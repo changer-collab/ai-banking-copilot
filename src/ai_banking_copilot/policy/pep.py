@@ -436,8 +436,10 @@ def _require_date(params: dict[str, object], key: str) -> date:
     value = params.get(key)
     if value is None:
         return DEFAULT_BOOKING_DATE
+    if isinstance(value, date):
+        return value
     if not isinstance(value, str):
-        raise NotAuthorizedError(f"参数 {key} 必须是 ISO 日期字符串")
+        raise NotAuthorizedError(f"参数 {key} 必须是 ISO 日期字符串或 date")
     try:
         return date.fromisoformat(value)
     except ValueError as error:

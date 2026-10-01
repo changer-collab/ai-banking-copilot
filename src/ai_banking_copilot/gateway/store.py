@@ -131,11 +131,11 @@ class Store:
         if mode is StoreMode.READ_ONLY:
             if not self._path.is_file():
                 raise StoreError(f"只读打开失败：文件不存在 {self._path}")
-            self._conn = sqlite3.connect(str(self._path))
+            self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
             self._conn.execute("PRAGMA query_only = ON")
         else:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self._path))
+            self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
 

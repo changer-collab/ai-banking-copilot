@@ -59,7 +59,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `gateway.models` | `Money(cents)`（`+`/`-`/取负/`yuan`）· `Account` · `Payee` · `Card` · `Transaction` · `WealthProduct` · `Subscription` · `Hold` · `CategoryTotal` · `BillSummary` |
 | `gateway.errors` | `GatewayError` · `ReadOnlyViolation` · `StoreError` · `GatewayNotFoundError` · `CoreBankError` · `InsufficientFundsError` · `BlockedPayeeError` · `IdempotencyConflictError` · `UnknownAccountError` / `UnknownPayeeError` / `UnknownSubscriptionError` / `UnknownProductError` / `UnknownCardError` · `OperatorError` / `UnknownOperatorError` · `SandboxError` / `SandboxViolation` / `SandboxTimeout` |
-| `gateway.store` | `StoreMode`(READ_ONLY/READ_WRITE) · `Store(db_path, mode)`（`query`/`execute`/`transaction`/`close`）· `init_schema(store)` · `SCHEMA_VERSION` |
+| `gateway.store` | `StoreMode`(READ_ONLY/READ_WRITE) · `Store(db_path, mode)`（`query`/`execute`/`transaction`/`close`）· `init_schema(store)` · `SCHEMA_VERSION`（`Store` 跨线程安全，见裁决 #18） |
 | `gateway.hashing` | `canonical_json(value) -> str` · `sha256_hex(text) -> str` |
 | `gateway.seed` | `seed_database(store)`（幂等）· `DEMO_USER_ID` |
 | `gateway.facts` | `Record[T](record_id, payload, content_hash)` · `FactGateway(store)`（单条：`account`/`payee`/`card`/`transaction`/`subscription`/`wealth_product`/`hold`；集合：`accounts_of`/`payees_of`/`cards_of`/`subscriptions_of`/`holds_of`；查询：`transactions_between`/`monthly_bill`/`wealth_products`/`daily_transfer_total`/`verify`） |
@@ -82,7 +82,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `policy.pdp` | `ObjectState`(SELF/KNOWN_UNVERIFIED/VERIFIED_SAVED/UNKNOWN/BLOCKED) · `PolicyRequest(user_id, action, amount, daily_accumulated, object_state, is_pure_query, irreversible, context_flags)` · `evaluate(request) -> Decision` · `evaluate_plan(plan, net) -> Decision` · `DAILY_LIMIT_YUAN` · `NET_EFFECT_THRESHOLD_YUAN` |
 | `policy.gate` | `assert_frozen(plan, frozen_hash) -> None` · `StalePlanError` |
-| `policy.pep` | `Pep(registry, gateway, core_bank, audit, breaker)`（`execute(call, decision, frozen_hash, idempotency_key)`）· `ExecResult(status, record_ids, message)` · `NotAuthorizedError` |
+| `policy.pep` | `Pep(registry, gateway, core_bank, audit, breaker)`（`execute(call, decision, frozen_hash, idempotency_key)`）· `ExecResult(status, record_ids, message)` · `NotAuthorizedError`（日期参数接受 `date` 或 ISO 字符串，见裁决 #19） |
 | `policy.audit` | `AuditEvent(event_id, kind, payload, prev_hash)` · `AuditLog(path)`（**追加式 JSONL + sha256 哈希链**，不占用 01 的 schema）· `append(event) -> str` / `verify_chain() -> bool` / `events()` · `ChainBrokenError` |
 | `policy.breaker` | `BreakerState`(CLOSED/OPEN) · `CircuitBreaker`（`record_failure` / `record_success` / `is_open` / `lock` / `unlock` / `state`） |
 | `policy.saga` | `Saga`（`add` / `run` / `compensate`）· `ReversalWindow`（`open` / `reverse` / `expired`）· `CompensationError` |
@@ -168,6 +168,9 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 15. **05 的桥接常量降级为临时**：05 的 `base.NORMATIVE_ACTION_KINDS` 是"对齐前"的临时桥；07 须新增交叉断言 `set(ACTION_KINDS) == set(registry.actions()) == set(REQUIRED_SLOTS)`，通过后该桥可删（**已删**）。
 16. **写动作必须声明 `user_id`**（07/03 复核发现）：`transfer.create` / `transfer.schedule` / `wealth.subscribe` / `wealth.redeem` / `subscription.sign` 在 02 目录中**必须**声明控制槽参数 `user_id`（`slot=CONTROL`、`py_type=str`、必填）；否则 PEP 写分派拿不到用户身份。会话层与评测链装配 params 时填入 `DEMO_USER_ID`。
 17. **`subscription.sign` 槽位统一**为 `("user_id", "merchant", "amount_cents", "period", "next_charge_on")`——代扣签约的对象是**商户**，不涉及已有订阅 id；`subscription.cancel` 仍用 `subscription_id`。04 的 `REQUIRED_SLOTS` 与 05 的 `scenarios.subscriptions` 按此对齐。
+18. **01 `Store` 允许跨线程使用**（06 复核发现，2026-10-02）：FastAPI `TestClient` 与 uvicorn 同步端点在线程池中运行，而 01 的 `Store` 用 SQLite 默认 `check_same_thread=True` → 跨线程访问抛 `sqlite3.ProgrammingError`。01 `gateway/store.py` 的两处 `sqlite3.connect` **追加** `check_same_thread=False`（**不改** `SCHEMA_SQL`、不改任何冻结符号/签名）。**并发写一致性由调用方保证单写者语义**（事实网关读多写少；06 为单会话 demo）。回溯修订：01 的 `Store` 行为说明按本条更新（见冻结面表）。
+19. **日期参数接受 `datetime.date` 实例**（06 复核发现，2026-10-02）：02 目录把 `booked_on` / `start` / `end` / `next_charge_on` 声明为 `py_type=date`（`tests/tools/test_catalog.py` 锁定该契约），而 03 的 `policy.pep._require_date` 原先只接受 ISO 字符串 → 同一值二者互斥、写路径必失败。03 `policy/pep.py::_require_date` **追加**「若已是 `date` 实例则直接返回」分支（原 ISO 字符串路径不变）。**语义为放宽（向后兼容），不改冻结符号/签名**。回溯修订：03 的 `Pep` 参数说明按本条更新（见冻结面表）。
+20. **`user_id` 装配归会话层 / 评测链**（05/06 复核，2026-10-02；固化裁决 #16 的落点）：05 的 `scenarios` 组装 `transfer.*` / `wealth.*` 节点时**不**把 `user_id` 放进 `PlanNode.params`；由 06 的 `web.session.Session._to_call` 与 07 的评测链在**构造 `ToolCall` 时**注入 `DEMO_USER_ID`（仅当该动作的 `ToolSpec` 声明了必填 CONTROL 槽 `user_id` 且节点 params 缺失时）。**只在 `ToolCall` 层注入，不改 `PlanNode.params` / `cfhash`**。02 的 `user_id` 声明（裁决 #16）与 05 的省略设计**并非冲突**（06 计划偏差 #1 的"02 未声明 user_id"陈述已过时，作废）。
 
 ### 跨计划硬约束（每份计划都生效）
 
