@@ -72,13 +72,12 @@
 
 ## 快速开始
 
-> 开发中，随实施计划（`docs/plans/`）逐步落地。
-
 ```bash
-git clone <repo-url>
+git clone https://github.com/changer-collab/ai-banking-copilot.git
 cd ai-banking-copilot
-cp .env.example .env          # 配置大模型 API Key
-docker compose up -d          # 一键起（后端 + 模拟核心银行）
+python -m pip install -e ".[dev]"
+cp .env.example .env          # 填入大模型 API Key
+make check                    # lint + 类型检查 + 测试
 ```
 
 ## 测试
