@@ -48,6 +48,16 @@
 | Task 7（FastAPI 单页） | Task 3–6、`fastapi` / `httpx` | 就绪 |
 | Task 8（演示脚本 + 集成验收） | Task 1–7 | 就绪 |
 
+**设计稿衔接（视觉与交互规范，2026-10-01 补）**
+
+- 前端视觉 / 交互规范独立成仓：`changer-collab/ai-banking-copilot-web`（private · MIT）——只有设计令牌、组件规范与可演示静态稿，**不含工程实现**。
+- 实施 Task 7 的内联单页时，**样式取值必须来自该仓库的设计令牌**（`assets/tokens.css`），不得另起一套色值：
+  - 主色 `--blue-600 #0b4fd8`；三色分级 `--lvl-green #0f8a5f` / `--lvl-yellow #a8710f` / `--lvl-red #b3362a`；拒绝 `--lvl-denied #5b6473`。
+  - 金额 / 哈希 / 凭证号一律等宽 + `tabular-nums`（`--font-mono`）；标题用宋体栈（`--font-display`），保住"票据"语汇。
+  - 三色分级在界面上必须以**戳记**可见（不可只写文字）；确认按钮必须回显冻结哈希；熔断开启态用**封条**样式。
+- 视觉语汇 = **银行凭证**（防伪底纹 / 骑缝编号 / 等宽票据数字 / 戳记 / 封条）；**不得引用任何第三方商标、logo 或官方色值**。
+- 该仓库的 `demo.html` 是 **mock**（不连后端、数值与哈希均为示例），用于路演与盲审的可视化；**真实链路的验收仍以本计划 Task 8 的进程内脚本为准**（`pytest tests/web/test_demo_script.py -v`）。
+
 ---
 
 ### Task 1: 渠道层依赖、包骨架与装配契约（`AppDeps`）
