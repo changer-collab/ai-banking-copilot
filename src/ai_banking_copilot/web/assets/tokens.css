@@ -1,0 +1,127 @@
+/* ==========================================================================
+   AI 银行副驾 · 设计令牌
+   概念：计划卡 = 银行凭证
+   调性：数字银行蓝（清新 / 大留白 / 圆角）+ 票据凭证语言（防伪纹 / 骑缝 / 等宽编号）
+   合规：不引用任何第三方商标、logo 或官方色值；本表为自有设计定义。
+   ========================================================================== */
+
+:root {
+  /* ---------- 纸与墨 ---------- */
+  --paper: #f2f5fa;
+  --paper-grid: rgba(11, 79, 216, 0.045);
+  --voucher: #ffffff;
+  --voucher-alt: #fbfcfe;
+  --ink: #0a1b2e;
+  --ink-2: #3f5570;
+  --ink-3: #7b8ba2;
+  --rule: #dbe3ee;
+  --rule-strong: #c1cdde;
+
+  /* ---------- 主色：数字银行蓝 ---------- */
+  --blue-700: #0a3fa8;
+  --blue-600: #0b4fd8;
+  --blue-500: #2e7bff;
+  --blue-300: #9cc2ff;
+  --blue-050: #eaf2ff;
+  --blue-ink: #062348;
+
+  /* ---------- 高光：清新青 ---------- */
+  --cyan-600: #0e8a99;
+  --cyan-500: #12b5c9;
+  --cyan-050: #e4f7f9;
+
+  /* ---------- 三色分级（官方口径：绿 / 黄 / 红）---------- */
+  --lvl-green: #0f8a5f;
+  --lvl-green-bg: #e6f5ef;
+  --lvl-yellow: #a8710f;
+  --lvl-yellow-bg: #fdf3e0;
+  --lvl-red: #b3362a;
+  --lvl-red-bg: #fdecea;
+  --lvl-denied: #5b6473;
+  --lvl-denied-bg: #eef0f3;
+
+  /* ---------- 印章与封条 ---------- */
+  --seal: #b3362a;
+  --seal-soft: rgba(179, 54, 42, 0.12);
+  --seal-line: rgba(179, 54, 42, 0.42);
+
+  /* ---------- 字体 ---------- */
+  --font-display: "Source Han Serif SC", "Noto Serif SC", "Songti SC", SimSun, Georgia, serif;
+  --font-body: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", ui-monospace, Consolas, "Courier New", monospace;
+
+  --fs-display: 34px;
+  --fs-h1: 24px;
+  --fs-h2: 17px;
+  --fs-body: 14px;
+  --fs-small: 12.5px;
+  --fs-mono: 13px;
+  --fs-amount: 27px;
+  --lh-tight: 1.25;
+  --lh-body: 1.65;
+  --ls-display: -0.02em;
+  --ls-mono: 0.02em;
+
+  /* ---------- 间距 / 圆角 / 阴影 ---------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --r-card: 14px;
+  --r-control: 10px;
+  --r-chip: 999px;
+  --sh-1: 0 1px 2px rgba(10, 27, 46, 0.06);
+  --sh-2: 0 1px 2px rgba(10, 27, 46, 0.06), 0 10px 30px -14px rgba(10, 27, 46, 0.22);
+  --sh-3: 0 2px 4px rgba(10, 27, 46, 0.08), 0 24px 60px -24px rgba(10, 27, 46, 0.32);
+
+  /* ---------- 动效 ---------- */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-stamp: cubic-bezier(0.2, 1.4, 0.4, 1);
+  --d-fast: 140ms;
+  --d-base: 240ms;
+  --d-slow: 460ms;
+}
+
+[data-theme="dark"] {
+  --paper: #071426;
+  --paper-grid: rgba(140, 180, 255, 0.06);
+  --voucher: #0d2138;
+  --voucher-alt: #102a44;
+  --ink: #eaf2ff;
+  --ink-2: #a9bdd6;
+  --ink-3: #7b8ba2;
+  --rule: #1d3556;
+  --rule-strong: #2a4a72;
+
+  --blue-700: #9cc2ff;
+  --blue-600: #4d90ff;
+  --blue-500: #2e7bff;
+  --blue-300: #1b4f9e;
+  --blue-050: #102a44;
+  --blue-ink: #cfe2ff;
+
+  --cyan-600: #4fd4e4;
+  --cyan-500: #12b5c9;
+  --cyan-050: #0b2b33;
+
+  --lvl-green: #4fd3a4;
+  --lvl-green-bg: rgba(15, 138, 95, 0.18);
+  --lvl-yellow: #e3b263;
+  --lvl-yellow-bg: rgba(168, 113, 15, 0.2);
+  --lvl-red: #ff8a7a;
+  --lvl-red-bg: rgba(179, 54, 42, 0.2);
+  --lvl-denied: #9aa6b8;
+  --lvl-denied-bg: rgba(91, 100, 115, 0.22);
+
+  --seal: #ff8a7a;
+  --seal-soft: rgba(255, 138, 122, 0.14);
+  --seal-line: rgba(255, 138, 122, 0.45);
+
+  --sh-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sh-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 30px -14px rgba(0, 0, 0, 0.7);
+  --sh-3: 0 2px 4px rgba(0, 0, 0, 0.45), 0 24px 60px -24px rgba(0, 0, 0, 0.8);
+}

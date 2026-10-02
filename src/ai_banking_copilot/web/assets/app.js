@@ -1,0 +1,395 @@
+/* ==========================================================================
+   AI 银行副驾 · Web 渠道交互（**真实 API**）
+   版式与组件词汇对齐设计仓 `demo.html` / `app.css`（凭证 / 戳记 / 步骤 / 链 / 时间线）。
+   与设计仓 `demo.js` 的区别：本文件不做任何 mock——所有数据来自同源 `/api/*`。
+   ========================================================================== */
+
+const PRESETS = [
+  "转给李娜 500 元",
+  "转给李娜 1200 元，再查一下上月账单",
+  "查一下上月账单",
+  "冻结 500 元，转给李娜 300 元",
+  "转给李娜 500 元，取消订阅",
+  "订阅取消",
+  "锁卡",
+  "挂失卡片",
+  "帮我做点什么",
+];
+
+/* 演示页无选择器：按真实 UI 的做法声明「当前选中对象」（受信任调用方职责） */
+const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video" };
+
+const LEVEL = {
+  GREEN: { cls: "green", code: "L0", text: "核验通过", policy: "自动执行" },
+  YELLOW: { cls: "yellow", code: "L1", text: "待您确认", policy: "用户确认" },
+  RED: { cls: "red", code: "L2", text: "强验证", policy: "多因子" },
+  DENIED: { cls: "denied", code: "L4", text: "拒绝并解释", policy: "安全拒绝" },
+};
+
+const state = {
+  card: null,
+  plan: null,
+  decision: null,
+  questions: [],
+  stepStates: [],
+  phase: "idle",
+  chain: [],
+};
+
+function el(id) {
+  return document.getElementById(id);
+}
+
+function esc(text) {
+  return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function clock() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function stripNo(line) {
+  return String(line).replace(/^\s*\d+\.\s*/, "");
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  return { status: response.status, data: await response.json() };
+}
+
+/* ---------------- 右栏：审计链 / 时间线 ---------------- */
+
+function renderChain() {
+  const chain = el("chain");
+  if (!state.chain.length) {
+    chain.innerHTML = '<li class="chain__empty">尚未产生事件</li>';
+    return;
+  }
+  chain.innerHTML = state.chain.map((node) => `<li class="chain__node">${esc(node)}</li>`).join("");
+}
+
+function chainAdd(node) {
+  state.chain.push(node);
+  renderChain();
+}
+
+function timelineAdd(text, kind) {
+  const list = el("timeline");
+  if (list.dataset.empty !== "false") {
+    list.innerHTML = "";
+    list.dataset.empty = "false";
+  }
+  const item = document.createElement("li");
+  item.className = `timeline__item${kind ? ` timeline__item--${kind}` : ""}`;
+  item.innerHTML = `<span class="timeline__at">${clock()}</span>${esc(text)}`;
+  list.appendChild(item);
+}
+
+function timelineReset() {
+  const list = el("timeline");
+  list.innerHTML = '<li class="timeline__item">等待操作…</li>';
+  list.dataset.empty = "true";
+}
+
+/* ---------------- 凭证卡渲染 ---------------- */
+
+function sealHtml(level) {
+  const meta = LEVEL[level] || LEVEL.DENIED;
+  return `<div class="seal seal--stamped seal--${meta.cls}" style="margin-left:auto">
+    <span class="seal__level">${meta.code}</span>
+    <span class="seal__text">${meta.text}</span>
+    <span class="seal__policy">${meta.policy}</span>
+  </div>`;
+}
+
+function stepHtml(line, index) {
+  const status = state.stepStates[index] || "pending";
+  const cls = status === "done" ? "step step--done" : status === "rolled" ? "step step--rolled" : "step step--pending";
+  const label = status === "done" ? "已执行" : status === "rolled" ? "已回滚" : "待执行";
+  return `<li class="${cls}">
+    <span class="step__no">${String(index + 1).padStart(2, "0")}</span>
+    <span class="step__main"><span class="step__action">${esc(stripNo(line))}</span></span>
+    <span class="step__meta"><span class="step__state">${label}</span></span>
+  </li>`;
+}
+
+function rulesHtml(reasons) {
+  if (!reasons.length) return '<span class="muted">—</span>';
+  return reasons.map((reason) => `<span class="rule"><b>${esc(reason)}</b></span>`).join("");
+}
+
+function requiresHtml(requires) {
+  if (!requires.length) return '<span class="muted">无额外要求</span>';
+  return requires
+    .map((item) => `<span class="chip"><span class="chip__dot"></span>${esc(item)}</span>`)
+    .join("");
+}
+
+function voucherHtml() {
+  const card = state.card;
+  const lines = card.lines || [];
+  const frozen = card.frozen_hash || "";
+  return `<article class="voucher">
+    <div class="voucher__head">
+      <div class="doc-no">
+        <span class="doc-no__label">骑缝哈希（cfhash）</span>
+        <span class="doc-no__value">${esc(frozen)}</span>
+      </div>
+      ${sealHtml(card.level)}
+    </div>
+
+    <div class="voucher__body">
+      <dl class="triple">
+        <div class="triple__row"><dt class="triple__key">动作</dt>
+          <dd class="triple__val">${lines.length} 步计划 <span class="tech">${esc(card.card_id)}</span></dd></div>
+        <div class="triple__row"><dt class="triple__key">要求</dt>
+          <dd class="triple__val triple__val--tokens">${requiresHtml(card.requires || [])}</dd></div>
+        <div class="triple__row"><dt class="triple__key">时间</dt>
+          <dd class="triple__val">${clock()}</dd></div>
+      </dl>
+      <div class="amount">
+        <span class="amount__value">${lines.length} 步</span>
+        <span class="amount__note">确认绑定 cfhash · 经计划级 + 节点级双层执行门</span>
+      </div>
+    </div>
+
+    ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
+
+    <p class="muted" style="margin-top: var(--s-3)">
+      命中规则<span class="rules">${rulesHtml(state.decision ? state.decision.reasons || [] : [])}</span>
+    </p>
+  </article>`;
+}
+
+function interceptHtml(title, why, lock) {
+  const cls = lock ? "intercept intercept--lock" : "intercept";
+  return `<div class="${cls}" style="margin-top: var(--s-4)">
+    <span class="seal seal--stamped seal--denied" style="width:60px;height:60px;border-width:1.5px">
+      <span class="seal__text" style="font-size:10.5px">${lock ? "封条" : "已拦截"}</span>
+    </span>
+    <div>
+      <div class="intercept__title">${esc(title)}</div>
+      <div class="intercept__why">${esc(why)}</div>
+    </div>
+  </div>`;
+}
+
+function takeoverHtml(pack) {
+  const nodes = pack.plan ? pack.plan.nodes.length : 0;
+  return `<div class="takeover" style="margin-top: var(--s-4)">
+    <div class="muted">人工接管包 · 交给人工判断的四要素</div>
+    <dl class="takeover__grid">
+      <dt>意图</dt><dd>${esc(pack.intent_text || "—")}</dd>
+      <dt>计划</dt><dd class="mono">${pack.plan ? esc(pack.plan.plan_id) : "—"} · ${nodes} 节点</dd>
+      <dt>命中规则</dt><dd><span class="rules">${rulesHtml(pack.hit_rules || [])}</span></dd>
+      <dt>审计 ID</dt><dd class="mono">${esc((pack.audit_ids || []).join(" · ") || "—")}</dd>
+    </dl>
+    <p class="muted" style="font-size: var(--fs-small); margin:0">
+      接管包交付人工判断：意图 / 计划 / 命中规则 / 审计 ID 四要素齐备，人工可据此复核或改判。
+    </p>
+  </div>`;
+}
+
+/* ---------------- 渲染装配 ---------------- */
+
+function renderStage() {
+  const stage = el("stage");
+  if (state.card) {
+    stage.innerHTML = voucherHtml();
+    return;
+  }
+  stage.innerHTML = state.panel || "";
+}
+
+function setButtons() {
+  const busy = state.phase === "executing";
+  const awaiting = state.phase === "awaiting_confirm";
+  el("btn-submit").disabled = busy;
+  el("btn-confirm").disabled = !awaiting || busy;
+  el("btn-interrupt").disabled = !(busy || awaiting);
+  el("btn-resume").disabled = state.phase !== "interrupted";
+  el("btn-reverse").disabled = state.stepStates.filter((s) => s === "done").length === 0;
+  el("btn-takeover").disabled = state.phase === "idle";
+}
+
+function reset(keepUtterance) {
+  state.card = null;
+  state.plan = null;
+  state.decision = null;
+  state.questions = [];
+  state.stepStates = [];
+  state.phase = "idle";
+  state.chain = [];
+  state.panel = "";
+  if (!keepUtterance) el("utterance").value = "转给李娜 500 元";
+  renderStage();
+  renderChain();
+  timelineReset();
+  setButtons();
+}
+
+function renderPresets() {
+  el("presets").innerHTML = PRESETS.map(
+    (text) => `<button class="btn btn--ghost" data-preset="${esc(text)}">${esc(text)}</button>`
+  ).join("");
+}
+
+/* ---------------- 交互 ---------------- */
+
+async function onSubmit() {
+  reset(true);
+  const text = el("utterance").value;
+  state.phase = "submitting";
+  setButtons();
+  const result = await post("/api/submit", { utterance: text, selected: SELECTED });
+  const data = result.data;
+  timelineAdd(`提交：${text}`, "live");
+  if (data.state === "awaiting_confirm" && data.card) {
+    state.card = data.card;
+    state.plan = data.plan || null;
+    state.decision = data.decision || null;
+    state.stepStates = (data.card.lines || []).map(() => "pending");
+    state.phase = "awaiting_confirm";
+    chainAdd(`cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
+    renderStage();
+    timelineAdd(`裁决：${data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
+  } else {
+    state.phase = data.state === "blocked" ? "blocked" : "clarifying";
+    const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
+    state.panel = interceptHtml(
+      data.state === "blocked" ? "安全拒绝（未产生可执行计划）" : "需要澄清（不产出级别）",
+      data.state === "blocked"
+        ? data.message || "未知意图不猜测执行；已留痕。"
+        : `${data.message || "请补充信息"}<br />${questions}`,
+      false
+    );
+    renderStage();
+    timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
+  }
+  setButtons();
+}
+
+async function onConfirm() {
+  if (!state.card) return;
+  state.phase = "executing";
+  setButtons();
+  const result = await post("/api/confirm", {
+    card_id: state.card.card_id,
+    frozen_hash: state.card.frozen_hash,
+  });
+  if (result.status !== 200) {
+    state.phase = "awaiting_confirm";
+    state.panel = interceptHtml("确认被拒绝", String(result.data.detail || "确认不通过"), false);
+    el("stage").insertAdjacentHTML("beforeend", state.panel);
+    timelineAdd(`确认被拒绝：${result.data.detail || ""}`, "stop");
+    setButtons();
+    return;
+  }
+  const data = result.data;
+  (data.results || []).forEach((item, index) => {
+    if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
+    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    timelineAdd(`${item.status}：${item.message}`, item.status === "settled" || item.status === "cancelled" ? "done" : "warn");
+  });
+  state.phase = "done";
+  renderStage();
+  timelineAdd(`执行完成 · 回执记录 ${(data.record_ids || []).length} 条`, "done");
+  setButtons();
+}
+
+async function onInterrupt() {
+  const result = await post("/api/interrupt", {});
+  state.phase = "interrupted";
+  timelineAdd("用户中断：已执行节点保留、未执行节点挂起", "warn");
+  renderStage();
+  setButtons();
+  void result;
+}
+
+async function onResume() {
+  const result = await post("/api/resume", {});
+  const data = result.data;
+  (data.results || []).forEach((item, index) => {
+    if (state.stepStates[index] !== undefined && state.stepStates[index] !== "done") {
+      state.stepStates[index] = "done";
+    }
+    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    timelineAdd(`${item.status}：${item.message}`, "done");
+  });
+  state.phase = "done";
+  renderStage();
+  timelineAdd("恢复执行：从未执行节点继续", "done");
+  setButtons();
+}
+
+async function onReverse() {
+  const result = await post("/api/reverse", { settled: true });
+  const data = result.data;
+  const rolled = state.stepStates.lastIndexOf("done");
+  if (rolled >= 0) state.stepStates[rolled] = "rolled";
+  state.phase = "done";
+  renderStage();
+  timelineAdd(`${data.message || "已回退"} · 回滚 ${(data.compensated_steps || []).length} 步`, "stop");
+  setButtons();
+}
+
+async function onTakeover() {
+  const response = await fetch("/api/takeover");
+  if (response.status !== 200) {
+    timelineAdd("当前状态无接管包", "warn");
+    return;
+  }
+  const pack = await response.json();
+  el("stage").insertAdjacentHTML("beforeend", takeoverHtml(pack));
+  timelineAdd("已导出人工接管包（意图 / 计划 / 命中规则 / 审计 ID）", "warn");
+}
+
+/* ---------------- 装配 ---------------- */
+
+renderPresets();
+el("presets").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-preset]");
+  if (button) el("utterance").value = button.dataset.preset;
+});
+el("btn-submit").addEventListener("click", onSubmit);
+el("btn-confirm").addEventListener("click", onConfirm);
+el("btn-interrupt").addEventListener("click", onInterrupt);
+el("btn-resume").addEventListener("click", onResume);
+el("btn-reverse").addEventListener("click", onReverse);
+el("btn-takeover").addEventListener("click", onTakeover);
+el("btn-reset").addEventListener("click", () => reset(false));
+
+function readTheme() {
+  try {
+    return localStorage.getItem("ab-theme");
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveTheme(theme) {
+  try {
+    localStorage.setItem("ab-theme", theme);
+  } catch (error) {
+    return;
+  }
+}
+
+const themeToggle = el("theme-toggle");
+if (readTheme() === "dark") {
+  document.documentElement.dataset.theme = "dark";
+  themeToggle.checked = true;
+}
+themeToggle.addEventListener("change", () => {
+  const theme = themeToggle.checked ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+  saveTheme(theme);
+});
+
+timelineReset();
+setButtons();
