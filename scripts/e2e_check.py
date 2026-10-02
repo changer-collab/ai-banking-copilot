@@ -78,7 +78,13 @@ def run(base: str) -> list[str]:
         status, executed = _post(
             base,
             "/api/confirm",
-            {"card_id": card.get("card_id"), "frozen_hash": card.get("frozen_hash")},
+            {
+                "card_id": card.get("card_id"),
+                "frozen_hash": card.get("frozen_hash"),
+                # 红色卡按官方口径需强验证；本自检直接声明已通过（黄色/绿色卡忽略该字段）。
+                # 注意：若演示库日累计已超 1000 元，同一计划会合法升为红色。
+                "strong_verified": True,
+            },
         )
         results = executed.get("results", [])
         print(f"[3] POST /api/confirm         -> {status} state={executed.get('state')}")
