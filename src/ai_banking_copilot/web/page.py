@@ -15,8 +15,8 @@ INDEX_HTML = """<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AI 银行副驾 · 计划卡（真实连通）</title>
-<link rel="stylesheet" href="/assets/tokens.css?v=1" />
-<link rel="stylesheet" href="/assets/app.css?v=1" />
+<link rel="stylesheet" href="/assets/tokens.css?v=2" />
+<link rel="stylesheet" href="/assets/app.css?v=2" />
 </head>
 <body>
 <div class="paper-bg" aria-hidden="true"></div>
@@ -28,6 +28,10 @@ INDEX_HTML = """<!DOCTYPE html>
       <span class="brand-sub">真实连通 · 计划卡由确定性模板渲染，执行经双层执行门</span>
     </div>
     <nav class="topbar__nav">
+      <label class="switch">
+        <input type="checkbox" id="tech-toggle" />
+        技术详情
+      </label>
       <label class="switch">
         <input type="checkbox" id="theme-toggle" />
         夜航主题
@@ -86,7 +90,7 @@ INDEX_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="panel">
-        <p class="panel__title">审计链（sha256 链）</p>
+        <p class="panel__title">审计链 <span class="tech">sha256 链</span></p>
         <ul class="chain" id="chain"><li class="chain__empty">尚未产生事件</li></ul>
       </div>
 
@@ -98,7 +102,7 @@ INDEX_HTML = """<!DOCTYPE html>
   </main>
 </div>
 
-<script src="/assets/app.js?v=1"></script>
+<script src="/assets/app.js?v=2"></script>
 </body>
 </html>
 """

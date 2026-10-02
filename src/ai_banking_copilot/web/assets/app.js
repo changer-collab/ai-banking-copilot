@@ -20,10 +20,10 @@ const PRESETS = [
 const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video" };
 
 const LEVEL = {
-  GREEN: { cls: "green", code: "L0", text: "核验通过", policy: "自动执行" },
-  YELLOW: { cls: "yellow", code: "L1", text: "待您确认", policy: "用户确认" },
-  RED: { cls: "red", code: "L2", text: "强验证", policy: "多因子" },
-  DENIED: { cls: "denied", code: "L4", text: "拒绝并解释", policy: "安全拒绝" },
+  GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
+  YELLOW: { cls: "yellow", code: "L1", name: "黄色", text: "待您确认", policy: "用户确认" },
+  RED: { cls: "red", code: "L2", name: "红色", text: "强验证", policy: "多因子" },
+  DENIED: { cls: "denied", code: "L4", name: "拒绝", text: "拒绝并解释", policy: "安全拒绝" },
 };
 
 const state = {
@@ -70,11 +70,13 @@ function renderChain() {
     chain.innerHTML = '<li class="chain__empty">尚未产生事件</li>';
     return;
   }
-  chain.innerHTML = state.chain.map((node) => `<li class="chain__node">${esc(node)}</li>`).join("");
+  chain.innerHTML = state.chain
+    .map((node) => `<li class="chain__node">${esc(node.label)}<span class="tech">${esc(node.tech)}</span></li>`)
+    .join("");
 }
 
-function chainAdd(node) {
-  state.chain.push(node);
+function chainAdd(label, tech) {
+  state.chain.push({ label, tech });
   renderChain();
 }
 
@@ -185,9 +187,9 @@ function takeoverHtml(pack) {
     <div class="muted">人工接管包 · 交给人工判断的四要素</div>
     <dl class="takeover__grid">
       <dt>意图</dt><dd>${esc(pack.intent_text || "—")}</dd>
-      <dt>计划</dt><dd class="mono">${pack.plan ? esc(pack.plan.plan_id) : "—"} · ${nodes} 节点</dd>
+      <dt>计划</dt><dd class="mono">计划已冻结 · ${nodes} 个节点 <span class="tech">${pack.plan ? esc(pack.plan.plan_id) : ""}</span></dd>
       <dt>命中规则</dt><dd><span class="rules">${rulesHtml(pack.hit_rules || [])}</span></dd>
-      <dt>审计 ID</dt><dd class="mono">${esc((pack.audit_ids || []).join(" · ") || "—")}</dd>
+      <dt>审计 ID</dt><dd class="mono tech">${esc((pack.audit_ids || []).join(" · ") || "—")}</dd>
     </dl>
     <p class="muted" style="font-size: var(--fs-small); margin:0">
       接管包交付人工判断：意图 / 计划 / 命中规则 / 审计 ID 四要素齐备，人工可据此复核或改判。
@@ -255,9 +257,9 @@ async function onSubmit() {
     state.decision = data.decision || null;
     state.stepStates = (data.card.lines || []).map(() => "pending");
     state.phase = "awaiting_confirm";
-    chainAdd(`cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
+    chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
-    timelineAdd(`裁决：${data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
+    timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
   } else {
     state.phase = data.state === "blocked" ? "blocked" : "clarifying";
     const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
@@ -293,7 +295,7 @@ async function onConfirm() {
   const data = result.data;
   (data.results || []).forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
-    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
     timelineAdd(`${item.status}：${item.message}`, item.status === "settled" || item.status === "cancelled" ? "done" : "warn");
   });
   state.phase = "done";
@@ -318,7 +320,7 @@ async function onResume() {
     if (state.stepStates[index] !== undefined && state.stepStates[index] !== "done") {
       state.stepStates[index] = "done";
     }
-    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
     timelineAdd(`${item.status}：${item.message}`, "done");
   });
   state.phase = "done";
@@ -390,6 +392,18 @@ themeToggle.addEventListener("change", () => {
   document.documentElement.dataset.theme = theme;
   saveTheme(theme);
 });
+
+/* 技术详情：默认收起机器标识（cfhash / 记录号 / 审计 ID / 动作标识） */
+const techToggle = el("tech-toggle");
+if (techToggle) {
+  techToggle.addEventListener("change", () => {
+    if (techToggle.checked) {
+      document.documentElement.dataset.tech = "on";
+    } else {
+      delete document.documentElement.dataset.tech;
+    }
+  });
+}
 
 timelineReset();
 setButtons();

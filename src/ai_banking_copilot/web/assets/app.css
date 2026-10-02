@@ -952,3 +952,13 @@ body {
   }
 }
 
+/* 技术详情：机器标识（动作标识 / 哈希 / 记录号 / 审计 ID）**默认收起**——
+   用户优先读中文关键信息；需要审计时打开顶栏「技术详情」开关再逐字核对。 */
+.tech {
+  display: none;
+}
+
+html[data-tech="on"] .tech {
+  display: inline;
+}
+
