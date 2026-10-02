@@ -55,6 +55,8 @@
 ├── README.md                        # 本文件：项目说明 / 快速开始 / 部署 / 测试
 ├── LICENSE                          # 许可证
 ├── THIRD_PARTY_NOTICES.md           # 第三方依赖清单（名称/版本/来源/许可证/使用范围）
+├── Dockerfile                       # 容器镜像（api）
+├── docker-compose.yml               # 一键复现编排
 ├── docs/
 │   ├── roadmap.md                   # 路线图（里程碑 / 模块 / 门禁 / 风险）
 │   ├── official-requirements.md     # 官方要求 → 本项目落点 对照表
@@ -62,13 +64,14 @@
 │   ├── algorithms.md                # 核心算法说明
 │   ├── security-design.md           # 安全设计文档
 │   ├── security-self-assessment.md  # 安全自评报告（权限分级实现说明 + 已知风险清单）
+│   ├── 作品简介.md                   # ≤200 字作品简介（报名系统提交用）
 │   └── plans/                       # 实施计划（按模块拆分，逐份产出）
 ├── src/                             # 源代码
-├── tests/                           # 测试用例（单元 / 集成 / 对抗库）
-└── deploy/                          # 部署说明与编排
+├── tests/                           # 测试用例（分层单元 / 集成 / 评测套件 / 对抗库）
+└── deploy/                          # 部署说明与 Docker 编排
 ```
 
-> `architecture.md`、`algorithms.md`、`security-design.md`、`security-self-assessment.md` 随开发逐步补全；`src/`、`tests/`、`deploy/` 随实施计划落地。
+> 各模块以测试为契约验收（`make check` = lint + 类型检查 + 测试）；一键复现见 `deploy/README.md`。
 
 ## 快速开始
 
@@ -82,12 +85,12 @@ make check                    # lint + 类型检查 + 测试
 
 ## 测试
 
-> 开发中。**测试规范：完成的标准是跑通，不是写完**——每个模块以测试为契约验收。
+> **测试规范：完成的标准是跑通，不是写完**——每个模块以测试为契约验收。
 
 ```bash
-pytest tests/unit            # 单元测试
-pytest tests/integration     # 集成测试
-pytest tests/adversarial     # 对抗样例库（提示注入 / 越权超标 / 幻觉诱发 / 诱导承诺收益）
+pytest                                   # 全量（分层单元 + 集成 + 评测）
+pytest tests/eval                        # 评测套件（标准 62 + 对抗 19 + held-out 20）
+pytest tests/gateway tests/tools tests/policy tests/planning tests/scenarios tests/web  # 分层
 ```
 
 ## 部署
