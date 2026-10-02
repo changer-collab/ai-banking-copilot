@@ -1,15 +1,21 @@
-"""跨场景联动：DAG 多步 · 锚点授予归交互层（LLM 只能提议）· 计划级净效应。
+"""跨场景与多意图：DAG 多步 · 锚点授予归交互层 · 计划级净效应。
 
 口径（PRD §4.1 场景⑥ / §5.3）：
 - **DAG 多步**：跨场景 = 管道串联（多个白名单动作按依赖组成 DAG）；
 - **锚点授予归交互层**：需求推断子树（订花 / 订蛋糕）必须携带
   `grant == "user_approved"`（交互层授予），LLM 只能提议、不能授予；缺失即拒绝；
 - **计划级净效应**：`NE = Σ cf(node)`，防"多步组合越权"（由 `policy.pdp.evaluate_plan` 使用）。
+
+`CrossHandler.build` 分两支（README 裁决 #21）：
+1. **冻结支**：意图 ⊆ `{funds.freeze} ∪ 资金动作` 且 ≥2 域 → 保留原「预算冻结 → 多步消费」语义
+   （`grant` 锚点规则不变）；
+2. **通用支**：其余多域组合 → 按域分组（保持输入顺序）→ 复用各域 handler 的 `build` →
+   合并重编号 → 同资源串行 → **单一 `Plan`**；任一子意图澄清/拒绝 → 整单不产级别。
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from ai_banking_copilot.contracts.plan import (
@@ -31,14 +37,24 @@ from ai_banking_copilot.scenarios.base import (
     grant_anchor,
     trusted_slot,
 )
-from ai_banking_copilot.scenarios.transfer import build_money_node
+from ai_banking_copilot.scenarios.bills import BillsHandler
+from ai_banking_copilot.scenarios.cards import CardsHandler
+from ai_banking_copilot.scenarios.subscriptions import SubscriptionsHandler
+from ai_banking_copilot.scenarios.transfer import TransferHandler, build_money_node
+from ai_banking_copilot.scenarios.wealth import WealthHandler
 
 MONEY_ACTIONS = frozenset({"transfer.create", "transfer.schedule"})
 """可被跨场景复用的资金流出动作（README 规范动作表 #8 / #9）。"""
 
 _FREEZE_ACTION = "funds.freeze"
+_RELEASE_ACTION = "funds.release"
 _DEFAULT_FREEZE_REASON = "预算冻结"
 _MIN_DOMAINS = 2
+
+_FUNDS_ACTIONS = frozenset({_FREEZE_ACTION, _RELEASE_ACTION})
+_FUNDS_DOMAIN = frozenset({"funds"})
+_FROZEN_ACTIONS = frozenset({_FREEZE_ACTION, *MONEY_ACTIONS})
+_RESOURCE_KEYS = ("account_id", "card_id", "subscription_id", "hold_id")
 
 
 def intents_domains(intents: Sequence[Intent]) -> frozenset[str]:
@@ -46,41 +62,160 @@ def intents_domains(intents: Sequence[Intent]) -> frozenset[str]:
     return frozenset(intent.action.split(".", 1)[0] for intent in intents if intent.action)
 
 
+def _build_release_node(node_id: str, intent: Intent, ledger: AnchorLedger) -> PlanNode:
+    source = _grant_source(intent)
+    anchor_id = grant_anchor(ledger, source, "解冻")
+    params: dict[str, object] = {
+        "hold_id": as_str(trusted_slot(intent, ("hold", "hold_id"), "hold"), "hold"),
+    }
+    return PlanNode(
+        node_id=node_id,
+        action=_RELEASE_ACTION,
+        params=params,
+        intent=IntentRef(source=source, anchor_id=anchor_id),
+    )
+
+
+class _FundsHandler(ScenarioHandler):
+    """`funds.*` 域的内部构建器（仅供通用合并复用，不注册进 `SCENARIO_HANDLERS`）。"""
+
+    @property
+    def name(self) -> str:
+        return "funds"
+
+    def matches(self, intents: Sequence[Intent]) -> bool:
+        return any(intent.action in _FUNDS_ACTIONS for intent in intents)
+
+    def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+        ledger = AnchorLedger()
+        nodes: list[PlanNode] = []
+        for index, intent in enumerate(intents, start=1):
+            node_id = f"n{index}"
+            if intent.action == _FREEZE_ACTION:
+                nodes.append(_build_freeze_node(node_id, intent, ledger))
+            elif intent.action == _RELEASE_ACTION:
+                nodes.append(_build_release_node(node_id, intent, ledger))
+            else:
+                raise ScenarioRefused(f"funds 域暂不支持动作 {intent.action}")
+        plan = Plan(plan_id="funds_plan", nodes=tuple(nodes))
+        validate_plan(plan)
+        return plan
+
+
+_DOMAIN_HANDLERS: Mapping[str, ScenarioHandler] = {
+    "account": BillsHandler(),
+    "bills": BillsHandler(),
+    "transfer": TransferHandler(),
+    "wealth": WealthHandler(),
+    "card": CardsHandler(),
+    "subscription": SubscriptionsHandler(),
+    "funds": _FundsHandler(),
+}
+
+
 class CrossHandler(ScenarioHandler):
-    """跨场景联动处理器（冻结预算 → 多步消费）。"""
+    """跨场景 / 多意图处理器（冻结预算 → 多步消费；或任意多域组合）。"""
 
     @property
     def name(self) -> str:
         return "cross"
 
     def matches(self, intents: Sequence[Intent]) -> bool:
-        return len(intents_domains(intents)) >= _MIN_DOMAINS
+        domains = intents_domains(intents)
+        return len(domains) >= _MIN_DOMAINS or domains == _FUNDS_DOMAIN
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
-        if len(intents_domains(intents)) < _MIN_DOMAINS:
-            raise ScenarioRefused("跨场景联动需覆盖 ≥ 2 个场景域")
-        ledger = AnchorLedger()
-        nodes: list[PlanNode] = []
-        freeze_node_id: str | None = None
-        freeze_intents = [item for item in intents if item.action == _FREEZE_ACTION]
-        other_intents = [item for item in intents if item.action != _FREEZE_ACTION]
-        for index, intent in enumerate(freeze_intents, start=1):
-            node = _build_freeze_node(f"n{index}", intent, ledger)
-            nodes.append(node)
-            freeze_node_id = node.node_id
-        start = len(nodes)
-        for offset, intent in enumerate(other_intents, start=1):
-            node_id = f"n{start + offset}"
-            source = _grant_source(intent)
-            if intent.action not in MONEY_ACTIONS:
-                raise ScenarioRefused(f"跨场景暂不支持动作 {intent.action}")
-            node = build_money_node(node_id, intent, gateway, ledger, source)
-            if freeze_node_id is not None:
-                node = replace(node, depends_on=(freeze_node_id,))
-            nodes.append(node)
-        plan = Plan(plan_id="cross_dag", nodes=tuple(nodes))
-        validate_plan(plan)
-        return plan
+        actions = {intent.action for intent in intents}
+        domains = intents_domains(intents)
+        frozen = actions <= _FROZEN_ACTIONS and _FREEZE_ACTION in actions
+        if len(domains) >= _MIN_DOMAINS and frozen:
+            return _build_frozen_pattern(intents, gateway)
+        return _assemble_multi(intents, gateway)
+
+
+def _build_frozen_pattern(intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+    """冻结支：预算锁定 → 多步消费（`grant` 锚点规则逐字保留）。"""
+    if len(intents_domains(intents)) < _MIN_DOMAINS:
+        raise ScenarioRefused("跨场景联动需覆盖 ≥ 2 个场景域")
+    ledger = AnchorLedger()
+    nodes: list[PlanNode] = []
+    freeze_node_id: str | None = None
+    freeze_intents = [item for item in intents if item.action == _FREEZE_ACTION]
+    other_intents = [item for item in intents if item.action != _FREEZE_ACTION]
+    for index, intent in enumerate(freeze_intents, start=1):
+        node = _build_freeze_node(f"n{index}", intent, ledger)
+        nodes.append(node)
+        freeze_node_id = node.node_id
+    start = len(nodes)
+    for offset, intent in enumerate(other_intents, start=1):
+        node_id = f"n{start + offset}"
+        source = _grant_source(intent)
+        if intent.action not in MONEY_ACTIONS:
+            raise ScenarioRefused(f"跨场景暂不支持动作 {intent.action}")
+        node = build_money_node(node_id, intent, gateway, ledger, source)
+        if freeze_node_id is not None:
+            node = replace(node, depends_on=(freeze_node_id,))
+        nodes.append(node)
+    plan = Plan(plan_id="cross_dag", nodes=tuple(nodes))
+    validate_plan(plan)
+    return plan
+
+
+def _assemble_multi(intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+    """通用支：按域分组 → 复用各域 build → 合并重编号 → 同资源串行 → 单一 Plan。"""
+    ledger = AnchorLedger()
+    nodes: list[PlanNode] = []
+    last_by_resource: dict[str, str] = {}
+    for domain, group in _group_by_domain(intents):
+        handler = _DOMAIN_HANDLERS.get(domain)
+        if handler is None:
+            raise ScenarioRefused(f"通用多意图暂不支持动作域 {domain}")
+        sub_plan = handler.build(group, gateway)
+        offset = len(nodes)
+        local_ids = {
+            node.node_id: f"n{offset + index}"
+            for index, node in enumerate(sub_plan.nodes, start=1)
+        }
+        for sub_node in sub_plan.nodes:
+            deps = tuple(local_ids.get(dep, dep) for dep in sub_node.depends_on)
+            resource = _resource_key(sub_node)
+            if resource is not None and resource in last_by_resource:
+                deps = (*deps, last_by_resource[resource])
+            source = (
+                sub_node.intent.source if sub_node.intent is not None else AnchorSource.EXPLICIT
+            )
+            merged = PlanNode(
+                node_id=local_ids[sub_node.node_id],
+                action=sub_node.action,
+                params=dict(sub_node.params),
+                intent=IntentRef(
+                    source=source,
+                    anchor_id=grant_anchor(ledger, source, f"多意图合并：{sub_node.action}"),
+                ),
+                depends_on=deps,
+            )
+            nodes.append(merged)
+            if resource is not None:
+                last_by_resource[resource] = merged.node_id
+    plan = Plan(plan_id="multi_dag", nodes=tuple(nodes))
+    validate_plan(plan)
+    return plan
+
+
+def _group_by_domain(intents: Sequence[Intent]) -> tuple[tuple[str, tuple[Intent, ...]], ...]:
+    """按动作域分组，保持**输入顺序**（dict 保序）。"""
+    buckets: dict[str, list[Intent]] = {}
+    for intent in intents:
+        buckets.setdefault(intent.action.split(".", 1)[0], []).append(intent)
+    return tuple((domain, tuple(group)) for domain, group in buckets.items())
+
+
+def _resource_key(node: PlanNode) -> str | None:
+    for key in _RESOURCE_KEYS:
+        value = node.params.get(key)
+        if isinstance(value, str) and value:
+            return f"{key}:{value}"
+    return None
 
 
 def _grant_source(intent: Intent) -> AnchorSource:

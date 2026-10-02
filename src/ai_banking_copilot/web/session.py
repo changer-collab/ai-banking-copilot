@@ -305,6 +305,7 @@ class Session:
                 key: Value(value, Trust.TRUSTED) for key, value in fill.slots.items()
             }
             slots.update(extras)
+            slots.setdefault("grant", "explicit")
             slots["span"] = span
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
