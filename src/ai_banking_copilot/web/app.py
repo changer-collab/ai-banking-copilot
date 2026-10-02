@@ -460,7 +460,11 @@ _INDEX_HTML = """<!DOCTYPE html>
     }
     async function submitUtterance() {
       const text = document.getElementById("utterance").value;
-      const result = await post("/api/submit", { utterance: text });
+      const result = await post("/api/submit", {
+        utterance: text,
+        // 演示页无选择器：按真实 UI 的做法声明「当前选中对象」（受信任调用方职责）
+        selected: { account: "acc_savings", card: "card_debit", subscription: "sub_video" },
+      });
       lastCard = result.data.card;
       echoFrozenHash(lastCard);
       document.getElementById("breaker-strip").classList.remove("on");
