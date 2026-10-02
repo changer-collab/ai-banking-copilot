@@ -38,6 +38,8 @@ data/
 logs/
 *.log
 artifacts/
+# 例外：评测数据集随包分发，必须入库（覆盖上方通用 data/ 规则）
+!src/ai_banking_copilot/eval/data/
 
 # --- 编辑器 / 系统 ---
 .idea/
