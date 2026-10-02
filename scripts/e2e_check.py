@@ -46,7 +46,14 @@ def run(base: str) -> list[str]:
     failures: list[str] = []
 
     status, html = _get(base, "/")
-    page_ok = status == 200 and "fetch(" in html and "计划卡" in html
+    asset_status, _asset = _get(base, "/assets/app.js")
+    page_ok = (
+        status == 200
+        and asset_status == 200
+        and 'id="stage"' in html
+        and "/assets/app.js" in html
+        and "计划卡" in html
+    )
     print(f"[1] GET /                     -> {status}  前端页可达={page_ok}")
     if not page_ok:
         failures.append("GET / 未返回内联页")
