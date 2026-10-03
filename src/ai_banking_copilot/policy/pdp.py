@@ -14,7 +14,8 @@
 - 规则冲突取**更严**级别（`contracts.authorization.strictest`，并集原因，保证可解释）。
 - 对象维度**只升档、不降档**；`blocked` 为**吸收态** ⇒ `DENY`（唯一可压制金额维度者）。
 - 多候选收款人**不产出级别**（本层拒绝定级，强制澄清）。
-- **金额下限保护**：`日累计 > 1000 ⇒ L_final ≥ 红`，与对象维度无关。
+- **金额下限保护**：**当日流出累计** > 1000 ⇒ L_final ≥ 红（仅 `amount_applies=True` 的请求），
+  与对象维度无关。
 
 本模块**纯函数、零 I/O**：不读库、不调模型、不发网络。
 """
@@ -107,6 +108,12 @@ class PolicyRequest:
     官方口径**不可放宽**：有效阈值恒取 `min(官方默认, 客户限额)`，只能更严。
     """
     context_flags: frozenset[str] = field(default_factory=frozenset)
+    amount_applies: bool = True
+    """金额档是否适用：`False ⇒ 金额档不适用，仅用于非流出型动作`。
+
+    仅当动作产生**资金流出**时为 `True`；非流出型动作（锁定卡、改限额、挂失等）
+    即便 `daily_accumulated` 很高，也不得被金额档抬到红色。
+    """
 
     def __post_init__(self) -> None:
         if not isinstance(self.object_state, ObjectState):
@@ -187,6 +194,8 @@ def _effective_limit_cents(customer_limit: Money | None) -> int:
 def _base_decision(request: PolicyRequest) -> Decision:
     if request.is_pure_query:
         return green_or_raise(is_pure_query=True)
+    if not request.amount_applies:
+        return Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
     return _amount_band_decision(
         request.daily_accumulated, _effective_limit_cents(request.daily_limit)
     )

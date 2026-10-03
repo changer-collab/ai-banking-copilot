@@ -22,23 +22,23 @@ from typing import TYPE_CHECKING
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode
+from ai_banking_copilot.contracts.security import (
+    INJECTION_MARKERS as INJECTION_MARKERS,
+)
+from ai_banking_copilot.contracts.security import (
+    detect_injection,
+)
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
-from ai_banking_copilot.gateway.errors import GatewayError, GatewayNotFoundError
-from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
-from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
 from ai_banking_copilot.planning.slots import SLOT_PARAMS, SlotInputs, fill_control_slots
 from ai_banking_copilot.policy.audit import KIND_DECISION, KIND_REVERSAL, AuditEvent
 from ai_banking_copilot.policy.gate import assert_frozen
-from ai_banking_copilot.policy.pdp import (
-    DAILY_LIMIT_YUAN,
-    FLAG_INJECTION_DETECTED,
-    ObjectState,
-    PolicyRequest,
-    evaluate,
-)
+from ai_banking_copilot.policy.pdp import DAILY_LIMIT_YUAN, FLAG_INJECTION_DETECTED, evaluate
 from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, manifest_hash
 from ai_banking_copilot.policy.saga import ReversalOutcome, ReversalWindow, Saga
+from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
     ScenarioOutcome,
     ScenarioStatus,
@@ -62,19 +62,6 @@ if TYPE_CHECKING:
 
 _CENTS_PER_YUAN = 100
 """元 → 分换算（与 `policy.pdp` 同口径）。"""
-
-INJECTION_MARKERS: tuple[str, ...] = (
-    "忽略以上",
-    "忽略之前",
-    "忽略上述",
-    "无视以上",
-    "忽略系统",
-    "ignore previous",
-    "ignore above",
-    "disregard",
-    "新指令",
-)
-"""提示注入的确定性标记（命中即升 `MANUAL` 转人工，不做模糊判断）。"""
 
 FABRICATION_MARKERS: tuple[str, ...] = (
     "编一个",
@@ -269,7 +256,9 @@ class Session:
         decision = strictest(outcome.decision, *node_decisions)
         card = render_plan_card(plan, decision, self._deps.gateway)
         quota = (
-            self._daily_quota(plan) if decision.level in (Level.YELLOW, Level.RED) else None
+            self._daily_quota(plan)
+            if decision.level in (Level.YELLOW, Level.RED) and _plan_has_outflow(plan)
+            else None
         )
         hit_rules = tuple(reason.value for reason in decision.reasons)
         pending = _Pending(
@@ -348,59 +337,37 @@ class Session:
         return frozenset()
 
     def _node_decision(self, node: PlanNode, flags: frozenset[str]) -> Decision:
-        spec = self._deps.registry.get(node.action)
-        amount, daily = self._amounts(node, spec.is_pure_query)
-        request = PolicyRequest(
+        request = node_policy_request(
+            node,
+            spec=self._deps.registry.get(node.action),
+            gateway=self._deps.gateway,
             user_id=self._deps.user_id,
-            action=node.action,
-            amount=amount,
-            daily_accumulated=daily,
-            object_state=self._object_state(node),
-            is_pure_query=spec.is_pure_query,
-            irreversible=not spec.reversible,
-            daily_limit=self._deps.gateway.daily_transfer_limit(self._deps.user_id),
-            context_flags=flags,
+            today=self._deps.today,
+            flags=flags,
         )
         return evaluate(request)
-
-    def _amounts(self, node: PlanNode, is_pure_query: bool) -> tuple[Money, Money]:
-        if is_pure_query:
-            return Money(0), Money(0)
-        cents = _param_cents(node, "amount_cents")
-        if cents is None:
-            cents = _param_cents(node, "daily_limit_cents")
-        amount = Money(0 if cents is None else cents)
-        baseline = self._deps.gateway.daily_transfer_total(self._deps.user_id, self._deps.today)
-        return amount, Money(baseline.cents + amount.cents)
 
     def _daily_quota(self, plan: Plan) -> DailyQuota:
         """当日额度（展示用只读透传）：有效阈值 = `min(官方 1000 元, 客户限额)`。
 
-        当日累计取**各节点最大值**（与计划级 `strictest` 同向），口径即
-        `_amounts` 传给 `PolicyRequest.daily_accumulated` 的值（含本笔）；只透结论性数字，
-        不暴露资产分档规则，也不改变 PDP 判定语义。
+        当日累计与裁决**同源**（复用 `node_policy_request` 的 `daily_accumulated`，含本笔），
+        取各节点最大值（与计划级 `strictest` 同向）；只透结论性数字，不暴露资产分档规则，
+        也不改变 PDP 判定语义。仅含 ≥1 流出节点的计划会走到这里（见 `_after_outcome`）。
         """
         customer = self._deps.gateway.daily_transfer_limit(self._deps.user_id)
         effective = min(DAILY_LIMIT_YUAN * _CENTS_PER_YUAN, customer.cents)
         accumulated = max(
-            self._amounts(node, self._deps.registry.get(node.action).is_pure_query)[1].cents
+            node_policy_request(
+                node,
+                spec=self._deps.registry.get(node.action),
+                gateway=self._deps.gateway,
+                user_id=self._deps.user_id,
+                today=self._deps.today,
+                flags=frozenset(),
+            ).daily_accumulated.cents
             for node in plan.nodes
         )
         return DailyQuota(limit_cents=effective, accumulated_cents=accumulated)
-
-    def _object_state(self, node: PlanNode) -> ObjectState:
-        raw = node.params.get("payee_id")
-        if not isinstance(raw, str) or not raw:
-            return ObjectState.SELF
-        try:
-            payee = self._deps.gateway.payee(raw).payload
-        except GatewayNotFoundError:
-            return ObjectState.UNKNOWN
-        if payee.blocked:
-            return ObjectState.BLOCKED
-        if payee.identity_confirmed:
-            return ObjectState.VERIFIED_SAVED
-        return ObjectState.KNOWN_UNVERIFIED
 
     def _refuse(
         self,
@@ -651,12 +618,6 @@ class Session:
         self._pending_node_ids = []
 
 
-def detect_injection(text: str) -> bool:
-    """确定性注入检测：命中标记即视为注入（不做启发式猜测）。"""
-    lowered = text.lower()
-    return any(marker.lower() in lowered for marker in INJECTION_MARKERS)
-
-
 def extract_remark(utterance: str) -> str | None:
     """抽取"备注"后的文本（作为**数据槽**内容：永不解释为指令）。"""
     marker = "备注"
@@ -665,6 +626,11 @@ def extract_remark(utterance: str) -> str | None:
         return None
     tail = utterance[index + len(marker) :].lstrip("：: ")
     return tail or None
+
+
+def _plan_has_outflow(plan: Plan) -> bool:
+    """计划是否含 ≥1 流出节点：金额档（及额度行）只对流出型计划有意义。"""
+    return any(ACTION_KINDS.get(node.action) is ActionKind.OUTFLOW for node in plan.nodes)
 
 
 def _guard_utterance(utterance: str) -> str | None:
@@ -719,13 +685,6 @@ def _intent_span(intent: Intent, utterance: str) -> str:
     if isinstance(span, str) and span and span in utterance:
         return span
     return utterance
-
-
-def _param_cents(node: PlanNode, key: str) -> int | None:
-    value = node.params.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
 
 
 _DATE_PARAMS = frozenset({"booked_on", "start", "end"})

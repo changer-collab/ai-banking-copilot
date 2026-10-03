@@ -71,6 +71,36 @@ def test_daily_over_limit_is_red() -> None:
     assert ReasonCode.AMOUNT_OVER_DAILY_LIMIT in decision.reasons
 
 
+def test_non_monetary_request_is_not_banded_by_daily_accumulation() -> None:
+    request = PolicyRequest(
+        user_id=DEMO_USER_ID,
+        action="card.lock",
+        amount=Money(0),
+        daily_accumulated=Money(200000),  # 当日已流出 ¥2000
+        object_state=ObjectState.SELF,
+        is_pure_query=False,
+        irreversible=False,
+        amount_applies=False,
+    )
+    decision = evaluate(request)
+    assert decision.level is Level.YELLOW
+    assert decision.reasons == (ReasonCode.STATE_CHANGE_SMALL,)
+
+
+def test_amount_applies_true_still_bands_even_with_zero_node_amount() -> None:
+    request = PolicyRequest(
+        user_id=DEMO_USER_ID,
+        action="transfer.create",
+        amount=Money(0),
+        daily_accumulated=Money(200000),
+        object_state=ObjectState.SELF,
+        is_pure_query=False,
+        irreversible=False,
+        amount_applies=True,
+    )
+    assert evaluate(request).level is Level.RED
+
+
 def test_blocked_is_deny_regardless_of_amount_and_purity() -> None:
     for request in (
         _request(state=ObjectState.BLOCKED, pure=True),
