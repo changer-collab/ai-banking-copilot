@@ -52,6 +52,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | `contracts.taint` | `Trust`(TRUSTED/UNVERIFIED) · `SlotKind`(DATA/CONTROL) · `Value[T](raw, trust)` · `Slot[T](kind, value)` · `UntrustedWriteError` |
 | `contracts.authorization` | `Level`(GREEN=0/YELLOW=1/RED=2/MANUAL=3/DENY=4) · `ReasonCode`(QUERY_ONLY/STATE_CHANGE_SMALL/AMOUNT_OVER_DAILY_LIMIT/IRREVERSIBLE/MANUAL_REVIEW/OBJECT_BLOCKED) · `Decision(level, reasons)` · `strictest(*decisions)` · `green_or_raise(is_pure_query)` |
 | `contracts.plan` | `AnchorSource`(EXPLICIT/USER_APPROVED/DERIVED) · `IntentRef(source, anchor_id)` · `PlanNode(node_id, action, params, intent, depends_on)` · `Plan(plan_id, nodes)` · `validate_plan(plan)` · `cfhash(nodes)` · `PlanValidationError` |
+| `contracts.security` | `INJECTION_MARKERS` · `detect_injection(text) -> bool` |
 
 ### 01 `gateway`
 
@@ -81,7 +82,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 
 | 模块 | 冻结符号 |
 |---|---|
-| `policy.pdp` | `ObjectState`(SELF/KNOWN_UNVERIFIED/VERIFIED_SAVED/UNKNOWN/BLOCKED) · `PolicyRequest(user_id, action, amount, daily_accumulated, object_state, is_pure_query, irreversible, context_flags)` · `evaluate(request) -> Decision` · `evaluate_plan(plan, net) -> Decision` · `DAILY_LIMIT_YUAN` · `NET_EFFECT_THRESHOLD_YUAN` |
+| `policy.pdp` | `ObjectState`(SELF/KNOWN_UNVERIFIED/VERIFIED_SAVED/UNKNOWN/BLOCKED) · `PolicyRequest(user_id, action, amount, daily_accumulated, object_state, is_pure_query, irreversible, daily_limit, context_flags, amount_applies: bool = True)` · `evaluate(request) -> Decision` · `evaluate_plan(plan, net) -> Decision` · `DAILY_LIMIT_YUAN` · `NET_EFFECT_THRESHOLD_YUAN` |
 | `policy.gate` | `assert_frozen(plan, frozen_hash) -> None` · `StalePlanError` |
 | `policy.pep` | `Pep(registry, gateway, core_bank, audit, breaker)`（`execute(call, decision, frozen_hash, idempotency_key)`）· `ExecResult(status, record_ids, message)` · `NotAuthorizedError`（日期参数接受 `date` 或 ISO 字符串，见裁决 #19） |
 | `policy.audit` | `AuditEvent(event_id, kind, payload, prev_hash)` · `AuditLog(path)`（**追加式 JSONL + sha256 哈希链**，不占用 01 的 schema）· `append(event) -> str` / `verify_chain() -> bool` / `events()` · `ChainBrokenError` |
@@ -103,7 +104,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `scenarios.base` | `ScenarioOutcome(scenario, status, plan, decision, exec_results, message, record_ids)` · `ScenarioHandler` Protocol（`name` / `matches(intents)` / `build(intents, gateway) -> Plan`） |
 | `scenarios.registry` | `SCENARIO_HANDLERS` · `select_handler(intents) -> ScenarioHandler` |
-| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 · 新增 scenarios.wealth.to_risk_assessment(record) -> RiskAssessment \| None |
+| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 · 新增 scenarios.wealth.to_risk_assessment(record) -> RiskAssessment \| None · 新增 scenarios.authorization.{object_state_for_node, node_policy_request} |
 
 ### 06 `web`
 
@@ -120,7 +121,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | `eval.dataset` | `EvalCase(id, utterance, expect_level, expect_blocked, category)` · `load_cases(path)` |
 | `eval.harness` | `run_suite(cases, pipeline) -> EvalReport` · `EvalReport(passed, failed, invariants)` |
 | `eval.invariants` | `InvariantResult(name, holds, detail)` · `check_invariants(cases, results)`（I1′–I4′ + 绿色纯度 + 非退化） |
-| `eval.pipeline` | `run_suite` / `EvalReport` 签名不变；**新增私有** `_inject_assessment` 与收益暗示守卫（镜像 `scenarios.wealth.FORBIDDEN_HINTS`）；`_DEFAULT_SELECTED["product"]` 由 `wp_bond` 改 `wp_cash` |
+| `eval.pipeline` | `run_suite` / `EvalReport` 签名不变；**新增私有** `_inject_assessment` 与收益暗示守卫（镜像 `scenarios.wealth.FORBIDDEN_HINTS`）；`_DEFAULT_SELECTED["product"]` 由 `wp_bond` 改 `wp_cash`；`_derived_release` 改走受限沙箱 `scenarios.bills.category_share_in_sandbox`（catch 追加 `SandboxError` / `ScenarioRefused`） |
 
 ### 规范动作表（**唯一真源**，02/03/04/05/06/07 一律以此为准）
 
@@ -175,11 +176,12 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 20. **`user_id` 装配归会话层 / 评测链**（05/06 复核，2026-10-02；固化裁决 #16 的落点）：05 的 `scenarios` 组装 `transfer.*` / `wealth.*` 节点时**不**把 `user_id` 放进 `PlanNode.params`；由 06 的 `web.session.Session._to_call` 与 07 的评测链在**构造 `ToolCall` 时**注入 `DEMO_USER_ID`（仅当该动作的 `ToolSpec` 声明了必填 CONTROL 槽 `user_id` 且节点 params 缺失时）。**只在 `ToolCall` 层注入，不改 `PlanNode.params` / `cfhash`**。02 的 `user_id` 声明（裁决 #16）与 05 的省略设计**并非冲突**（06 计划偏差 #1 的"02 未声明 user_id"陈述已过时，作废）。
 21. **05 `CrossHandler` 通用化**（2026-10-02，多意图能力）：`matches` 扩为「≥2 场景域 **或** 单域 `funds.*`」；`build` 分两支——「冻结 + 资金」组合**逐字保留**原语义（`grant` 锚点规则不变），其余多域组合走**通用支**（按域分组 → 复用各域 handler 的 `build` → 合并重编号 → 同资源串行 → **单一 `Plan`**）。`select_handler` / `run_scenario` / 06 确认-执行协议**不变**；计划级安全（单卡 / 单 `cfhash` / 单次 `evaluate_plan(NE)`）不变。会话层 `web.session._assemble_intents` 为用户明说意图补 `grant="explicit"`（与 07 评测链 `_scenario_intent` 一致）。单域 `funds.*` 的原 `UnknownScenarioError` 缺口一并补齐。
 22. **S1b 授权改 06/07 既有实现（加严 / 新增 / 收窄）**（2026-10-03，G2 收口）：新增 `gateway/risk_store.py`（独立表，不改 01 的 `SCHEMA_SQL`）；`web.app.AppDeps` **尾部追加**可选字段 `risk`（向后兼容）；`web.session._assemble_intents` 对 `wealth.subscribe` 做 per-intent 受信任注入（`product=wp_cash` / `user_id` / `assessment`，**不包 `Value`**）；`eval.pipeline._evaluate` 注入 `assessment` 并**新增收益暗示守卫**（镜像 `FORBIDDEN_HINTS`），`_DEFAULT_SELECTED["product"]` 改 `wp_cash`；`scenarios.wealth` **仅新增** `to_risk_assessment`。**既有冻结符号与签名零改动**（`assess_suitability` / `_assessment` / `RiskAssessment` 逻辑不变）。**语义只加严/收窄，不放宽**。
+23. **S2 一致性收口授权（additive / 收窄 / 加严；先改表再回溯）**（2026-10-04，裁决 #23，G3/G5/G4/G12）：授权本计划按下列方向落地，且**先改本冻结面、再回溯修订已出计划的 `Interfaces` 段与实现**：① 00 **新增** `contracts.security`（`INJECTION_MARKERS` · `detect_injection(text) -> bool`），06/07 的注入标记收敛为该单一真源（**集合相等**：`set(web.session.INJECTION_MARKERS) == set(eval.pipeline.INJECTION_MARKERS) == set(contracts.security.INJECTION_MARKERS)`，G4）；② 03 `PolicyRequest` **补登记既有** `daily_limit` 并**尾部新增** `amount_applies: bool = True`（`False ⇒ 金额档不适用，仅用于非流出型动作`，G5 收窄）；③ 05 **新增** `scenarios.authorization`（`object_state_for_node` / `node_policy_request`），06 `web.session` 与 07 `eval.pipeline` 共用该构造器（G3 消除口径双份 + 交叉断言）；④ 07 `_derived_release` 改走受限沙箱 `scenarios.bills.category_share_in_sandbox`（`except (GatewayError, SandboxError, ScenarioRefused): return False`，G12 加严）。**既有冻结符号与签名零改动**；语义**只收窄/加严，不放宽**。
 
 ### 跨计划硬约束（每份计划都生效）
 
 - 契约层（`contracts/`）**禁止 I/O**：不 import `requests`/`httpx`/`sqlite3`，不调用 `open()`。
-- 绿色只允许纯查询；`日累计 ≤1000 元 = 黄`、`>1000 元 = 红`；用户只能加严不能放宽（H10）。
+- 绿色只允许纯查询；`当日流出累计 ≤1000 元 = 黄`、`>1000 元 = 红`；用户只能加严不能放宽（H10）。
 - 执行门判据 = 节点 ∈ 已冻结确认子图哈希；`untrusted` 永不进入控制槽（H2/H3）。
 - 沙箱不得回写事实网关；熔断只加严不降级（PRD §5.8）。
 - **不得修改已出计划的既有实现**：只允许新增模块；要改上游接口，先改本表、再回溯修订。
