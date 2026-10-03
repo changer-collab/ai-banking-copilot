@@ -62,6 +62,32 @@ function esc(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+/* 金额格式化：整数分（cents）→ "¥1,000.00" */
+function yuan(cents) {
+  return (
+    "¥" +
+    (cents / 100).toLocaleString("zh-CN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })
+  );
+}
+
+/* 当日额度行：仅黄/红卡显示「本人当日限额 / 已用 / 剩余」；超额不出负数，改红色「已超额」。
+   绿卡（纯查询）、转人工、拒绝一律不显示——只透结论性数字（min 后的有效阈值），不解释来源。 */
+function quotaHtml(card) {
+  if (card.level !== "YELLOW" && card.level !== "RED") return "";
+  const limit = card.daily_limit_cents;
+  const used = card.daily_accumulated_cents;
+  if (typeof limit !== "number" || typeof used !== "number") return "";
+  const remaining = limit - used;
+  const head = `本人当日限额 <b class="quota__val">${yuan(limit)}</b> · 已用 <b class="quota__val">${yuan(used)}</b>`;
+  if (remaining < 0) {
+    return `<p class="quota quota--over">${head} · 已超额 <b class="quota__val">${yuan(-remaining)}</b></p>`;
+  }
+  return `<p class="quota">${head} · 剩余 <b class="quota__val">${yuan(remaining)}</b></p>`;
+}
+
 function clock() {
   const d = new Date();
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
@@ -198,6 +224,8 @@ function voucherHtml() {
         <span class="amount__note">确认绑定 cfhash · 经计划级 + 节点级双层执行门</span>
       </div>
     </div>
+
+    ${quotaHtml(card)}
 
     ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
 

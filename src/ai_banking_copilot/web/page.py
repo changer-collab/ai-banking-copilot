@@ -16,7 +16,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AI 银行副驾 · 计划卡（真实连通）</title>
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
-<link rel="stylesheet" href="/assets/app.css?v=2" />
+<link rel="stylesheet" href="/assets/app.css?v=3" />
 </head>
 <body>
 <div class="paper-bg" aria-hidden="true"></div>
@@ -102,7 +102,7 @@ INDEX_HTML = """<!DOCTYPE html>
   </main>
 </div>
 
-<script src="/assets/app.js?v=3"></script>
+<script src="/assets/app.js?v=4"></script>
 </body>
 </html>
 """

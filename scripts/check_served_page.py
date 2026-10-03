@@ -1,0 +1,135 @@
+"""服务页自检：对**真实运行的服务**校验内联页 / 静态资源 / 计划卡额度字段。
+
+用法：
+    # 终端 A：启动服务
+    python -m ai_banking_copilot
+    # 终端 B：跑自检（默认 http://127.0.0.1:8000）
+    python scripts/check_served_page.py
+    python scripts/check_served_page.py --base-url http://127.0.0.1:8000
+
+校验：内联页结构 + 资源 `?v` 版本 + 当日额度行样式/脚本 + `/api/submit` 卡片额度字段
+（黄/红卡携带、绿卡不携带）。仅标准库，退出码 0 = 全过。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.request
+
+
+def _get(base: str, path: str) -> str:
+    with urllib.request.urlopen(base + path, timeout=15) as response:
+        return response.read().decode("utf-8")
+
+
+def _post(base: str, path: str, body: dict[str, object]) -> dict[str, object]:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        base + path, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def run(base: str) -> list[str]:
+    failures: list[str] = []
+
+    html = _get(base, "/")
+    css = _get(base, "/assets/app.css?v=3")
+    js = _get(base, "/assets/app.js?v=4")
+
+    checks = {
+        "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
+        "page: 技术详情开关": 'id="tech-toggle"' in html and "技术详情" in html,
+        "page: 顶栏/两栏/侧栏": (
+            'class="topbar"' in html and 'class="layout"' in html and 'class="rail"' in html
+        ),
+        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=4" in html,
+        "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
+        "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
+        "css: 超额强调": ".quota--over" in css,
+        "css: .tech 默认收起": ".tech {" in css and "display: none;" in css,
+        "css: data-tech 展开": 'html[data-tech="on"] .tech' in css,
+        "js: 额度行渲染": (
+            "function quotaHtml(card)" in js and "本人当日限额" in js and "已超额" in js
+        ),
+        "js: 读额度字段": "daily_limit_cents" in js and "daily_accumulated_cents" in js,
+        "js: 链节点中文+tech": "function chainAdd(label, tech)" in js and "node.label" in js,
+        "js: 中文级别名": 'name: "黄色"' in js,
+        "js: techToggle": "techToggle" in js,
+        "js: 规则字典（真实枚举）": "AMOUNT_OVER_DAILY_LIMIT:" in js and "QUERY_ONLY:" in js,
+        "js: 要求字典": "user_confirm: " in js and "strong_verify: " in js,
+        "js: 凭证号替代哈希": "function receiptNo(" in js,
+        "js: 红色两段式强验证": "strong-verify" in js and "完成强验证并执行" in js,
+    }
+    bad = [key for key, ok in checks.items() if not ok]
+    for key, ok in checks.items():
+        print(("OK   " if ok else "MISS ") + key)
+    failures.extend(bad)
+
+    selected = {"account": "acc_savings", "card": "card_debit", "subscription": "sub_video"}
+
+    yellow = _post(base, "/api/submit", {"utterance": "转给李娜 500 元", "selected": selected})
+    ycard = yellow.get("card") or {}
+    limit = ycard.get("daily_limit_cents")
+    used = ycard.get("daily_accumulated_cents")
+    y_ok = (
+        ycard.get("level") == "YELLOW"
+        and isinstance(limit, int)
+        and isinstance(used, int)
+        and used >= 50000
+        and used <= limit
+    )
+    print(f"[api] 黄卡额度 -> level={ycard.get('level')} limit={limit} used={used} 通过={y_ok}")
+    if not y_ok:
+        failures.append("黄卡未携带 daily_limit_cents / daily_accumulated_cents")
+
+    red = _post(base, "/api/submit", {"utterance": "转给李娜 1500 元", "selected": selected})
+    rcard = red.get("card") or {}
+    rlimit = rcard.get("daily_limit_cents")
+    rused = rcard.get("daily_accumulated_cents")
+    r_ok = (
+        rcard.get("level") == "RED"
+        and isinstance(rlimit, int)
+        and isinstance(rused, int)
+        and rused > rlimit
+    )
+    print(f"[api] 红卡超额 -> level={rcard.get('level')} limit={rlimit} used={rused} 通过={r_ok}")
+    if not r_ok:
+        failures.append("红卡未体现超额（daily_accumulated_cents 应 > daily_limit_cents）")
+
+    green = _post(base, "/api/submit", {"utterance": "查一下上月账单", "selected": selected})
+    gcard = green.get("card") or {}
+    g_ok = (
+        gcard.get("level") == "GREEN"
+        and "daily_limit_cents" not in gcard
+        and "daily_accumulated_cents" not in gcard
+    )
+    print(f"[api] 绿卡无额度 -> level={gcard.get('level')} keys={sorted(gcard.keys())} 通过={g_ok}")
+    if not g_ok:
+        failures.append("绿卡不应携带额度字段")
+
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="服务页自检（对真实服务发 HTTP 请求）")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    args = parser.parse_args(argv)
+    base = str(args.base_url).rstrip("/")
+    print(f"target: {base}\n")
+    failures = run(base)
+    print()
+    if failures:
+        print("FAILED:")
+        for item in failures:
+            print("  -", item)
+        return 1
+    print("ALL OK：内联页 + 资源版本 + 额度行样式/脚本 + 卡片额度字段（黄/红携带、绿卡不携带）")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
