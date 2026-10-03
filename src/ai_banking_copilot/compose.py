@@ -13,13 +13,23 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
+from ai_banking_copilot.gateway.core_bank import CoreBank
+from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
+from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import (
     FallbackIntentModel,
     IntentModel,
     LlmIntentModel,
     TemplateIntentModel,
 )
+from ai_banking_copilot.policy.audit import AuditLog
+from ai_banking_copilot.policy.breaker import CircuitBreaker
+from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.tools.catalog import build_default_registry
+from ai_banking_copilot.web.app import AppDeps
 
 DISABLE_LLM_ENV = "AIB_DISABLE_LLM"
 """置为真值时强制**只用模板通道**（现场演示保稳的可选开关）。"""
@@ -34,3 +44,26 @@ def build_intent_model(env: Mapping[str, str] | None = None) -> IntentModel:
         return TemplateIntentModel()
     api_key = source.get("DASHSCOPE_API_KEY", "")
     return FallbackIntentModel(LlmIntentModel(api_key=api_key))
+
+
+def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
+    """装配默认依赖：模拟核心银行 + 只读事实网关 + 全量策略/工具依赖。"""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = Store(db_path)
+    init_schema(writer)
+    seed_database(writer)
+    writer.close()
+
+    gateway = FactGateway(Store(db_path, StoreMode.READ_ONLY))
+    registry = build_default_registry()
+    breaker = CircuitBreaker()
+    audit = AuditLog(db_path.parent / "audit.jsonl")
+    return AppDeps(
+        intent_model=build_intent_model(env),
+        registry=registry,
+        gateway=gateway,
+        pep=Pep(registry, gateway, CoreBank(Store(db_path, StoreMode.READ_WRITE)), audit, breaker),
+        breaker=breaker,
+        audit=audit,
+        user_id=DEMO_USER_ID,
+    )

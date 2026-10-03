@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from ai_banking_copilot.compose import DISABLE_LLM_ENV, build_intent_model
+from pathlib import Path
+
+from ai_banking_copilot.compose import DISABLE_LLM_ENV, build_deps, build_intent_model
 from ai_banking_copilot.planning.llm import FallbackIntentModel, TemplateIntentModel
+from ai_banking_copilot.web.app import AppDeps
 
 
 def test_disabled_env_is_template_only() -> None:
@@ -23,3 +26,9 @@ def test_key_present_keeps_llm_primary_lazy() -> None:
     model = build_intent_model({"DASHSCOPE_API_KEY": "sk-test"})
     assert isinstance(model, FallbackIntentModel)
     assert model.degraded is False
+
+
+def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:
+    deps = build_deps(tmp_path / "copilot.db", env={})
+    assert isinstance(deps, AppDeps)
+    assert isinstance(deps.intent_model, FallbackIntentModel)
