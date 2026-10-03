@@ -53,6 +53,26 @@ def resolve_cancel_race(
     return window.reverse(now=now, settled=settled, compensate=saga.compensate)
 
 
+def upcoming_charges(gateway: FactGateway, user_id: str) -> tuple[Subscription, ...]:
+    """只读到期提醒事实：按 `next_charge_on` **升序**返回用户全部订阅。"""
+    records = gateway.subscriptions_of(user_id)
+    return tuple(
+        record.payload
+        for record in sorted(records, key=lambda record: record.payload.next_charge_on)
+    )
+
+
+def describe_upcoming_charges(subscriptions: tuple[Subscription, ...]) -> str:
+    """只陈述事实：订阅数 + 最近到期日 + 商户/金额（无收益/推荐措辞，守 H6/H3）。"""
+    if not subscriptions:
+        return "暂无订阅"
+    nearest = subscriptions[0]
+    return (
+        f"共 {len(subscriptions)} 项，最近到期 {nearest.next_charge_on.isoformat()}"
+        f"（{nearest.merchant} {nearest.amount.yuan} 元）"
+    )
+
+
 class SubscriptionsHandler(ScenarioHandler):
     """订阅场景处理器。"""
 

@@ -39,8 +39,31 @@ WEALTH_ACTIONS = frozenset({"wealth.list", "wealth.subscribe", "wealth.redeem"})
 
 _RISK_ORDER = {"R1": 1, "R2": 2, "R3": 3, "R4": 4, "R5": 5}
 
-FORBIDDEN_HINTS = ("保本", "稳赚", "保证收益", "预期收益", "收益率", "年化", "包赚", "无风险")
-"""收益暗示措辞黑名单（H6：不做投资建议、不承诺收益）。"""
+FORBIDDEN_HINTS = (
+    "保本",
+    "稳赚",
+    "保证收益",
+    "预期收益",
+    "收益率",
+    "年化",
+    "包赚",
+    "无风险",
+    "推荐",
+    "哪只",
+    "哪款",
+    "收益高",
+    "收益低",
+    "收益最好",
+    "收益最高",
+    "收益更高",
+    "收益最低",
+    "赚钱",
+    "买哪个",
+    "选哪个",
+)
+"""收益暗示措辞黑名单（H6：不做投资建议、不承诺收益）。
+
+S3 加严（append-only）：追加「推荐 / 择优 / 收益高低」同义 12 词，原 8 词保留。"""
 
 
 class AssessmentState(str, Enum):
@@ -91,6 +114,11 @@ def describe_product(product: WealthProduct) -> str:
         f"产品 {product.name}｜风险等级 {product.risk_level}｜期限 {product.term_days} 天"
         f"｜起购金额 {product.min_amount.yuan} 元"
     )
+
+
+def product_comparison(gateway: FactGateway) -> tuple[str, ...]:
+    """只读产品事实清单（复用 `describe_product`）：无收益字段、无排序、无推荐（守 H6）。"""
+    return tuple(describe_product(record.payload) for record in gateway.wealth_products())
 
 
 class WealthHandler(ScenarioHandler):

@@ -14,6 +14,7 @@ from ai_banking_copilot.scenarios.wealth import (
     SuitabilityError,
     WealthHandler,
     describe_product,
+    product_comparison,
 )
 
 
@@ -81,3 +82,16 @@ def test_describe_product_has_no_yield_hint(gateway: FactGateway) -> None:
     assert all(word not in text for word in FORBIDDEN_HINTS)
     assert "年化" not in text
     assert "收益" not in text
+
+
+def test_product_comparison_states_facts_only(gateway: FactGateway) -> None:
+    items = product_comparison(gateway)
+    assert len(items) == 4
+    products = tuple(record.payload for record in gateway.wealth_products())
+    assert {product.risk_level for product in products} == {"R1", "R2", "R3", "R4"}
+    for product in products:
+        assert any(product.name in item and product.risk_level in item for item in items)
+    joined = "\n".join(items)
+    assert all(word not in joined for word in FORBIDDEN_HINTS)
+    assert "推荐" not in joined
+    assert "排序" not in joined

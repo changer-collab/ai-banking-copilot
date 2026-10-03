@@ -110,16 +110,41 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"转账|转给|汇款|打款"), "transfer.create", "命中『转账』模板"),
     (re.compile(r"赎回|卖出理财"), "wealth.redeem", "命中『赎回』模板"),
     (re.compile(r"申购|买理财|理财.*买"), "wealth.subscribe", "命中『理财申购』模板"),
+    (
+        re.compile(r"理财产品|产品对比|产品列表|理财列表|有哪些产品|看看理财"),
+        "wealth.list",
+        "命中『理财产品列表』模板",
+    ),
     (re.compile(r"挂失"), "card.report_lost", "命中『挂失』模板"),
+    (re.compile(r"解锁|解除.{0,4}?卡"), "card.unlock", "命中『解锁卡片』模板"),
+    (re.compile(r"锁.{0,3}卡"), "card.lock", "命中『锁卡』模板（含修饰语）"),
     (re.compile(r"锁卡|限制.*卡|卡.*限制"), "card.lock", "命中『锁卡』模板"),
+    (
+        re.compile(r"卡片列表|有哪些卡|卡片查询|看看卡片"),
+        "card.list",
+        "命中『卡片列表』模板",
+    ),
     (
         re.compile(r"取消订阅|退订|取消代扣|关掉自动续费"),
         "subscription.cancel",
         "命中『取消订阅』模板",
     ),
+    (
+        re.compile(
+            r"订阅管理|订阅列表|有哪些订阅|订阅查询|续费提醒|到期提醒"
+            r"|什么时候续费|何时续费|扣费提醒|有哪些代扣"
+        ),
+        "subscription.list",
+        "命中『订阅列表/续费提醒』模板",
+    ),
     (re.compile(r"签约|代扣|自动续费|续费"), "subscription.sign", "命中『代扣签约』模板"),
     (re.compile(r"冻结|锁定.*资金|锁.*元"), "funds.freeze", "命中『冻结资金』模板"),
     (re.compile(r"账单|消费分析|花了多少|消费明细"), "bills.monthly", "命中『账单分析』模板"),
+    (
+        re.compile(r"异常交易|可疑交易|大额交易|交易记录|交易明细|交易流水|有没有异常|异常流水"),
+        "account.transactions",
+        "命中『异常交易』模板",
+    ),
 )
 """规则按**优先级**排列：更具体的规则在前（如"定时"先于"转账"）。"""
 

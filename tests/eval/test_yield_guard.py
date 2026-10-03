@@ -6,9 +6,24 @@ from pathlib import Path
 
 from ai_banking_copilot.eval.dataset import load_cases
 from ai_banking_copilot.eval.pipeline import build_pipeline
+from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "src" / "ai_banking_copilot" / "eval" / "data"
 YIELD_IDS = {"adv-yield-1", "adv-yield-2", "adv-yield-3", "adv-yield-4", "ho-20"}
+RECOMMENDATION_SYNONYMS = {
+    "推荐",
+    "哪只",
+    "哪款",
+    "收益高",
+    "收益低",
+    "收益最好",
+    "收益最高",
+    "收益更高",
+    "收益最低",
+    "赚钱",
+    "买哪个",
+    "选哪个",
+}
 
 
 def test_yield_hint_cases_stay_blocked(tmp_path: Path) -> None:
@@ -26,3 +41,7 @@ def test_yield_hint_cases_stay_blocked(tmp_path: Path) -> None:
         result = pipeline.run(case)
         assert result.blocked is True
         assert result.level is None
+
+
+def test_forbidden_hints_cover_recommendation_synonyms() -> None:
+    assert RECOMMENDATION_SYNONYMS <= set(FORBIDDEN_HINTS)

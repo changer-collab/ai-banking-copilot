@@ -1,6 +1,7 @@
 import pytest
 
 from ai_banking_copilot.planning.llm import (
+    _TEMPLATE_RULES,
     ACTION_KINDS,
     CANONICAL_ACTIONS,
     Intent,
@@ -60,3 +61,89 @@ def test_template_model_returns_nothing_for_unknown_utterance() -> None:
 def test_template_model_is_deterministic() -> None:
     model = TemplateIntentModel()
     assert model.propose("冻结 5000 元", {}) == model.propose("冻结 5000 元", {})
+
+
+_READ_ONLY_ACTIONS = {"wealth.list", "card.list", "subscription.list", "account.transactions"}
+
+
+def _actions(utterance: str) -> list[str]:
+    return [intent.action for intent in TemplateIntentModel().propose(utterance, {}).intents]
+
+
+def test_card_unlock_never_swallows_inquiry_verbs() -> None:
+    for utterance in (
+        "了解我的卡片",
+        "了解一下卡片",
+        "理解卡片",
+        "解读卡片",
+        "解决卡片问题",
+        "解密卡片信息",
+    ):
+        assert _actions(utterance) == [], utterance
+
+
+def test_card_unlock_matches_explicit_unlock() -> None:
+    for utterance in (
+        "解锁卡片",
+        "解锁我的卡",
+        "解锁这张卡",
+        "解锁卡",
+        "解除卡片限制",
+    ):
+        actions = _actions(utterance)
+        assert actions, utterance
+        assert actions[0] == "card.unlock", utterance
+
+
+def test_card_lock_keeps_priority_for_lock_family() -> None:
+    for utterance in (
+        "锁卡",
+        "帮我锁卡",
+        "锁我的卡",
+        "限制这张卡的交易",
+    ):
+        assert "card.lock" in _actions(utterance), utterance
+
+
+def test_new_list_rules_never_swallow_modified_write_intents() -> None:
+    for utterance in ("取消我的订阅", "退出我的订阅"):
+        assert _READ_ONLY_ACTIONS.isdisjoint(_actions(utterance)), utterance
+
+
+def test_subscription_precedence_changes_are_frozen() -> None:
+    for utterance in ("续费提醒", "什么时候续费", "何时续费", "有哪些代扣"):
+        actions = _actions(utterance)
+        assert actions and actions[0] == "subscription.list", utterance
+    for utterance in ("续费", "签约", "代扣", "自动续费"):
+        actions = _actions(utterance)
+        assert actions and actions[0] == "subscription.sign", utterance
+
+
+def test_bare_verbs_keep_write_semantics() -> None:
+    for utterance in ("取消订阅", "退订", "取消代扣", "关掉自动续费"):
+        actions = _actions(utterance)
+        assert actions and actions[0] == "subscription.cancel", utterance
+
+
+def test_new_list_rules_reachable() -> None:
+    expected = {
+        "理财产品": "wealth.list",
+        "产品对比": "wealth.list",
+        "卡片列表": "card.list",
+        "有哪些卡": "card.list",
+        "订阅管理": "subscription.list",
+        "交易记录": "account.transactions",
+        "异常交易": "account.transactions",
+    }
+    for utterance, action in expected.items():
+        assert action in _actions(utterance), utterance
+
+
+def test_card_region_order_is_frozen() -> None:
+    patterns = [pattern.pattern for pattern, _, _ in _TEMPLATE_RULES]
+    unlock_index = next(index for index, pattern in enumerate(patterns) if "解锁" in pattern)
+    direct_lock_index = next(
+        index for index, pattern in enumerate(patterns) if "锁.{0,3}卡" in pattern
+    )
+    existing_lock_index = patterns.index("锁卡|限制.*卡|卡.*限制")
+    assert unlock_index < direct_lock_index < existing_lock_index
