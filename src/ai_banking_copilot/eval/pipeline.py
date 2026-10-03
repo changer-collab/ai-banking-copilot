@@ -278,6 +278,7 @@ class EvalPipeline:
             object_state=object_state,
             is_pure_query=spec.is_pure_query,
             irreversible=not spec.reversible,
+            daily_limit=gateway.daily_transfer_limit(DEMO_USER_ID),
             context_flags=flags,
         )
         decision = evaluate(request)

@@ -336,6 +336,7 @@ class Session:
             object_state=self._object_state(node),
             is_pure_query=spec.is_pure_query,
             irreversible=not spec.reversible,
+            daily_limit=self._deps.gateway.daily_transfer_limit(self._deps.user_id),
             context_flags=flags,
         )
         return evaluate(request)
