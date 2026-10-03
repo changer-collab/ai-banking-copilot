@@ -273,7 +273,18 @@ git -C E:\AI_Banking commit -m "refactor(compose): AppDeps 装配下沉 build_de
   - T13（G10 收口，2026-10-03）：交付入口此前只装配 `TemplateIntentModel`、`LlmIntentModel` 在 `src` 运行期零引用、`DASHSCOPE_API_KEY` 无消费者 → 新增包根组合模块 `compose.py`（`build_intent_model`/`build_deps`），入口默认"真模型优先 + 失败降级模板"，并提供 `AIB_DISABLE_LLM` 强制模板开关；`__main__.py` 瘦身为"调 build_deps + 起服务"。**未改任何冻结符号/签名；`web/` 仍不触 `CoreBank`（H2 守卫不破）**。Key 只走环境变量、不入库/日志。
 ```
 
-- [ ] **Step 3: 校验 + 提交**
+- [ ] **Step 3: 服务级 e2e（stage 门禁，**离线**）**
+
+另开终端起服务（显式关闭 LLM，保证 e2e 不发真实网络、结果确定）：
+`$env:PYTHONPATH='src'; $env:AIB_DISABLE_LLM='1'; python -m ai_banking_copilot`
+
+Run: `cd E:\AI_Banking; python scripts/e2e_check.py`
+Expected: `ALL PASSED`（前端页 + 提交/确认/执行 + 多意图跨场景 + 澄清 + 安全拒绝）
+
+Run: `python scripts/check_served_page.py`
+Expected: `ALL OK`
+
+- [ ] **Step 4: 校验 + 提交**
 
 Run: `python -m pytest tests/eval -q`
 Expected: PASS（文档类断言不回归）
@@ -292,6 +303,7 @@ git -C E:\AI_Banking commit -m "docs: LLM 通道口径同步（真链路 + 自�
 - [ ] `__main__.main` 可调用；`web/` 无 `CoreBank(`（H2 守卫绿）。
 - [ ] `ruff check .` clean；`mypy` no issues；`pytest` **≥ 522 passed**。
 - [ ] 离线可复现：测试全程不发起网络请求（未注入 transport、未设置 Key 即降级）。
+- [ ] 服务级 e2e（离线，起服务前 `AIB_DISABLE_LLM=1`）：`scripts/e2e_check.py` **ALL PASSED** · `scripts/check_served_page.py` **ALL OK**。
 - [ ] README / 决策冻结文档口径与代码一致。
 
 ## 不在本计划内（S1b / 后续）
