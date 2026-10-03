@@ -22,6 +22,12 @@ from typing import TYPE_CHECKING
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode
+from ai_banking_copilot.contracts.security import (
+    INJECTION_MARKERS as INJECTION_MARKERS,
+)
+from ai_banking_copilot.contracts.security import (
+    detect_injection,
+)
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
@@ -56,19 +62,6 @@ if TYPE_CHECKING:
 
 _CENTS_PER_YUAN = 100
 """元 → 分换算（与 `policy.pdp` 同口径）。"""
-
-INJECTION_MARKERS: tuple[str, ...] = (
-    "忽略以上",
-    "忽略之前",
-    "忽略上述",
-    "无视以上",
-    "忽略系统",
-    "ignore previous",
-    "ignore above",
-    "disregard",
-    "新指令",
-)
-"""提示注入的确定性标记（命中即升 `MANUAL` 转人工，不做模糊判断）。"""
 
 FABRICATION_MARKERS: tuple[str, ...] = (
     "编一个",
@@ -623,12 +616,6 @@ class Session:
         self._exec_results = []
         self._completed_node_ids = []
         self._pending_node_ids = []
-
-
-def detect_injection(text: str) -> bool:
-    """确定性注入检测：命中标记即视为注入（不做启发式猜测）。"""
-    lowered = text.lower()
-    return any(marker.lower() in lowered for marker in INJECTION_MARKERS)
 
 
 def extract_remark(utterance: str) -> str | None:

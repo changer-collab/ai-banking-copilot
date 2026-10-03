@@ -25,6 +25,7 @@ from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, green_or_raise, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode
+from ai_banking_copilot.contracts.security import INJECTION_MARKERS
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.eval.dataset import EvalCase
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
@@ -65,17 +66,6 @@ from ai_banking_copilot.scenarios.registry import (
 from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS, to_risk_assessment
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ParamSpec, ToolCall, ToolRegistry, ToolSpec
-
-INJECTION_MARKERS: tuple[str, ...] = (
-    "忽略以上",
-    "忽略之前",
-    "忽略指令",
-    "无视",
-    "绕过",
-    "突破限额",
-    "ignore previous",
-)
-"""提示注入标记词：命中即加载 `FLAG_INJECTION_DETECTED`（H3 / 官方"注入防御"）。"""
 
 _DEFAULT_SELECTED: Mapping[str, object] = {
     "account": "acc_savings",
