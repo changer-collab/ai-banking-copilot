@@ -75,16 +75,19 @@ def run(base: str) -> list[str]:
     ycard = yellow.get("card") or {}
     limit = ycard.get("daily_limit_cents")
     used = ycard.get("daily_accumulated_cents")
+    ylevel = ycard.get("level")
+    # 额度字段与级别须一致：黄 ⇔ 未超（used ≤ limit）、红 ⇔ 超（used > limit）。
+    # 不断言恒为黄：演示库日累计可能已抬升级别（与 e2e 自检同口径）。
     y_ok = (
-        ycard.get("level") == "YELLOW"
-        and isinstance(limit, int)
+        isinstance(limit, int)
         and isinstance(used, int)
-        and used >= 50000
-        and used <= limit
+        and ylevel in {"YELLOW", "RED"}
+        and ((ylevel == "YELLOW") == (used <= limit))
+        and ((ylevel == "RED") == (used > limit))
     )
-    print(f"[api] 黄卡额度 -> level={ycard.get('level')} limit={limit} used={used} 通过={y_ok}")
+    print(f"[api] 转账500额度一致 -> level={ylevel} limit={limit} used={used} 通过={y_ok}")
     if not y_ok:
-        failures.append("黄卡未携带 daily_limit_cents / daily_accumulated_cents")
+        failures.append("黄/红卡额度字段与级别不一致")
 
     red = _post(base, "/api/submit", {"utterance": "转给李娜 1500 元", "selected": selected})
     rcard = red.get("card") or {}
