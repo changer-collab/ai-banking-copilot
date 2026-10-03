@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -12,8 +12,10 @@ from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.scenarios.base import ScenarioRefused, plan_is_pure_query, plan_net_effect
 from ai_banking_copilot.scenarios.subscriptions import (
     SubscriptionsHandler,
+    describe_upcoming_charges,
     future_outflow_effect,
     resolve_cancel_race,
+    upcoming_charges,
 )
 
 NOW = datetime(2026, 10, 1, 9, 0, 0)
@@ -97,3 +99,15 @@ def test_cancel_race_compensates_without_claiming_cancelled() -> None:
     assert "退回" in outcome.message
     assert "已取消" not in outcome.message
     assert outcome.compensated_steps == ("charge",)
+
+
+def test_upcoming_charges_sorted_by_next_charge_on(gateway: FactGateway) -> None:
+    charges = upcoming_charges(gateway, DEMO_USER_ID)
+    assert len(charges) == 3
+    assert [item.next_charge_on for item in charges] == sorted(
+        item.next_charge_on for item in charges
+    )
+    assert charges[0].next_charge_on == date(2026, 10, 8)
+    text = describe_upcoming_charges(charges)
+    assert "共 3 项" in text
+    assert "2026-10-08" in text
