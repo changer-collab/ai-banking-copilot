@@ -9,6 +9,11 @@ import pytest
 
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.risk_store import (
+    StoreRiskAssessmentSource,
+    init_risk_schema,
+    seed_risk_assessment,
+)
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import TemplateIntentModel
@@ -27,6 +32,8 @@ def db_path(tmp_path: Path) -> Path:
     store = Store(path)
     init_schema(store)
     seed_database(store)
+    init_risk_schema(store)
+    seed_risk_assessment(store)
     store.close()
     return path
 
@@ -44,6 +51,14 @@ def gateway(db_path: Path) -> Iterator[FactGateway]:
     """只读事实网关（计划卡取值 + PEP 出处校验）。"""
     store = Store(db_path, StoreMode.READ_ONLY)
     yield FactGateway(store)
+    store.close()
+
+
+@pytest.fixture
+def risk(db_path: Path) -> Iterator[StoreRiskAssessmentSource]:
+    """受信任风险测评事实源（只读）。"""
+    store = Store(db_path, StoreMode.READ_ONLY)
+    yield StoreRiskAssessmentSource(store)
     store.close()
 
 
@@ -90,6 +105,7 @@ def deps(
     pep: Pep,
     breaker: CircuitBreaker,
     audit: AuditLog,
+    risk: StoreRiskAssessmentSource,
 ) -> AppDeps:
     """渠道层依赖装配（默认 LLM-off：模板通道）。"""
     return AppDeps(
@@ -101,6 +117,7 @@ def deps(
         audit=audit,
         user_id=DEMO_USER_ID,
         today=DEFAULT_BOOKING_DATE,
+        risk=risk,
     )
 
 

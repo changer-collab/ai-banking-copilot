@@ -162,3 +162,29 @@ def _assessment(intent: Intent) -> RiskAssessment | None:
     if isinstance(raw, RiskAssessment):
         return raw
     return None
+
+
+def to_risk_assessment(record: object) -> RiskAssessment | None:
+    """把风险测评**事实记录**转成场景层 `RiskAssessment`；未识别⇒`None`（调用方 fail-closed）。
+
+    入参取 `object`：让 06 `AppDeps.risk` 的 `Protocol` 返回 `object | None` 与 `mypy --strict`
+    兼容，类型识别在本函数内完成。
+    """
+    if isinstance(record, RiskAssessment):
+        return record
+    user_id = getattr(record, "user_id", None)
+    risk_profile = getattr(record, "risk_profile", None)
+    assessed_on = getattr(record, "assessed_on", None)
+    valid_days = getattr(record, "valid_days", None)
+    if not isinstance(user_id, str) or not isinstance(risk_profile, str):
+        return None
+    if risk_profile not in _RISK_ORDER:
+        return None
+    if not isinstance(assessed_on, date) or not isinstance(valid_days, int):
+        return None
+    return RiskAssessment(
+        user_id=user_id,
+        risk_profile=risk_profile,
+        assessed_on=assessed_on,
+        valid_days=valid_days,
+    )

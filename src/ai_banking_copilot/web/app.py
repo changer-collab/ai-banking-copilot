@@ -26,6 +26,7 @@ from ai_banking_copilot.contracts.authorization import Decision
 from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.policy.audit import AuditLog
@@ -49,7 +50,10 @@ from ai_banking_copilot.web.session import (
 
 @dataclass(frozen=True)
 class AppDeps:
-    """渠道层依赖装配（全部来自上游公开符号；本层不做任何裁决、不持有写连接）。"""
+    """渠道层依赖装配（全部来自上游公开符号；本层不做任何裁决、不持有写连接）。
+
+    `risk` = 受信任风险测评事实源；`None ⇒ 申购 fail-closed 拒绝`。
+    """
 
     intent_model: IntentModel
     registry: ToolRegistry
@@ -59,6 +63,7 @@ class AppDeps:
     audit: AuditLog
     user_id: str = DEMO_USER_ID
     today: date = DEFAULT_BOOKING_DATE
+    risk: RiskAssessmentSource | None = None
 
 
 class _SubmitRequest(BaseModel):
