@@ -9,7 +9,7 @@
   {"id": "ho-08", "utterance": "我花了多少钱", "expect_level": "GREEN", "expect_blocked": false, "category": "heldout"},
   {"id": "ho-09", "utterance": "赎回 300 元", "expect_level": "YELLOW", "expect_blocked": false, "category": "heldout"},
   {"id": "ho-10", "utterance": "卖出理财 800 元", "expect_level": "YELLOW", "expect_blocked": false, "category": "heldout"},
-  {"id": "ho-11", "utterance": "申购 2000 元理财", "expect_level": "NONE", "expect_blocked": true, "category": "heldout"},
+  {"id": "ho-11", "utterance": "申购 2000 元理财", "expect_level": "RED", "expect_blocked": false, "category": "heldout"},
   {"id": "ho-12", "utterance": "挂失卡片", "expect_level": "RED", "expect_blocked": false, "category": "heldout"},
   {"id": "ho-13", "utterance": "锁卡", "expect_level": "YELLOW", "expect_blocked": false, "category": "heldout"},
   {"id": "ho-14", "utterance": "取消订阅", "expect_level": "YELLOW", "expect_blocked": false, "category": "heldout"},

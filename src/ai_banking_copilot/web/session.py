@@ -49,7 +49,7 @@ from ai_banking_copilot.scenarios.registry import (
     run_scenario,
     select_handler,
 )
-from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS
+from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS, to_risk_assessment
 from ai_banking_copilot.tools.registry import ToolCall
 from ai_banking_copilot.web.plan_card import (
     PROMPT_STRONG_VERIFY,
@@ -317,7 +317,7 @@ class Session:
                     text=span,
                     today=self._deps.today,
                     payees=payees,
-                    selected=chosen,
+                    selected=_per_intent_selected(intent.action, chosen, self._deps),
                 ),
             )
             if fill.negated:
@@ -330,6 +330,7 @@ class Session:
             slots["span"] = span
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
+            _inject_assessment(intent.action, slots, self._deps)
             questions.extend(question.prompt for question in fill.questions)
             intents.append(
                 Intent(
@@ -680,6 +681,37 @@ def _default_selected(deps: AppDeps) -> dict[str, object]:
         if record.payload.kind == "savings":
             return {"account": record.payload.account_id}
     return {}
+
+
+_SUBSCRIBE_DEFAULT_PRODUCT = "wp_cash"
+"""申购的受信任默认产品（起购 1 元，R1 ≤ 客户测评）；**仅** `wealth.subscribe` 使用。"""
+
+
+def _per_intent_selected(
+    action: str, chosen: Mapping[str, object], deps: AppDeps
+) -> dict[str, object]:
+    """受信任的 per-intent 选中对象：**仅** `wealth.subscribe` 补默认产品与用户身份。
+
+    不改共享 `chosen`，故 `wealth.redeem` 等动作的既有澄清行为不变（收窄）。
+    """
+    selected = dict(chosen)
+    if action == "wealth.subscribe":
+        selected.setdefault("product", _SUBSCRIBE_DEFAULT_PRODUCT)
+        selected.setdefault("user_id", deps.user_id)
+    return selected
+
+
+def _inject_assessment(action: str, slots: dict[str, object], deps: AppDeps) -> None:
+    """受信任注入风险测评事实（**仅** `wealth.subscribe`）。
+
+    **不包 `Value`**：场景层 `_assessment` 以 `isinstance(raw, RiskAssessment)` 判定，
+    包装会导致其静默失效并退化为"未测评"拒绝。
+    """
+    if action != "wealth.subscribe" or deps.risk is None:
+        return
+    assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
+    if assessment is not None:
+        slots["assessment"] = assessment
 
 
 def _intent_span(intent: Intent, utterance: str) -> str:

@@ -31,6 +31,12 @@ from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
 from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money, Payee
+from ai_banking_copilot.gateway.risk_store import (
+    RiskAssessmentSource,
+    StoreRiskAssessmentSource,
+    init_risk_schema,
+    seed_risk_assessment,
+)
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.kernel import Kernel, PlanningResult
@@ -56,6 +62,7 @@ from ai_banking_copilot.scenarios.registry import (
     run_scenario,
     select_handler,
 )
+from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS, to_risk_assessment
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ParamSpec, ToolCall, ToolRegistry, ToolSpec
 
@@ -83,7 +90,7 @@ _OUTFLOW_ACTIONS: frozenset[str] = frozenset(
 
 _DEFAULT_SELECTED: Mapping[str, object] = {
     "account": "acc_savings",
-    "product": "wp_bond",
+    "product": "wp_cash",
     "subscription": "sub_video",
     "card": "card_debit",
     "user_id": DEMO_USER_ID,
@@ -176,6 +183,8 @@ class EvalPipeline:
         writer = Store(db_path)
         init_schema(writer)
         seed_database(writer)
+        init_risk_schema(writer)
+        seed_risk_assessment(writer)
         writer.close()
         reader = Store(db_path, StoreMode.READ_ONLY)
         rw_store = Store(db_path, StoreMode.READ_WRITE)
@@ -186,6 +195,7 @@ class EvalPipeline:
                 core_bank=CoreBank(rw_store),
                 audit=AuditLog(case_dir / "audit.jsonl"),
                 breaker=CircuitBreaker(),
+                risk=StoreRiskAssessmentSource(reader),
                 started=started,
             )
         finally:
@@ -200,9 +210,12 @@ class EvalPipeline:
         core_bank: CoreBank,
         audit: AuditLog,
         breaker: CircuitBreaker,
+        risk: RiskAssessmentSource,
         started: float,
     ) -> CaseResult:
         flags = _context_flags(case.utterance)
+        if any(hint in case.utterance for hint in FORBIDDEN_HINTS):
+            return _blocked_result(case, "blocked", _YIELD_REFUSAL, flags, started)
         context: dict[str, object] = {
             "today": DEFAULT_BOOKING_DATE,
             "payees": tuple(record.payload for record in gateway.payees_of(DEMO_USER_ID)),
@@ -216,7 +229,9 @@ class EvalPipeline:
         if planning.blocked or not planning.intents:
             reason = "未知或无法执行的意图：安全拒绝"
             return _blocked_result(case, "blocked", reason, flags, started)
-        intents = tuple(_scenario_intent(intent, context) for intent in planning.intents)
+        intents = _inject_assessment(
+            tuple(_scenario_intent(intent, context) for intent in planning.intents), risk
+        )
         try:
             handler = select_handler(intents)
             outcome = run_scenario(handler, intents, gateway)
@@ -395,6 +410,34 @@ def _scenario_intent(intent: Intent, context: Mapping[str, object]) -> Intent:
         confidence=intent.confidence,
         evidence=intent.evidence,
     )
+
+
+_YIELD_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝以收益承诺为前提的请求"
+
+
+def _inject_assessment(
+    intents: tuple[Intent, ...], risk: RiskAssessmentSource
+) -> tuple[Intent, ...]:
+    """受信任注入风险测评事实（**仅** `wealth.subscribe`；不包 `Value`）。"""
+    assessment = to_risk_assessment(risk.assessment_for(DEMO_USER_ID))
+    if assessment is None:
+        return intents
+    injected: list[Intent] = []
+    for intent in intents:
+        if intent.action != "wealth.subscribe":
+            injected.append(intent)
+            continue
+        slots = dict(intent.slots)
+        slots["assessment"] = assessment
+        injected.append(
+            Intent(
+                action=intent.action,
+                slots=slots,
+                confidence=intent.confidence,
+                evidence=intent.evidence,
+            )
+        )
+    return tuple(injected)
 
 
 def _context_flags(utterance: str) -> frozenset[str]:

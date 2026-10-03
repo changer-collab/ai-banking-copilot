@@ -68,6 +68,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | `gateway.operators` | `OperatorSpec(name, arity, description)` · `OPERATOR_WHITELIST` · `OPERATOR_NAMES` · `DerivedValue(operator, value, sources)` · `run_operator(name, inputs)` |
 | `gateway.sandbox` | `SandboxRequest(operator, inputs, timeout_s)` · `SandboxResult(operator, value, duration_ms, sources)` · `run_in_sandbox(request)` · `run_probe(probe, timeout_s)` |
 | `gateway.sandbox_child` | `install_guards()` · `main() -> int` · `DENIED_MODULES` |
+| `gateway.risk_store` | `RISK_SCHEMA_SQL` · `RiskAssessmentRecord(user_id, risk_profile, assessed_on, valid_days)` · `RiskAssessmentSource` Protocol（`assessment_for(user_id) -> object \| None`）· `StoreRiskAssessmentSource(store)` · `init_risk_schema(store)` · `seed_risk_assessment(store)` · `risk_assessment(store, user_id)` · `verify_risk(store, record_id, content_hash)` |
 
 ### 02 `tools`
 
@@ -102,7 +103,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `scenarios.base` | `ScenarioOutcome(scenario, status, plan, decision, exec_results, message, record_ids)` · `ScenarioHandler` Protocol（`name` / `matches(intents)` / `build(intents, gateway) -> Plan`） |
 | `scenarios.registry` | `SCENARIO_HANDLERS` · `select_handler(intents) -> ScenarioHandler` |
-| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 |
+| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 · 新增 scenarios.wealth.to_risk_assessment(record) -> RiskAssessment \| None |
 
 ### 06 `web`
 
@@ -110,7 +111,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `web.plan_card` | `PlanCard(card_id, frozen_hash, level, lines, requires)` · `render_plan_card(plan, decision, gateway) -> PlanCard` |
 | `web.session` | `Session(deps)`（`submit` / `confirm` / `interrupt` / `resume` / `takeover_package` / `state`）· `SessionState` |
-| `web.app` | `AppDeps` · `create_app(deps) -> FastAPI` |
+| `web.app` | `AppDeps`（**尾部新增可选字段 `risk: RiskAssessmentSource \| None = None`**，`None ⇒ 申购 fail-closed`）· `create_app(deps) -> FastAPI` |
 
 ### 07 `eval`
 
@@ -119,6 +120,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | `eval.dataset` | `EvalCase(id, utterance, expect_level, expect_blocked, category)` · `load_cases(path)` |
 | `eval.harness` | `run_suite(cases, pipeline) -> EvalReport` · `EvalReport(passed, failed, invariants)` |
 | `eval.invariants` | `InvariantResult(name, holds, detail)` · `check_invariants(cases, results)`（I1′–I4′ + 绿色纯度 + 非退化） |
+| `eval.pipeline` | `run_suite` / `EvalReport` 签名不变；**新增私有** `_inject_assessment` 与收益暗示守卫（镜像 `scenarios.wealth.FORBIDDEN_HINTS`）；`_DEFAULT_SELECTED["product"]` 由 `wp_bond` 改 `wp_cash` |
 
 ### 规范动作表（**唯一真源**，02/03/04/05/06/07 一律以此为准）
 
@@ -172,6 +174,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 19. **日期参数接受 `datetime.date` 实例**（06 复核发现，2026-10-02）：02 目录把 `booked_on` / `start` / `end` / `next_charge_on` 声明为 `py_type=date`（`tests/tools/test_catalog.py` 锁定该契约），而 03 的 `policy.pep._require_date` 原先只接受 ISO 字符串 → 同一值二者互斥、写路径必失败。03 `policy/pep.py::_require_date` **追加**「若已是 `date` 实例则直接返回」分支（原 ISO 字符串路径不变）。**语义为放宽（向后兼容），不改冻结符号/签名**。回溯修订：03 的 `Pep` 参数说明按本条更新（见冻结面表）。
 20. **`user_id` 装配归会话层 / 评测链**（05/06 复核，2026-10-02；固化裁决 #16 的落点）：05 的 `scenarios` 组装 `transfer.*` / `wealth.*` 节点时**不**把 `user_id` 放进 `PlanNode.params`；由 06 的 `web.session.Session._to_call` 与 07 的评测链在**构造 `ToolCall` 时**注入 `DEMO_USER_ID`（仅当该动作的 `ToolSpec` 声明了必填 CONTROL 槽 `user_id` 且节点 params 缺失时）。**只在 `ToolCall` 层注入，不改 `PlanNode.params` / `cfhash`**。02 的 `user_id` 声明（裁决 #16）与 05 的省略设计**并非冲突**（06 计划偏差 #1 的"02 未声明 user_id"陈述已过时，作废）。
 21. **05 `CrossHandler` 通用化**（2026-10-02，多意图能力）：`matches` 扩为「≥2 场景域 **或** 单域 `funds.*`」；`build` 分两支——「冻结 + 资金」组合**逐字保留**原语义（`grant` 锚点规则不变），其余多域组合走**通用支**（按域分组 → 复用各域 handler 的 `build` → 合并重编号 → 同资源串行 → **单一 `Plan`**）。`select_handler` / `run_scenario` / 06 确认-执行协议**不变**；计划级安全（单卡 / 单 `cfhash` / 单次 `evaluate_plan(NE)`）不变。会话层 `web.session._assemble_intents` 为用户明说意图补 `grant="explicit"`（与 07 评测链 `_scenario_intent` 一致）。单域 `funds.*` 的原 `UnknownScenarioError` 缺口一并补齐。
+22. **S1b 授权改 06/07 既有实现（加严 / 新增 / 收窄）**（2026-10-03，G2 收口）：新增 `gateway/risk_store.py`（独立表，不改 01 的 `SCHEMA_SQL`）；`web.app.AppDeps` **尾部追加**可选字段 `risk`（向后兼容）；`web.session._assemble_intents` 对 `wealth.subscribe` 做 per-intent 受信任注入（`product=wp_cash` / `user_id` / `assessment`，**不包 `Value`**）；`eval.pipeline._evaluate` 注入 `assessment` 并**新增收益暗示守卫**（镜像 `FORBIDDEN_HINTS`），`_DEFAULT_SELECTED["product"]` 改 `wp_cash`；`scenarios.wealth` **仅新增** `to_risk_assessment`。**既有冻结符号与签名零改动**（`assess_suitability` / `_assessment` / `RiskAssessment` 逻辑不变）。**语义只加严/收窄，不放宽**。
 
 ### 跨计划硬约束（每份计划都生效）
 

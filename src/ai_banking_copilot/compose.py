@@ -17,6 +17,11 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.core_bank import CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.risk_store import (
+    StoreRiskAssessmentSource,
+    init_risk_schema,
+    seed_risk_assessment,
+)
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import (
@@ -52,9 +57,12 @@ def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
     writer = Store(db_path)
     init_schema(writer)
     seed_database(writer)
+    init_risk_schema(writer)
+    seed_risk_assessment(writer)
     writer.close()
 
-    gateway = FactGateway(Store(db_path, StoreMode.READ_ONLY))
+    read_store = Store(db_path, StoreMode.READ_ONLY)
+    gateway = FactGateway(read_store)
     registry = build_default_registry()
     breaker = CircuitBreaker()
     audit = AuditLog(db_path.parent / "audit.jsonl")
@@ -66,4 +74,5 @@ def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
         breaker=breaker,
         audit=audit,
         user_id=DEMO_USER_ID,
+        risk=StoreRiskAssessmentSource(read_store),
     )
