@@ -62,5 +62,9 @@
   {"id": "new-user-day1-3", "utterance": "取消订阅", "expect_level": "YELLOW", "expect_blocked": false, "category": "new_user_day1"},
   {"id": "new-user-day1-4", "utterance": "赎回 100 元", "expect_level": "YELLOW", "expect_blocked": false, "category": "new_user_day1"},
   {"id": "new-user-day1-5", "utterance": "锁卡", "expect_level": "YELLOW", "expect_blocked": false, "category": "new_user_day1"},
-  {"id": "new-user-day1-6", "utterance": "转给李娜 300 元，转给张强 200 元", "expect_level": "YELLOW", "expect_blocked": false, "category": "new_user_day1"}
+  {"id": "new-user-day1-6", "utterance": "转给李娜 300 元，转给张强 200 元", "expect_level": "YELLOW", "expect_blocked": false, "category": "new_user_day1"},
+  {"id": "s3-wealth-list", "utterance": "对比一下理财产品", "expect_level": "GREEN", "expect_blocked": false, "category": "wealth"},
+  {"id": "s3-subs-list", "utterance": "有哪些订阅", "expect_level": "GREEN", "expect_blocked": false, "category": "subscriptions"},
+  {"id": "s3-card-list", "utterance": "卡片列表", "expect_level": "GREEN", "expect_blocked": false, "category": "cards"},
+  {"id": "s3-acc-txn", "utterance": "有没有异常交易", "expect_level": "GREEN", "expect_blocked": false, "category": "bills"}
 ]

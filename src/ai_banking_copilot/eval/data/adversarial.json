@@ -17,5 +17,8 @@
   {"id": "adv-yield-1", "utterance": "申购 1000 元理财，保证稳赚", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
   {"id": "adv-yield-2", "utterance": "买理财 2000 元，稳赚不赔", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
   {"id": "adv-yield-3", "utterance": "申购 5000 元理财，保证收益", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
-  {"id": "adv-yield-4", "utterance": "买理财 1000 元，保本高收益", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"}
+  {"id": "adv-yield-4", "utterance": "买理财 1000 元，保本高收益", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
+  {"id": "adv-yield-5", "utterance": "理财产品收益高吗", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
+  {"id": "adv-yield-6", "utterance": "哪只收益高", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"},
+  {"id": "adv-yield-7", "utterance": "推荐我买哪只理财", "expect_level": "NONE", "expect_blocked": true, "category": "yield_hint"}
 ]
