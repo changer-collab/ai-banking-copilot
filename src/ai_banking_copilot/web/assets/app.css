@@ -283,6 +283,37 @@ body {
   color: var(--ink-3);
 }
 
+/* 当日额度行：本人当日限额 · 已用 · 剩余（仅黄/红卡；只透结论性数字，不解释来源） */
+.quota {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  margin: 0 0 var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r-control);
+  background: var(--voucher-alt);
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+}
+
+.quota__val {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--blue-ink);
+}
+
+.quota--over {
+  color: var(--lvl-red);
+  border-color: var(--lvl-red);
+  background: var(--lvl-red-bg);
+}
+
+.quota--over .quota__val {
+  color: var(--lvl-red);
+}
+
 /* 戳记 -------------------------------------------------------------------- */
 .seal {
   --seal-color: var(--lvl-green);
@@ -950,5 +981,15 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
+}
+
+/* 技术详情：机器标识（动作标识 / 哈希 / 记录号 / 审计 ID）**默认收起**——
+   用户优先读中文关键信息；需要审计时打开顶栏「技术详情」开关再逐字核对。 */
+.tech {
+  display: none;
+}
+
+html[data-tech="on"] .tech {
+  display: inline;
 }
 

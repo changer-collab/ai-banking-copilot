@@ -4,6 +4,8 @@
 - 绿色 = 自动执行，**仅纯查询**；任何资金 / 状态变更不得落入绿色。
 - 黄色 = 用户确认；`日累计 ≤ 1000 元` ⇒ 黄。
 - 红色 = 强验证；`日累计 > 1000 元` ⇒ 红。
+- **客户级日限额**（银行侧下发）为**只加严**维度：有效阈值 = `min(官方 1000 元, 客户限额)`，
+  官方口径**不可放宽**（客户数据只能更严，不能更松）。
 - 增强层（红线之上的兜底）：`MANUAL` 人工接管 · `DENY` 拒绝并解释。
 
 合成规则（fail-safe）：
@@ -34,7 +36,9 @@ from ai_banking_copilot.contracts.plan import Plan, validate_plan
 from ai_banking_copilot.gateway.models import Money
 
 DAILY_LIMIT_YUAN: int = 1000
-"""官方日累计阈值（元）：`≤ 该值 ⇒ 黄`、`> 该值 ⇒ 红`（PRD §5.2）。"""
+"""官方日累计阈值（元）：`≤ 该值 ⇒ 黄`、`> 该值 ⇒ 红`（PRD §5.2）。
+
+它同时是**官方上限**：客户级日限额只能把它收紧，不能放宽。"""
 
 NET_EFFECT_THRESHOLD_YUAN: int = 1000
 """计划级净效应阈值 `T_net`（元）：`NE ≥ T_net ⇒ 计划级 ≥ 红`（PRD §5.3）。"""
@@ -97,6 +101,11 @@ class PolicyRequest:
     object_state: ObjectState
     is_pure_query: bool
     irreversible: bool
+    daily_limit: Money | None = None
+    """**客户级日限额**（银行侧个性化；`None` = 用官方默认阈值）。
+
+    官方口径**不可放宽**：有效阈值恒取 `min(官方默认, 客户限额)`，只能更严。
+    """
     context_flags: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
@@ -167,14 +176,24 @@ def _net_effect_decision(net_amount: Money) -> Decision:
     return Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
 
 
+def _effective_limit_cents(customer_limit: Money | None) -> int:
+    """有效日限额 = `min(官方默认, 客户限额)`：官方口径不可放宽，客户数据只能更严。"""
+    official = DAILY_LIMIT_YUAN * _CENT_PER_YUAN
+    if customer_limit is None:
+        return official
+    return min(official, customer_limit.cents)
+
+
 def _base_decision(request: PolicyRequest) -> Decision:
     if request.is_pure_query:
         return green_or_raise(is_pure_query=True)
-    return _amount_band_decision(request.daily_accumulated)
+    return _amount_band_decision(
+        request.daily_accumulated, _effective_limit_cents(request.daily_limit)
+    )
 
 
-def _amount_band_decision(daily_accumulated: Money) -> Decision:
-    if daily_accumulated.cents <= DAILY_LIMIT_YUAN * _CENT_PER_YUAN:
+def _amount_band_decision(daily_accumulated: Money, limit_cents: int) -> Decision:
+    if daily_accumulated.cents <= limit_cents:
         return Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
     return Decision(level=Level.RED, reasons=(ReasonCode.AMOUNT_OVER_DAILY_LIMIT,))
 

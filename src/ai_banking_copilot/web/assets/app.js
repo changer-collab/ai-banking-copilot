@@ -20,10 +20,28 @@ const PRESETS = [
 const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video" };
 
 const LEVEL = {
-  GREEN: { cls: "green", code: "L0", text: "核验通过", policy: "自动执行" },
-  YELLOW: { cls: "yellow", code: "L1", text: "待您确认", policy: "用户确认" },
-  RED: { cls: "red", code: "L2", text: "强验证", policy: "多因子" },
-  DENIED: { cls: "denied", code: "L4", text: "拒绝并解释", policy: "安全拒绝" },
+  GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
+  YELLOW: { cls: "yellow", code: "L1", name: "黄色", text: "待您确认", policy: "用户确认" },
+  RED: { cls: "red", code: "L2", name: "红色", text: "强验证", policy: "多因子" },
+  DENIED: { cls: "denied", code: "L4", name: "拒绝", text: "拒绝并解释", policy: "安全拒绝" },
+};
+
+/* 术语表：机器标识 → 中文（与设计仓 GLOSS 同源；标识本身入 .tech，默认收起） */
+const GLOSS = {
+  rule: {
+    QUERY_ONLY: "仅纯查询",
+    STATE_CHANGE_SMALL: "小额状态变更",
+    AMOUNT_OVER_DAILY_LIMIT: "日累计超限额",
+    IRREVERSIBLE: "不可逆操作",
+    MANUAL_REVIEW: "转人工复核",
+    OBJECT_BLOCKED: "对象被阻断",
+  },
+  require: {
+    user_confirm: "需您确认",
+    strong_verify: "需强验证（多因子）",
+    manual_takeover: "转人工接管",
+    deny_and_explain: "拒绝并说明",
+  },
 };
 
 const state = {
@@ -42,6 +60,32 @@ function el(id) {
 
 function esc(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* 金额格式化：整数分（cents）→ "¥1,000.00" */
+function yuan(cents) {
+  return (
+    "¥" +
+    (cents / 100).toLocaleString("zh-CN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })
+  );
+}
+
+/* 当日额度行：仅黄/红卡显示「本人当日限额 / 已用 / 剩余」；超额不出负数，改红色「已超额」。
+   绿卡（纯查询）、转人工、拒绝一律不显示——只透结论性数字（min 后的有效阈值），不解释来源。 */
+function quotaHtml(card) {
+  if (card.level !== "YELLOW" && card.level !== "RED") return "";
+  const limit = card.daily_limit_cents;
+  const used = card.daily_accumulated_cents;
+  if (typeof limit !== "number" || typeof used !== "number") return "";
+  const remaining = limit - used;
+  const head = `本人当日限额 <b class="quota__val">${yuan(limit)}</b> · 已用 <b class="quota__val">${yuan(used)}</b>`;
+  if (remaining < 0) {
+    return `<p class="quota quota--over">${head} · 已超额 <b class="quota__val">${yuan(-remaining)}</b></p>`;
+  }
+  return `<p class="quota">${head} · 剩余 <b class="quota__val">${yuan(remaining)}</b></p>`;
 }
 
 function clock() {
@@ -70,11 +114,13 @@ function renderChain() {
     chain.innerHTML = '<li class="chain__empty">尚未产生事件</li>';
     return;
   }
-  chain.innerHTML = state.chain.map((node) => `<li class="chain__node">${esc(node)}</li>`).join("");
+  chain.innerHTML = state.chain
+    .map((node) => `<li class="chain__node">${esc(node.label)}<span class="tech">${esc(node.tech)}</span></li>`)
+    .join("");
 }
 
-function chainAdd(node) {
-  state.chain.push(node);
+function chainAdd(label, tech) {
+  state.chain.push({ label, tech });
   renderChain();
 }
 
@@ -120,14 +166,33 @@ function stepHtml(line, index) {
 
 function rulesHtml(reasons) {
   if (!reasons.length) return '<span class="muted">—</span>';
-  return reasons.map((reason) => `<span class="rule"><b>${esc(reason)}</b></span>`).join("");
+  return reasons
+    .map((reason) => {
+      const zh = GLOSS.rule[reason];
+      const tech = `<span class="tech">${esc(reason)}</span>`;
+      return zh ? `<span class="rule"><b>${esc(zh)}</b>${tech}</span>` : tech;
+    })
+    .join("");
 }
 
 function requiresHtml(requires) {
   if (!requires.length) return '<span class="muted">无额外要求</span>';
   return requires
-    .map((item) => `<span class="chip"><span class="chip__dot"></span>${esc(item)}</span>`)
+    .map((item) => {
+      const zh = GLOSS.require[item] || item;
+      return `<span class="chip"><span class="chip__dot"></span>${esc(zh)}<span class="tech">${esc(item)}</span></span>`;
+    })
     .join("");
+}
+
+function receiptNo(frozen) {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+  return `PLAN-${stamp}-${String(frozen).slice(0, 4).toUpperCase()}`;
 }
 
 function voucherHtml() {
@@ -137,8 +202,10 @@ function voucherHtml() {
   return `<article class="voucher">
     <div class="voucher__head">
       <div class="doc-no">
-        <span class="doc-no__label">骑缝哈希（cfhash）</span>
-        <span class="doc-no__value">${esc(frozen)}</span>
+        <span class="doc-no__label">凭证号</span>
+        <span class="doc-no__value">${esc(receiptNo(frozen))}</span>
+        <span class="doc-no__label tech" style="margin-top: 6px">计划冻结哈希（cfhash）</span>
+        <span class="tech">${esc(frozen)}</span>
       </div>
       ${sealHtml(card.level)}
     </div>
@@ -157,6 +224,8 @@ function voucherHtml() {
         <span class="amount__note">确认绑定 cfhash · 经计划级 + 节点级双层执行门</span>
       </div>
     </div>
+
+    ${quotaHtml(card)}
 
     ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
 
@@ -185,9 +254,9 @@ function takeoverHtml(pack) {
     <div class="muted">人工接管包 · 交给人工判断的四要素</div>
     <dl class="takeover__grid">
       <dt>意图</dt><dd>${esc(pack.intent_text || "—")}</dd>
-      <dt>计划</dt><dd class="mono">${pack.plan ? esc(pack.plan.plan_id) : "—"} · ${nodes} 节点</dd>
+      <dt>计划</dt><dd class="mono">计划已冻结 · ${nodes} 个节点 <span class="tech">${pack.plan ? esc(pack.plan.plan_id) : ""}</span></dd>
       <dt>命中规则</dt><dd><span class="rules">${rulesHtml(pack.hit_rules || [])}</span></dd>
-      <dt>审计 ID</dt><dd class="mono">${esc((pack.audit_ids || []).join(" · ") || "—")}</dd>
+      <dt>审计 ID</dt><dd class="mono tech">${esc((pack.audit_ids || []).join(" · ") || "—")}</dd>
     </dl>
     <p class="muted" style="font-size: var(--fs-small); margin:0">
       接管包交付人工判断：意图 / 计划 / 命中规则 / 审计 ID 四要素齐备，人工可据此复核或改判。
@@ -209,8 +278,10 @@ function renderStage() {
 function setButtons() {
   const busy = state.phase === "executing";
   const awaiting = state.phase === "awaiting_confirm";
+  const strongPhase = state.phase === "strong-verify";
   el("btn-submit").disabled = busy;
-  el("btn-confirm").disabled = !awaiting || busy;
+  el("btn-confirm").textContent = strongPhase ? "完成强验证并执行" : "确认并执行";
+  el("btn-confirm").disabled = !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = !(busy || awaiting);
   el("btn-resume").disabled = state.phase !== "interrupted";
   el("btn-reverse").disabled = state.stepStates.filter((s) => s === "done").length === 0;
@@ -255,9 +326,9 @@ async function onSubmit() {
     state.decision = data.decision || null;
     state.stepStates = (data.card.lines || []).map(() => "pending");
     state.phase = "awaiting_confirm";
-    chainAdd(`cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
+    chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
-    timelineAdd(`裁决：${data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
+    timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
   } else {
     state.phase = data.state === "blocked" ? "blocked" : "clarifying";
     const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
@@ -276,11 +347,19 @@ async function onSubmit() {
 
 async function onConfirm() {
   if (!state.card) return;
+  if (state.card.level === "RED" && state.phase !== "strong-verify") {
+    state.phase = "strong-verify";
+    timelineAdd("红色：等待强验证（人脸 / 短信 / U 盾）", "warn");
+    setButtons();
+    return;
+  }
+  const strongVerified = state.phase === "strong-verify";
   state.phase = "executing";
   setButtons();
   const result = await post("/api/confirm", {
     card_id: state.card.card_id,
     frozen_hash: state.card.frozen_hash,
+    strong_verified: strongVerified,
   });
   if (result.status !== 200) {
     state.phase = "awaiting_confirm";
@@ -293,7 +372,7 @@ async function onConfirm() {
   const data = result.data;
   (data.results || []).forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
-    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
     timelineAdd(`${item.status}：${item.message}`, item.status === "settled" || item.status === "cancelled" ? "done" : "warn");
   });
   state.phase = "done";
@@ -318,7 +397,7 @@ async function onResume() {
     if (state.stepStates[index] !== undefined && state.stepStates[index] !== "done") {
       state.stepStates[index] = "done";
     }
-    if (item.record_ids && item.record_ids.length) chainAdd(item.record_ids[0]);
+    if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
     timelineAdd(`${item.status}：${item.message}`, "done");
   });
   state.phase = "done";
@@ -390,6 +469,18 @@ themeToggle.addEventListener("change", () => {
   document.documentElement.dataset.theme = theme;
   saveTheme(theme);
 });
+
+/* 技术详情：默认收起机器标识（cfhash / 记录号 / 审计 ID / 动作标识） */
+const techToggle = el("tech-toggle");
+if (techToggle) {
+  techToggle.addEventListener("change", () => {
+    if (techToggle.checked) {
+      document.documentElement.dataset.tech = "on";
+    } else {
+      delete document.documentElement.dataset.tech;
+    }
+  });
+}
 
 timelineReset();
 setButtons();

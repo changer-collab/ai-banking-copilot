@@ -30,6 +30,22 @@ from ai_banking_copilot.gateway.store import Store, StoreMode
 
 T = TypeVar("T")
 
+_ASSET_BAND_LIMITS_CENTS: tuple[tuple[int, int], ...] = (
+    (10_000_000, 100_000),
+    (5_000_000, 80_000),
+    (2_000_000, 50_000),
+)
+"""客户资产分档 → 客户日限额（分）：`(资产下限, 日限额)`，从高到低匹配。
+
+最高档即**官方上限 1000 元**；资产越低限额越严（只加严、不放宽）。"""
+
+
+def _asset_band_limit_cents(assets_cents: int) -> int:
+    for threshold_cents, limit_cents in _ASSET_BAND_LIMITS_CENTS:
+        if assets_cents >= threshold_cents:
+            return limit_cents
+    return 30_000
+
 
 @dataclass(frozen=True)
 class Record(Generic[T]):
@@ -128,6 +144,15 @@ class FactGateway:
             (user_id, on.isoformat()),
         )
         return Money(int(rows[0]["total"]))
+
+    def daily_transfer_limit(self, user_id: str) -> Money:
+        """**客户级日限额**（银行侧口径）：按客户资产分档下发，因人而异。
+
+        只返回结论性限额，不外露分档规则。**是否放宽由 PDP 决定**：
+        官方口径不可放宽，有效阈值恒取 `min(官方 1000 元, 本限额)`。
+        """
+        assets = sum(record.payload.balance.cents for record in self.accounts_of(user_id))
+        return Money(_asset_band_limit_cents(assets))
 
     def account(self, account_id: str) -> Record[Account]:
         return self._account(self._one("accounts", "account_id", account_id))

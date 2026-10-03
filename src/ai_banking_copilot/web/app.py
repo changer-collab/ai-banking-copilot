@@ -158,11 +158,18 @@ def create_app(deps: AppDeps) -> FastAPI:
 
 
 def _submission_payload(view: SubmissionView) -> dict[str, object]:
+    card = _card_payload(view.card)
+    if card is not None and view.quota is not None:
+        card = {
+            **card,
+            "daily_limit_cents": view.quota.limit_cents,
+            "daily_accumulated_cents": view.quota.accumulated_cents,
+        }
     return {
         "state": view.state.value,
         "message": view.message,
         "questions": list(view.questions),
-        "card": _card_payload(view.card),
+        "card": card,
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
     }

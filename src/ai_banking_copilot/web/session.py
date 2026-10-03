@@ -31,6 +31,7 @@ from ai_banking_copilot.planning.slots import SLOT_PARAMS, SlotInputs, fill_cont
 from ai_banking_copilot.policy.audit import KIND_DECISION, KIND_REVERSAL, AuditEvent
 from ai_banking_copilot.policy.gate import assert_frozen
 from ai_banking_copilot.policy.pdp import (
+    DAILY_LIMIT_YUAN,
     FLAG_INJECTION_DETECTED,
     ObjectState,
     PolicyRequest,
@@ -58,6 +59,9 @@ from ai_banking_copilot.web.plan_card import (
 
 if TYPE_CHECKING:
     from ai_banking_copilot.web.app import AppDeps
+
+_CENTS_PER_YUAN = 100
+"""元 → 分换算（与 `policy.pdp` 同口径）。"""
 
 INJECTION_MARKERS: tuple[str, ...] = (
     "忽略以上",
@@ -134,6 +138,18 @@ class SessionView:
 
 
 @dataclass(frozen=True)
+class DailyQuota:
+    """当日额度（**展示用只读透传**）：只透结论性数字，不含资产分档规则。
+
+    口径与 PDP 一致：有效阈值 = `min(官方 1000 元, 客户限额)`（只加严不放宽）；
+    当日累计与 `PolicyRequest.daily_accumulated` 同口径（**含本笔**）。仅黄/红卡携带。
+    """
+
+    limit_cents: int
+    accumulated_cents: int
+
+
+@dataclass(frozen=True)
 class SubmissionView:
     """一次提交的产出（澄清 / 拒绝时 `card` / `plan` 为 `None`，**不产出级别**）。"""
 
@@ -143,6 +159,8 @@ class SubmissionView:
     decision: Decision | None
     plan: Plan | None
     questions: tuple[str, ...]
+    quota: DailyQuota | None = None
+    """黄/红卡的当日额度（`None` = 绿卡 / 转人工 / 拒绝不显示）。"""
 
 
 @dataclass(frozen=True)
@@ -250,6 +268,9 @@ class Session:
         node_decisions = tuple(self._node_decision(node, flags) for node in plan.nodes)
         decision = strictest(outcome.decision, *node_decisions)
         card = render_plan_card(plan, decision, self._deps.gateway)
+        quota = (
+            self._daily_quota(plan) if decision.level in (Level.YELLOW, Level.RED) else None
+        )
         hit_rules = tuple(reason.value for reason in decision.reasons)
         pending = _Pending(
             card=card,
@@ -270,7 +291,7 @@ class Session:
             return SubmissionView(self._state, self._message, card, decision, plan, ())
         self._state = SessionState.AWAITING_CONFIRM
         self._message = f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）"
-        return SubmissionView(self._state, self._message, card, decision, plan, ())
+        return SubmissionView(self._state, self._message, card, decision, plan, (), quota)
 
     def _assemble_intents(
         self, utterance: str, selected: Mapping[str, object] | None
@@ -336,6 +357,7 @@ class Session:
             object_state=self._object_state(node),
             is_pure_query=spec.is_pure_query,
             irreversible=not spec.reversible,
+            daily_limit=self._deps.gateway.daily_transfer_limit(self._deps.user_id),
             context_flags=flags,
         )
         return evaluate(request)
@@ -349,6 +371,21 @@ class Session:
         amount = Money(0 if cents is None else cents)
         baseline = self._deps.gateway.daily_transfer_total(self._deps.user_id, self._deps.today)
         return amount, Money(baseline.cents + amount.cents)
+
+    def _daily_quota(self, plan: Plan) -> DailyQuota:
+        """当日额度（展示用只读透传）：有效阈值 = `min(官方 1000 元, 客户限额)`。
+
+        当日累计取**各节点最大值**（与计划级 `strictest` 同向），口径即
+        `_amounts` 传给 `PolicyRequest.daily_accumulated` 的值（含本笔）；只透结论性数字，
+        不暴露资产分档规则，也不改变 PDP 判定语义。
+        """
+        customer = self._deps.gateway.daily_transfer_limit(self._deps.user_id)
+        effective = min(DAILY_LIMIT_YUAN * _CENTS_PER_YUAN, customer.cents)
+        accumulated = max(
+            self._amounts(node, self._deps.registry.get(node.action).is_pure_query)[1].cents
+            for node in plan.nodes
+        )
+        return DailyQuota(limit_cents=effective, accumulated_cents=accumulated)
 
     def _object_state(self, node: PlanNode) -> ObjectState:
         raw = node.params.get("payee_id")
