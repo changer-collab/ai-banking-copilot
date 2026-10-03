@@ -29,7 +29,7 @@ from ai_banking_copilot.contracts.security import INJECTION_MARKERS
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.eval.dataset import EvalCase
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
-from ai_banking_copilot.gateway.errors import GatewayError
+from ai_banking_copilot.gateway.errors import GatewayError, SandboxError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money, Payee
 from ai_banking_copilot.gateway.risk_store import (
@@ -54,10 +54,11 @@ from ai_banking_copilot.policy.pdp import (
 from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_hash
 from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
+    ScenarioRefused,
     plan_is_pure_query,
     plan_net_effect,
 )
-from ai_banking_copilot.scenarios.bills import category_share
+from ai_banking_copilot.scenarios.bills import category_share_in_sandbox
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
     run_scenario,
@@ -421,7 +422,12 @@ def _context_flags(utterance: str) -> frozenset[str]:
 
 
 def _derived_release(plan: Plan, gateway: FactGateway, case: EvalCase) -> bool | None:
-    """派生数字放行率的分母分子：仅 `category == "derived"` 的用例统计。"""
+    """派生数字放行率的分母分子：仅 `category == "derived"` 的用例统计。
+
+    交付链路的派生计算**只走受限沙箱**（`category_share_in_sandbox` → `run_in_sandbox`），
+    不再回退进程内算子（G12）。沙箱 / 网关 / 场景任一环失败一律 fail-safe 返回 `False`
+    （`SandboxError` 非 `GatewayError` 子类，必须显式捕获，不放行、不崩用例）。
+    """
     if case.category != "derived":
         return None
     month_node = next((node for node in plan.nodes if node.action == "bills.monthly"), None)
@@ -430,8 +436,8 @@ def _derived_release(plan: Plan, gateway: FactGateway, case: EvalCase) -> bool |
     year = _int_param(month_node, "year", DEFAULT_BOOKING_DATE.year)
     month = _int_param(month_node, "month", DEFAULT_BOOKING_DATE.month)
     try:
-        derived = category_share(gateway, DEMO_USER_ID, year, month, "购物")
-    except GatewayError:
+        derived = category_share_in_sandbox(gateway, DEMO_USER_ID, year, month, "购物")
+    except (GatewayError, SandboxError, ScenarioRefused):
         return False
     return derived.operator == "ratio"
 
