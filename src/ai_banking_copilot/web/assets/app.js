@@ -26,6 +26,24 @@ const LEVEL = {
   DENIED: { cls: "denied", code: "L4", name: "拒绝", text: "拒绝并解释", policy: "安全拒绝" },
 };
 
+/* 术语表：机器标识 → 中文（与设计仓 GLOSS 同源；标识本身入 .tech，默认收起） */
+const GLOSS = {
+  rule: {
+    QUERY_ONLY: "仅纯查询",
+    STATE_CHANGE_SMALL: "小额状态变更",
+    AMOUNT_OVER_DAILY_LIMIT: "日累计超限额",
+    IRREVERSIBLE: "不可逆操作",
+    MANUAL_REVIEW: "转人工复核",
+    OBJECT_BLOCKED: "对象被阻断",
+  },
+  require: {
+    user_confirm: "需您确认",
+    strong_verify: "需强验证（多因子）",
+    manual_takeover: "转人工接管",
+    deny_and_explain: "拒绝并说明",
+  },
+};
+
 const state = {
   card: null,
   plan: null,
@@ -122,14 +140,33 @@ function stepHtml(line, index) {
 
 function rulesHtml(reasons) {
   if (!reasons.length) return '<span class="muted">—</span>';
-  return reasons.map((reason) => `<span class="rule"><b>${esc(reason)}</b></span>`).join("");
+  return reasons
+    .map((reason) => {
+      const zh = GLOSS.rule[reason];
+      const tech = `<span class="tech">${esc(reason)}</span>`;
+      return zh ? `<span class="rule"><b>${esc(zh)}</b>${tech}</span>` : tech;
+    })
+    .join("");
 }
 
 function requiresHtml(requires) {
   if (!requires.length) return '<span class="muted">无额外要求</span>';
   return requires
-    .map((item) => `<span class="chip"><span class="chip__dot"></span>${esc(item)}</span>`)
+    .map((item) => {
+      const zh = GLOSS.require[item] || item;
+      return `<span class="chip"><span class="chip__dot"></span>${esc(zh)}<span class="tech">${esc(item)}</span></span>`;
+    })
     .join("");
+}
+
+function receiptNo(frozen) {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+  return `PLAN-${stamp}-${String(frozen).slice(0, 4).toUpperCase()}`;
 }
 
 function voucherHtml() {
@@ -139,8 +176,10 @@ function voucherHtml() {
   return `<article class="voucher">
     <div class="voucher__head">
       <div class="doc-no">
-        <span class="doc-no__label">骑缝哈希（cfhash）</span>
-        <span class="doc-no__value">${esc(frozen)}</span>
+        <span class="doc-no__label">凭证号</span>
+        <span class="doc-no__value">${esc(receiptNo(frozen))}</span>
+        <span class="doc-no__label tech" style="margin-top: 6px">计划冻结哈希（cfhash）</span>
+        <span class="tech">${esc(frozen)}</span>
       </div>
       ${sealHtml(card.level)}
     </div>
@@ -211,8 +250,10 @@ function renderStage() {
 function setButtons() {
   const busy = state.phase === "executing";
   const awaiting = state.phase === "awaiting_confirm";
+  const strongPhase = state.phase === "strong-verify";
   el("btn-submit").disabled = busy;
-  el("btn-confirm").disabled = !awaiting || busy;
+  el("btn-confirm").textContent = strongPhase ? "完成强验证并执行" : "确认并执行";
+  el("btn-confirm").disabled = !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = !(busy || awaiting);
   el("btn-resume").disabled = state.phase !== "interrupted";
   el("btn-reverse").disabled = state.stepStates.filter((s) => s === "done").length === 0;
@@ -278,11 +319,19 @@ async function onSubmit() {
 
 async function onConfirm() {
   if (!state.card) return;
+  if (state.card.level === "RED" && state.phase !== "strong-verify") {
+    state.phase = "strong-verify";
+    timelineAdd("红色：等待强验证（人脸 / 短信 / U 盾）", "warn");
+    setButtons();
+    return;
+  }
+  const strongVerified = state.phase === "strong-verify";
   state.phase = "executing";
   setButtons();
   const result = await post("/api/confirm", {
     card_id: state.card.card_id,
     frozen_hash: state.card.frozen_hash,
+    strong_verified: strongVerified,
   });
   if (result.status !== 200) {
     state.phase = "awaiting_confirm";
