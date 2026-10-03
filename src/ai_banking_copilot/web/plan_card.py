@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import Decision, Level
@@ -18,6 +19,7 @@ from ai_banking_copilot.contracts.plan import Plan, PlanNode, cfhash, validate_p
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.scenarios import bills, subscriptions, wealth
 
 PROMPT_USER_CONFIRM = "user_confirm"
 """黄色：用户确认。"""
@@ -163,6 +165,22 @@ def _requires_for_level(level: Level) -> tuple[str, ...]:
 
 
 def _object_label(node: PlanNode, gateway: FactGateway) -> str:
+    if node.action == "wealth.list":
+        return f"理财产品：{'；'.join(wealth.product_comparison(gateway))}"
+    if node.action == "subscription.list":
+        user_id = _str_param(node, "user_id")
+        if user_id is not None:
+            upcoming = subscriptions.upcoming_charges(gateway, user_id)
+            return f"订阅：{subscriptions.describe_upcoming_charges(upcoming)}"
+    if node.action == "account.transactions":
+        account_id = _str_param(node, "account_id")
+        start = _str_param(node, "start")
+        end = _str_param(node, "end")
+        if account_id is not None and start is not None and end is not None:
+            large = bills.large_transactions(
+                gateway, account_id, date.fromisoformat(start), date.fromisoformat(end)
+            )
+            return f"账户 {account_id}：{bills.describe_large_transactions(large)}"
     payee_id = _str_param(node, "payee_id")
     if payee_id is not None:
         try:
@@ -197,6 +215,18 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
 
 
 def _when_label(node: PlanNode, gateway: FactGateway) -> str:
+    if node.action == "account.transactions":
+        start = _str_param(node, "start")
+        end = _str_param(node, "end")
+        if start is not None and end is not None:
+            return f"{start}~{end}"
+    if node.action == "subscription.list":
+        user_id = _str_param(node, "user_id")
+        if user_id is not None:
+            upcoming = subscriptions.upcoming_charges(gateway, user_id)
+            if upcoming:
+                return upcoming[0].next_charge_on.isoformat()
+            return "—"
     booked_on = _str_param(node, "booked_on")
     if booked_on is not None:
         return booked_on

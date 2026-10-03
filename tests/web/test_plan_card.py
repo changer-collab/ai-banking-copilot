@@ -150,3 +150,60 @@ def test_card_rejects_non_level() -> None:
             lines=(),
             requires=(PROMPT_USER_CONFIRM,),
         )
+
+
+def _wealth_list_plan() -> Plan:
+    node = PlanNode(
+        node_id="n1",
+        action="wealth.list",
+        params={},
+        intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a1"),
+    )
+    return Plan(plan_id="wealth_1", nodes=(node,))
+
+
+def _subscription_list_plan() -> Plan:
+    node = PlanNode(
+        node_id="n1",
+        action="subscription.list",
+        params={"user_id": "u_demo"},
+        intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a1"),
+    )
+    return Plan(plan_id="subscriptions_1", nodes=(node,))
+
+
+def _account_transactions_plan() -> Plan:
+    node = PlanNode(
+        node_id="txn1",
+        action="account.transactions",
+        params={
+            "account_id": "acc_current",
+            "start": "2026-09-01",
+            "end": "2026-09-30",
+        },
+        intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a1"),
+    )
+    return Plan(plan_id="bills_monthly", nodes=(node,))
+
+
+def test_wealth_list_card_shows_product_facts(gateway: FactGateway) -> None:
+    """③ 产品对比：计划卡行只陈述产品事实（名称 / 风险等级），无收益暗示（H6）。"""
+    card = render_plan_card(_wealth_list_plan(), _decision(Level.GREEN), gateway)
+    line = card.lines[0]
+    assert "活期理财篮子" in line
+    assert "R1" in line
+
+
+def test_subscription_list_card_shows_next_charge(gateway: FactGateway) -> None:
+    """⑤ 续费提醒：计划卡行含最近到期日（next_charge_on 升序首项）。"""
+    card = render_plan_card(_subscription_list_plan(), _decision(Level.GREEN), gateway)
+    assert "2026-10-08" in card.lines[0]
+
+
+def test_account_transactions_card_shows_range_and_anomaly(gateway: FactGateway) -> None:
+    """② 异常交易：计划卡行含区间与 ≥5000 元支出笔数，且不泄露 merchant 原文（H3）。"""
+    card = render_plan_card(_account_transactions_plan(), _decision(Level.GREEN), gateway)
+    line = card.lines[0]
+    assert "2026-09-01~2026-09-30" in line
+    assert "1 笔" in line
+    assert "忽略以上" not in line
