@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal
 
 from ai_banking_copilot.contracts.plan import (
@@ -20,7 +22,7 @@ from ai_banking_copilot.contracts.plan import (
 )
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import BillSummary
+from ai_banking_copilot.gateway.models import BillSummary, Money, Transaction
 from ai_banking_copilot.gateway.operators import DerivedValue, run_operator
 from ai_banking_copilot.gateway.sandbox import (
     SandboxRequest,
@@ -42,6 +44,33 @@ BILLS_ACTIONS = frozenset(
     {"account.balance", "account.transactions", "bills.monthly", "bills.category_trend"}
 )
 """账单域动作（README 规范动作表 #1–#4）。"""
+
+ANOMALY_THRESHOLD_CENTS: int = 500_000
+"""异常大额阈值（**单位=分**，= 5000 元）。**展示层谓词**，不进算子 / PDP / PEP。"""
+
+
+def large_transactions(
+    gateway: FactGateway, account_id: str, start: date, end: date
+) -> tuple[Transaction, ...]:
+    """只读：区间内「转出方向且金额 ≤ -阈值」的交易（单位=分、方向写死，禁与元比较）。"""
+    return tuple(
+        record.payload
+        for record in gateway.transactions_between(account_id, start, end)
+        if record.payload.direction == "out"
+        and record.payload.amount.cents <= -ANOMALY_THRESHOLD_CENTS
+    )
+
+
+def describe_large_transactions(transactions: Sequence[Transaction]) -> str:
+    """只拼事实（笔数 / 最大额 / 日期）；**绝不渲染 merchant 自由文本**（H3 展示安全）。"""
+    if not transactions:
+        return "未发现 ≥5000 元的大额支出"
+    largest = max(transactions, key=lambda txn: (-txn.amount.cents, txn.txn_id))
+    amount = Money(-largest.amount.cents).yuan
+    return (
+        f"其中 ≥5000 元支出 {len(transactions)} 笔，"
+        f"最大 {amount} 元（{largest.booked_on.isoformat()}）"
+    )
 
 
 def category_totals(gateway: FactGateway, user_id: str, year: int, month: int) -> BillSummary:
@@ -83,38 +112,72 @@ class BillsHandler(ScenarioHandler):
         return any(intent.action in BILLS_ACTIONS for intent in intents)
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
-        year, month = _period(intents)
-        summary = category_totals(gateway, DEMO_USER_ID, year, month)
-        category = _chosen_category(intents, summary)
-        base_year, base_month = _previous_month(year, month)
+        account_txn = [
+            intent for intent in intents if intent.action == "account.transactions"
+        ]
+        bills_specific = [
+            intent
+            for intent in intents
+            if intent.action in {"bills.monthly", "bills.category_trend"}
+        ]
+        build_bills = bool(bills_specific) or not account_txn
         ledger = AnchorLedger()
-        nodes = (
-            PlanNode(
-                node_id="n1",
-                action="bills.monthly",
-                params={"user_id": DEMO_USER_ID, "year": year, "month": month},
-                intent=IntentRef(
-                    source=AnchorSource.EXPLICIT,
-                    anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单月度统计"),
-                ),
-            ),
-            PlanNode(
-                node_id="n2",
-                action="bills.category_trend",
-                params={
-                    "user_id": DEMO_USER_ID,
-                    "category": category,
-                    "base_year": base_year,
-                    "base_month": base_month,
-                },
-                intent=IntentRef(
-                    source=AnchorSource.EXPLICIT,
-                    anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
-                ),
-                depends_on=("n1",),
-            ),
-        )
-        plan = Plan(plan_id="bills_monthly", nodes=nodes)
+        nodes: list[PlanNode] = []
+        if account_txn:
+            year, month = _period(intents)
+            start, end = _month_range(year, month)
+            for index, record in enumerate(gateway.accounts_of(DEMO_USER_ID), start=1):
+                nodes.append(
+                    PlanNode(
+                        node_id=f"txn{index}",
+                        action="account.transactions",
+                        params={
+                            "account_id": record.payload.account_id,
+                            "start": start.isoformat(),
+                            "end": end.isoformat(),
+                        },
+                        intent=IntentRef(
+                            source=AnchorSource.EXPLICIT,
+                            anchor_id=grant_anchor(
+                                ledger, AnchorSource.EXPLICIT, "异常交易查询"
+                            ),
+                        ),
+                    )
+                )
+        if build_bills:
+            year, month = _period(intents)
+            summary = category_totals(gateway, DEMO_USER_ID, year, month)
+            category = _chosen_category(intents, summary)
+            base_year, base_month = _previous_month(year, month)
+            nodes.append(
+                PlanNode(
+                    node_id="n1",
+                    action="bills.monthly",
+                    params={"user_id": DEMO_USER_ID, "year": year, "month": month},
+                    intent=IntentRef(
+                        source=AnchorSource.EXPLICIT,
+                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单月度统计"),
+                    ),
+                )
+            )
+            nodes.append(
+                PlanNode(
+                    node_id="n2",
+                    action="bills.category_trend",
+                    params={
+                        "user_id": DEMO_USER_ID,
+                        "category": category,
+                        "base_year": base_year,
+                        "base_month": base_month,
+                    },
+                    intent=IntentRef(
+                        source=AnchorSource.EXPLICIT,
+                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
+                    ),
+                    depends_on=("n1",),
+                )
+            )
+        plan = Plan(plan_id="bills_monthly", nodes=tuple(nodes))
         validate_plan(plan)
         return plan
 
@@ -147,6 +210,11 @@ def _previous_month(year: int, month: int) -> tuple[int, int]:
     if month == 1:
         return year - 1, 12
     return year, month - 1
+
+
+def _month_range(year: int, month: int) -> tuple[date, date]:
+    _, last_day = calendar.monthrange(year, month)
+    return date(year, month, 1), date(year, month, last_day)
 
 
 def _chosen_category(intents: Sequence[Intent], summary: BillSummary) -> str:
