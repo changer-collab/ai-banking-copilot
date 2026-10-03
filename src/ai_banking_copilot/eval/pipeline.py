@@ -47,11 +47,11 @@ from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pdp import (
     FLAG_INJECTION_DETECTED,
     ObjectState,
-    PolicyRequest,
     evaluate,
     evaluate_plan,
 )
 from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_hash
+from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
     plan_is_pure_query,
     plan_net_effect,
@@ -76,17 +76,6 @@ INJECTION_MARKERS: tuple[str, ...] = (
     "ignore previous",
 )
 """提示注入标记词：命中即加载 `FLAG_INJECTION_DETECTED`（H3 / 官方"注入防御"）。"""
-
-_OUTFLOW_ACTIONS: frozenset[str] = frozenset(
-    {
-        "transfer.create",
-        "transfer.schedule",
-        "wealth.subscribe",
-        "subscription.sign",
-        "funds.freeze",
-    }
-)
-"""按 `README.md` 规范动作表的 cf 语义，把"视同流出"的动作列在此处（金额维度据此计算日累计）。"""
 
 _DEFAULT_SELECTED: Mapping[str, object] = {
     "account": "acc_savings",
@@ -282,19 +271,13 @@ class EvalPipeline:
         case_id: str,
     ) -> tuple[NodeOutcome, Decision | None]:
         spec = self._registry.get(node.action)
-        object_state = _object_state(gateway, node)
-        amount = _node_amount(node) if node.action in _OUTFLOW_ACTIONS else Money(0)
-        daily = _node_daily(gateway, node, amount)
-        request = PolicyRequest(
+        request = node_policy_request(
+            node,
+            spec=spec,
+            gateway=gateway,
             user_id=DEMO_USER_ID,
-            action=node.action,
-            amount=amount,
-            daily_accumulated=daily,
-            object_state=object_state,
-            is_pure_query=spec.is_pure_query,
-            irreversible=not spec.reversible,
-            daily_limit=gateway.daily_transfer_limit(DEMO_USER_ID),
-            context_flags=flags,
+            today=DEFAULT_BOOKING_DATE,
+            flags=flags,
         )
         decision = evaluate(request)
         executed = _execute(pep, self._registry, node, decision, case_id)
@@ -304,9 +287,9 @@ class EvalPipeline:
                 action=node.action,
                 level=decision.level,
                 is_pure_query=spec.is_pure_query,
-                is_outflow=node.action in _OUTFLOW_ACTIONS,
-                daily_accumulated_cents=daily.cents,
-                object_blocked=object_state is ObjectState.BLOCKED,
+                is_outflow=request.amount_applies,
+                daily_accumulated_cents=request.daily_accumulated.cents,
+                object_blocked=request.object_state is ObjectState.BLOCKED,
                 executed_status=executed,
             ),
             decision,
@@ -445,37 +428,6 @@ def _context_flags(utterance: str) -> frozenset[str]:
     if any(marker.lower() in lowered for marker in INJECTION_MARKERS):
         return frozenset({FLAG_INJECTION_DETECTED})
     return frozenset()
-
-
-def _object_state(gateway: FactGateway, node: PlanNode) -> ObjectState:
-    """由节点参数里的收款对象推出对象态（唯一谓词 = `identity_confirmed`；`blocked` 为吸收态）。"""
-    payee_id = node.params.get("payee_id")
-    if not isinstance(payee_id, str) or not payee_id:
-        return ObjectState.SELF
-    try:
-        payload = gateway.payee(payee_id).payload
-    except GatewayError:
-        return ObjectState.UNKNOWN
-    if payload.blocked:
-        return ObjectState.BLOCKED
-    if payload.identity_confirmed:
-        return ObjectState.VERIFIED_SAVED
-    return ObjectState.KNOWN_UNVERIFIED
-
-
-def _node_amount(node: PlanNode) -> Money:
-    raw = node.params.get("amount_cents")
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return Money(0)
-    return Money(raw)
-
-
-def _node_daily(gateway: FactGateway, node: PlanNode, amount: Money) -> Money:
-    """日累计：仅对"视同流出"动作计算（含本笔）；其余维度不适用（记 0）。"""
-    if node.action not in _OUTFLOW_ACTIONS:
-        return Money(0)
-    existing = gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents
-    return Money(existing + amount.cents)
 
 
 def _derived_release(plan: Plan, gateway: FactGateway, case: EvalCase) -> bool | None:
