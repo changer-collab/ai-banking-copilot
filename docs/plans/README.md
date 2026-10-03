@@ -93,7 +93,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 
 | 模块 | 冻结符号 |
 |---|---|
-| `planning.llm` | `IntentProposal(intents, raw)` · `Intent(action, slots, confidence, evidence)` · `IntentModel` Protocol（`propose(utterance, context) -> IntentProposal`）· `TemplateIntentModel`（降级通道）· `LlmIntentModel` |
+| `planning.llm` | `IntentProposal(intents, raw)` · `Intent(action, slots, confidence, evidence)` · `IntentModel` Protocol（`propose(utterance, context) -> IntentProposal`）· `TemplateIntentModel`（降级通道）· `LlmIntentModel` · **S3** `_TEMPLATE_RULES`（降级通道规则）新增 5 条（wealth.list / card.unlock / card.lock 带修饰补强 / card.list / subscription.list / account.transactions），**既有 10 条零改动** |
 | `planning.anchors` | `AnchorLedger`（`grant_explicit` / `grant_approved` / `derive` / `resolve`）· `DerivedDepthError` |
 | `planning.net_effect` | `NetEffect(amount, irreversibles, node_ids)` · `net_effect(plan, gateway) -> NetEffect` |
 | `planning.kernel` | `Question(slot, prompt, candidates)` · `PlanningResult(plan, questions, blocked, intents, rationale)` · `Kernel(llm, registry)`（`plan(user_id, utterance, context) -> PlanningResult`） |
@@ -104,13 +104,13 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 |---|---|
 | `scenarios.base` | `ScenarioOutcome(scenario, status, plan, decision, exec_results, message, record_ids)` · `ScenarioHandler` Protocol（`name` / `matches(intents)` / `build(intents, gateway) -> Plan`） |
 | `scenarios.registry` | `SCENARIO_HANDLERS` · `select_handler(intents) -> ScenarioHandler` |
-| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 · 新增 scenarios.wealth.to_risk_assessment(record) -> RiskAssessment \| None · 新增 scenarios.authorization.{object_state_for_node, node_policy_request} |
+| `scenarios.*` | `transfer` / `bills` / `wealth` / `cards` / `subscriptions` / `cross` 六个 handler 模块 · 新增 scenarios.wealth.to_risk_assessment(record) -> RiskAssessment \| None · 新增 scenarios.authorization.{object_state_for_node, node_policy_request} · **S3** 新增 scenarios.bills.{ANOMALY_THRESHOLD_CENTS, large_transactions, describe_large_transactions} · scenarios.wealth.product_comparison · scenarios.subscriptions.{upcoming_charges, describe_upcoming_charges}；scenarios.wealth.FORBIDDEN_HINTS **加严**（append）；scenarios.bills.BillsHandler.build **新增 account.transactions 分支 + 仅该意图时短路 bills 计算** |
 
 ### 06 `web`
 
 | 模块 | 冻结符号 |
 |---|---|
-| `web.plan_card` | `PlanCard(card_id, frozen_hash, level, lines, requires)` · `render_plan_card(plan, decision, gateway) -> PlanCard` |
+| `web.plan_card` | `PlanCard(card_id, frozen_hash, level, lines, requires)` · `render_plan_card(plan, decision, gateway) -> PlanCard` · **S3** `_object_label`/`_when_label` **实现增强**（消费 05 只读 helper 拼接 ②③⑤ 只读事实；**签名与字段零改**；新增 06→05 只读依赖，不生成数字） |
 | `web.session` | `Session(deps)`（`submit` / `confirm` / `interrupt` / `resume` / `takeover_package` / `state`）· `SessionState` |
 | `web.app` | `AppDeps`（**尾部新增可选字段 `risk: RiskAssessmentSource \| None = None`**，`None ⇒ 申购 fail-closed`）· `create_app(deps) -> FastAPI` |
 
@@ -118,7 +118,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 
 | 模块 | 冻结符号 |
 |---|---|
-| `eval.dataset` | `EvalCase(id, utterance, expect_level, expect_blocked, category)` · `load_cases(path)` |
+| `eval.dataset` | `EvalCase(id, utterance, expect_level, expect_blocked, category)` · `load_cases(path)` · **S3** `eval/data/cases.json` +4 条 GREEN（②③⑤ + card.list）/ `adversarial.json` +3 条 yield_hint blocked；`heldout.json` **不动** |
 | `eval.harness` | `run_suite(cases, pipeline) -> EvalReport` · `EvalReport(passed, failed, invariants)` |
 | `eval.invariants` | `InvariantResult(name, holds, detail)` · `check_invariants(cases, results)`（I1′–I4′ + 绿色纯度 + 非退化） |
 | `eval.pipeline` | `run_suite` / `EvalReport` 签名不变；**新增私有** `_inject_assessment` 与收益暗示守卫（镜像 `scenarios.wealth.FORBIDDEN_HINTS`）；`_DEFAULT_SELECTED["product"]` 由 `wp_bond` 改 `wp_cash`；`_derived_release` 改走受限沙箱 `scenarios.bills.category_share_in_sandbox`（catch 追加 `SandboxError` / `ScenarioRefused`） |
@@ -177,6 +177,8 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 21. **05 `CrossHandler` 通用化**（2026-10-02，多意图能力）：`matches` 扩为「≥2 场景域 **或** 单域 `funds.*`」；`build` 分两支——「冻结 + 资金」组合**逐字保留**原语义（`grant` 锚点规则不变），其余多域组合走**通用支**（按域分组 → 复用各域 handler 的 `build` → 合并重编号 → 同资源串行 → **单一 `Plan`**）。`select_handler` / `run_scenario` / 06 确认-执行协议**不变**；计划级安全（单卡 / 单 `cfhash` / 单次 `evaluate_plan(NE)`）不变。会话层 `web.session._assemble_intents` 为用户明说意图补 `grant="explicit"`（与 07 评测链 `_scenario_intent` 一致）。单域 `funds.*` 的原 `UnknownScenarioError` 缺口一并补齐。
 22. **S1b 授权改 06/07 既有实现（加严 / 新增 / 收窄）**（2026-10-03，G2 收口）：新增 `gateway/risk_store.py`（独立表，不改 01 的 `SCHEMA_SQL`）；`web.app.AppDeps` **尾部追加**可选字段 `risk`（向后兼容）；`web.session._assemble_intents` 对 `wealth.subscribe` 做 per-intent 受信任注入（`product=wp_cash` / `user_id` / `assessment`，**不包 `Value`**）；`eval.pipeline._evaluate` 注入 `assessment` 并**新增收益暗示守卫**（镜像 `FORBIDDEN_HINTS`），`_DEFAULT_SELECTED["product"]` 改 `wp_cash`；`scenarios.wealth` **仅新增** `to_risk_assessment`。**既有冻结符号与签名零改动**（`assess_suitability` / `_assessment` / `RiskAssessment` 逻辑不变）。**语义只加严/收窄，不放宽**。
 23. **S2 一致性收口授权（additive / 收窄 / 加严；先改表再回溯）**（2026-10-04，裁决 #23，G3/G5/G4/G12）：授权本计划按下列方向落地，且**先改本冻结面、再回溯修订已出计划的 `Interfaces` 段与实现**：① 00 **新增** `contracts.security`（`INJECTION_MARKERS` · `detect_injection(text) -> bool`），06/07 的注入标记收敛为该单一真源（**集合相等**：`set(web.session.INJECTION_MARKERS) == set(eval.pipeline.INJECTION_MARKERS) == set(contracts.security.INJECTION_MARKERS)`，G4）；② 03 `PolicyRequest` **补登记既有** `daily_limit` 并**尾部新增** `amount_applies: bool = True`（`False ⇒ 金额档不适用，仅用于非流出型动作`，G5 收窄）；③ 05 **新增** `scenarios.authorization`（`object_state_for_node` / `node_policy_request`），06 `web.session` 与 07 `eval.pipeline` 共用该构造器（G3 消除口径双份 + 交叉断言）；④ 07 `_derived_release` 改走受限沙箱 `scenarios.bills.category_share_in_sandbox`（`except (GatewayError, SandboxError, ScenarioRefused): return False`，G12 加严）。**既有冻结符号与签名零改动**；语义**只收窄/加严，不放宽**。
+
+24. **S3 能力补齐授权（additive / 收窄 / 加严；先改表再回溯）**（2026-10-04，裁决 #24，G13 / G1 / G11）：授权 S3 按下列方向落地，且**先改本冻结面、再回溯改实现**：① 04 `planning.llm::_TEMPLATE_RULES` **新增 5 条规则**（`wealth.list` / `card.unlock`（`解锁|解除.{0,4}?卡`，须位于 `card.lock` 之前）/ `card.lock` 带修饰补强（`锁.{0,3}卡`）/ `card.list` / `subscription.list`（须位于 `cancel` 之后、`sign` 之前）/ `account.transactions`（末位）），**既有 10 条正则与动作零改动**；**唯一授权的 precedence 例外**：`{续费提醒, 什么时候续费, 何时续费, 有哪些代扣}` 由 `subscription.sign` 改判 `subscription.list`（裸 `续费/签约/代扣/自动续费` 仍 `sign`），集合须**恰等**；② 05 `scenarios.bills` **新增** `ANOMALY_THRESHOLD_CENTS`（分）/`large_transactions`（判据 `direction=="out" and cents <= -阈值`）/`describe_large_transactions`，`BillsHandler.build` **新增 `account.transactions` 分支**（门=`intent.action=="account.transactions"`；账户集=`gateway.accounts_of(user)` 全账户，不读 `selected["account"]`、不硬编码；节点 id `txn{i}`；params `account_id/start/end` 三参齐备；仅该意图时**短路** bills 计算）；③ 05 `scenarios.wealth` **新增** `product_comparison` 并 **append 加严** `FORBIDDEN_HINTS`；05 `scenarios.subscriptions` **新增** `upcoming_charges`/`describe_upcoming_charges`；④ 06 `web.plan_card` **实现增强**（`_object_label`/`_when_label` 拼接 05 只读事实，**签名/字段零改**，不生成数字）；⑤ 07 `eval/data` **additive**（cases +4 / adversarial +3；heldout 不动）。**冻结符号与签名零改动**；`SCHEMA_SQL` / 20 动作集合 / `OPERATOR_WHITELIST` / `_DOMAIN_HANDLERS` / `_assemble_multi` / `select_handler` **零改动**；**语义只加严/收窄，不放宽**（新增面不得使真实写意图变只读自动执行）。
 
 ### 跨计划硬约束（每份计划都生效）
 
