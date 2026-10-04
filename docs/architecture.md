@@ -63,6 +63,47 @@
 - **LLM 侧只做意图理解与受限措辞**，零生成事实。
 - **成熟组件缝合**：评测复用既有模块公开接口，不复制业务逻辑。
 
+## 6. 分层与可插拔（对外口径）
+
+### 6.1 对外四层映射
+
+§2 的分层可按对外习惯的"四层"表述（依赖 / 调用方向自上而下、单向）：
+
+| 对外层 | 本项目落点 | 职责 | 硬约束 |
+|---|---|---|---|
+| （入口）渠道 / 评测 | `web/`、`eval/` | 计划卡 / 确认 / 接管；评测链（复用公开接口） | `web/` **不得**直触 `CoreBank`（H2 守卫） |
+| **模型层**（意图） | `planning/` | 意图提案 + 拆解 / 槽位 / DAG / 净效应 | LLM **只提案、不执行**；缺 Key / 失败 → 降级模板 |
+| **执行层** | `policy/`、`scenarios/`、`tools/` | PDP 三色裁决 · PEP 白名单执行 · 执行门 · 审计链 · 熔断 · saga；六场景闭环 | `无裁决不执行`；绿色只含纯查询 |
+| **计算层**（确定性） | `gateway/operators.py`、`gateway/sandbox.py` | 白名单算子（sum / avg / ratio / yoy / mom）+ 受限子进程沙箱 | **不生成代码**；白名单**封闭** |
+| **数据层**（TCB） | `gateway/`、`contracts/` | 事实网关（**唯一可写库**）+ 纯契约类型 | 上层**只读**；`contracts/` **禁 I/O** |
+
+> 注：「计算层」与「数据层」同包（均在 `gateway/`）—— 按**职责**分层、不按包拆，属工程取舍而非遗漏。
+
+### 6.2 可插拔矩阵（扩展点 → 接缝 → 代价）
+
+| 扩展点 | 接缝（Protocol / 注册表 / 组合根） | 换什么 · 加什么 | 改冻结面？ |
+|---|---|---|---|
+| 意图模型 | `planning.llm.IntentModel` Protocol（`runtime_checkable`）；三实现 `Template` / `Llm` / `Fallback` | 换 / 加模型 —— **只改组合根一处** `compose.build_intent_model`（`AIB_DISABLE_LLM` / `DASHSCOPE_API_KEY`） | 否 |
+| 场景处理器 | `scenarios.base.ScenarioHandler` Protocol + `SCENARIO_HANDLERS` 注册表（**顺序即优先级**） | 加场景 = 新增实现类 + 注册一行（声明式） | 加**动作**才需 |
+| 动作 / 工具 | `tools.registry.register(ToolSpec)` + `build_default_registry()` | 加动作 = 注册一个 `ToolSpec` | **是**（裁决表） |
+| 核心银行 / 写面 | 组合根 `compose.build_deps` 注入 `CoreBank` / `Pep` / `AuditLog` / `CircuitBreaker` | 换核心银行 / 换审计后端 —— 只动组合根，`web/` 零改动 | 否 |
+| 裁决视图 | `policy.pdp.NetEffectView` Protocol | 换净效应视图实现（兼便于测试打桩） | 否 |
+| 风险测评源 | `gateway.risk_store.RiskAssessmentSource` Protocol | 换测评数据源 | 否 |
+| 计划卡润色 | `web.plan_card.PlanCardPolisher` Protocol | 换措辞润色实现 | 否 |
+| 评测管线 | `eval.pipeline.CasePipeline` Protocol | 渠道与评测解耦 | 否 |
+| 计算算子 | `OPERATOR_WHITELIST`（元组） | **受控扩展**：须先改冻结面 | **是** |
+
+### 6.3 刻意封闭（不放开的部分）
+
+- **算子白名单封闭**：无 `eval`、无通用表达式求值；不在白名单的名字一律拒绝。
+- **LLM 不能执行、不能生成事实**：只产 `IntentProposal`；数值只来自事实网关。
+- **注册了工具 ≠ 能执行**：仍受三色裁决 + 算子白名单 + 执行门哈希三重约束。
+- **扩展须走冻结面**：`docs/plans/README.md` 裁决表 —— 改冻结符号先改 README，再回溯改码。
+
+### 6.4 一句话口径
+
+**横向（各层的"实现"）可插拔，纵向（安全语义）刻意封闭 —— 换件容易、越权困难。**
+
 ---
 
-*2026-10-01 建立 · 2026-10-01 补充 Web / 评测链与分层职责表*
+*2026-10-01 建立 · 2026-10-01 补充 Web / 评测链与分层职责表 · 2026-10-04 补充「分层与可插拔」矩阵（S3）*
