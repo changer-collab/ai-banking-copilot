@@ -44,6 +44,8 @@ _ACTION_LABELS: dict[str, str] = {
     "subscription.list": "订阅查询",
     "transfer.create": "转账",
     "transfer.schedule": "定时转账",
+    "transfer.book": "登记定时转账",
+    "transfer.request_collection": "发起 AA 收款",
     "wealth.subscribe": "理财申购",
     "wealth.redeem": "理财赎回",
     "subscription.cancel": "取消订阅",
@@ -225,6 +227,11 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
         end = _str_param(node, "end")
         if start is not None and end is not None:
             return f"{start}~{end}"
+    if node.action == "bills.yearly":
+        year = node.params.get("year")
+        if isinstance(year, int) and not isinstance(year, bool):
+            return f"{year}-01~{year}-12"
+        return "—"
     if node.action == "subscription.list":
         user_id = _str_param(node, "user_id")
         if user_id is not None:

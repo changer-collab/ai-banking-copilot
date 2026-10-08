@@ -91,6 +91,7 @@ SLOT_PARAMS: Mapping[str, str] = _slot_params()
 _PROMPTS: Mapping[str, str] = {
     "account": "请选择要操作的账户。",
     "payee": "请确认收款人（需要全名 / 账号尾号 / 手机尾号）。",
+    "payer": "请确认付款人（需要全名 / 账号尾号 / 手机尾号）。",
     "amount": "请给出金额（必须带单位，例如 500 元）。",
     "when": "请给出执行时间（例如 明天 / 2026-12-25）。",
     "product": "请选择理财产品。",
@@ -179,7 +180,7 @@ def _resolve_slot(
             notes.append(f"selected:{slot}")
             return (raw.raw if isinstance(raw, Value) else raw), None, tuple(notes)
         notes.append(f"rejected unverified:{slot}")
-    if slot == "payee":
+    if slot in {"payee", "payer"}:
         return _resolve_payee(inputs, notes)
     if slot == "amount":
         return _resolve_amount(inputs, notes)

@@ -31,6 +31,10 @@ from ai_banking_copilot.gateway.errors import (
 from ai_banking_copilot.gateway.hashing import sha256_hex
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.store import Store, StoreMode
+from ai_banking_copilot.gateway.transfer_store import (
+    COLLECTION_REQUESTS_SCHEMA_SQL,
+    SCHEDULED_TRANSFERS_SCHEMA_SQL,
+)
 
 # 演示与评测的基准记账日（固定值，保证评测可复现）
 DEFAULT_BOOKING_DATE = date(2026, 10, 1)
@@ -411,6 +415,116 @@ class CoreBank:
             )
 
         return self._run_once("sign_subscription", idempotency_key, body)
+
+    def request_collection(
+        self,
+        *,
+        user_id: str,
+        payer_id: str,
+        amount: Money,
+        note: str,
+        idempotency_key: str,
+    ) -> WriteReceipt:
+        """发起一笔 **AA 收款**请求（待收款，**不产生资金流**；P2-3）。
+
+        纪律与既有原语一致：幂等 / 单事务 / 确定性 id / 不做授权判断。付款方必须在名册内
+        且非 `blocked`；本动作**不改动任何账户余额**，只登记一条待收款请求。
+        """
+        if amount.cents <= 0:
+            raise CoreBankError("收款金额必须为正")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            conn.execute(COLLECTION_REQUESTS_SCHEMA_SQL)
+            payee = conn.execute(
+                "SELECT blocked FROM payees WHERE payee_id = ? AND user_id = ?",
+                (payer_id, user_id),
+            ).fetchone()
+            if payee is None:
+                raise UnknownPayeeError(payer_id)
+            if int(payee["blocked"]) == 1:
+                raise BlockedPayeeError(f"付款方 {payer_id} 处于 blocked 状态")
+            request_id = _effect_id("collect", "request_collection", idempotency_key)
+            conn.execute(
+                "INSERT INTO collection_requests(request_id, user_id, payer_id, amount_cents,"
+                " note, status, created_on) VALUES(?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    request_id,
+                    user_id,
+                    payer_id,
+                    amount.cents,
+                    note,
+                    DEFAULT_BOOKING_DATE.isoformat(),
+                ),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="request_collection",
+                status="pending",
+                record_ids=(f"collection_requests:{request_id}",),
+                effect_ids=(f"collection_requests:{request_id}",),
+            )
+
+        return self._run_once("request_collection", idempotency_key, body)
+
+    def book_transfer(
+        self,
+        *,
+        user_id: str,
+        account_id: str,
+        payee_id: str,
+        amount: Money,
+        booked_on: date,
+        remark: str,
+        idempotency_key: str,
+    ) -> WriteReceipt:
+        """**登记**一笔未来转账（P2-6；登记时**不扣款**）。
+
+        只写 `scheduled_transfers` 一行；真正扣款由到期派发后的 `transfer.create` 既有链路承担。
+        纪律与既有原语一致：幂等 / 单事务 / 确定性 id / 不做授权判断；账户与收款人必须是既存事实。
+        """
+        if amount.cents <= 0:
+            raise CoreBankError("登记金额必须为正")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+            account = conn.execute(
+                "SELECT account_id FROM accounts WHERE account_id = ? AND user_id = ?",
+                (account_id, user_id),
+            ).fetchone()
+            if account is None:
+                raise UnknownAccountError(account_id)
+            payee = conn.execute(
+                "SELECT blocked FROM payees WHERE payee_id = ? AND user_id = ?",
+                (payee_id, user_id),
+            ).fetchone()
+            if payee is None:
+                raise UnknownPayeeError(payee_id)
+            if int(payee["blocked"]) == 1:
+                raise BlockedPayeeError(f"收款对象 {payee_id} 处于 blocked 状态")
+            schedule_id = _effect_id("sched", "book_transfer", idempotency_key)
+            conn.execute(
+                "INSERT INTO scheduled_transfers(schedule_id, user_id, account_id, payee_id,"
+                " amount_cents, booked_on, remark, status)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, 'scheduled')",
+                (
+                    schedule_id,
+                    user_id,
+                    account_id,
+                    payee_id,
+                    amount.cents,
+                    booked_on.isoformat(),
+                    remark,
+                ),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="book_transfer",
+                status="scheduled",
+                record_ids=(f"scheduled_transfers:{schedule_id}",),
+                effect_ids=(f"scheduled_transfers:{schedule_id}",),
+            )
+
+        return self._run_once("book_transfer", idempotency_key, body)
 
     def _wealth_flow(
         self,
