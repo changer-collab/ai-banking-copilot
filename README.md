@@ -119,11 +119,22 @@ NL 触发词为「AA 收款 / 发起收款 / 让大家还我钱」；与「按�
 
 ### 能力子集（声明不补）
 
-`account.balance` / `subscription.sign` / `card.apply_virtual` / `card.set_limit` / `funds.release`
-五个动作**缺可控 NL 或构造路径**、**未补评测用例**，声明为能力子集（非等价实现，H9）。
+**确认仍缺可控路径的三个**：`account.balance` / `subscription.sign` / `funds.release`。
 
-`card.unlock`（解挂）**不属能力子集**：它有 NL 触发规则、有场景构造路径，也有单元测试，
+- `account.balance`：`planning/llm.py::_TEMPLATE_RULES` 里**没有任何 NL 规则**，无法由口述触达；**未补评测用例**。
+- `funds.release`：同理无 NL 规则，且 `hold_id` 无法由口述产生；**未补评测用例**。
+- `subscription.sign`：**有** NL 触发词（`签约 / 代扣 / 自动续费 / 续费`）与构造 handler，但 `period` 槽
+  **无解析器**、评测链也不预选 `merchant` / `period`，口述走不通完整可控路径；**未补评测用例**。
+
+以上三个声明为**能力子集**（非等价实现，H9）。
+
+`card.unlock`（解挂）**不属能力子集**：有 NL 触发规则、有场景构造路径，也有单元测试，
 仅**未补评测用例**——此处订正先前「缺可控 NL 或构造路径」的过强表述（见 `docs/待修复清单.md` P2-8）。
+
+`card.apply_virtual` / `card.set_limit` **自 2026-10-08 起也不属能力子集**（本节此前把它们列为子集，
+与实况不符，现订正）：二者**有** NL 规则（`虚拟卡` / `额度|限额`）、**有**场景构造路径、**有**评测用例
+（`cards-apply-virtual-yellow` / `cards-set-limit-yellow`）；`daily_limit` 槽既可由受信任选定值提供，
+也可由文本解析器 `planning.slots._resolve_daily_limit` 从口述解析（须带单位）。
 
 `取消我的订阅` / `退出我的订阅` 为 **fail-closed（空意图）**：安全语义不变，不降档为只读执行。
 
