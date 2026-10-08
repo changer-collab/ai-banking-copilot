@@ -32,6 +32,7 @@ from ai_banking_copilot.policy.pep import (
     WriteHandler,
     money_cents,
     require_date,
+    require_int,
     require_str,
 )
 from ai_banking_copilot.scenarios.base import (
@@ -46,9 +47,23 @@ from ai_banking_copilot.scenarios.base import (
     require_trusted,
     trusted_slot,
 )
+from ai_banking_copilot.scenarios.scheduling import ScheduledItem, plan_due
 
-TRANSFER_ACTIONS = frozenset({"transfer.create", "transfer.schedule"})
-"""转账域动作（README 规范动作表 #8 / #9）。"""
+TRANSFER_ACTIONS = frozenset(
+    {
+        "transfer.create",
+        "transfer.schedule",
+        "transfer.book",
+        "transfer.request_collection",
+    }
+)
+"""转账域动作（README 规范动作表 #8 / #9 + P2-3 / P2-6 新增动作）。"""
+
+COLLECTION_ACTION = "transfer.request_collection"
+"""AA **收款**动作（待收款，不产生资金流；与按份额转出的 `split_aa` 语义区分）。"""
+
+_DUE_ACTION = "transfer.create"
+"""到期派发所装配的动作（复用既有转账链路完成真正扣款）。"""
 
 AA_KEYWORDS = ("AA", "aa", "均摊", "平摊", "分摊", "拆分")
 
@@ -103,10 +118,20 @@ def build_money_node(
 
 def resolve_payee(intent: Intent, gateway: FactGateway) -> str:
     """解析收款对象：已给可信 `payee_id` 直接用；否则走 01 名册确定性解析（多候选即澄清）。"""
-    raw = intent.slots.get("payee")
+    return _resolve_named_party(intent, "payee", gateway)
+
+
+def resolve_payer(intent: Intent, gateway: FactGateway) -> str:
+    """解析 AA 收款的**付款方**：与收款人同一套名册确定性解析（不另写一套）。"""
+    return _resolve_named_party(intent, "payer", gateway)
+
+
+def _resolve_named_party(intent: Intent, slot: str, gateway: FactGateway) -> str:
+    label = "收款人" if slot == "payee" else "付款方"
+    raw = intent.slots.get(slot)
     if raw is None:
-        raise ClarificationRequired("payee", "请确认收款人（全名 / 账号尾号 / 手机尾号）")
-    value = require_trusted(raw, "payee")
+        raise ClarificationRequired(slot, f"请确认{label}（全名 / 账号尾号 / 手机尾号）")
+    value = require_trusted(raw, slot)
     if isinstance(value, str) and value.startswith(_PAYEE_ID_PREFIX):
         return value
     text = value if isinstance(value, str) else str(value)
@@ -114,10 +139,39 @@ def resolve_payee(intent: Intent, gateway: FactGateway) -> str:
     resolution = resolve_payees(roster, text)
     if resolution.needs_clarification:
         labels = tuple(_payee_label(item) for item in resolution.candidates)
-        raise ClarificationRequired("payee", "收款人存在多个候选，请明确", labels)
+        raise ClarificationRequired(slot, f"{label}存在多个候选，请明确", labels)
     if not resolution.candidates:
-        raise ClarificationRequired("payee", "未在名册中匹配到收款人，请确认")
+        raise ClarificationRequired(slot, f"未在名册中匹配到{label}，请确认")
     return resolution.candidates[0].payee_id
+
+
+def build_collection_node(
+    node_id: str,
+    intent: Intent,
+    gateway: FactGateway,
+    ledger: AnchorLedger,
+    source: AnchorSource,
+) -> PlanNode:
+    """构造一个 **AA 收款**节点（待收款，**不产生资金流**）。
+
+    与 `build_money_node`（按份额转出的资金流出）语义分离：本动作只登记待收款请求，
+    `amount_cents` 为待收金额（**不做 AA 均摊推导**——「AA」是场景措辞，不是整除运算）。
+    """
+    detail = f"AA 收款：{intent.evidence or intent.action}"
+    anchor_id = grant_anchor(ledger, source, detail)
+    params: dict[str, object] = {
+        "payer_id": resolve_payer(intent, gateway),
+        "amount_cents": _amount_from(intent).cents,
+    }
+    note = intent.slots.get("note")
+    if note is not None:
+        params["note"] = accept_data(note)
+    return PlanNode(
+        node_id=node_id,
+        action=COLLECTION_ACTION,
+        params=params,
+        intent=IntentRef(source=source, anchor_id=anchor_id),
+    )
 
 
 def resolve_amount_cents(intent: Intent, ledger: AnchorLedger, parent_anchor_id: str) -> Money:
@@ -154,11 +208,17 @@ class TransferHandler(ScenarioHandler):
         if not transfer_intents:
             raise ClarificationRequired("action", "未识别到转账意图")
         ledger = AnchorLedger()
-        nodes = tuple(
-            build_money_node(f"n{index}", intent, gateway, ledger, AnchorSource.EXPLICIT)
-            for index, intent in enumerate(transfer_intents, start=1)
-        )
-        plan = Plan(plan_id=f"transfer_{len(nodes)}", nodes=nodes)
+        nodes: list[PlanNode] = []
+        for index, intent in enumerate(transfer_intents, start=1):
+            node_id = f"n{index}"
+            if intent.action == COLLECTION_ACTION:
+                node = build_collection_node(
+                    node_id, intent, gateway, ledger, AnchorSource.EXPLICIT
+                )
+            else:
+                node = build_money_node(node_id, intent, gateway, ledger, AnchorSource.EXPLICIT)
+            nodes.append(node)
+        plan = Plan(plan_id=f"transfer_{len(nodes)}", nodes=tuple(nodes))
         validate_plan(plan)
         return plan
 
@@ -177,6 +237,33 @@ def _payee_label(candidate: Candidate) -> str:
     return f"{candidate.full_name}(尾号 {candidate.account_tail}/{candidate.phone_tail})"
 
 
+def due_transfer_plan(gateway: FactGateway, as_of: date) -> tuple[PlanNode, ...]:
+    """把**到期**的定时转账登记项装配成 `transfer.create` 节点（P2-6）。
+
+    纪律：
+    - 只做装配——**日期筛选与排序一律交给公共机制** `scenarios.scheduling.plan_due`
+      （不另写日期 / 派发逻辑）；
+    - 基准时钟由调用方传入的 `as_of` 决定，调用方应取 `scheduling.REFERENCE_DATE`
+      （其唯一来源是 01 的 `DEFAULT_BOOKING_DATE`）；
+    - 登记项**登记时不扣款**：真正扣款由装配出的 `transfer.create` 走既有链路完成。
+    """
+    items = tuple(
+        ScheduledItem(
+            key=record.payload.schedule_id,
+            due_on=record.payload.booked_on,
+            action=_DUE_ACTION,
+            params={
+                "account_id": record.payload.account_id,
+                "payee_id": record.payload.payee_id,
+                "amount_cents": record.payload.amount.cents,
+                "booked_on": record.payload.booked_on.isoformat(),
+            },
+        )
+        for record in gateway.scheduled_transfers()
+    )
+    return plan_due(items, as_of=as_of, ledger=AnchorLedger(), node_prefix="due")
+
+
 def _transfer_handler(context: WriteContext) -> WriteReceipt:
     """把 `transfer.*` 映射到 `CoreBank.transfer`（定时语义由 `booked_on` 承载）。"""
     return context.core_bank.transfer(
@@ -189,8 +276,36 @@ def _transfer_handler(context: WriteContext) -> WriteReceipt:
     )
 
 
+def _request_collection_handler(context: WriteContext) -> WriteReceipt:
+    """把 `transfer.request_collection` 映射到 `CoreBank.request_collection`（待收款，不扣款）。"""
+    note = context.params.get("note")
+    return context.core_bank.request_collection(
+        user_id=require_str(context.params, "user_id"),
+        payer_id=require_str(context.params, "payer_id"),
+        amount=Money(require_int(context.params, "amount_cents")),
+        note="" if note is None else str(note),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+def _book_transfer_handler(context: WriteContext) -> WriteReceipt:
+    """把 `transfer.book` 映射到 `CoreBank.book_transfer`（登记未来转账，**登记不扣款**）。"""
+    remark = context.params.get("remark")
+    return context.core_bank.book_transfer(
+        user_id=require_str(context.params, "user_id"),
+        account_id=require_str(context.params, "account_id"),
+        payee_id=require_str(context.params, "payee_id"),
+        amount=Money(money_cents(context.params, context.spec)),
+        booked_on=require_date(context.params, "booked_on"),
+        remark="" if remark is None else str(remark),
+        idempotency_key=context.idempotency_key,
+    )
+
+
 WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "transfer.create": _transfer_handler,
     "transfer.schedule": _transfer_handler,
+    "transfer.book": _book_transfer_handler,
+    "transfer.request_collection": _request_collection_handler,
 }
 """转账域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""

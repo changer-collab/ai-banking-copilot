@@ -88,6 +88,11 @@ class IntentModel(Protocol):
 _CLAUSE_SPLIT = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (
+        re.compile(r"AA\s*收款|发起收款|让大家还我钱"),
+        "transfer.request_collection",
+        "命中『AA 收款』模板",
+    ),
     (re.compile(r"定时|定转|预约转"), "transfer.schedule", "命中『定时转账』模板"),
     (re.compile(r"转账|转给|汇款|打款"), "transfer.create", "命中『转账』模板"),
     (re.compile(r"赎回|卖出理财"), "wealth.redeem", "命中『赎回』模板"),

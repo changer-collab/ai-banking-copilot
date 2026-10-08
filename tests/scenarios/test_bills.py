@@ -1,19 +1,24 @@
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 from ai_banking_copilot.contracts.plan import validate_plan
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.seed import DEMO_USER_ID
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
+from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import QueryContext, QueryResult
 from ai_banking_copilot.scenarios.base import plan_is_pure_query
 from ai_banking_copilot.scenarios.bills import (
     ANOMALY_THRESHOLD_CENTS,
+    QUERY_HANDLERS,
     BillsHandler,
     category_share,
     category_share_in_sandbox,
     category_totals,
     large_transactions,
 )
+from ai_banking_copilot.tools.catalog import build_default_registry
 
 
 def _bills_intent() -> Intent:
@@ -93,3 +98,56 @@ def test_large_transactions_is_out_only_and_in_cents(gateway: FactGateway) -> No
 
 def test_threshold_unit_is_cents() -> None:
     assert ANOMALY_THRESHOLD_CENTS == 500_000
+
+
+def _yearly_result(gateway: FactGateway) -> QueryResult:
+    spec = build_default_registry().get("bills.yearly")
+    return QUERY_HANDLERS["bills.yearly"](
+        QueryContext(
+            gateway=gateway,
+            params={"user_id": DEMO_USER_ID, "year": 2026},
+            spec=spec,
+        )
+    )
+
+
+def test_yearly_bill_reads_two_years_of_monthly_facts(gateway: FactGateway) -> None:
+    """年度同比的出处 = **两年共 24 条**月度账单事实（H1）。"""
+    result = _yearly_result(gateway)
+    assert len(result.record_ids) == 24
+    assert len(result.provenance) == 24
+    assert len(set(result.record_ids)) == 24
+    # 种子库只有本年（2026）数据，上年无可比账单 ⇒ 白名单算子拒绝不可判，如实声明。
+    assert "同比不可判" in result.detail
+
+
+def test_yearly_bill_computes_yoy_via_whitelisted_operator(tmp_path: Path) -> None:
+    db_path = tmp_path / "yoy.db"
+    writer = Store(db_path)
+    init_schema(writer)
+    seed_database(writer)
+    with writer.transaction() as conn:
+        conn.execute(
+            "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
+            " merchant, category, channel, direction) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "txn_prior_year",
+                DEMO_USER_ID,
+                "acc_savings",
+                "2025-03-05",
+                -100000,
+                "测试商户",
+                "购物",
+                "app",
+                "out",
+            ),
+        )
+    writer.close()
+    reader = Store(db_path, StoreMode.READ_ONLY)
+    try:
+        detail = _yearly_result(FactGateway(reader)).detail
+    finally:
+        reader.close()
+    assert "支出同比" in detail
+    assert "%" in detail
+    assert "同比不可判" not in detail

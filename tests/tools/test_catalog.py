@@ -16,7 +16,9 @@ SCENARIO_ACTIONS = {
     "wealth.list",
     "card.list",
     "subscription.list",
+    "transfer.book",
     "transfer.create",
+    "transfer.request_collection",
     "transfer.schedule",
     "wealth.subscribe",
     "wealth.redeem",
@@ -120,6 +122,7 @@ MINIMUM_CANONICAL_ACTIONS = 20
 **每个新增动作的人都去改同一行**（必然冲突），与步骤 1 的目标相悖；集合仍须逐项精确。"""
 
 MONEY_ACTIONS = {
+    "transfer.book",
     "transfer.create",
     "transfer.schedule",
     "wealth.subscribe",
@@ -192,7 +195,9 @@ def test_write_actions_declare_a_required_user_id_control_slot() -> None:
     """README 裁决 #16：写动作必须声明 `user_id` 控制槽（03 的 PEP 写分派需要用户身份）。"""
     registry = build_default_registry()
     for action in (
+        "transfer.book",
         "transfer.create",
+        "transfer.request_collection",
         "transfer.schedule",
         "wealth.subscribe",
         "wealth.redeem",

@@ -80,6 +80,38 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
         money_param="amount_cents",
         description="定时转账（未来流出；执行日由 booked_on 指定）",
     ),
+    ToolSpec(
+        action="transfer.book",
+        risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
+            ParamSpec("remark", SlotKind.DATA, str, required=False),
+        ),
+        is_pure_query=False,
+        reversible=True,
+        money_param="amount_cents",
+        description="登记未来转账（登记时不扣款；到期由调度派发为 transfer.create）",
+    ),
+    ToolSpec(
+        action="transfer.request_collection",
+        risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("payer_id", SlotKind.CONTROL, str, slot_name="payer"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("note", SlotKind.DATA, str, required=False),
+        ),
+        is_pure_query=False,
+        reversible=True,
+        money_param=None,
+        description="发起 AA 收款请求（待收款，不产生资金流；与按份额转出的 transfer.create 区分）",
+    ),
 )
 
 _BILLS_SPECS: tuple[ToolSpec, ...] = (

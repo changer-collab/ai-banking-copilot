@@ -27,6 +27,7 @@ from ai_banking_copilot.gateway.models import (
     WealthProduct,
 )
 from ai_banking_copilot.gateway.store import Store, StoreMode
+from ai_banking_copilot.gateway.transfer_store import CollectionRequest, ScheduledTransfer
 
 T = TypeVar("T")
 
@@ -175,6 +176,23 @@ class FactGateway:
     def hold(self, hold_id: str) -> Record[Hold]:
         return self._hold(self._one("holds", "hold_id", hold_id))
 
+    def collection_request(self, request_id: str) -> Record[CollectionRequest]:
+        """按主键回读一条 AA 收款请求（转账线独立表；出处校验用）。"""
+        return self._collection_request(
+            self._one("collection_requests", "request_id", request_id)
+        )
+
+    def scheduled_transfers(self) -> tuple[Record[ScheduledTransfer], ...]:
+        """全部定时转账登记（按 `schedule_id` 升序，确定性；供到期派发读取）。"""
+        rows = self._store.query("SELECT * FROM scheduled_transfers ORDER BY schedule_id")
+        return tuple(self._scheduled_transfer(row) for row in rows)
+
+    def scheduled_transfer(self, schedule_id: str) -> Record[ScheduledTransfer]:
+        """按主键回读一条定时转账登记（转账线独立表；出处校验用）。"""
+        return self._scheduled_transfer(
+            self._one("scheduled_transfers", "schedule_id", schedule_id)
+        )
+
     def verify(self, record_id: str, content_hash: str) -> bool:
         """出处校验：按 `record_id` 回读事实并比对哈希（**比哈希而非比文本**）。"""
         table, _, pk = record_id.partition(":")
@@ -201,6 +219,10 @@ class FactGateway:
             return self.wealth_product(pk).content_hash
         if table == "holds":
             return self.hold(pk).content_hash
+        if table == "collection_requests":
+            return self.collection_request(pk).content_hash
+        if table == "scheduled_transfers":
+            return self.scheduled_transfer(pk).content_hash
         raise GatewayNotFoundError(f"未知记录表：{table}")
 
     def _one(self, table: str, key: str, value: str) -> sqlite3.Row:
@@ -289,6 +311,31 @@ class FactGateway:
             status=str(row["status"]),  # type: ignore[index]
         )
         return _record("holds", payload.hold_id, payload)
+
+    def _collection_request(self, row: object) -> Record[CollectionRequest]:
+        payload = CollectionRequest(
+            request_id=str(row["request_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            payer_id=str(row["payer_id"]),  # type: ignore[index]
+            amount=Money(int(row["amount_cents"])),  # type: ignore[index]
+            note=str(row["note"]),  # type: ignore[index]
+            status=str(row["status"]),  # type: ignore[index]
+            created_on=date.fromisoformat(str(row["created_on"])),  # type: ignore[index]
+        )
+        return _record("collection_requests", payload.request_id, payload)
+
+    def _scheduled_transfer(self, row: object) -> Record[ScheduledTransfer]:
+        payload = ScheduledTransfer(
+            schedule_id=str(row["schedule_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            account_id=str(row["account_id"]),  # type: ignore[index]
+            payee_id=str(row["payee_id"]),  # type: ignore[index]
+            amount=Money(int(row["amount_cents"])),  # type: ignore[index]
+            booked_on=date.fromisoformat(str(row["booked_on"])),  # type: ignore[index]
+            remark=str(row["remark"]),  # type: ignore[index]
+            status=str(row["status"]),  # type: ignore[index]
+        )
+        return _record("scheduled_transfers", payload.schedule_id, payload)
 
 
 def _record(table: str, pk: str, payload: T) -> Record[T]:

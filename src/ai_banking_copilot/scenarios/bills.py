@@ -324,22 +324,49 @@ def _category_trend(context: QueryContext) -> QueryResult:
 
 
 def _yearly_bill(context: QueryContext) -> QueryResult:
-    """年度账单：读 12 个月度事实，合计**只走算子白名单**（H1，出处=12 个 record_id）。"""
+    """年度账单（P2-1 加固）：读**本年 + 上年**各 12 条月度事实。
+
+    本年合计、上年合计各自只走 `sum` 算子；**同比**用 `yoy` 算子（H1 事实零生成，
+    出处携带两年共 24 个 `record_id`）。上年合计为 0 时 `yoy` 不应计算（白名单算子
+    **拒绝不可判**，不得编造），如实声明「同比不可判」。
+    """
     user_id = require_str(context.params, "user_id")
     year = require_int(context.params, "year")
-    months = tuple(
+    this_year = tuple(
         context.gateway.monthly_bill(user_id, year, month) for month in range(1, 13)
     )
-    expense = _annual_sum(months, lambda bill: bill.total_expense.cents)
-    income = _annual_sum(months, lambda bill: bill.total_income.cents)
-    return QueryResult(
-        record_ids=tuple(item.record_id for item in months),
-        provenance=tuple((item.record_id, item.content_hash) for item in months),
-        detail=(
-            f"{year} 年度支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
-            f"（{len(months)} 个月度账单事实合计）"
-        ),
+    last_year = tuple(
+        context.gateway.monthly_bill(user_id, year - 1, month) for month in range(1, 13)
     )
+    expense = _annual_sum(this_year, lambda bill: bill.total_expense.cents)
+    income = _annual_sum(this_year, lambda bill: bill.total_income.cents)
+    last_expense = _annual_sum(last_year, lambda bill: bill.total_expense.cents)
+    detail = (
+        f"{year} 年度支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
+        f"（{len(this_year)} 个月度账单事实合计）"
+    )
+    if last_expense.cents != 0:
+        yoy = run_operator(
+            "yoy",
+            (
+                (f"bills:{user_id}:{year:04d}", Decimal(expense.cents)),
+                (f"bills:{user_id}:{year - 1:04d}", Decimal(last_expense.cents)),
+            ),
+        )
+        detail += f"；支出同比 {_percent(yoy.value)}（上年 {last_expense.yuan} 元）"
+    else:
+        detail += f"；上年（{year - 1}）无可比账单支出，同比不可判"
+    records = (*this_year, *last_year)
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in records),
+        provenance=tuple((item.record_id, item.content_hash) for item in records),
+        detail=detail,
+    )
+
+
+def _percent(ratio: Decimal) -> str:
+    """把算子产出的比率**格式化**成百分比（只做渲染，不生成事实）。"""
+    return f"{(ratio * 100).quantize(Decimal('0.01'))}%"
 
 
 def _annual_sum(
