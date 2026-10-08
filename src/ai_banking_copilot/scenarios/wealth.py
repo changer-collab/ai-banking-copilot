@@ -253,7 +253,7 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "wealth.subscribe": _subscribe_handler,
     "wealth.redeem": _redeem_handler,
 }
-"""理财域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+"""理财域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""
 
 
 def _wealth_list(context: QueryContext) -> QueryResult:
@@ -266,4 +266,4 @@ def _wealth_list(context: QueryContext) -> QueryResult:
 
 
 QUERY_HANDLERS: Mapping[str, QueryHandler] = {"wealth.list": _wealth_list}
-"""理财域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""
+"""理财域**读**处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做）。"""

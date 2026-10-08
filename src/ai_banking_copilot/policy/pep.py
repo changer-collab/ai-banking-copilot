@@ -63,7 +63,7 @@ WriteHandler = Callable[[WriteContext], WriteReceipt]
 控制槽零信任（`_assert_taint`）、执行后出处回读（`_verify_receipt`）、收尾与审计
 （`_finish`）**全部留在 `Pep` 的包装流程里**，处理器没有机会绕过任何检查。
 
-2026-10-08（`docs/待修复清单.md` 步骤 1.5）：由**各场景模块自带**、组合根汇入，
+2026-10-08（`docs/已修复清单-2026-10-08.md` 步骤 1.5）：由**各场景模块自带**、组合根汇入，
 取代原先 `policy/pep.py` 内逐动作的 `if/elif` 代码分支。
 """
 
@@ -99,7 +99,7 @@ QueryHandler = Callable[[QueryContext], QueryResult]
 与 `WriteHandler` 同一条接缝纪律：计划成员资格、控制槽零信任、收尾与审计全部留在
 `Pep` 的包装流程里。
 
-2026-10-08（`docs/待修复清单.md` 步骤 4「残留」补做）：读分派同样由**各场景模块自带**，
+2026-10-08（`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做）：读分派同样由**各场景模块自带**，
 取代 `_execute_query` 内逐动作的 `if/elif`——此后新增**任一**动作都不再需要改 `policy/pep.py`。
 """
 
@@ -200,7 +200,7 @@ class Pep:
     def handled_actions(self) -> frozenset[str]:
         """PEP 实际**持有处理器**的动作集 = 已登记读处理器 ∪ 已登记写处理器。
 
-        取代原先手写的 `HANDLED_ACTIONS` 常量（`docs/待修复清单.md` 步骤 1.5）；
+        取代原先手写的 `HANDLED_ACTIONS` 常量（`docs/已修复清单-2026-10-08.md` 步骤 1.5）；
         2026-10-08 步骤 4「残留」补做后，读侧也由注册表派生，本方法改为**处理器键的并集**
         （此前是「注册表里的纯查询动作 ∪ 写处理器」，会把「有动作但没读处理器」谎报为可执行）。
 

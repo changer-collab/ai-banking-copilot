@@ -420,4 +420,4 @@ QUERY_HANDLERS: Mapping[str, QueryHandler] = {
     "bills.category_trend": _category_trend,
     "bills.yearly": _yearly_bill,
 }
-"""账单域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""
+"""账单域**读**处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做）。"""

@@ -21,7 +21,8 @@ from typing import Protocol, cast, runtime_checkable
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ActionKind as ActionKind
 
-# `ActionKind` 已于 2026-10-07 **下移**到 `tools/registry.py`（`docs/待修复清单.md` 步骤 1.1）：
+# `ActionKind` 已于 2026-10-07 **下移**到 `tools/registry.py`
+# （`docs/已修复清单-2026-10-08.md` 步骤 1.1）：
 # 类别是动作契约的一部分，而 `architecture.md` §6.1 规定「依赖 / 调用方向自上而下、单向」——
 # 规划层在上、执行层在下，枚举放执行层才不反向依赖。本模块顶部
 # `from ...tools.registry import ActionKind` 即其 re-export，既有引用保持不变。
@@ -43,7 +44,7 @@ def _kind_of(action: str, kind: ActionKind | None) -> ActionKind:
 ACTION_KINDS: Mapping[str, ActionKind] = {
     action: _kind_of(action, _SPECS.get(action).kind) for action in _SPECS.actions()
 }
-"""规范动作词表（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 1.4）：本计划所有模块
+"""规范动作词表（**由 02 目录派生**，见 `docs/已修复清单-2026-10-08.md` 步骤 1.4）：本计划所有模块
 （slots / net_effect / kernel）的唯一动作来源。禁止 `bill.query` 等表外动作名。
 
 派生而非手写：新增动作只需在场景模块声明 `ToolSpec.kind`，本表自动跟上——这是「各做各的、

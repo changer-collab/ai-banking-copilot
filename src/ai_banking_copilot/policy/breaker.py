@@ -13,7 +13,8 @@
 **熔断只加严、不降级（hard）**：打开后 `record_success()` 不得改回 `CLOSED`；
 **唯一**降级出口是显式 `unlock()`（调用方负责二次确认 + 留痕）。
 
-**状态可持久化**（`docs/待修复清单.md` P1-3 残留）：本模块只定义 `BreakerStateStore` 接缝与
+**状态可持久化**（`docs/已修复清单-2026-10-08.md` P1-3 残留）：本模块只定义
+`BreakerStateStore` 接缝与
 `BreakerSnapshot`；SQLite 实现在 `policy/breaker_store.py`（独立表，不并入 01 的 `SCHEMA_SQL`）。
 不注入存储时行为与原先**逐字一致**（纯进程内、零 I/O）。
 """

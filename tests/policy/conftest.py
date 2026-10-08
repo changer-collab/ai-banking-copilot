@@ -94,7 +94,8 @@ def _build_test_registry() -> ToolRegistry:
     （自建注册表，不依赖 02 的 catalog，保证 03 可独立验收）。
 
     写处理器注入生产场景模块自带的那一份（`scenarios.registry.WRITE_HANDLERS`）——03 的
-    执行分支已改为 handler 注册表（`docs/待修复清单.md` 步骤 1.5），故不再在测试里另写一套平行表。
+    执行分支已改为 handler 注册表（`docs/已修复清单-2026-10-08.md` 步骤 1.5），
+    故不再在测试里另写一套平行表。
     """
     registry = ToolRegistry()
     for spec in (

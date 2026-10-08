@@ -64,7 +64,7 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
 }
 """全部写动作处理器：**各场景模块自带**、此处只做汇合（组合根注入 PEP）。
 
-`docs/待修复清单.md` 步骤 1.5：新增一个动作 ⇒ 只改**自己那一个场景模块**（外加自己的
+`docs/已修复清单-2026-10-08.md` 步骤 1.5：新增一个动作 ⇒ 只改**自己那一个场景模块**（外加自己的
 评测用例与 `GLOSS` 条目），不再需要改 `policy/pep.py`。
 """
 
@@ -76,7 +76,8 @@ QUERY_HANDLERS: Mapping[str, QueryHandler] = {
 }
 """全部**读**动作处理器：同样**各场景模块自带**、此处只做汇合（组合根注入 PEP）。
 
-`docs/待修复清单.md` 步骤 4「残留」补做：读分派原先是 `policy/pep.py::_execute_query` 内的
+`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做：读分派原先是
+`policy/pep.py::_execute_query` 内的
 逐动作 `if/elif`，现已与写侧对称地改为注册表；**新增任一动作（读或写）都不再改 `policy/pep.py`**。
 """
 

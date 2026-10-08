@@ -243,7 +243,7 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "subscription.cancel": _cancel_handler,
     "subscription.sign": _sign_handler,
 }
-"""订阅域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+"""订阅域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""
 
 
 def _subscription_list(context: QueryContext) -> QueryResult:
@@ -256,4 +256,4 @@ def _subscription_list(context: QueryContext) -> QueryResult:
 
 
 QUERY_HANDLERS: Mapping[str, QueryHandler] = {"subscription.list": _subscription_list}
-"""订阅域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""
+"""订阅域**读**处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做）。"""

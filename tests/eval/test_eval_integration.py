@@ -14,8 +14,9 @@ MINIMUM_CANONICAL_ACTIONS = 20
 def test_action_vocabulary_is_unified_across_layers() -> None:
     """README 裁决 #15：03/04/05 的动作名集合必须两两一致。
 
-    数量取**下限**而非等号：新增规范动作是允许的（须一次改齐 6 处，见 `docs/待修复清单.md`
-    第七节），但不得少于已声明的 20 项。三处集合仍须**完全相等**——那才是真正的一致性判据。
+    数量取**下限**而非等号：新增规范动作是允许的（须一次改齐 6 处，
+    见 `docs/已修复清单-2026-10-08.md` 第七节），但不得少于已声明的 20 项。
+    三处集合仍须**完全相等**——那才是真正的一致性判据。
     """
     registry_actions = set(build_default_registry().actions())
     assert len(registry_actions) >= MINIMUM_CANONICAL_ACTIONS

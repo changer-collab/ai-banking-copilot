@@ -117,7 +117,7 @@ class ToolSpec:
     action: str
     risk: RiskClass
     kind: ActionKind | None = None
-    """**净效应类别**（cf 口径）——2026-10-07 新增（`docs/待修复清单.md` 步骤 1.1）。
+    """**净效应类别**（cf 口径）——2026-10-07 新增（`docs/已修复清单-2026-10-08.md` 步骤 1.1）。
 
     类别**不能由 `risk` 推出**：`wealth.subscribe`(OUTFLOW) 与 `wealth.redeem`(INFLOW)
     同为 `LARGE_FUNDS`；`subscription.cancel`(CANCEL_OUTFLOW) 与 `card.lock`(STATE)

@@ -165,7 +165,7 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "card.apply_virtual": _apply_virtual_handler,
     "card.set_limit": _set_limit_handler,
 }
-"""卡片域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+"""卡片域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""
 
 
 def _card_list(context: QueryContext) -> QueryResult:
@@ -178,4 +178,4 @@ def _card_list(context: QueryContext) -> QueryResult:
 
 
 QUERY_HANDLERS: Mapping[str, QueryHandler] = {"card.list": _card_list}
-"""卡片域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""
+"""卡片域**读**处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 4「残留」补做）。"""

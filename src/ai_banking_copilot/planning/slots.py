@@ -48,7 +48,7 @@ def _slots_of(spec: ToolSpec) -> tuple[str, ...]:
 REQUIRED_SLOTS: Mapping[str, tuple[str, ...]] = {
     action: _slots_of(_SPECS.get(action)) for action in _SPECS.actions()
 }
-"""动作 → 必填控制槽（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 1.3）。
+"""动作 → 必填控制槽（**由 02 目录派生**，见 `docs/已修复清单-2026-10-08.md` 步骤 1.3）。
 
 派生而非手写：新增动作只需在场景模块声明 `ToolSpec` 的参数与 `slot_name`，本表自动跟上。
 
@@ -83,7 +83,8 @@ def _slot_params() -> Mapping[str, str]:
 
 
 SLOT_PARAMS: Mapping[str, str] = _slot_params()
-"""控制槽 → `PlanNode.params` 键名（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 4「残留」）。
+"""控制槽 → `PlanNode.params` 键名（**由 02 目录派生**，
+    见 `docs/已修复清单-2026-10-08.md` 步骤 4「残留」）。
 
 派生而非手写：新增动作只需在场景模块声明 `ParamSpec.slot_name`，本表自动跟上；两套词汇
 （规划层的槽位名 / 执行层的参数名）若出现矛盾则构造期即抛，不再静默错位。"""

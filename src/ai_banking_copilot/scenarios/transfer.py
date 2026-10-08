@@ -308,4 +308,4 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "transfer.book": _book_transfer_handler,
     "transfer.request_collection": _request_collection_handler,
 }
-"""转账域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+"""转账域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""

@@ -1,14 +1,14 @@
 # 11 · P2 场景覆盖：实施规格 + 四人并行计划
 
-> **用途**：把 `docs/待修复清单.md` 第三节剩余的 5 项 P2 场景缺口做完——作为**四人并行**的
+> **用途**：把 `docs/已修复清单-2026-10-08.md` 第三节剩余的 5 项 P2 场景缺口做完——作为**四人并行**的
 > 统一规格（接口已冻结，各人不必互相等待，也不需要谈判）。
-> **依据**：`docs/待修复清单.md` 第七 / 八节、`docs/plans/README.md` 冻结面表与裁决 #25 / #26。
+> **依据**：`docs/已修复清单-2026-10-08.md` 第七 / 八节、`docs/plans/README.md` 冻结面表与裁决 #25 / #26。
 > **建立** 2026-10-08。
 
 > **⚠️ 执行说明（2026-10-08 收尾补记）**：本计划虽以「四人并行」组织，但**实际由单一执行者
 > （AI 会话）一次性全部完成**——四条分支（`feat/p2-1-3-6-transfer-line` / `feat/p2-query-eval-cases` /
 > `feat/eval-assertions-review` / `feat/p2-5-7-cross-channel`）配四个子代理**并行执行**，各自门禁全绿后
-> 合并回 `main`。故本文、`docs/待修复清单.md` 第七节、`docs/变更同步-2026-10-08.md` 中的
+> 合并回 `main`。故本文、`docs/已修复清单-2026-10-08.md` 第七节、`docs/变更同步-2026-10-08.md` 中的
 > **「甲 / 乙 / 丙 / 丁」应读作「工作流分组与文件归属」，不表示由四位团队成员分别认领与实现**。
 > 分工设计本身**已被验证有效**：四条分支确实互不阻塞，合并期只有 3 处「同一条件链上相邻加分支」的
 > 文本冲突（取并集即解）与 1 处需按新口径登记的语义冲突（`merchant` 段）。后续若真按人分工，可直接沿用本表。
@@ -147,7 +147,7 @@ place_merchant_order(*, user_id, merchant, amount: Money, order_on: date, idempo
 | 任务 | 落点 |
 |---|---|
 | 查询动作用例 | `eval/data/cases.json` 的 `cards-*` / `subs-*` / `wealth-*` / `account-*` 段：给 `card.list` / `subscription.list` / `wealth.list` / `account.balance` 各补 1–2 条 **GREEN** 用例（这些动作已有 NL 规则但缺用例） |
-| 口径复核 | 复核 README「能力子集」清单与 `docs/待修复清单.md` P2-8 结论是否仍与实现一致（**只报告，不改 README**——README 是甲的独占文件） |
+| 口径复核 | 复核 README「能力子集」清单与 `docs/已修复清单-2026-10-08.md` P2-8 结论是否仍与实现一致（**只报告，不改 README**——README 是甲的独占文件） |
 
 **不要**：新增动作；改 `scenarios/*` 的既有语义；动 `bills-*` / `derived-*` / `cross-*` 段。
 
@@ -183,8 +183,8 @@ place_merchant_order(*, user_id, merchant, amount: Money, order_on: date, idempo
 4. **集成**：按 甲 → 丁 → 乙 → 丙 顺序合并进 `main`（先合共享文件改动多的），
    逐次解决冲突并跑全量 `pytest`；冲突集中在分段共享文件，**不得**为了合并而放宽断言。
 5. **收口**：合并后在主树跑**全部门禁**（含 `check_served_page` / `e2e_check` / `check_design_sync`），
-   重启服务，逐条更新 `docs/待修复清单.md` 第三节状态与 README 口径。
+   重启服务，逐条更新 `docs/已修复清单-2026-10-08.md` 第三节状态与 README 口径。
 
 ---
 
-*本规格与 `docs/待修复清单.md` 冲突时，以本文件为准（接口部分）；清单仍是任务台账。*
+*本规格与 `docs/已修复清单-2026-10-08.md` 冲突时，以本文件为准（接口部分）；清单仍是任务台账。*
