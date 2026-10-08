@@ -1,4 +1,15 @@
-from ai_banking_copilot.eval.dataset import EVAL_DATA_DIR, LEVEL_NAMES, NO_LEVEL, load_cases
+import json
+
+from ai_banking_copilot.eval.dataset import (
+    CASE_FILES,
+    EVAL_DATA_DIR,
+    LEVEL_NAMES,
+    MUST_PASS_IDS,
+    NO_LEVEL,
+    load_cases,
+    load_default_cases,
+)
+from ai_banking_copilot.scenarios.registry import SCENARIO_HANDLERS
 
 REQUIRED_CATEGORIES = {
     "transfer",
@@ -11,9 +22,25 @@ REQUIRED_CATEGORIES = {
     "new_user_day1",
 }
 
+_ADVERSARIAL_CATEGORIES = {"injection", "overreach", "hallucination", "yield_hint"}
+"""对抗样例的 category（与 `adversarial.json` 一致；不是场景名，属评测链专用）。"""
+
+_LEVEL_ONLY_CATEGORIES = {"derived", "new_user_day1"}
+"""评测链专用的复合 category：它们不直接对应某个场景，而由既有动作链路承接
+（`derived` → `bills.monthly` 派生数字路径；`new_user_day1` → 各场景首日路径）。"""
+
 
 def _cases() -> tuple:
     return load_cases(EVAL_DATA_DIR / "cases.json")
+
+
+def _raw_items() -> list[dict[str, object]]:
+    """直接读用例文件的原始 JSON 条目（校验落盘数据，而非仅校验加载器）。"""
+    items: list[dict[str, object]] = []
+    for name in CASE_FILES:
+        raw = json.loads((EVAL_DATA_DIR / name).read_text(encoding="utf-8"))
+        items.extend(raw)
+    return items
 
 
 def test_standard_case_count_is_within_target_range() -> None:
@@ -40,3 +67,33 @@ def test_standard_cases_have_unique_ids_and_non_empty_utterances() -> None:
 def test_standard_cases_cover_all_three_colors_and_absorption() -> None:
     levels = {case.expect_level for case in _cases()}
     assert {"GREEN", "YELLOW", "RED", "DENY"} <= levels
+
+
+def test_every_category_is_served_by_a_scenario_or_eval_chain() -> None:
+    """不存在「孤儿 category」：每个 category 要么是某个场景处理器的承接域，
+    要么是显式登记的评测链专用类别（复合链路 / 对抗样例）。"""
+    scenario_names = {handler.name for handler in SCENARIO_HANDLERS}
+    known = scenario_names | _LEVEL_ONLY_CATEGORIES | _ADVERSARIAL_CATEGORIES
+    orphan = {case.category for case in load_default_cases()} - known
+    assert orphan == set(), f"孤儿 category（无场景/链路承接）：{sorted(orphan)}"
+
+
+def test_expect_blocked_and_level_combination_is_legal_in_data() -> None:
+    """`expect_level` 与 `expect_blocked` 的组合在**落盘数据**里必须合法：
+    期望拦截 ⇒ 不产级别（`NONE`）；未期望拦截 ⇒ 不得为 `NONE`。"""
+    for item in _raw_items():
+        case_id = item["id"]
+        level = str(item["expect_level"])
+        blocked = bool(item["expect_blocked"])
+        assert level in (*LEVEL_NAMES, NO_LEVEL), f"{case_id} 级别非法：{level}"
+        if blocked:
+            assert level == NO_LEVEL, f"{case_id}：期望拦截时级别必须是 {NO_LEVEL}"
+        else:
+            assert level != NO_LEVEL, f"{case_id}：未期望拦截时级别不得为 {NO_LEVEL}"
+
+
+def test_must_pass_anchor_ids_exist_in_default_suite() -> None:
+    """must-pass 外部锚所覆盖的用例 id 必须都存在于默认集（否则外部锚形同虚设）。"""
+    default_ids = {case.id for case in load_default_cases()}
+    missing = [anchor_id for anchor_id in MUST_PASS_IDS if anchor_id not in default_ids]
+    assert missing == [], f"must-pass 外部锚不在默认集：{missing}"
