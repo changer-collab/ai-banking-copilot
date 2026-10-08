@@ -230,7 +230,7 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
     if node.action == "bills.yearly":
         year = node.params.get("year")
         if isinstance(year, int) and not isinstance(year, bool):
-            return f"{year}-01~{year}-12"
+            return f"{year}-01~{year}-{bills.ytd_end_month(year):02d}"
         return "—"
     if node.action == "subscription.list":
         user_id = _str_param(node, "user_id")

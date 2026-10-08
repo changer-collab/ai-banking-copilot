@@ -32,6 +32,7 @@
   {"id": "bills-yearly-green", "utterance": "看看我的年度账单", "expect_level": "GREEN", "expect_blocked": false, "category": "bills"},
   {"id": "bills-yearly-green-2", "utterance": "帮我做一下今年的年度账单", "expect_level": "GREEN", "expect_blocked": false, "category": "bills"},
   {"id": "bills-yearly-yoy-green", "utterance": "看看今年的年度账单同比", "expect_level": "GREEN", "expect_blocked": false, "category": "bills"},
+  {"id": "bills-yearly-yoy-green-2", "utterance": "看看全年账单的同期同比", "expect_level": "GREEN", "expect_blocked": false, "category": "bills"},
   {"id": "derived-share-1", "utterance": "分析一下我的账单", "expect_level": "GREEN", "expect_blocked": false, "category": "derived"},
   {"id": "derived-share-2", "utterance": "看看上月消费明细", "expect_level": "GREEN", "expect_blocked": false, "category": "derived"},
   {"id": "derived-share-3", "utterance": "我这个月花了多少钱", "expect_level": "GREEN", "expect_blocked": false, "category": "derived"},

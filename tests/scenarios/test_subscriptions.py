@@ -120,8 +120,10 @@ def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> 
     charges = detected_charges(gateway, DEMO_USER_ID)
     assert [charge.merchant for charge in charges] == ["视频会员"]
     assert charges[0].subscription_id == "sub_video"
-    assert charges[0].txn_count == 3
-    assert charges[0].total.cents == 7500
+    # 覆盖区间扩为 2025-01..2026-09 后，该商户每月 1 笔 ⇒ 共 21 笔；
+    # 2025（系数 85）为 -2125 分/笔、2026 为 -2500 分/笔，合计 48000 分（数据覆盖变化，非放宽）。
+    assert charges[0].txn_count == 21
+    assert charges[0].total.cents == 48000
     assert charges[0].last_booked_on == date(2026, 9, 18)
     assert "识别到 1 项订阅扣费" in describe_detected_charges(charges)
 
