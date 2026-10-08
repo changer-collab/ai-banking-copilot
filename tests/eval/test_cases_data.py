@@ -29,6 +29,14 @@ _LEVEL_ONLY_CATEGORIES = {"derived", "new_user_day1"}
 """评测链专用的复合 category：它们不直接对应某个场景，而由既有动作链路承接
 （`derived` → `bills.monthly` 派生数字路径；`new_user_day1` → 各场景首日路径）。"""
 
+_CAPABILITY_SUBSET_CATEGORIES = {"merchant"}
+"""**声明为能力子集**的动作（无 NL 触发规则、无单域处理器）的**负例** category。
+
+`merchant.order` 目前只由联动路径（`cross.birthday_plan`）构造、**不可口述触达**，故该段用例期望
+「未知意图 → 安全拒绝」（`blocked=True` / `NONE`）——承接者是**安全拒绝路径**，不是场景域。
+它锁定的是「该动作目前不可口述触达」这一事实；
+等实现补齐（加 NL 规则 + 单域 handler）后应移出本集合。"""
+
 
 def _cases() -> tuple:
     return load_cases(EVAL_DATA_DIR / "cases.json")
@@ -71,9 +79,14 @@ def test_standard_cases_cover_all_three_colors_and_absorption() -> None:
 
 def test_every_category_is_served_by_a_scenario_or_eval_chain() -> None:
     """不存在「孤儿 category」：每个 category 要么是某个场景处理器的承接域，
-    要么是显式登记的评测链专用类别（复合链路 / 对抗样例）。"""
+    要么是显式登记的评测链专用类别（复合链路 / 对抗样例 / 能力子集负例）。"""
     scenario_names = {handler.name for handler in SCENARIO_HANDLERS}
-    known = scenario_names | _LEVEL_ONLY_CATEGORIES | _ADVERSARIAL_CATEGORIES
+    known = (
+        scenario_names
+        | _LEVEL_ONLY_CATEGORIES
+        | _ADVERSARIAL_CATEGORIES
+        | _CAPABILITY_SUBSET_CATEGORIES
+    )
     orphan = {case.category for case in load_default_cases()} - known
     assert orphan == set(), f"孤儿 category（无场景/链路承接）：{sorted(orphan)}"
 
