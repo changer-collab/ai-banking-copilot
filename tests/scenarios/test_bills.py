@@ -111,35 +111,59 @@ def _yearly_result(gateway: FactGateway) -> QueryResult:
     )
 
 
-def test_yearly_bill_reads_two_years_of_monthly_facts(gateway: FactGateway) -> None:
-    """年度同比的出处 = **两年共 24 条**月度账单事实（H1）。"""
+def test_yearly_bill_reads_same_period_of_two_years(gateway: FactGateway) -> None:
+    """年度**同期同比**的出处 = 本年与上年**同期区间**各自的月度账单事实（H1）。"""
     result = _yearly_result(gateway)
-    assert len(result.record_ids) == 24
-    assert len(result.provenance) == 24
-    assert len(set(result.record_ids)) == 24
-    # 种子库只有本年（2026）数据，上年无可比账单 ⇒ 白名单算子拒绝不可判，如实声明。
-    assert "同比不可判" in result.detail
+    # 基准月 = 2026-09（基准时钟 2026-10-01 的前一月）⇒ 本年 1–9 月 + 上年 1–9 月 = 18 条。
+    assert len(result.record_ids) == 18
+    assert len(result.provenance) == 18
+    assert len(set(result.record_ids)) == 18
+    assert "同期同比口径" in result.detail
+    assert "2026 年 1–9 月" in result.detail
+    # 种子库含 2025 年同期数据 ⇒ 产出**真实百分比**（2026 支出为 2025 的 100/85 ⇒ +17.65%）。
+    assert "同比不可判" not in result.detail
+    assert "+17.65%" in result.detail
 
 
-def test_yearly_bill_computes_yoy_via_whitelisted_operator(tmp_path: Path) -> None:
-    db_path = tmp_path / "yoy.db"
+def test_yearly_bill_reports_no_prior_period_without_calling_operator(tmp_path: Path) -> None:
+    """上年同期**完全无流水事实** ⇒ 不调用算子，如实声明「无可比数据」。"""
+    db_path = tmp_path / "no_prior.db"
     writer = Store(db_path)
     init_schema(writer)
     seed_database(writer)
     with writer.transaction() as conn:
+        conn.execute("DELETE FROM transactions WHERE booked_on < '2026-01-01'")
+    writer.close()
+    reader = Store(db_path, StoreMode.READ_ONLY)
+    try:
+        detail = _yearly_result(FactGateway(reader)).detail
+    finally:
+        reader.close()
+    assert "上年同期" in detail
+    assert "无可比数据" in detail
+
+
+def test_yearly_bill_refuses_yoy_when_prior_period_sums_to_zero(tmp_path: Path) -> None:
+    """上年同期**有事实但支出合计为 0** ⇒ 照走算子、由算子拒绝除零，如实输出「不可判」。"""
+    db_path = tmp_path / "zero_prior.db"
+    writer = Store(db_path)
+    init_schema(writer)
+    seed_database(writer)
+    with writer.transaction() as conn:
+        conn.execute("DELETE FROM transactions WHERE booked_on < '2026-01-01'")
         conn.execute(
             "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
             " merchant, category, channel, direction) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "txn_prior_year",
+                "txn_prior_income",
                 DEMO_USER_ID,
                 "acc_savings",
                 "2025-03-05",
-                -100000,
+                100000,
                 "测试商户",
-                "购物",
-                "app",
-                "out",
+                "工资",
+                "bank",
+                "in",
             ),
         )
     writer.close()
@@ -148,6 +172,5 @@ def test_yearly_bill_computes_yoy_via_whitelisted_operator(tmp_path: Path) -> No
         detail = _yearly_result(FactGateway(reader)).detail
     finally:
         reader.close()
-    assert "支出同比" in detail
-    assert "%" in detail
-    assert "同比不可判" not in detail
+    assert "支出合计为 0" in detail
+    assert "同比不可判" in detail

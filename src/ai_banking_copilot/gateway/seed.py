@@ -49,8 +49,25 @@ _SUBSCRIPTIONS = (
     ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active"),
 )
 
-_SEED_MONTHS = (7, 8, 9)
-_SEED_YEAR = 2026
+_SEED_FIRST: tuple[int, int] = (2025, 1)
+_SEED_LAST: tuple[int, int] = (2026, 9)
+"""流水覆盖区间（含两端）：`2025-01 .. 2026-09`，共 **21 个月**。
+
+**基准月 = `2026-09`**：等于 `scenarios.scheduling.REFERENCE_DATE`
+（= `gateway.core_bank.DEFAULT_BOOKING_DATE` = `2026-10-01`）**所在月的前一个月**，
+与 `scenarios.bills._period` 的缺省账期口径一致——账期只到最近一个**完整月份**为止。
+分层纪律：种子层（gateway）**不得** import 上层（scenarios），故此处用与基准时钟一致的
+**显式常量**，并由 `tests/gateway/test_seed.py` 守卫「与该基准时钟一致」。
+"""
+
+_YEAR_SCALE: dict[int, int] = {2025: 85, 2026: 100}
+"""按**年**的确定性整数缩放系数（百分比）：金额 = `cents * scale // 100`。
+
+零随机、可复现。`2026 = 100` ⇒ 既有 24 条流水**逐字段不变**（避免连锁破坏既有精确数值断言）；
+`2025 = 85` ⇒ 上年同期支出为本年的 85%，使年度**同期同比**产出真实百分比
+（`(100 - 85) / 85 = 17.65%`）。`_TXN_SPECS` 的金额均为 20 的倍数，缩放后仍为整数分
+（无浮点、无舍入误差）。
+"""
 
 _TXN_SPECS = (
     # (day, account_id, amount_cents, category, merchant, channel)
@@ -106,22 +123,39 @@ def seed_database(store: Store) -> None:
         conn.execute("INSERT INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,))
 
 
+def _seed_months() -> tuple[tuple[int, int], ...]:
+    """覆盖区间内的全部 `(年, 月)`，按时间升序（确定性）。"""
+    start_year, start_month = _SEED_FIRST
+    end_year, end_month = _SEED_LAST
+    periods: list[tuple[int, int]] = []
+    year, month = start_year, start_month
+    while (year, month) <= (end_year, end_month):
+        periods.append((year, month))
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return tuple(periods)
+
+
 def _build_transactions() -> tuple[tuple[object, ...], ...]:
     rows: list[tuple[object, ...]] = []
-    for month in _SEED_MONTHS:
+    for year, month in _seed_months():
+        scale = _YEAR_SCALE[year]
         for day, account_id, cents, category, merchant, channel in _TXN_SPECS:
-            booked_on = date(_SEED_YEAR, month, day).isoformat()
+            amount_cents = cents * scale // 100
+            booked_on = date(year, month, day).isoformat()
             rows.append(
                 (
-                    f"txn_{_SEED_YEAR}{month:02d}{day:02d}",
+                    f"txn_{year}{month:02d}{day:02d}",
                     DEMO_USER_ID,
                     account_id,
                     booked_on,
-                    cents,
+                    amount_cents,
                     merchant,
                     category,
                     channel,
-                    "out" if cents < 0 else "in",
+                    "out" if amount_cents < 0 else "in",
                 )
             )
     return tuple(rows)

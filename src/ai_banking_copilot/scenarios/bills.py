@@ -21,6 +21,7 @@ from ai_banking_copilot.contracts.plan import (
     validate_plan,
 )
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
+from ai_banking_copilot.gateway.errors import OperatorError
 from ai_banking_copilot.gateway.facts import FactGateway, Record
 from ai_banking_copilot.gateway.models import BillSummary, Money, Transaction
 from ai_banking_copilot.gateway.operators import DerivedValue, run_operator
@@ -47,6 +48,7 @@ from ai_banking_copilot.scenarios.base import (
     grant_anchor,
     require_trusted,
 )
+from ai_banking_copilot.scenarios.scheduling import REFERENCE_DATE
 
 BILLS_ACTIONS = frozenset(
     {
@@ -323,39 +325,69 @@ def _category_trend(context: QueryContext) -> QueryResult:
     )
 
 
-def _yearly_bill(context: QueryContext) -> QueryResult:
-    """年度账单（P2-1 加固）：读**本年 + 上年**各 12 条月度事实。
+def ytd_end_month(year: int) -> int:
+    """同期同比的**基准月**：只来自唯一基准时钟（`scenarios.scheduling.REFERENCE_DATE`）。
 
-    本年合计、上年合计各自只走 `sum` 算子；**同比**用 `yoy` 算子（H1 事实零生成，
-    出处携带两年共 24 个 `record_id`）。上年合计为 0 时 `yoy` 不应计算（白名单算子
-    **拒绝不可判**，不得编造），如实声明「同比不可判」。
+    基准时钟为 `2026-10-01`，其**所在月的前一个月**（`2026-09`）即最近一个完整账期，
+    与 `_period` 的缺省账期口径一致。**仅当请求年份等于基准年时**取 YTD（`1..基准月`）；
+    其余年份按**整年**（`1..12`，历史完整年），否则口径不可比。
+    """
+    if year == REFERENCE_DATE.year:
+        return _previous_month(REFERENCE_DATE.year, REFERENCE_DATE.month)[1]
+    return 12
+
+
+def _yearly_bill(context: QueryContext) -> QueryResult:
+    """年度账单（P2-1 加固）：**同期（YTD）同比**。
+
+    本金区间 = 本年 `1 月 .. 基准月`，对照区间 = 上年 `1 月 .. 同月`；两个区间的月度账单事实
+    **各自只走 `sum` 算子**，同比走 `yoy` 算子（H1 事实零生成，出处携带两个区间全部
+    `record_id`）。基准月只来自 `scenarios.scheduling.REFERENCE_DATE`。
+
+    **两种「不可比」区分对待**：
+    - 上年同期**完全没有任何流水事实**（月度账单事实的笔数合计 = 0）⇒ **不调用算子**，
+      如实声明「上年同期无可比数据」；
+    - 上年同期**有事实但支出合计 = 0** ⇒ 照走算子，由算子拒绝（除零）后如实输出「不可判」。
     """
     user_id = require_str(context.params, "user_id")
     year = require_int(context.params, "year")
-    this_year = tuple(
-        context.gateway.monthly_bill(user_id, year, month) for month in range(1, 13)
-    )
+    end_month = ytd_end_month(year)
+    months = tuple(range(1, end_month + 1))
+    this_year = tuple(context.gateway.monthly_bill(user_id, year, month) for month in months)
     last_year = tuple(
-        context.gateway.monthly_bill(user_id, year - 1, month) for month in range(1, 13)
+        context.gateway.monthly_bill(user_id, year - 1, month) for month in months
     )
     expense = _annual_sum(this_year, lambda bill: bill.total_expense.cents)
     income = _annual_sum(this_year, lambda bill: bill.total_income.cents)
     last_expense = _annual_sum(last_year, lambda bill: bill.total_expense.cents)
     detail = (
-        f"{year} 年度支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
-        f"（{len(this_year)} 个月度账单事实合计）"
+        f"{year} 年 1–{end_month} 月支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
+        f"（{len(this_year)} 个月度账单事实，同期同比口径）"
     )
-    if last_expense.cents != 0:
-        yoy = run_operator(
-            "yoy",
-            (
-                (f"bills:{user_id}:{year:04d}", Decimal(expense.cents)),
-                (f"bills:{user_id}:{year - 1:04d}", Decimal(last_expense.cents)),
-            ),
-        )
-        detail += f"；支出同比 {_percent(yoy.value)}（上年 {last_expense.yuan} 元）"
+    last_fact_count = sum(
+        item.txn_count for record in last_year for item in record.payload.by_category
+    )
+    if last_fact_count == 0:
+        detail += f"；上年同期（{year - 1} 年 1–{end_month} 月）无可比数据，同比不可判"
     else:
-        detail += f"；上年（{year - 1}）无可比账单支出，同比不可判"
+        try:
+            yoy = run_operator(
+                "yoy",
+                (
+                    (f"bills:{user_id}:{year:04d}-YTD", Decimal(expense.cents)),
+                    (f"bills:{user_id}:{year - 1:04d}-YTD", Decimal(last_expense.cents)),
+                ),
+            )
+        except OperatorError:
+            detail += (
+                f"；上年同期（{year - 1} 年 1–{end_month} 月）支出合计为 0，"
+                "白名单算子拒绝除以零，同比不可判"
+            )
+        else:
+            detail += (
+                f"；较去年同期（上年同期支出 {last_expense.yuan} 元）"
+                f"{_signed_percent(yoy.value)}"
+            )
     records = (*this_year, *last_year)
     return QueryResult(
         record_ids=tuple(item.record_id for item in records),
@@ -364,9 +396,10 @@ def _yearly_bill(context: QueryContext) -> QueryResult:
     )
 
 
-def _percent(ratio: Decimal) -> str:
-    """把算子产出的比率**格式化**成百分比（只做渲染，不生成事实）。"""
-    return f"{(ratio * 100).quantize(Decimal('0.01'))}%"
+def _signed_percent(ratio: Decimal) -> str:
+    """把算子产出的比率**格式化**成带符号百分比（只做渲染，不生成事实）。"""
+    rendered = f"{(ratio * 100).quantize(Decimal('0.01'))}"
+    return f"+{rendered}%" if ratio >= 0 else f"{rendered}%"
 
 
 def _annual_sum(
