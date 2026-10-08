@@ -994,8 +994,10 @@ def _intent_span(intent: Intent, utterance: str) -> str:
     return utterance
 
 
-_DATE_PARAMS = frozenset({"booked_on", "start", "end"})
-"""需要从 ISO 文本还原为 `date` 的工具参数（02 目录声明为 `date`，计划节点里是 ISO 字符串）。"""
+_DATE_PARAMS = frozenset({"booked_on", "start", "end", "order_on"})
+"""需要从 ISO 文本还原为 `date` 的工具参数（02 目录声明为 `date`，计划节点里是 ISO 字符串）。
+
+`order_on`（`merchant.order` 的订单日期）由**场景层**装配为 ISO 文本，同样需在此还原。"""
 
 
 def _convert_param(name: str, raw: object) -> object:

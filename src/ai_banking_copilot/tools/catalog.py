@@ -335,6 +335,28 @@ _CROSS_SPECS: tuple[ToolSpec, ...] = (
     ),
 )
 
+_MERCHANT_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        action="merchant.order",
+        risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.OUTFLOW,
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("merchant", SlotKind.CONTROL, str, slot_name="merchant"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            # 规格 §2.2 的 `slot_name=when` 与 transfer 的 `when → booked_on` 在**由目录派生的**
+            # `planning.slots.SLOT_PARAMS` 里冲突（同名槽位不得映射到不同参数名，构造期即抛）。
+            # 故这里声明为 `slot_name=None`：订单日期由**场景层**（`scenarios.cross.birthday_plan`）
+            # 填充，规划层不补全——与 `ParamSpec.slot_name` 的判据（「是否由规划层补全」）一致。
+            ParamSpec("order_on", SlotKind.CONTROL, date),
+        ),
+        is_pure_query=False,
+        reversible=False,
+        money_param="amount_cents",
+        description="向商户下单（生日联动：生日前 2 天下单；不可逆流出）",
+    ),
+)
+
 _SCENARIO_SPECS: tuple[ToolSpec, ...] = (
     _TRANSFER_SPECS
     + _BILLS_SPECS
@@ -342,6 +364,7 @@ _SCENARIO_SPECS: tuple[ToolSpec, ...] = (
     + _CARDS_SPECS
     + _SUBSCRIPTION_SPECS
     + _CROSS_SPECS
+    + _MERCHANT_SPECS
 )
 
 

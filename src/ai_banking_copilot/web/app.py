@@ -69,12 +69,18 @@ class AppDeps:
     """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
 
 
+DEFAULT_SESSION_ID = "default"
+"""缺省会话标识：请求体未带 `session_id` 时用它，保持既有单会话行为不变（多会话隔离的兜底）。"""
+
+
 class _SubmitRequest(BaseModel):
     utterance: str
     selected: dict[str, object] | None = None
     session_anomaly: bool = False
     """会话异常（设备 / 地点跳变）。**生产环境应由渠道风控判定后注入，不得直接取自客户端载荷**；
     演示渠道无风控模块，故开放该字段以便现场演示熔断触发 5。"""
+    session_id: str = DEFAULT_SESSION_ID
+    """会话标识：不同取值对应**相互隔离**的会话（各自 pending / 状态机独立）。"""
 
 
 class _ConfirmRequest(BaseModel):
@@ -82,27 +88,42 @@ class _ConfirmRequest(BaseModel):
     frozen_hash: str
     verification_code: str | None = None
     steps: int | None = None
+    session_id: str = DEFAULT_SESSION_ID
 
 
 class _ClarifyRequest(BaseModel):
     """澄清补充答案：`槽位名 → 值`（与 `selected` 同口径）。"""
 
     answers: dict[str, object] = {}
+    session_id: str = DEFAULT_SESSION_ID
 
 
 class _EmptyRequest(BaseModel):
     """空请求体（中断 / 恢复 / 回退）。"""
 
+    session_id: str = DEFAULT_SESSION_ID
+
 
 def create_app(deps: AppDeps) -> FastAPI:
-    """装配单页渠道。计划卡与执行全部来自上游；本层只做 HTTP 与序列化。"""
+    """装配单页渠道。计划卡与执行全部来自上游；本层只做 HTTP 与序列化。
+
+    **多会话（P2-7）**：按 `session_id` 维护**相互隔离**的 `Session`（缺省 `DEFAULT_SESSION_ID`
+    保持既有单会话行为）；`AppDeps` 的字段签名不变（上游依赖仍由组合根注入一次）。
+    """
     app = FastAPI(title="AI 银行副驾 · Web 渠道", version="0.1.0")
     app.mount(
         "/assets",
         StaticFiles(directory=str(Path(__file__).parent / "assets")),
         name="assets",
     )
-    session = Session(deps)
+    sessions: dict[str, Session] = {}
+
+    def _session_for(session_id: str) -> Session:
+        session = sessions.get(session_id)
+        if session is None:
+            session = Session(deps)
+            sessions[session_id] = session
+        return session
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -110,7 +131,7 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.post("/api/submit")
     def submit(request: _SubmitRequest) -> dict[str, object]:
-        view = session.submit(
+        view = _session_for(request.session_id).submit(
             request.utterance,
             selected=request.selected,
             session_anomaly=request.session_anomaly,
@@ -121,7 +142,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     def clarify(request: _ClarifyRequest) -> dict[str, object]:
         """澄清闭环：用补充答案重跑上一条指令，用户无需整句重述。"""
         try:
-            view = session.clarify(request.answers)
+            view = _session_for(request.session_id).clarify(request.answers)
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _submission_payload(view)
@@ -134,7 +155,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         校验为服务端一次性 + TTL + 与冻结计划绑定，接入真实渠道只需替换下发一步。
         """
         try:
-            prompt = session.request_verification()
+            prompt = _session_for(request.session_id).request_verification()
         except (SessionStateError, StrongVerificationRequiredError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -147,7 +168,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/api/confirm")
     def confirm(request: _ConfirmRequest) -> dict[str, object]:
         try:
-            view = session.confirm(
+            view = _session_for(request.session_id).confirm(
                 request.card_id,
                 frozen_hash=request.frozen_hash,
                 verification_code=request.verification_code,
@@ -165,7 +186,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/api/interrupt")
     def interrupt(request: _EmptyRequest) -> dict[str, object]:
         try:
-            view = session.interrupt()
+            view = _session_for(request.session_id).interrupt()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _session_payload(view)
@@ -173,7 +194,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/api/resume")
     def resume(request: _EmptyRequest) -> dict[str, object]:
         try:
-            view = session.resume()
+            view = _session_for(request.session_id).resume()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _execution_payload(view)
@@ -182,7 +203,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     def reverse(request: _EmptyRequest) -> dict[str, object]:
         """回退：对本次执行逐条走补偿事务（无 `settled` 参数：模拟核心银行执行即结算）。"""
         try:
-            outcome = session.reverse()
+            outcome = _session_for(request.session_id).reverse()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -192,9 +213,9 @@ def create_app(deps: AppDeps) -> FastAPI:
         }
 
     @app.get("/api/takeover")
-    def takeover() -> dict[str, object]:
+    def takeover(session_id: str = DEFAULT_SESSION_ID) -> dict[str, object]:
         try:
-            package = session.takeover_package()
+            package = _session_for(session_id).takeover_package()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _takeover_payload(package)

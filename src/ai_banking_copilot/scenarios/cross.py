@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import date
 
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
@@ -28,12 +29,14 @@ from ai_banking_copilot.contracts.plan import (
 from ai_banking_copilot.gateway.core_bank import WriteReceipt
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import (
     WriteContext,
     WriteHandler,
     money_cents,
+    require_date,
     require_str,
 )
 from ai_banking_copilot.scenarios.base import (
@@ -47,6 +50,7 @@ from ai_banking_copilot.scenarios.base import (
 )
 from ai_banking_copilot.scenarios.bills import BillsHandler
 from ai_banking_copilot.scenarios.cards import CardsHandler
+from ai_banking_copilot.scenarios.scheduling import ScheduledItem, due_date, plan_due
 from ai_banking_copilot.scenarios.subscriptions import SubscriptionsHandler
 from ai_banking_copilot.scenarios.transfer import TransferHandler, build_money_node
 from ai_banking_copilot.scenarios.wealth import WealthHandler
@@ -254,6 +258,55 @@ def _build_freeze_node(node_id: str, intent: Intent, ledger: AnchorLedger) -> Pl
     )
 
 
+BIRTHDAY_MERCHANT = "鲜花礼品店"
+"""生日联动的演示商户名（**代码常量**，非 LLM 生成）。"""
+
+BIRTHDAY_ORDER_CENTS = 29900
+"""生日联动的演示下单金额（分）：299 元，走 `merchant.order` 的金额档（LARGE_FUNDS）。"""
+
+_BIRTHDAY_LEAD_DAYS = 2
+"""「生日前 N 天」的提前量（P2-5）。"""
+
+
+def birthday_plan(gateway: FactGateway, as_of: date) -> tuple[PlanNode, ...]:
+    """生日联动：**到期则**装配「生日前 2 天 → `merchant.order`」的下单节点（P2-5）。
+
+    日期算术**一律走公共调度** `scenarios.scheduling`（`due_date(..., lead_days=2)` +
+    `plan_due`），不另写一套；基准时钟只取入参 `as_of`（演示 / 评测统一用
+    `scheduling.REFERENCE_DATE`）。生日数据源 = `user_profiles`（**演示播种值**，非真实客户资料）。
+    """
+    profile = gateway.user_profile(DEMO_USER_ID)
+    if profile is None:
+        return ()
+    birthday = _birthday_in_year(profile.payload.birthday, as_of.year)
+    if birthday is None:
+        return ()
+    order_on = due_date(birthday, lead_days=_BIRTHDAY_LEAD_DAYS)
+    item = ScheduledItem(
+        key=f"birthday:{DEMO_USER_ID}",
+        due_on=order_on,
+        action="merchant.order",
+        params={
+            "merchant": BIRTHDAY_MERCHANT,
+            "amount_cents": BIRTHDAY_ORDER_CENTS,
+            "order_on": order_on.isoformat(),
+        },
+    )
+    return plan_due((item,), as_of=as_of, ledger=AnchorLedger(), node_prefix="order")
+
+
+def _birthday_in_year(birthday: str, year: int) -> date | None:
+    """把 `MM-DD` 生日转成本年对应日；格式非法 / 非闰年 2-29 一律返回 `None`（不猜）。"""
+    parts = birthday.split("-")
+    if len(parts) != 2:
+        return None
+    try:
+        month, day = int(parts[0]), int(parts[1])
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 def _freeze_handler(context: WriteContext) -> WriteReceipt:
     """把 `funds.freeze` 映射到 `CoreBank.freeze_funds`。"""
     return context.core_bank.freeze_funds(
@@ -272,8 +325,20 @@ def _release_handler(context: WriteContext) -> WriteReceipt:
     )
 
 
+def _merchant_order_handler(context: WriteContext) -> WriteReceipt:
+    """把 `merchant.order` 映射到 `CoreBank.place_merchant_order`。"""
+    return context.core_bank.place_merchant_order(
+        user_id=require_str(context.params, "user_id"),
+        merchant=require_str(context.params, "merchant"),
+        amount=Money(money_cents(context.params, context.spec)),
+        order_on=require_date(context.params, "order_on"),
+        idempotency_key=context.idempotency_key,
+    )
+
+
 WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "funds.freeze": _freeze_handler,
     "funds.release": _release_handler,
+    "merchant.order": _merchant_order_handler,
 }
-"""`funds.*` 域写处理器（随该域场景模块自带；组合根汇入 PEP）。"""
+"""`funds.*` / `merchant.order` 域写处理器（随该域场景模块自带；组合根汇入 PEP）。"""

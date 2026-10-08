@@ -27,6 +27,7 @@ SCENARIO_ACTIONS = {
     "card.report_lost",
     "card.apply_virtual",
     "card.set_limit",
+    "merchant.order",
 }
 
 PURE_QUERY_ACTIONS = {
@@ -128,6 +129,7 @@ MONEY_ACTIONS = {
     "card.apply_virtual",
     "card.set_limit",
     "funds.freeze",
+    "merchant.order",
 }
 
 
@@ -149,6 +151,7 @@ def test_every_scenario_domain_appears() -> None:
         "card",
         "subscription",
         "funds",
+        "merchant",
     } <= prefixes
 
 

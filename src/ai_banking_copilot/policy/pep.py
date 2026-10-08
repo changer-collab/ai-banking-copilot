@@ -474,6 +474,8 @@ def _read_hash(gateway: FactGateway, record_id: str) -> str:
         return gateway.subscription(primary_key).content_hash
     if table == "transactions":
         return gateway.transaction(primary_key).content_hash
+    if table == "merchant_orders":
+        return gateway.merchant_order(primary_key).content_hash
     raise GatewayError(f"未知记录表：{table}")
 
 

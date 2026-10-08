@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.core_bank import CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed_user_profiles
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
     init_risk_schema,
@@ -140,6 +141,8 @@ def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
     seed_database(writer)
     init_risk_schema(writer)
     seed_risk_assessment(writer)
+    init_merchant_schema(writer)
+    seed_user_profiles(writer)
     init_breaker_schema(writer)
     writer.close()
 
