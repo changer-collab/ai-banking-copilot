@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。其中的 `Pep(...)` 装配片段已过时——现行签名为 `Pep(registry, gateway, core_bank, audit, breaker, write_handlers, query_handlers)`（两者由组合根分别从 `scenarios.registry.WRITE_HANDLERS` / `QUERY_HANDLERS` 注入），见 [README.md](README.md) 冻结面表与**裁决 #25 / #26**。
+
 **Goal:** 让交付入口真正装配"真模型优先 + 失败自动降级模板"的意图通道（消除 G10：入口只装模板、LLM 通道 `src` 零引用、`DASHSCOPE_API_KEY` 无消费者）。
 
 **Architecture:** 新增包根组合模块 `src/ai_banking_copilot/compose.py`，把"意图通道装配"与"AppDeps 装配"从 `__main__.py` 抽出为可单测的纯函数；`__main__.py` 退化为"调 `build_deps` + 起 uvicorn"。意图通道用现成的 `FallbackIntentModel(LlmIntentModel(...))`：`LlmIntentModel` 懒加载（构造期不碰网络），缺 Key / 缺 httpx / 调用失败一律抛 `LlmUnavailableError` → `FallbackIntentModel` 回落 `TemplateIntentModel`（H9：降级通道是能力子集，不宣称等价）。

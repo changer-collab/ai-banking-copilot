@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 from ai_banking_copilot.contracts.plan import (
@@ -20,13 +20,20 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
-from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.resolvers import Candidate, parse_amount, resolve_payees
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import (
+    WriteContext,
+    WriteHandler,
+    money_cents,
+    require_date,
+    require_str,
+)
 from ai_banking_copilot.scenarios.base import (
     ClarificationRequired,
     ScenarioHandler,
@@ -168,3 +175,22 @@ def _amount_from(intent: Intent) -> Money:
 
 def _payee_label(candidate: Candidate) -> str:
     return f"{candidate.full_name}(尾号 {candidate.account_tail}/{candidate.phone_tail})"
+
+
+def _transfer_handler(context: WriteContext) -> WriteReceipt:
+    """把 `transfer.*` 映射到 `CoreBank.transfer`（定时语义由 `booked_on` 承载）。"""
+    return context.core_bank.transfer(
+        user_id=require_str(context.params, "user_id"),
+        account_id=require_str(context.params, "account_id"),
+        payee_id=require_str(context.params, "payee_id"),
+        amount=Money(money_cents(context.params, context.spec)),
+        idempotency_key=context.idempotency_key,
+        booked_on=require_date(context.params, "booked_on"),
+    )
+
+
+WRITE_HANDLERS: Mapping[str, WriteHandler] = {
+    "transfer.create": _transfer_handler,
+    "transfer.schedule": _transfer_handler,
+}
+"""转账域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""

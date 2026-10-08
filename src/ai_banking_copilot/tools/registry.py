@@ -15,12 +15,12 @@ H3「输入零信任」在本层的落点：控制槽（`SlotKind.CONTROL`）接
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 
 
-class RiskClass(str, Enum):
+class RiskClass(StrEnum):
     """动作的**内在**风险等级（与授权级别解耦；三色映射见 03）。"""
 
     READ_ONLY = "read_only"
@@ -39,6 +39,33 @@ class RiskClass(str, Enum):
     """不可逆动作（挂失）：只能加严，无回滚。"""
 
 
+class ActionKind(StrEnum):
+    """动作的**净效应类别**（cf 口径，PRD §5.3）。
+
+    **2026-10-07 从 `planning.llm` 下移到本层**：类别是动作契约的一部分，且规划层依赖执行层
+    （`docs/architecture.md` §6.1「依赖 / 调用方向自上而下、单向」），放本层才不违反依赖方向。
+    `planning.llm` 仍 re-export 同名枚举，避免调用方与测试被同时牵动。
+    """
+
+    QUERY = "query"
+    """纯查询：不进 cf。"""
+
+    STATE = "state"
+    """状态变更但非不可逆、无资金流：不进 cf。"""
+
+    OUTFLOW = "outflow"
+    """流出（正 cf）：转账 / 定时转账 / 理财申购 / 代扣签约 / 自动续费 / 冻结资金。"""
+
+    INFLOW = "inflow"
+    """流入（负流出）：理财赎回 / 解冻。"""
+
+    CANCEL_OUTFLOW = "cancel_outflow"
+    """取消未来流出（记负）：订阅取消 / 解约。"""
+
+    IRREVERSIBLE = "irreversible"
+    """不可逆：挂失——**不入 cf**，单列触发 ≥ 红色 + L3。"""
+
+
 @dataclass(frozen=True)
 class ParamSpec:
     """一个动作参数的声明：名字 + 槽位类别 + 期望 Python 类型 + 是否必填。
@@ -50,6 +77,21 @@ class ParamSpec:
     slot: SlotKind
     py_type: type[object]
     required: bool = True
+    slot_name: str | None = None
+    """**槽位名**——非空表示该参数**由规划层补全**，值为规划层用的槽位名（步骤 1.1）。
+
+    两套词汇**必须分开**：参数名是执行层调用用的字面名，槽位名是规划层补全用的名字。
+    实测差异：`account_id`/`account`、`card_id`/`card`、`subscription_id`/`subscription`、
+    `hold_id`/`hold`、`payee_id`/`payee`、`amount_cents`/`amount`（`transfer.create`）。
+
+    **判据是「是否由规划层补全」，不是「是否与参数名同名」。** 有些参数虽为必填，却由**场景层**
+    填充、规划层不管，故必须留 `None`：`bills.monthly` 的 `year` / `month`、
+    `account.transactions` 的 `start` / `end`、`bills.category_trend` 的 `category` /
+    `base_year` / `base_month`、以及各动作的 `note` / `reason` 等数据槽。
+
+    同名但确由规划层补全的（`user_id`、`merchant`、`period`、`next_charge_on`）**要显式填同名值**，
+    否则会被判为非槽位参数。`REQUIRED_SLOTS` 据此派生，见步骤 1.3。
+    """
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -58,6 +100,8 @@ class ParamSpec:
             raise TypeError(f"slot 必须是 SlotKind 成员，收到 {type(self.slot).__name__}")
         if not isinstance(self.py_type, type):
             raise TypeError(f"py_type 必须是类型对象，收到 {self.py_type!r}")
+        if self.slot_name is not None and not self.slot_name:
+            raise ValueError("ParamSpec.slot_name 不能为空串（不同名时必填，同名请留 None）")
 
 
 @dataclass(frozen=True)
@@ -72,6 +116,16 @@ class ToolSpec:
 
     action: str
     risk: RiskClass
+    kind: ActionKind | None = None
+    """**净效应类别**（cf 口径）——2026-10-07 新增（`docs/待修复清单.md` 步骤 1.1）。
+
+    类别**不能由 `risk` 推出**：`wealth.subscribe`(OUTFLOW) 与 `wealth.redeem`(INFLOW)
+    同为 `LARGE_FUNDS`；`subscription.cancel`(CANCEL_OUTFLOW) 与 `card.lock`(STATE)
+    同为 `SMALL_CHANGE`，故须逐动作声明。
+
+    **可空只为便利测试构造临时 `ToolSpec`**（测试替身不该被强制声明类别）；02 规范目录的
+    20 项必须逐一声明——该 totality 由 `planning.llm.ACTION_KINDS` 的派生处把关（缺失即拒绝）。
+    """
     params: tuple[ParamSpec, ...] = ()
     is_pure_query: bool = False
     reversible: bool = True
@@ -83,6 +137,10 @@ class ToolSpec:
             raise ValueError("ToolSpec.action 不能为空")
         if not isinstance(self.risk, RiskClass):
             raise TypeError(f"risk 必须是 RiskClass 成员，收到 {type(self.risk).__name__}")
+        if self.kind is not None and not isinstance(self.kind, ActionKind):
+            raise TypeError(f"kind 必须是 ActionKind 成员，收到 {type(self.kind).__name__}")
+        if self.kind is not None and (self.kind is ActionKind.QUERY) is not self.is_pure_query:
+            raise ValueError(f"{self.action}：kind=QUERY ⟺ is_pure_query（绿色只含纯查询）")
         if not self.description:
             raise ValueError("ToolSpec.description 不能为空（禁止占位）")
         names = [param.name for param in self.params]

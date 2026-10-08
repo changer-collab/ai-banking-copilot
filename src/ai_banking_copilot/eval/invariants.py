@@ -17,7 +17,11 @@ from ai_banking_copilot.contracts.authorization import Level
 from ai_banking_copilot.eval.dataset import MUST_PASS_IDS, EvalCase
 from ai_banking_copilot.eval.pipeline import CaseResult, matches_expectation
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind
-from ai_banking_copilot.policy.pdp import DAILY_LIMIT_YUAN, NET_EFFECT_THRESHOLD_YUAN
+from ai_banking_copilot.policy.pdp import (
+    DAILY_LIMIT_YUAN,
+    NET_EFFECT_THRESHOLD_YUAN,
+    OFFICIAL_RED_ACTIONS,
+)
 
 _CENT_PER_YUAN = 100
 _DAILY_LIMIT_CENTS = DAILY_LIMIT_YUAN * _CENT_PER_YUAN
@@ -61,7 +65,11 @@ def check_invariants(
 
 
 def _i1_prime(results: Sequence[CaseResult]) -> tuple[InvariantResult, int]:
-    """`日累计 < 1000 ∧ 无异常 ⇒ ≤黄`；`日累计 > 1000 ⇒ ≥红`（节点级金额维度）。"""
+    """`日累计 < 1000 ∧ 无异常 ⇒ ≤黄`；`日累计 > 1000 ⇒ ≥红`（节点级金额维度）。
+
+    `OFFICIAL_RED_ACTIONS`（官方明文点名红色：理财申购、卡片解挂）**不计入可判定集**——
+    它们的级别由官方口径直接给定，不受金额档支配，故金额序关系对其不成立。
+    """
     violations: list[str] = []
     applicable = 0
     for result in results:
@@ -69,6 +77,8 @@ def _i1_prime(results: Sequence[CaseResult]) -> tuple[InvariantResult, int]:
             continue
         for node in result.nodes:
             if not node.is_outflow or node.level is None or node.object_blocked:
+                continue
+            if node.action in OFFICIAL_RED_ACTIONS:
                 continue
             daily = node.daily_accumulated_cents
             if daily > _DAILY_LIMIT_CENTS:

@@ -7,6 +7,7 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     PlanValidationError,
     cfhash,
+    topological_order,
     validate_plan,
 )
 
@@ -19,6 +20,25 @@ def _node(node_id: str, amount: int = 100, deps: tuple[str, ...] = ()) -> PlanNo
         intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a1"),
         depends_on=deps,
     )
+
+
+def test_topological_order_follows_dependencies_not_listing_order() -> None:
+    """节点列表顺序**不是**依赖序（乱序合法 DAG）时，执行序仍由 `depends_on` 决定。"""
+    plan = Plan(plan_id="p", nodes=(_node("c", deps=("b",)), _node("a"), _node("b", deps=("a",))))
+    validate_plan(plan)
+    assert topological_order(plan) == ("a", "b", "c")
+
+
+def test_topological_order_is_deterministic_for_independent_nodes() -> None:
+    """无依赖的并列节点按计划中靠前者优先，保证执行序可复现、可审计。"""
+    plan = Plan(plan_id="p", nodes=(_node("zeta"), _node("alpha")))
+    assert topological_order(plan) == ("zeta", "alpha")
+
+
+def test_topological_order_rejects_a_cyclic_plan() -> None:
+    plan = Plan(plan_id="p", nodes=(_node("a", deps=("b",)), _node("b", deps=("a",))))
+    with pytest.raises(PlanValidationError, match="cycle"):
+        topological_order(plan)
 
 
 def test_valid_plan_passes() -> None:

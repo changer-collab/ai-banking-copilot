@@ -15,6 +15,7 @@ from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.registry import ParamSpec, RiskClass, ToolRegistry, ToolSpec
 
 
@@ -90,7 +91,11 @@ def _spec(
 
 def _build_test_registry() -> ToolRegistry:
     """最小工具白名单：动作名**与 README 规范动作表逐项一致（全 20 个）**，覆盖纯查询 + 全部写动作
-    （自建注册表，不依赖 02 的 catalog，保证 03 可独立验收）。"""
+    （自建注册表，不依赖 02 的 catalog，保证 03 可独立验收）。
+
+    写处理器注入生产场景模块自带的那一份（`scenarios.registry.WRITE_HANDLERS`）——03 的
+    执行分支已改为 handler 注册表（`docs/待修复清单.md` 步骤 1.5），故不再在测试里另写一套平行表。
+    """
     registry = ToolRegistry()
     for spec in (
         _spec("account.balance", RiskClass.READ_ONLY, (_param("account_id", str),), pure=True),
@@ -238,4 +243,4 @@ def pep(
     audit: AuditLog,
     breaker: CircuitBreaker,
 ) -> Pep:
-    return Pep(registry, gateway, core_bank, audit, breaker)
+    return Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS)

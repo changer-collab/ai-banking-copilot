@@ -35,16 +35,19 @@ def _request(
     pure: bool = False,
     irreversible: bool = False,
     flags: frozenset[str] = frozenset(),
+    action: str = "transfer.create",
+    amount_applies: bool = True,
 ) -> PolicyRequest:
     return PolicyRequest(
         user_id=DEMO_USER_ID,
-        action="transfer.create",
+        action=action,
         amount=Money(amount),
         daily_accumulated=Money(daily),
         object_state=state,
         is_pure_query=pure,
         irreversible=irreversible,
         context_flags=flags,
+        amount_applies=amount_applies,
     )
 
 
@@ -99,6 +102,17 @@ def test_amount_applies_true_still_bands_even_with_zero_node_amount() -> None:
         amount_applies=True,
     )
     assert evaluate(request).level is Level.RED
+
+
+def test_official_red_actions_are_red_regardless_of_amount() -> None:
+    """官方明文点名红色（理财申购 / 卡片解挂）不因金额小或非流出而降为黄。"""
+    subscribe = evaluate(_request(action="wealth.subscribe", amount=10000, daily=10000))
+    assert subscribe.level is Level.RED
+    assert ReasonCode.OFFICIAL_RED in subscribe.reasons
+
+    unlock = evaluate(_request(action="card.unlock", amount_applies=False))
+    assert unlock.level is Level.RED
+    assert ReasonCode.OFFICIAL_RED in unlock.reasons
 
 
 def test_blocked_is_deny_regardless_of_amount_and_purity() -> None:

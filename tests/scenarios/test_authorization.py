@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Level
-from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, PlanNode
+from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode
 from ai_banking_copilot.eval.pipeline import EvalPipeline
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
@@ -31,6 +31,7 @@ from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pdp import ObjectState
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.scenarios.authorization import node_policy_request, object_state_for_node
+from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.app import AppDeps
@@ -107,7 +108,7 @@ def pep(
     breaker: CircuitBreaker,
 ) -> Pep:
     """策略执行点：本层唯一的执行通道。"""
-    return Pep(registry, gateway, core_bank, audit, breaker)
+    return Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS)
 
 
 @pytest.fixture
@@ -284,6 +285,7 @@ def test_web_and_eval_agree_on_representative_nodes(
             flags=frozenset(),
             pep=pep,
             case_id="x",
+            plan=Plan(plan_id="consistency", nodes=(node,)),
         )
         assert eval_decision is not None
         assert (web_decision.level, web_decision.reasons) == (

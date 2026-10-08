@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。其中 `planning.slots.SLOT_PARAMS` 以**手写字典**给出（本文 Task 4）；自 2026-10-08 起它改为**由 02 目录派生**（`ParamSpec.slot_name → ParamSpec.name`，同名冲突即构造期抛），**符号与可见内容逐项不变（仍 14 项）**，见 [README.md](README.md) 冻结面表与**裁决 #26**。
+
 **Goal:** 建成本方案的**能力上限**——`规划内核`：把一句自然语言拆成**多意图**、用 01 的确定性解析器把**控制槽**补全成可信值、把意图编排成**带锚点的 DAG 计划**、算出**计划级净效应**，并在 LLM 不可用时**确定性降级**；全程**不产事实、不产级别、不执行动作**。
 
 **Architecture:** 单体 Python 包 `ai_banking_copilot`，`src/` 布局。本计划在 `src/ai_banking_copilot/planning/` 下交付六个职责单一的小模块：`llm.py`（意图契约 + 模板通道 + 可选真实 LLM 通道）、`anchors.py`（锚点账本）、`slots.py`（控制槽补全）、`net_effect.py`（带符号资金流）、`kernel.py`（编排出口）、`orchestrator.py`（Task 0 spike 产出的可插桩步骤驱动器 = 自研 fallback 骨架）。内核**只产出 `plan.Plan`**；级别裁决交给 `policy.pdp`、执行交给 `policy.pep`——这是 H2「动作零越权」的落点。

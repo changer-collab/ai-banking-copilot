@@ -16,56 +16,38 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Protocol, cast, runtime_checkable
 
+from ai_banking_copilot.tools.catalog import build_default_registry
+from ai_banking_copilot.tools.registry import ActionKind as ActionKind
 
-class ActionKind(str, Enum):
-    """动作的净效应类别（cf 口径，PRD §5.3）。"""
+# `ActionKind` 已于 2026-10-07 **下移**到 `tools/registry.py`（`docs/待修复清单.md` 步骤 1.1）：
+# 类别是动作契约的一部分，而 `architecture.md` §6.1 规定「依赖 / 调用方向自上而下、单向」——
+# 规划层在上、执行层在下，枚举放执行层才不反向依赖。本模块顶部
+# `from ...tools.registry import ActionKind` 即其 re-export，既有引用保持不变。
 
-    QUERY = "query"
-    """纯查询：不进 cf。"""
+_SPECS = build_default_registry()
 
-    STATE = "state"
-    """状态变更但非不可逆、无资金流：不进 cf。"""
 
-    OUTFLOW = "outflow"
-    """流出（正 cf）：转账 / 定时转账 / 理财申购 / 代扣签约 / 自动续费 / 冻结资金。"""
+def _kind_of(action: str, kind: ActionKind | None) -> ActionKind:
+    """派生时把关：**规范目录里每个动作都必须声明类别**，缺失即拒绝（fail-fast）。
 
-    INFLOW = "inflow"
-    """流入（负流出）：理财赎回 / 解冻。"""
-
-    CANCEL_OUTFLOW = "cancel_outflow"
-    """取消未来流出（记负）：订阅取消 / 解约。"""
-
-    IRREVERSIBLE = "irreversible"
-    """不可逆：挂失——**不入 cf**，单列触发 ≥ 红色 + L3。"""
+    之所以把 totality 放在这里而不是 `ToolSpec` 构造期：测试需要构造临时 `ToolSpec` 替身，
+    不该被强制声明类别；而 02 规范目录是本项目对外词表，缺类别属写错，必须当场拦住。
+    """
+    if kind is None:
+        raise ValueError(f"动作 {action} 未声明 ToolSpec.kind（02 目录须逐动作声明净效应类别）")
+    return kind
 
 
 ACTION_KINDS: Mapping[str, ActionKind] = {
-    "account.balance": ActionKind.QUERY,
-    "account.transactions": ActionKind.QUERY,
-    "bills.monthly": ActionKind.QUERY,
-    "bills.category_trend": ActionKind.QUERY,
-    "wealth.list": ActionKind.QUERY,
-    "card.list": ActionKind.QUERY,
-    "subscription.list": ActionKind.QUERY,
-    "transfer.create": ActionKind.OUTFLOW,
-    "transfer.schedule": ActionKind.OUTFLOW,
-    "wealth.subscribe": ActionKind.OUTFLOW,
-    "wealth.redeem": ActionKind.INFLOW,
-    "subscription.cancel": ActionKind.CANCEL_OUTFLOW,
-    "subscription.sign": ActionKind.OUTFLOW,
-    "card.lock": ActionKind.STATE,
-    "card.unlock": ActionKind.STATE,
-    "card.report_lost": ActionKind.IRREVERSIBLE,
-    "card.apply_virtual": ActionKind.STATE,
-    "card.set_limit": ActionKind.STATE,
-    "funds.freeze": ActionKind.OUTFLOW,
-    "funds.release": ActionKind.INFLOW,
+    action: _kind_of(action, _SPECS.get(action).kind) for action in _SPECS.actions()
 }
-"""规范动作词表（20 项，逐项对齐 `README.md` 规范动作表）：本计划所有模块
-（slots / net_effect / kernel）的唯一动作来源。禁止 `bill.query` 等表外动作名。"""
+"""规范动作词表（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 1.4）：本计划所有模块
+（slots / net_effect / kernel）的唯一动作来源。禁止 `bill.query` 等表外动作名。
+
+派生而非手写：新增动作只需在场景模块声明 `ToolSpec.kind`，本表自动跟上——这是「各做各的、
+无先后」的前提。绿色纯度不受影响：`ToolSpec` 的不变式已保证 `kind=QUERY ⟺ is_pure_query`。"""
 
 CANONICAL_ACTIONS: tuple[str, ...] = tuple(ACTION_KINDS)
 
@@ -116,6 +98,8 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "命中『理财产品列表』模板",
     ),
     (re.compile(r"挂失"), "card.report_lost", "命中『挂失』模板"),
+    (re.compile(r"虚拟卡"), "card.apply_virtual", "命中『虚拟卡申请』模板"),
+    (re.compile(r"额度|限额"), "card.set_limit", "命中『额度调整』模板"),
     (re.compile(r"解锁|解除.{0,4}?卡"), "card.unlock", "命中『解锁卡片』模板"),
     (re.compile(r"锁.{0,3}卡"), "card.lock", "命中『锁卡』模板（含修饰语）"),
     (re.compile(r"锁卡|限制.*卡|卡.*限制"), "card.lock", "命中『锁卡』模板"),
@@ -132,13 +116,18 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         re.compile(
             r"订阅管理|订阅列表|有哪些订阅|订阅查询|续费提醒|到期提醒"
-            r"|什么时候续费|何时续费|扣费提醒|有哪些代扣"
+            r"|什么时候续费|何时续费|扣费提醒|有哪些代扣|识别.{0,4}扣费|在扣费"
         ),
         "subscription.list",
         "命中『订阅列表/续费提醒』模板",
     ),
     (re.compile(r"签约|代扣|自动续费|续费"), "subscription.sign", "命中『代扣签约』模板"),
     (re.compile(r"冻结|锁定.*资金|锁.*元"), "funds.freeze", "命中『冻结资金』模板"),
+    (
+        re.compile(r"年度账单|全年账单|一年的账单|年度消费"),
+        "bills.yearly",
+        "命中『年度账单』模板",
+    ),
     (re.compile(r"账单|消费分析|花了多少|消费明细"), "bills.monthly", "命中『账单分析』模板"),
     (
         re.compile(r"异常交易|可疑交易|大额交易|交易记录|交易明细|交易流水|有没有异常|异常流水"),
@@ -206,6 +195,13 @@ class _HttpClientFactory(Protocol):
     def Client(self, *, timeout: float) -> _HttpClient: ...
 
 
+DEFAULT_LLM_MODEL = "qwen-plus"
+"""默认意图模型（可在组合根经 `AI_MODEL` 覆盖）。"""
+
+DEFAULT_LLM_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+"""默认端点（可在组合根经 `AI_BASE_URL` 覆盖）。"""
+
+
 class LlmIntentModel:
     """真实 LLM 意图通道：可注入、懒加载、默认不参与测试与 CI。"""
 
@@ -214,8 +210,8 @@ class LlmIntentModel:
         *,
         transport: HttpTransport | None = None,
         api_key: str | None = None,
-        model: str = "qwen-plus",
-        endpoint: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        model: str = DEFAULT_LLM_MODEL,
+        endpoint: str = DEFAULT_LLM_ENDPOINT,
         timeout_s: float = 20.0,
         allow_actions: Sequence[str] = CANONICAL_ACTIONS,
     ) -> None:
@@ -292,9 +288,35 @@ def _load_httpx_transport(*, api_key: str, endpoint: str, timeout_s: float) -> H
         )
         if response.status_code != 200:
             raise LlmUnavailableError(f"LLM 返回状态 {response.status_code}")
-        return response.text
+        return _extract_content(response.text)
 
     return transport
+
+
+def _extract_content(raw: str) -> str:
+    """从 OpenAI 兼容 `/chat/completions` 响应中取出模型输出文本（`choices[0].message.content`）。
+
+    传输层契约是「返回模型文本」，故信封解包发生在此处；注入的测试传输直接返回文本，不受影响。
+    """
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise LlmUnavailableError(f"LLM 响应不是合法 JSON：{error}") from error
+    if not isinstance(envelope, dict):
+        raise LlmUnavailableError("LLM 响应必须是 JSON 对象")
+    choices = envelope.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise LlmUnavailableError("LLM 响应缺少 choices 数组")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise LlmUnavailableError("LLM choices 元素必须是 JSON 对象")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise LlmUnavailableError("LLM choice 缺少 message 对象")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise LlmUnavailableError("LLM message 缺少 content 文本")
+    return content
 
 
 def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) -> IntentProposal:

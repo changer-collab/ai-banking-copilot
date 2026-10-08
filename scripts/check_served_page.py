@@ -46,7 +46,7 @@ def run(base: str) -> list[str]:
         "page: 顶栏/两栏/侧栏": (
             'class="topbar"' in html and 'class="layout"' in html and 'class="rail"' in html
         ),
-        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=4" in html,
+        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=6" in html,
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
@@ -62,7 +62,9 @@ def run(base: str) -> list[str]:
         "js: 规则字典（真实枚举）": "AMOUNT_OVER_DAILY_LIMIT:" in js and "QUERY_ONLY:" in js,
         "js: 要求字典": "user_confirm: " in js and "strong_verify: " in js,
         "js: 凭证号替代哈希": "function receiptNo(" in js,
-        "js: 红色两段式强验证": "strong-verify" in js and "完成强验证并执行" in js,
+        "js: 红色强验证挑战": (
+            "strong-verify" in js and "申请强验证" in js and "/api/verify/request" in js
+        ),
     }
     bad = [key for key, ok in checks.items() if not ok]
     for key, ok in checks.items():

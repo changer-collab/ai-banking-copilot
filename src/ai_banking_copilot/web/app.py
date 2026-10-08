@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -33,6 +33,7 @@ from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.policy.reversal import ReversalService
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.page import INDEX_HTML
 from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
@@ -64,26 +65,33 @@ class AppDeps:
     user_id: str = DEMO_USER_ID
     today: date = DEFAULT_BOOKING_DATE
     risk: RiskAssessmentSource | None = None
+    reversal: ReversalService | None = None
+    """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
 
 
 class _SubmitRequest(BaseModel):
     utterance: str
     selected: dict[str, object] | None = None
+    session_anomaly: bool = False
+    """会话异常（设备 / 地点跳变）。**生产环境应由渠道风控判定后注入，不得直接取自客户端载荷**；
+    演示渠道无风控模块，故开放该字段以便现场演示熔断触发 5。"""
 
 
 class _ConfirmRequest(BaseModel):
     card_id: str
     frozen_hash: str
-    strong_verified: bool = False
+    verification_code: str | None = None
     steps: int | None = None
 
 
+class _ClarifyRequest(BaseModel):
+    """澄清补充答案：`槽位名 → 值`（与 `selected` 同口径）。"""
+
+    answers: dict[str, object] = {}
+
+
 class _EmptyRequest(BaseModel):
-    """空请求体（中断 / 恢复）。"""
-
-
-class _ReverseRequest(BaseModel):
-    settled: bool
+    """空请求体（中断 / 恢复 / 回退）。"""
 
 
 def create_app(deps: AppDeps) -> FastAPI:
@@ -102,8 +110,39 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.post("/api/submit")
     def submit(request: _SubmitRequest) -> dict[str, object]:
-        view = session.submit(request.utterance, selected=request.selected)
+        view = session.submit(
+            request.utterance,
+            selected=request.selected,
+            session_anomaly=request.session_anomaly,
+        )
         return _submission_payload(view)
+
+    @app.post("/api/clarify")
+    def clarify(request: _ClarifyRequest) -> dict[str, object]:
+        """澄清闭环：用补充答案重跑上一条指令，用户无需整句重述。"""
+        try:
+            view = session.clarify(request.answers)
+        except SessionStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _submission_payload(view)
+
+    @app.post("/api/verify/request")
+    def request_verification(request: _EmptyRequest) -> dict[str, object]:
+        """下发红色卡的强验证挑战。
+
+        **演示声明**：未接入真实短信 / 人脸 / U 盾渠道，验证码随响应回显以便现场输入；
+        校验为服务端一次性 + TTL + 与冻结计划绑定，接入真实渠道只需替换下发一步。
+        """
+        try:
+            prompt = session.request_verification()
+        except (SessionStateError, StrongVerificationRequiredError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return {
+            "channel": prompt.channel,
+            "target": prompt.target,
+            "code": prompt.code,
+            "expires_in_s": prompt.expires_in_s,
+        }
 
     @app.post("/api/confirm")
     def confirm(request: _ConfirmRequest) -> dict[str, object]:
@@ -111,7 +150,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             view = session.confirm(
                 request.card_id,
                 frozen_hash=request.frozen_hash,
-                strong_verified=request.strong_verified,
+                verification_code=request.verification_code,
                 steps=request.steps,
             )
         except (
@@ -140,9 +179,10 @@ def create_app(deps: AppDeps) -> FastAPI:
         return _execution_payload(view)
 
     @app.post("/api/reverse")
-    def reverse(request: _ReverseRequest) -> dict[str, object]:
+    def reverse(request: _EmptyRequest) -> dict[str, object]:
+        """回退：对本次执行逐条走补偿事务（无 `settled` 参数：模拟核心银行执行即结算）。"""
         try:
-            outcome = session.reverse(now=datetime.now(), settled=request.settled)
+            outcome = session.reverse()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {
@@ -174,6 +214,9 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "state": view.state.value,
         "message": view.message,
         "questions": list(view.questions),
+        "clarifications": [
+            {"slot": ask.slot, "prompt": ask.prompt} for ask in view.clarifications
+        ],
         "card": card,
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",

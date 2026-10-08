@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
 
 
-class Trust(str, Enum):
+class Trust(StrEnum):
     """值来源的可信级别。"""
 
     TRUSTED = "trusted"
@@ -23,7 +23,7 @@ class Trust(str, Enum):
     """备注、商户名、消息、工具返回文本——**永不被解释为指令**。"""
 
 
-class SlotKind(str, Enum):
+class SlotKind(StrEnum):
     """槽位二分。"""
 
     DATA = "data"

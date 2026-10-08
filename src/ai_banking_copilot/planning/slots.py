@@ -26,30 +26,31 @@ from ai_banking_copilot.gateway.resolvers import (
     parse_temporal,
     resolve_payees,
 )
+from ai_banking_copilot.tools.catalog import build_default_registry
+from ai_banking_copilot.tools.registry import ToolSpec
+
+_SPECS = build_default_registry()
+
+
+def _slots_of(spec: ToolSpec) -> tuple[str, ...]:
+    """取该动作**由规划层补全**的槽位名（`ParamSpec.slot_name` 非空的那些）。
+
+    注意判据是「是否由规划层补全」，**不是**「是否必填」：`bills.monthly` 的 `year` / `month`
+    虽为必填参数，却由场景层填充，故 `slot_name` 为空、不计入槽位。
+    """
+    names: list[str] = []
+    for param in spec.params:
+        if param.slot_name is not None:
+            names.append(param.slot_name)
+    return tuple(names)
+
 
 REQUIRED_SLOTS: Mapping[str, tuple[str, ...]] = {
-    "account.balance": ("account",),
-    "account.transactions": ("account",),
-    "bills.monthly": ("user_id",),
-    "bills.category_trend": ("user_id",),
-    "wealth.list": (),
-    "card.list": ("user_id",),
-    "subscription.list": ("user_id",),
-    "transfer.create": ("user_id", "account", "payee", "amount", "when"),
-    "transfer.schedule": ("user_id", "account", "payee", "amount", "when"),
-    "wealth.subscribe": ("user_id", "account", "product", "amount"),
-    "wealth.redeem": ("user_id", "account", "product", "amount"),
-    "subscription.cancel": ("subscription",),
-    "subscription.sign": ("user_id", "merchant", "amount_cents", "period", "next_charge_on"),
-    "card.lock": ("card",),
-    "card.unlock": ("card",),
-    "card.report_lost": ("card",),
-    "card.apply_virtual": ("user_id", "daily_limit"),
-    "card.set_limit": ("card", "daily_limit"),
-    "funds.freeze": ("account", "amount"),
-    "funds.release": ("hold",),
+    action: _slots_of(_SPECS.get(action)) for action in _SPECS.actions()
 }
-"""动作 → 必填控制槽（键与 `planning.llm.ACTION_KINDS` 的 20 个动作一一对应）。
+"""动作 → 必填控制槽（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 1.3）。
+
+派生而非手写：新增动作只需在场景模块声明 `ToolSpec` 的参数与 `slot_name`，本表自动跟上。
 
 **与 02 目录的控制槽一致性**：凡 02 目录声明为**必填 `user_id` 控制槽**的动作，此处必须含
 `user_id`（纯查询动作亦然：`bills.monthly` / `bills.category_trend` / `card.list` /
@@ -57,26 +58,35 @@ REQUIRED_SLOTS: Mapping[str, tuple[str, ...]] = {
 `wealth.redeem` / `subscription.sign` / `card.apply_virtual`）一并覆盖。`subscription.sign`
 的对象是**商户**（不涉及已有订阅 id），故按 `merchant` / `amount_cents` / `period` /
 `next_charge_on` 声明（README 裁决 #17）；`user_id` 由**受信任调用方**经 `selected` 填入
-（会话层与评测链装配 `DEMO_USER_ID`）。
+（会话层与评测链装配 `DEMO_USER_ID`）。该一致性现由派生**自动成立**——两者同源于 02 目录。
 """
 
-SLOT_PARAMS: Mapping[str, str] = {
-    "account": "account_id",
-    "payee": "payee_id",
-    "amount": "amount_cents",
-    "when": "booked_on",
-    "product": "product_id",
-    "subscription": "subscription_id",
-    "card": "card_id",
-    "hold": "hold_id",
-    "daily_limit": "daily_limit_cents",
-    "user_id": "user_id",
-    "merchant": "merchant",
-    "amount_cents": "amount_cents",
-    "period": "period",
-    "next_charge_on": "next_charge_on",
-}
-"""控制槽 → `PlanNode.params` 键名。"""
+def _slot_params() -> Mapping[str, str]:
+    """槽位名 → 参数名（`ParamSpec.slot_name` → `ParamSpec.name`）：**由 02 目录派生**。
+
+    冲突即抛：同一槽位名被两个动作映射到**不同**参数名 ⇒ 规划层无法判断该写哪个键，
+    宁可 fail-fast，也不要静默取其一（这才是平行表真正会害人的地方）。
+    """
+    mapping: dict[str, str] = {}
+    for action in _SPECS.actions():
+        for param in _SPECS.get(action).params:
+            if param.slot_name is None:
+                continue
+            existing = mapping.get(param.slot_name)
+            if existing is not None and existing != param.name:
+                raise ValueError(
+                    f"槽位名 {param.slot_name!r} 被映射到多个参数名："
+                    f"{existing} / {param.name}（动作 {action}）"
+                )
+            mapping[param.slot_name] = param.name
+    return mapping
+
+
+SLOT_PARAMS: Mapping[str, str] = _slot_params()
+"""控制槽 → `PlanNode.params` 键名（**由 02 目录派生**，见 `docs/待修复清单.md` 步骤 4「残留」）。
+
+派生而非手写：新增动作只需在场景模块声明 `ParamSpec.slot_name`，本表自动跟上；两套词汇
+（规划层的槽位名 / 执行层的参数名）若出现矛盾则构造期即抛，不再静默错位。"""
 
 _PROMPTS: Mapping[str, str] = {
     "account": "请选择要操作的账户。",
@@ -173,6 +183,8 @@ def _resolve_slot(
         return _resolve_payee(inputs, notes)
     if slot == "amount":
         return _resolve_amount(inputs, notes)
+    if slot == "daily_limit":
+        return _resolve_daily_limit(inputs, notes)
     if slot == "when":
         return _resolve_when(inputs, notes)
     return None, SlotQuestion(slot=slot, prompt=_PROMPTS[slot]), tuple(notes)
@@ -208,6 +220,22 @@ def _resolve_amount(
         notes.append("missing amount")
         return None, SlotQuestion("amount", _PROMPTS["amount"]), tuple(notes)
     notes.append(f"resolved amount:{parsed.value.cents}")
+    return parsed.value.cents, None, tuple(notes)
+
+
+def _resolve_daily_limit(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """额度槽：只认**带单位**的文本金额（与 `amount` 同一套确定性解析；无单位不猜）。
+
+    `selected`（受信任调用方显式选定）仍**优先**于本解析器，见 `_resolve_slot` 首段。
+    落点见 `SLOT_PARAMS["daily_limit"]`（→ `daily_limit_cents`，整数分）。
+    """
+    parsed = parse_amount(inputs.text)
+    if not parsed.matched or parsed.value is None:
+        notes.append("missing daily_limit")
+        return None, SlotQuestion("daily_limit", _PROMPTS["daily_limit"]), tuple(notes)
+    notes.append(f"resolved daily_limit:{parsed.value.cents}")
     return parsed.value.cents, None, tuple(notes)
 
 

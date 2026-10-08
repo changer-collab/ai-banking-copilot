@@ -21,7 +21,7 @@ from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditLog
 from ai_banking_copilot.policy.breaker import BreakerTrigger, CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError, assert_frozen
 from ai_banking_copilot.policy.pdp import ObjectState, PolicyRequest, evaluate, evaluate_plan
-from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_hash
+from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_plan
 from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.tools.registry import ToolCall
 
@@ -170,10 +170,10 @@ def test_end_to_end_query_then_transfer_with_intact_audit_chain(
     pep: Pep, audit: AuditLog, gateway: FactGateway
 ) -> None:
     query_call = ToolCall(action="account.balance", params=_query_params())
-    query_result = pep.execute(query_call, _decision(Level.GREEN), manifest_hash(query_call), "q1")
+    query_result = pep.execute(query_call, _decision(Level.GREEN), manifest_plan(query_call), "q1")
     transfer_call = ToolCall(action="transfer.create", params=_transfer_params())
     transfer_result = pep.execute(
-        transfer_call, _decision(Level.RED), manifest_hash(transfer_call), "t1"
+        transfer_call, _decision(Level.RED), manifest_plan(transfer_call), "t1"
     )
     assert query_result.status == "queried"
     assert transfer_result.status == "settled"
@@ -190,15 +190,15 @@ def test_breaker_opens_on_rejections_and_only_unlock_restores(
     for index in range(3):
         call = ToolCall(action="transfer.create", params=_transfer_params())
         with pytest.raises(NotAuthorizedError):
-            pep.execute(call, _decision(Level.MANUAL), manifest_hash(call), f"m{index}")
+            pep.execute(call, _decision(Level.MANUAL), manifest_plan(call), f"m{index}")
     assert breaker.is_open() is True
     assert breaker.triggers() == (BreakerTrigger.CONSECUTIVE_AUTH_FAILURES,)
     blocked_call = ToolCall(action="transfer.create", params=_transfer_params())
     with pytest.raises(NotAuthorizedError, match="熔断"):
-        pep.execute(blocked_call, _decision(Level.RED), manifest_hash(blocked_call), "t1")
+        pep.execute(blocked_call, _decision(Level.RED), manifest_plan(blocked_call), "t1")
     breaker.unlock()
     assert (
-        pep.execute(blocked_call, _decision(Level.RED), manifest_hash(blocked_call), "t2").status
+        pep.execute(blocked_call, _decision(Level.RED), manifest_plan(blocked_call), "t2").status
         == "settled"
     )
 
@@ -219,7 +219,7 @@ def test_reversal_race_never_claims_cancelled() -> None:
 
 def test_tampered_audit_line_is_detected(tmp_path: Path, pep: Pep, audit: AuditLog) -> None:
     call = ToolCall(action="account.balance", params=_query_params())
-    pep.execute(call, _decision(Level.GREEN), manifest_hash(call), "q1")
+    pep.execute(call, _decision(Level.GREEN), manifest_plan(call), "q1")
     path = audit.path
     path.write_text(
         path.read_text(encoding="utf-8").replace("queried", "settled"), encoding="utf-8"

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Level
@@ -7,6 +9,7 @@ from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.plan_card import PlanCard
 from ai_banking_copilot.web.session import (
+    VERIFICATION_TTL_S,
     ConfirmationMismatchError,
     Session,
     SessionState,
@@ -58,17 +61,84 @@ def test_confirm_rejects_when_nothing_submitted(deps: AppDeps) -> None:
         Session(deps).confirm("card_x", frozen_hash="0" * 64)
 
 
-def test_over_limit_requires_strong_verification(deps: AppDeps) -> None:
+def _red_card(deps: AppDeps) -> tuple[Session, PlanCard]:
     session = Session(deps)
     view = session.submit("转给李娜 1500 元")
     assert view.card is not None
     assert view.card.level is Level.RED
+    return session, view.card
+
+
+def test_over_limit_requires_strong_verification(deps: AppDeps) -> None:
+    session, card = _red_card(deps)
     with pytest.raises(StrongVerificationRequiredError):
-        session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash)
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+    prompt = session.request_verification()
     done = session.confirm(
-        view.card.card_id, frozen_hash=view.card.frozen_hash, strong_verified=True
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
     )
     assert done.state is SessionState.COMPLETED
+
+
+def test_strong_verification_rejects_a_wrong_code_then_accepts_the_right_one(
+    deps: AppDeps,
+) -> None:
+    """错码被拒且不消耗挑战；正确码仍可执行（挑战由服务端下发，客户端无法自造）。"""
+    session, card = _red_card(deps)
+    prompt = session.request_verification()
+    wrong = "000000" if prompt.code != "000000" else "111111"
+    with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash, verification_code=wrong)
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+    )
+    assert done.state is SessionState.COMPLETED
+
+
+def test_strong_verification_requires_a_server_issued_challenge(deps: AppDeps) -> None:
+    """未申请即提交任意 6 位数字：闸门拒绝（不接受任何客户端自造值）。"""
+    session, card = _red_card(deps)
+    with pytest.raises(StrongVerificationRequiredError, match="请先申请"):
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash, verification_code="123456")
+
+
+def test_strong_verification_challenge_expires(deps: AppDeps) -> None:
+    session, card = _red_card(deps)
+    base = datetime(2026, 10, 1, 9, 0, 0)
+    prompt = session.request_verification(now=base)
+    with pytest.raises(StrongVerificationRequiredError, match="过期"):
+        session.confirm(
+            card.card_id,
+            frozen_hash=card.frozen_hash,
+            verification_code=prompt.code,
+            now=base + timedelta(seconds=VERIFICATION_TTL_S + 1),
+        )
+
+
+def test_strong_verification_challenge_rotates_on_each_request(deps: AppDeps) -> None:
+    """重复申请轮换验证码：旧码立即失效，新码可用。"""
+    session, card = _red_card(deps)
+    first = session.request_verification()
+    second = session.request_verification()
+    while second.code == first.code:  # 极低概率撞码：再申请一次
+        second = session.request_verification()
+    with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=first.code
+        )
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=second.code
+    )
+    assert done.state is SessionState.COMPLETED
+
+
+def test_strong_verification_is_rejected_for_non_red_cards(deps: AppDeps) -> None:
+    session = Session(deps)
+    view = session.submit("转给李娜 500 元")
+    assert view.card is not None
+    assert view.card.level is Level.YELLOW
+    with pytest.raises(StrongVerificationRequiredError, match="无需强验证"):
+        session.request_verification()
 
 
 def test_open_breaker_routes_a_write_to_takeover(deps: AppDeps) -> None:

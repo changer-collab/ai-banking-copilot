@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。其中的 `Pep(...)` 装配片段已过时——现行签名为 `Pep(registry, gateway, core_bank, audit, breaker, write_handlers, query_handlers)`（两者由组合根分别从 `scenarios.registry.WRITE_HANDLERS` / `QUERY_HANDLERS` 注入），见 [README.md](README.md) 冻结面表与**裁决 #25 / #26**。
+
 **Goal:** 在 00–07 已交付的零信任双核银行 AI 智能体上，补齐「任意跨场景多意图（顺序执行 + 整单批量确认）」能力，并修复部署/文档两处提交缺口。
 
 **Architecture:** 多意图能力**只扩展 05 的 `scenarios/cross.py::CrossHandler`**（不新增冻结符号）；`select_handler` / `run_scenario` / 06 的确认-执行协议**不动**。`CrossHandler.build` 分两支：冻结+资金组合保留原语义（逐字），其余多域组合按域分组→复用各域 handler 的 `build`→合并重编号→同资源串行→**单一 `Plan`**。因此 06 现有「单卡 `cfhash` 冻结 → 一次确认 → 顺序执行」天然实现「批量确认 + 按输入顺序逐个执行」。

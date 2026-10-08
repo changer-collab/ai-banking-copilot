@@ -27,9 +27,13 @@ def test_success_main_paths(
     view = session.submit(utterance, selected=selected)
     assert view.state is SessionState.AWAITING_CONFIRM, name
     assert view.card is not None, name
-    done = session.confirm(
-        view.card.card_id, frozen_hash=view.card.frozen_hash, strong_verified=strong
-    )
+    if strong:
+        prompt = session.request_verification()
+        done = session.confirm(
+            view.card.card_id, frozen_hash=view.card.frozen_hash, verification_code=prompt.code
+        )
+    else:
+        done = session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash)
     assert done.state is SessionState.COMPLETED, name
     assert done.record_ids, name
 
@@ -44,8 +48,9 @@ def test_cross_scenario_main_path(deps: AppDeps) -> None:
     assert view.card is not None
     assert view.plan is not None
     assert len(view.plan.nodes) == 2
+    prompt = session.request_verification()
     done = session.confirm(
-        view.card.card_id, frozen_hash=view.card.frozen_hash, strong_verified=True
+        view.card.card_id, frozen_hash=view.card.frozen_hash, verification_code=prompt.code
     )
     assert done.state is SessionState.COMPLETED
 

@@ -17,12 +17,12 @@ const PRESETS = [
 ];
 
 /* 演示页无选择器：按真实 UI 的做法声明「当前选中对象」（受信任调用方职责） */
-const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video" };
+const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video", daily_limit: 100000 };
 
 const LEVEL = {
   GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
   YELLOW: { cls: "yellow", code: "L1", name: "黄色", text: "待您确认", policy: "用户确认" },
-  RED: { cls: "red", code: "L2", name: "红色", text: "强验证", policy: "多因子" },
+  RED: { cls: "red", code: "L2", name: "红色", text: "强验证", policy: "服务端挑战" },
   DENIED: { cls: "denied", code: "L4", name: "拒绝", text: "拒绝并解释", policy: "安全拒绝" },
 };
 
@@ -35,10 +35,11 @@ const GLOSS = {
     IRREVERSIBLE: "不可逆操作",
     MANUAL_REVIEW: "转人工复核",
     OBJECT_BLOCKED: "对象被阻断",
+    OFFICIAL_RED: "官方点名红色",
   },
   require: {
     user_confirm: "需您确认",
-    strong_verify: "需强验证（多因子）",
+    strong_verify: "需强验证（服务端验证码）",
     manual_takeover: "转人工接管",
     deny_and_explain: "拒绝并说明",
   },
@@ -46,12 +47,13 @@ const GLOSS = {
 
 const state = {
   card: null,
-  plan: null,
   decision: null,
   questions: [],
   stepStates: [],
   phase: "idle",
   chain: [],
+  verification: null,
+  clarifications: [],
 };
 
 function el(id) {
@@ -269,10 +271,25 @@ function takeoverHtml(pack) {
 function renderStage() {
   const stage = el("stage");
   if (state.card) {
-    stage.innerHTML = voucherHtml();
+    stage.innerHTML = voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "");
     return;
   }
   stage.innerHTML = state.panel || "";
+}
+
+/* 强验证挑战面板：验证码由服务端下发，一次性 + TTL；演示环境直接展示以便现场输入 */
+function verifyHtml() {
+  const v = state.verification || {};
+  return `<div class="takeover" style="margin-top: var(--s-4)">
+    <div class="muted">强验证 · 红色级别须通过服务端挑战后方可执行</div>
+    <p class="muted" style="font-size: var(--fs-small); margin: var(--s-3) 0">
+      已向 <span class="mono">${esc(v.target || "—")}</span> 下发验证码
+      （渠道 ${esc(v.channel || "—")}，${esc(String(v.expires_in_s || "—"))} 秒内有效，一次性）。
+      <br />演示环境未接入真实短信网关，验证码在此直接展示：
+      <span class="mono">${esc(v.code || "—")}</span>
+    </p>
+    <input class="textarea" id="vcode" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码" />
+  </div>`;
 }
 
 function setButtons() {
@@ -280,7 +297,12 @@ function setButtons() {
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
   el("btn-submit").disabled = busy;
-  el("btn-confirm").textContent = strongPhase ? "完成强验证并执行" : "确认并执行";
+  const redPending = state.card && state.card.level === "RED" && !strongPhase;
+  el("btn-confirm").textContent = strongPhase
+    ? "提交验证码并执行"
+    : redPending
+      ? "申请强验证"
+      : "确认并执行";
   el("btn-confirm").disabled = !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = !(busy || awaiting);
   el("btn-resume").disabled = state.phase !== "interrupted";
@@ -290,13 +312,14 @@ function setButtons() {
 
 function reset(keepUtterance) {
   state.card = null;
-  state.plan = null;
   state.decision = null;
   state.questions = [];
   state.stepStates = [];
   state.phase = "idle";
   state.chain = [];
   state.panel = "";
+  state.verification = null;
+  state.clarifications = [];
   if (!keepUtterance) el("utterance").value = "转给李娜 500 元";
   renderStage();
   renderChain();
@@ -312,57 +335,109 @@ function renderPresets() {
 
 /* ---------------- 交互 ---------------- */
 
-async function onSubmit() {
-  reset(true);
-  const text = el("utterance").value;
-  state.phase = "submitting";
-  setButtons();
-  const result = await post("/api/submit", { utterance: text, selected: SELECTED });
-  const data = result.data;
-  timelineAdd(`提交：${text}`, "live");
+/* 把一次提交（/api/submit 或 /api/clarify）的结果落到界面：两条路径共用同一处理 */
+function applySubmission(data) {
   if (data.state === "awaiting_confirm" && data.card) {
     state.card = data.card;
-    state.plan = data.plan || null;
     state.decision = data.decision || null;
     state.stepStates = (data.card.lines || []).map(() => "pending");
     state.phase = "awaiting_confirm";
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
-  } else {
-    state.phase = data.state === "blocked" ? "blocked" : "clarifying";
-    const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
-    state.panel = interceptHtml(
+    return;
+  }
+  state.phase = data.state === "blocked" ? "blocked" : "clarifying";
+  state.clarifications = data.clarifications || [];
+  const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
+  state.panel =
+    interceptHtml(
       data.state === "blocked" ? "安全拒绝（未产生可执行计划）" : "需要澄清（不产出级别）",
       data.state === "blocked"
         ? data.message || "未知意图不猜测执行；已留痕。"
         : `${data.message || "请补充信息"}<br />${questions}`,
       false
-    );
-    renderStage();
-    timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
+    ) + clarifyHtml();
+  renderStage();
+  timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
+}
+
+/* 澄清闭环表单：按结构化提问逐槽位补值，回答后重跑原指令（无需整句重述） */
+function clarifyHtml() {
+  const asks = state.clarifications || [];
+  if (!asks.length) return "";
+  const fields = asks
+    .map(
+      (ask) =>
+        `<label class="field__label" for="ask-${esc(ask.slot)}">${esc(ask.prompt)}</label>` +
+        `<input class="textarea" id="ask-${esc(ask.slot)}" data-slot="${esc(ask.slot)}" placeholder="填写 ${esc(ask.slot)}" />`
+    )
+    .join("");
+  return `<div class="takeover" style="margin-top: var(--s-4)">
+    <div class="muted">补充后继续 · 在原指令上续答，不必重述</div>
+    <div>${fields}</div>
+    <div class="btn-row" style="margin-top: var(--s-3)">
+      <button class="btn btn--primary" id="btn-clarify">补充并继续</button>
+    </div>
+  </div>`;
+}
+
+async function onClarify() {
+  const answers = {};
+  document.querySelectorAll("[data-slot]").forEach((node) => {
+    const value = (node.value || "").trim();
+    if (value) answers[node.dataset.slot] = value;
+  });
+  const result = await post("/api/clarify", { answers });
+  if (result.status !== 200) {
+    timelineAdd(`补充被拒绝：${result.data.detail || "当前无待澄清指令"}`, "stop");
+    return;
   }
+  timelineAdd(`已补充并继续：${Object.keys(answers).join("、") || "（未新增）"}`, "live");
+  applySubmission(result.data);
+  setButtons();
+}
+
+async function onSubmit() {
+  reset(true);
+  const text = el("utterance").value;
+  state.phase = "submitting";
+  setButtons();
+  const result = await post("/api/submit", { utterance: text, selected: SELECTED });
+  timelineAdd(`提交：${text}`, "live");
+  applySubmission(result.data);
+  setButtons();
+}
+
+/* 申请服务端强验证挑战（红色卡）：验证码一次性 + 有 TTL，与当前冻结计划绑定 */
+async function requestVerification() {
+  const result = await post("/api/verify/request", {});
+  if (result.status !== 200) {
+    timelineAdd(`强验证申请被拒绝：${result.data.detail || "当前计划卡无需强验证"}`, "stop");
+    return;
+  }
+  state.verification = result.data;
+  state.phase = "strong-verify";
+  renderStage();
+  timelineAdd(`红色：已下发强验证挑战（${result.data.channel} → ${result.data.target}）`, "warn");
   setButtons();
 }
 
 async function onConfirm() {
   if (!state.card) return;
   if (state.card.level === "RED" && state.phase !== "strong-verify") {
-    state.phase = "strong-verify";
-    timelineAdd("红色：等待强验证（人脸 / 短信 / U 盾）", "warn");
-    setButtons();
+    await requestVerification();
     return;
   }
-  const strongVerified = state.phase === "strong-verify";
+  const codeEl = el("vcode");
+  const code = state.phase === "strong-verify" && codeEl ? codeEl.value.trim() : "";
   state.phase = "executing";
   setButtons();
-  const result = await post("/api/confirm", {
-    card_id: state.card.card_id,
-    frozen_hash: state.card.frozen_hash,
-    strong_verified: strongVerified,
-  });
+  const payload = { card_id: state.card.card_id, frozen_hash: state.card.frozen_hash };
+  if (code) payload.verification_code = code;
+  const result = await post("/api/confirm", payload);
   if (result.status !== 200) {
-    state.phase = "awaiting_confirm";
+    state.phase = state.verification ? "strong-verify" : "awaiting_confirm";
     state.panel = interceptHtml("确认被拒绝", String(result.data.detail || "确认不通过"), false);
     el("stage").insertAdjacentHTML("beforeend", state.panel);
     timelineAdd(`确认被拒绝：${result.data.detail || ""}`, "stop");
@@ -383,11 +458,14 @@ async function onConfirm() {
 
 async function onInterrupt() {
   const result = await post("/api/interrupt", {});
+  if (result.status !== 200) {
+    timelineAdd(`中断被拒绝：${result.data.detail || "当前状态不可中断"}`, "stop");
+    return;
+  }
   state.phase = "interrupted";
   timelineAdd("用户中断：已执行节点保留、未执行节点挂起", "warn");
   renderStage();
   setButtons();
-  void result;
 }
 
 async function onResume() {
@@ -407,8 +485,12 @@ async function onResume() {
 }
 
 async function onReverse() {
-  const result = await post("/api/reverse", { settled: true });
+  const result = await post("/api/reverse", {});
   const data = result.data;
+  if (result.status !== 200) {
+    timelineAdd(`回退被拒绝：${data.detail || "当前状态不可回退"}`, "stop");
+    return;
+  }
   const rolled = state.stepStates.lastIndexOf("done");
   if (rolled >= 0) state.stepStates[rolled] = "rolled";
   state.phase = "done";
@@ -442,6 +524,10 @@ el("btn-resume").addEventListener("click", onResume);
 el("btn-reverse").addEventListener("click", onReverse);
 el("btn-takeover").addEventListener("click", onTakeover);
 el("btn-reset").addEventListener("click", () => reset(false));
+/* 澄清表单是动态渲染的，故用事件委托 */
+el("stage").addEventListener("click", (event) => {
+  if (event.target && event.target.id === "btn-clarify") onClarify();
+});
 
 function readTheme() {
   try {

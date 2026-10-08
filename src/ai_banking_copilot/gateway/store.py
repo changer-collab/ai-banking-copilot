@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
@@ -107,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_txn_user_date ON transactions(user_id, booked_on)
 _READ_ONLY_ROOTS = ("SELECT", "WITH")
 
 
-class StoreMode(str, Enum):
+class StoreMode(StrEnum):
     READ_ONLY = "ro"
     READ_WRITE = "rw"
 

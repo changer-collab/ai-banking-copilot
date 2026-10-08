@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class StepState(str, Enum):
+class StepState(StrEnum):
     """步骤状态机。"""
 
     PENDING = "pending"

@@ -11,10 +11,13 @@ from ai_banking_copilot.planning.llm import (
 )
 from ai_banking_copilot.tools.catalog import build_default_registry
 
+MINIMUM_CANONICAL_ACTIONS = 20
+"""基线规范动作数**下限**（防误删）：计数断言用下限而非等号，避免新增动作时全员改同一行。"""
+
 
 def test_action_kinds_cover_the_canonical_vocabulary() -> None:
     assert set(ACTION_KINDS) == set(CANONICAL_ACTIONS)
-    assert len(CANONICAL_ACTIONS) == 20
+    assert len(CANONICAL_ACTIONS) >= MINIMUM_CANONICAL_ACTIONS
 
 
 def test_action_kinds_match_the_tool_registry_vocabulary() -> None:

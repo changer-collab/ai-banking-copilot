@@ -5,6 +5,7 @@ from ai_banking_copilot.gateway.models import Payee
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import ACTION_KINDS
 from ai_banking_copilot.planning.slots import (
+    _PROMPTS,
     REQUIRED_SLOTS,
     SLOT_PARAMS,
     SlotInputs,
@@ -44,6 +45,46 @@ def test_amount_without_unit_is_not_guessed(payees: tuple[Payee, ...]) -> None:
     assert fill.complete is False
     assert [question.slot for question in fill.questions] == ["amount"]
     assert "payee" in fill.slots
+
+
+def test_daily_limit_is_parsed_from_text_with_a_unit() -> None:
+    """`daily_limit` 有可控 NL（P2-4 残留）：口述额度（**必须带单位**）会被采纳为整数分。"""
+    fill = fill_control_slots(
+        "card.set_limit",
+        SlotInputs(
+            text="把这张卡的额度调到 2 万元",
+            today=TODAY,
+            payees=(),
+            selected={"card": "card_debit"},
+        ),
+    )
+    assert fill.slots["daily_limit"] == 2_000_000
+    assert fill.complete is True
+
+
+def test_daily_limit_without_a_unit_is_not_guessed() -> None:
+    fill = fill_control_slots(
+        "card.set_limit",
+        SlotInputs(
+            text="把这张卡的额度调到 2000", today=TODAY, payees=(), selected={"card": "card_debit"}
+        ),
+    )
+    assert "daily_limit" not in fill.slots
+    assert [question.slot for question in fill.questions] == ["daily_limit"]
+
+
+def test_selected_daily_limit_still_wins_over_the_text() -> None:
+    """受信任调用方显式选定**优先**于文本解析（`_resolve_slot` 首段），演示链行为不变。"""
+    fill = fill_control_slots(
+        "card.apply_virtual",
+        SlotInputs(
+            text="申请一张虚拟卡，额度 5 万元",
+            today=TODAY,
+            payees=(),
+            selected={"user_id": DEMO_USER_ID, "daily_limit": 100_000},
+        ),
+    )
+    assert fill.slots["daily_limit"] == 100_000
 
 
 def test_multiple_candidates_force_clarification_without_a_level(
@@ -106,6 +147,41 @@ def test_slot_params_cover_every_referenced_slot() -> None:
     assert referenced <= set(SLOT_PARAMS)
 
 
+def test_slot_params_are_derived_from_the_catalog() -> None:
+    """`SLOT_PARAMS` 是 02 目录的**投影**（不再是手写平行表）：槽位名必须映射到自己的参数名。"""
+    registry = build_default_registry()
+    for action in registry.actions():
+        for param in registry.get(action).params:
+            if param.slot_name is None:
+                continue
+            assert SLOT_PARAMS[param.slot_name] == param.name
+
+
+def test_slot_params_keep_the_known_wire_vocabulary() -> None:
+    """**下限式**锁：两套词汇的既有对应不得被悄悄改名（新增槽位不受影响，不算冲突点）。"""
+    assert {
+        "account": "account_id",
+        "payee": "payee_id",
+        "amount": "amount_cents",
+        "when": "booked_on",
+        "product": "product_id",
+        "subscription": "subscription_id",
+        "card": "card_id",
+        "hold": "hold_id",
+        "daily_limit": "daily_limit_cents",
+        "user_id": "user_id",
+        "merchant": "merchant",
+        "amount_cents": "amount_cents",
+        "period": "period",
+        "next_charge_on": "next_charge_on",
+    }.items() <= SLOT_PARAMS.items()
+
+
+def test_every_slot_param_has_a_clarification_prompt() -> None:
+    """每个可补全槽位都必须有澄清话术，否则追问路径会 KeyError。"""
+    assert set(SLOT_PARAMS) <= set(_PROMPTS)
+
+
 def test_required_slots_follow_the_catalog_required_control_slots() -> None:
     """02 声明必填 user_id 的动作，REQUIRED_SLOTS 必须一致含 user_id（README 裁决 #16）。"""
     registry = build_default_registry()
@@ -120,6 +196,7 @@ def test_required_slots_follow_the_catalog_required_control_slots() -> None:
     assert requires_user_id == {
         "bills.monthly",
         "bills.category_trend",
+        "bills.yearly",
         "card.list",
         "subscription.list",
         "card.apply_virtual",

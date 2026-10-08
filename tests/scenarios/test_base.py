@@ -40,8 +40,11 @@ def _plan(*nodes: PlanNode) -> Plan:
 
 
 def test_plan_is_pure_query_follows_the_canonical_vocabulary() -> None:
-    """绿色纯度判据直接复用 04 的 `ACTION_KINDS`（本层不再私存词表，README 裁决 #15）。"""
-    assert len(ACTION_KINDS) == 20
+    """绿色纯度判据直接复用 04 的 `ACTION_KINDS`（本层不再私存词表，README 裁决 #15）。
+
+    计数只设**下限**（`>= 20`）：新增动作不得使词表缩水，但等号会让每个新增动作的人都改同一行。
+    """
+    assert len(ACTION_KINDS) >= 20
     for action, kind in ACTION_KINDS.items():
         plan = _plan(_node("n1", action))
         assert plan_is_pure_query(plan) is (kind is ActionKind.QUERY)

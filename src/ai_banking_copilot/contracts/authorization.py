@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 
 
 class Level(IntEnum):
@@ -34,7 +34,7 @@ class Level(IntEnum):
     """增强层：拒绝并解释。"""
 
 
-class ReasonCode(str, Enum):
+class ReasonCode(StrEnum):
     """命中原因码——决定可解释、可审计，且规则变更须留痕。"""
 
     QUERY_ONLY = "QUERY_ONLY"
@@ -43,6 +43,8 @@ class ReasonCode(str, Enum):
     IRREVERSIBLE = "IRREVERSIBLE"
     MANUAL_REVIEW = "MANUAL_REVIEW"
     OBJECT_BLOCKED = "OBJECT_BLOCKED"
+    OFFICIAL_RED = "OFFICIAL_RED"
+    """官方明文点名红色、但金额档 / 可逆性推不出红色的动作（理财申购、卡片解挂）。"""
 
 
 @dataclass(frozen=True)

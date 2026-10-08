@@ -107,3 +107,52 @@ def test_event_requires_id_and_kind() -> None:
         AuditEvent(event_id="", kind=KIND_EXECUTION, payload={}, prev_hash="")
     with pytest.raises(ValueError, match="kind"):
         AuditEvent(event_id="e1", kind="", payload={}, prev_hash="")
+
+
+def test_keyed_log_uses_hmac_and_marks_algorithm(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, key="s3cret")
+    log.append(_event("e1"))
+    assert log.keyed is True
+    assert '"alg":"hmac-sha256"' in path.read_text(encoding="utf-8")
+    assert log.verify_chain() is True
+
+
+def test_keyed_log_fails_closed_without_or_with_a_wrong_key(tmp_path: Path) -> None:
+    """换密钥 / 不给密钥 ⇒ 全链校验失败（掌握日志写权限但无密钥者无法重算）。"""
+    path = tmp_path / "audit.jsonl"
+    AuditLog(path, key="s3cret").append(_event("e1"))
+    assert AuditLog(path, key="another").verify_chain() is False
+    assert AuditLog(path).verify_chain() is False
+
+
+def test_keyed_log_detects_a_rewritten_line(tmp_path: Path) -> None:
+    """改写一行内容仍会被 HMAC 检出（无密钥无法重算摘要）。"""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, key="s3cret")
+    log.append(_event("e1"))
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"RED"', '"GREEN"'), encoding="utf-8"
+    )
+    assert log.verify_chain() is False
+
+
+def test_keyless_and_keyed_entries_coexist(tmp_path: Path) -> None:
+    """历史无密钥行 + 新密钥行可混存校验（逐行按 `alg` 重算，支持平滑迁移）。"""
+    path = tmp_path / "audit.jsonl"
+    AuditLog(path).append(_event("legacy"))
+    keyed = AuditLog(path, key="s3cret")
+    keyed.append(_event("new"))
+    assert keyed.verify_chain() is True
+
+
+def test_flipping_the_algorithm_marker_breaks_verification(tmp_path: Path) -> None:
+    """把 `alg` 由 hmac-sha256 改成 sha256 ⇒ 校验失败（标记不参与哈希但会被比对）。"""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path, key="s3cret")
+    log.append(_event("e1"))
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('"alg":"hmac-sha256"', '"alg":"sha256"'),
+        encoding="utf-8",
+    )
+    assert log.verify_chain() is False

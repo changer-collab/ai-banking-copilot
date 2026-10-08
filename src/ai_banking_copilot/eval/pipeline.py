@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, green_or_raise, strictest
-from ai_banking_copilot.contracts.plan import Plan, PlanNode
+from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
 from ai_banking_copilot.contracts.security import INJECTION_MARKERS
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.eval.dataset import EvalCase
@@ -45,13 +45,14 @@ from ai_banking_copilot.planning.llm import Intent, TemplateIntentModel
 from ai_banking_copilot.planning.slots import SlotInputs, fill_control_slots
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
+from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pdp import (
     FLAG_INJECTION_DETECTED,
     ObjectState,
     evaluate,
     evaluate_plan,
 )
-from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_hash
+from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep
 from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
     ScenarioRefused,
@@ -60,6 +61,8 @@ from ai_banking_copilot.scenarios.base import (
 )
 from ai_banking_copilot.scenarios.bills import category_share_in_sandbox
 from ai_banking_copilot.scenarios.registry import (
+    QUERY_HANDLERS,
+    WRITE_HANDLERS,
     UnknownScenarioError,
     run_scenario,
     select_handler,
@@ -74,6 +77,7 @@ _DEFAULT_SELECTED: Mapping[str, object] = {
     "subscription": "sub_video",
     "card": "card_debit",
     "user_id": DEMO_USER_ID,
+    "daily_limit": 100000,
 }
 """受信任调用方（交互层）的默认选定对象：确定性、可复现（种子库中均存在）。
 
@@ -221,12 +225,16 @@ class EvalPipeline:
             return _blocked_result(case, "blocked", outcome.message, flags, started)
         plan = outcome.plan
         net = plan_net_effect(plan, gateway)
-        pep = Pep(self._registry, gateway, core_bank, audit, breaker)
+        pep = Pep(
+            self._registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS
+        )
         node_outcomes: list[NodeOutcome] = []
         node_decisions: list[Decision] = []
-        for node in plan.nodes:
+        node_map = plan.node_map()
+        for node_id in topological_order(plan):
+            node = node_map[node_id]
             node_outcome, decision = self._evaluate_node(
-                node, gateway=gateway, flags=flags, pep=pep, case_id=case.id
+                node, gateway=gateway, flags=flags, pep=pep, case_id=case.id, plan=plan
             )
             node_outcomes.append(node_outcome)
             if decision is not None:
@@ -260,6 +268,7 @@ class EvalPipeline:
         flags: frozenset[str],
         pep: Pep,
         case_id: str,
+        plan: Plan,
     ) -> tuple[NodeOutcome, Decision | None]:
         spec = self._registry.get(node.action)
         request = node_policy_request(
@@ -271,7 +280,7 @@ class EvalPipeline:
             flags=flags,
         )
         decision = evaluate(request)
-        executed = _execute(pep, self._registry, node, decision, case_id)
+        executed = _execute(pep, self._registry, node, decision, case_id, plan)
         return (
             NodeOutcome(
                 node_id=node.node_id,
@@ -288,15 +297,21 @@ class EvalPipeline:
 
 
 def _execute(
-    pep: Pep, registry: ToolRegistry, node: PlanNode, decision: Decision, case_id: str
+    pep: Pep,
+    registry: ToolRegistry,
+    node: PlanNode,
+    decision: Decision,
+    case_id: str,
+    plan: Plan,
 ) -> str:
     """执行取证：级别 ≥ `MANUAL` 或非纯查询绿色 → 跳过。
 
     写动作身份由**评测链在 `ToolCall` 层注入** `user_id`（README 裁决 #20；02 目录已按裁决 #16
     声明必填 CONTROL 槽 `user_id`，05 场景按设计不在 `PlanNode.params` 放置它）。任何残留的参数
     契约缺口或参数强校验失败（`KeyError` / `ValueError`，含 `ParamValidationError` /
-    `ForbiddenParamError` / `UnknownActionError`），或 PEP 拒绝（`NotAuthorizedError`），
-    一律**如实记为 `unsupported`**，不静默通过、不影响决策级评测判定。
+    `ForbiddenParamError` / `UnknownActionError`），或 PEP 拒绝（`NotAuthorizedError` /
+    `StalePlanError`，含节点级成员资格校验失败），一律**如实记为 `unsupported`**，
+    不静默通过、不影响决策级评测判定。
     """
     if decision.level >= Level.MANUAL:
         return _SKIPPED_STATUS
@@ -305,8 +320,8 @@ def _execute(
         return _SKIPPED_STATUS
     try:
         call = ToolCall(action=node.action, params=_tool_params(spec, node))
-        result = pep.execute(call, decision, manifest_hash(call), f"{case_id}:{node.node_id}")
-    except NotAuthorizedError:
+        result = pep.execute(call, decision, plan, f"{case_id}:{node.node_id}")
+    except (NotAuthorizedError, StalePlanError):
         return _UNSUPPORTED_STATUS
     except GatewayError as error:
         return f"failed:{type(error).__name__}"

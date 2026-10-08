@@ -2,22 +2,25 @@
 
 覆盖（PRD §4.1 / §5.2）：
 - ① 智能转账：`transfer.create` / `transfer.schedule`（`remark` 为数据槽，演示 H3）
-- ② 账单分析：`account.balance` / `account.transactions` / `bills.monthly` / `bills.category_trend`
+- ② 账单分析：`account.balance` / `account.transactions` / `bills.monthly` /
+  `bills.category_trend` / `bills.yearly`
 - ③ 理财操作：`wealth.list`（纯查询）/ `wealth.subscribe` / `wealth.redeem`
 - ④ 卡片管理：`card.list`（纯查询）/ `card.lock` / `card.unlock` / `card.report_lost` /
   `card.apply_virtual` / `card.set_limit`
 - ⑤ 订阅代扣：`subscription.list`（纯查询）/ `subscription.cancel` / `subscription.sign`
 - ⑥ 跨场景联动：`funds.freeze` / `funds.release`
 
-**动作名唯一真源**：本目录必须与 `README.md` 的「规范动作表（唯一真源）」**逐项一一对应**
-（共 20 个），不得增删或改名；需要变动时先改 README 表，再回溯修订本目录与其测试。
+**动作名唯一真源**：本目录就是规范动作表的**唯一真源**（旧文档指向的 README 表已不存在）。
+基线 20 个动作**不得增删或改名**；新增动作按 `docs/待修复清单.md` 第七节「硬性协作规则」一次改齐
+（本目录自己域那一段 + 自己场景模块的 handler + 评测用例）；计数断言只设**下限**（防误删）。
+`bills.yearly` 即步骤 2 冻结的第一个新增动作。
 
 **与 01 写原语的关系**：`transfer.create` / `wealth.subscribe` / `wealth.redeem` /
 `subscription.cancel` / `subscription.sign` / `funds.freeze` / `funds.release` /
 `card.lock` / `card.unlock` / `card.report_lost` / `card.apply_virtual` / `card.set_limit`
 均有 01 的 `CoreBank` 写原语（其中 `subscription.sign` 对应新增的 `sign_subscription`）；
-`transfer.schedule` 复用转账语义（带 `booked_on`）。**执行处理器由 03 的 PEP 登记**
-（本层只做声明，不执行）。
+`transfer.schedule` 复用转账语义（带 `booked_on`）。**执行处理器由各场景模块自带、组合根汇入
+03 的 PEP handler 注册表**（本层只做声明，不执行）。
 
 **写动作的 `user_id` 控制槽**（README 裁决 #16）：`transfer.create` / `transfer.schedule` /
 `wealth.subscribe` / `wealth.redeem` / `subscription.sign` 一律声明**必填控制槽** `user_id`
@@ -34,18 +37,25 @@ from __future__ import annotations
 from datetime import date
 
 from ai_banking_copilot.contracts.taint import SlotKind
-from ai_banking_copilot.tools.registry import ParamSpec, RiskClass, ToolRegistry, ToolSpec
+from ai_banking_copilot.tools.registry import (
+    ActionKind,
+    ParamSpec,
+    RiskClass,
+    ToolRegistry,
+    ToolSpec,
+)
 
 _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="transfer.create",
         risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.OUTFLOW,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("account_id", SlotKind.CONTROL, str),
-            ParamSpec("payee_id", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
-            ParamSpec("booked_on", SlotKind.CONTROL, date),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
             ParamSpec("remark", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -56,12 +66,13 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="transfer.schedule",
         risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.OUTFLOW,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("account_id", SlotKind.CONTROL, str),
-            ParamSpec("payee_id", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
-            ParamSpec("booked_on", SlotKind.CONTROL, date),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
             ParamSpec("remark", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -75,7 +86,8 @@ _BILLS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="account.balance",
         risk=RiskClass.READ_ONLY,
-        params=(ParamSpec("account_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.QUERY,
+        params=(ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),),
         is_pure_query=True,
         reversible=True,
         money_param=None,
@@ -84,8 +96,9 @@ _BILLS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="account.transactions",
         risk=RiskClass.READ_ONLY,
+        kind=ActionKind.QUERY,
         params=(
-            ParamSpec("account_id", SlotKind.CONTROL, str),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("start", SlotKind.CONTROL, date),
             ParamSpec("end", SlotKind.CONTROL, date),
         ),
@@ -97,8 +110,9 @@ _BILLS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="bills.monthly",
         risk=RiskClass.READ_ONLY,
+        kind=ActionKind.QUERY,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
             ParamSpec("year", SlotKind.CONTROL, int),
             ParamSpec("month", SlotKind.CONTROL, int),
         ),
@@ -110,8 +124,9 @@ _BILLS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="bills.category_trend",
         risk=RiskClass.READ_ONLY,
+        kind=ActionKind.QUERY,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
             ParamSpec("category", SlotKind.CONTROL, str),
             ParamSpec("base_year", SlotKind.CONTROL, int),
             ParamSpec("base_month", SlotKind.CONTROL, int),
@@ -121,12 +136,26 @@ _BILLS_SPECS: tuple[ToolSpec, ...] = (
         money_param=None,
         description="分类同比 / 环比（派生数字走算子白名单，纯查询）",
     ),
+    ToolSpec(
+        action="bills.yearly",
+        risk=RiskClass.READ_ONLY,
+        kind=ActionKind.QUERY,
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("year", SlotKind.CONTROL, int),
+        ),
+        is_pure_query=True,
+        reversible=True,
+        money_param=None,
+        description="年度账单汇总（12 个月度账单事实的年度合计，纯查询）",
+    ),
 )
 
 _WEALTH_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="wealth.list",
         risk=RiskClass.READ_ONLY,
+        kind=ActionKind.QUERY,
         params=(),
         is_pure_query=True,
         reversible=True,
@@ -136,11 +165,12 @@ _WEALTH_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="wealth.subscribe",
         risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.OUTFLOW,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("account_id", SlotKind.CONTROL, str),
-            ParamSpec("product_id", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("product_id", SlotKind.CONTROL, str, slot_name="product"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
         ),
         is_pure_query=False,
         reversible=True,
@@ -150,11 +180,12 @@ _WEALTH_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="wealth.redeem",
         risk=RiskClass.LARGE_FUNDS,
+        kind=ActionKind.INFLOW,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("account_id", SlotKind.CONTROL, str),
-            ParamSpec("product_id", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("product_id", SlotKind.CONTROL, str, slot_name="product"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
         ),
         is_pure_query=False,
         reversible=True,
@@ -167,7 +198,8 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.list",
         risk=RiskClass.READ_ONLY,
-        params=(ParamSpec("user_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.QUERY,
+        params=(ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),),
         is_pure_query=True,
         reversible=True,
         money_param=None,
@@ -176,8 +208,9 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.lock",
         risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
         params=(
-            ParamSpec("card_id", SlotKind.CONTROL, str),
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
             ParamSpec("note", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -188,7 +221,8 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.unlock",
         risk=RiskClass.SMALL_CHANGE,
-        params=(ParamSpec("card_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.STATE,
+        params=(ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),),
         is_pure_query=False,
         reversible=True,
         money_param=None,
@@ -197,8 +231,9 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.report_lost",
         risk=RiskClass.IRREVERSIBLE,
+        kind=ActionKind.IRREVERSIBLE,
         params=(
-            ParamSpec("card_id", SlotKind.CONTROL, str),
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
             ParamSpec("reason", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -209,9 +244,10 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.apply_virtual",
         risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("daily_limit_cents", SlotKind.CONTROL, int),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("daily_limit_cents", SlotKind.CONTROL, int, slot_name="daily_limit"),
         ),
         is_pure_query=False,
         reversible=True,
@@ -221,9 +257,10 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="card.set_limit",
         risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
         params=(
-            ParamSpec("card_id", SlotKind.CONTROL, str),
-            ParamSpec("daily_limit_cents", SlotKind.CONTROL, int),
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
+            ParamSpec("daily_limit_cents", SlotKind.CONTROL, int, slot_name="daily_limit"),
         ),
         is_pure_query=False,
         reversible=True,
@@ -236,7 +273,8 @@ _SUBSCRIPTION_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="subscription.list",
         risk=RiskClass.READ_ONLY,
-        params=(ParamSpec("user_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.QUERY,
+        params=(ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),),
         is_pure_query=True,
         reversible=True,
         money_param=None,
@@ -245,7 +283,8 @@ _SUBSCRIPTION_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="subscription.cancel",
         risk=RiskClass.SMALL_CHANGE,
-        params=(ParamSpec("subscription_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.CANCEL_OUTFLOW,
+        params=(ParamSpec("subscription_id", SlotKind.CONTROL, str, slot_name="subscription"),),
         is_pure_query=False,
         reversible=True,
         money_param=None,
@@ -254,12 +293,13 @@ _SUBSCRIPTION_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="subscription.sign",
         risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.OUTFLOW,
         params=(
-            ParamSpec("user_id", SlotKind.CONTROL, str),
-            ParamSpec("merchant", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
-            ParamSpec("period", SlotKind.CONTROL, str),
-            ParamSpec("next_charge_on", SlotKind.CONTROL, date),
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("merchant", SlotKind.CONTROL, str, slot_name="merchant"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount_cents"),
+            ParamSpec("period", SlotKind.CONTROL, str, slot_name="period"),
+            ParamSpec("next_charge_on", SlotKind.CONTROL, date, slot_name="next_charge_on"),
         ),
         is_pure_query=False,
         reversible=True,
@@ -272,9 +312,10 @@ _CROSS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="funds.freeze",
         risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.OUTFLOW,
         params=(
-            ParamSpec("account_id", SlotKind.CONTROL, str),
-            ParamSpec("amount_cents", SlotKind.CONTROL, int),
+            ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
             ParamSpec("reason", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -285,7 +326,8 @@ _CROSS_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         action="funds.release",
         risk=RiskClass.SMALL_CHANGE,
-        params=(ParamSpec("hold_id", SlotKind.CONTROL, str),),
+        kind=ActionKind.INFLOW,
+        params=(ParamSpec("hold_id", SlotKind.CONTROL, str, slot_name="hold"),),
         is_pure_query=False,
         reversible=True,
         money_param=None,

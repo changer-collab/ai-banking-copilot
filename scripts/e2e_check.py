@@ -75,17 +75,22 @@ def run(base: str) -> list[str]:
         failures.append("/api/submit 多意图未产出计划卡")
 
     if card:
-        status, executed = _post(
-            base,
-            "/api/confirm",
-            {
-                "card_id": card.get("card_id"),
-                "frozen_hash": card.get("frozen_hash"),
-                # 红色卡按官方口径需强验证；本自检直接声明已通过（黄色/绿色卡忽略该字段）。
-                # 注意：若演示库日累计已超 1000 元，同一计划会合法升为红色。
-                "strong_verified": True,
-            },
-        )
+        payload: dict[str, object] = {
+            "card_id": card.get("card_id"),
+            "frozen_hash": card.get("frozen_hash"),
+        }
+        # 红色卡按官方口径需强验证：向服务端申请挑战（演示环境验证码随响应回显）。
+        # 注意：若演示库日累计已超 1000 元，同一计划会合法升为红色。
+        if str(card.get("level", "")).upper() == "RED":
+            vstatus, prompt = _post(base, "/api/verify/request", {})
+            payload["verification_code"] = prompt.get("code")
+            print(
+                f"[2b] POST /api/verify/request  -> {vstatus} "
+                f"channel={prompt.get('channel')} target={prompt.get('target')}"
+            )
+            if vstatus != 200 or not prompt.get("code"):
+                failures.append("/api/verify/request 未下发验证码")
+        status, executed = _post(base, "/api/confirm", payload)
         results = executed.get("results", [])
         print(f"[3] POST /api/confirm         -> {status} state={executed.get('state')}")
         for item in results:

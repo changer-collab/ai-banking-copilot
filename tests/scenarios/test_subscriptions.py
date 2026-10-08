@@ -12,7 +12,9 @@ from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.scenarios.base import ScenarioRefused, plan_is_pure_query, plan_net_effect
 from ai_banking_copilot.scenarios.subscriptions import (
     SubscriptionsHandler,
+    describe_detected_charges,
     describe_upcoming_charges,
+    detected_charges,
     future_outflow_effect,
     resolve_cancel_race,
     upcoming_charges,
@@ -111,3 +113,18 @@ def test_upcoming_charges_sorted_by_next_charge_on(gateway: FactGateway) -> None
     text = describe_upcoming_charges(charges)
     assert "共 3 项" in text
     assert "2026-10-08" in text
+
+
+def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> None:
+    """自动识别订阅扣费：仅按**商户名精确匹配**归并流出流水，识别不到的不编造。"""
+    charges = detected_charges(gateway, DEMO_USER_ID)
+    assert [charge.merchant for charge in charges] == ["视频会员"]
+    assert charges[0].subscription_id == "sub_video"
+    assert charges[0].txn_count == 3
+    assert charges[0].total.cents == 7500
+    assert charges[0].last_booked_on == date(2026, 9, 18)
+    assert "识别到 1 项订阅扣费" in describe_detected_charges(charges)
+
+
+def test_detected_charges_are_empty_for_an_unknown_user(gateway: FactGateway) -> None:
+    assert detected_charges(gateway, "user_nobody") == ()

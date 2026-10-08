@@ -101,9 +101,18 @@ make check                    # lint + 类型检查 + 测试
 
 > 上述三项均**复用现有 20 个规范动作**、不新增算子。
 
+**年度账单（P2-1 的冻结接口）**：新增动作 `bills.yearly`（纯查询 → 绿），汇总 12 个月度账单事实，
+年度合计走**算子白名单**（`sum`）并携带全部 `record_id` 出处；NL 触发词为「年度账单 / 全年账单 /
+一年的账单 / 年度消费」。已落码，评测用例见 `bills-yearly-*`。其余为**能力子集**：本动作只做
+年度合计，不含同比 / 环比与专有渲染（那属 P2-1 的完整实现）。
+
 ### 能力子集（声明不补）
 
-`account.balance` / `subscription.sign` / `card.unlock` / `card.apply_virtual` / `card.set_limit` / `funds.release` 六个动作**缺可控 NL 或构造路径**、**未补评测用例**，声明为能力子集（非等价实现，H9）。
+`account.balance` / `subscription.sign` / `card.apply_virtual` / `card.set_limit` / `funds.release`
+五个动作**缺可控 NL 或构造路径**、**未补评测用例**，声明为能力子集（非等价实现，H9）。
+
+`card.unlock`（解挂）**不属能力子集**：它有 NL 触发规则、有场景构造路径，也有单元测试，
+仅**未补评测用例**——此处订正先前「缺可控 NL 或构造路径」的过强表述（见 `docs/待修复清单.md` P2-8）。
 
 `取消我的订阅` / `退出我的订阅` 为 **fail-closed（空意图）**：安全语义不变，不降档为只读执行。
 

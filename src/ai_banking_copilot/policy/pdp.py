@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import (
@@ -59,6 +59,14 @@ FLAG_INJECTION_DETECTED = "injection_detected"
 FLAG_FIRST_LARGE_TO_OBJECT = "first_large_to_object"
 """首次向某对象大额（涵盖熟人社工 / 盗号）。"""
 
+OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset({"wealth.subscribe", "card.unlock"})
+"""官方明文点名红色、但按金额档 / 可逆性推不出红色的动作（官方口径不得偏离）。
+
+- `wealth.subscribe`：官方红色示例「理财产品申购」——不因金额小而降为黄；
+- `card.unlock`：官方红色「挂失 / 解挂」——解挂是可逆状态变更且无金额，按金额档会落到黄；
+  解除保护比施加保护更危险，故强制 ≥ 红（`card.lock` 施加保护仍为黄）。
+"""
+
 KNOWN_CONTEXT_FLAGS: frozenset[str] = frozenset(
     {
         FLAG_OFF_HOURS,
@@ -74,7 +82,7 @@ _CENT_PER_YUAN = 100
 _YELLOW_CONTEXT_FLAGS = frozenset({FLAG_OFF_HOURS, FLAG_DEVICE_CHANGE, FLAG_HIGH_FREQUENCY})
 
 
-class ObjectState(str, Enum):
+class ObjectState(StrEnum):
     """对象态机（PRD §5.2，唯一谓词求值结果）。`BLOCKED` 为吸收态。"""
 
     SELF = "self"
@@ -136,6 +144,7 @@ def evaluate(request: PolicyRequest) -> Decision:
     if request.object_state is ObjectState.BLOCKED:
         return Decision(level=Level.DENY, reasons=(ReasonCode.OBJECT_BLOCKED,))
     modifiers: list[Decision | None] = [
+        _official_red_modifier(request.action),
         _object_modifier(request.object_state),
         _irreversible_modifier(request.irreversible),
         *_context_modifiers(request.context_flags),
@@ -205,6 +214,13 @@ def _amount_band_decision(daily_accumulated: Money, limit_cents: int) -> Decisio
     if daily_accumulated.cents <= limit_cents:
         return Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
     return Decision(level=Level.RED, reasons=(ReasonCode.AMOUNT_OVER_DAILY_LIMIT,))
+
+
+def _official_red_modifier(action: str) -> Decision | None:
+    """官方点名红色动作：无条件 ≥ 红（只升档，不降档）。"""
+    if action in OFFICIAL_RED_ACTIONS:
+        return Decision(level=Level.RED, reasons=(ReasonCode.OFFICIAL_RED,))
+    return None
 
 
 def _object_modifier(state: ObjectState) -> Decision | None:

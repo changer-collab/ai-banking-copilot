@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
@@ -17,12 +18,23 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
+from ai_banking_copilot.gateway.core_bank import WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import Money, Subscription
+from ai_banking_copilot.gateway.models import Money, Subscription, Transaction
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import (
+    QueryContext,
+    QueryHandler,
+    QueryResult,
+    WriteContext,
+    WriteHandler,
+    money_cents,
+    require_date,
+    require_str,
+)
 from ai_banking_copilot.policy.saga import ReversalOutcome, ReversalWindow, Saga
 from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
@@ -71,6 +83,62 @@ def describe_upcoming_charges(subscriptions: tuple[Subscription, ...]) -> str:
         f"共 {len(subscriptions)} 项，最近到期 {nearest.next_charge_on.isoformat()}"
         f"（{nearest.merchant} {nearest.amount.yuan} 元）"
     )
+
+
+@dataclass(frozen=True)
+class DetectedCharge:
+    """从流水**归并识别**出的订阅扣费（同一商户的流出记录聚合）。"""
+
+    merchant: str
+    subscription_id: str | None
+    txn_count: int
+    total: Money
+    last_booked_on: date
+
+
+def detected_charges(gateway: FactGateway, user_id: str) -> tuple[DetectedCharge, ...]:
+    """自动识别订阅扣费：把**流出流水**按订阅商户名归并（官方场景⑤「自动识别订阅扣费」）。
+
+    判据是**商户名精确匹配**已知订阅——不是模型推断，故可复现、可解释；识别不到的订阅
+    一律不返回（不编造扣费），非订阅商户也不返回。
+    """
+    by_merchant = {
+        record.payload.merchant: record.payload for record in gateway.subscriptions_of(user_id)
+    }
+    if not by_merchant:
+        return ()
+    grouped: dict[str, list[Transaction]] = {}
+    for account in gateway.accounts_of(user_id):
+        for record in gateway.transactions_between(
+            account.payload.account_id, date.min, date.max
+        ):
+            txn = record.payload
+            if txn.direction == "out" and txn.merchant in by_merchant:
+                grouped.setdefault(txn.merchant, []).append(txn)
+    detected = (
+        DetectedCharge(
+            merchant=merchant,
+            subscription_id=by_merchant[merchant].subscription_id,
+            txn_count=len(items),
+            total=Money(sum(abs(item.amount.cents) for item in items)),
+            last_booked_on=max(item.booked_on for item in items),
+        )
+        for merchant, items in grouped.items()
+    )
+    return tuple(sorted(detected, key=lambda charge: (-charge.total.cents, charge.merchant)))
+
+
+def describe_detected_charges(charges: tuple[DetectedCharge, ...]) -> str:
+    """只陈述事实：识别到的项数、笔数与合计金额（无推荐/收益措辞，守 H6）。"""
+    if not charges:
+        return "未从流水中识别到订阅扣费"
+    grand_total = Money(sum(charge.total.cents for charge in charges))
+    detail = "；".join(
+        f"{charge.merchant} {charge.txn_count} 笔合计 {charge.total.yuan} 元"
+        f"（最近 {charge.last_booked_on.isoformat()}）"
+        for charge in charges
+    )
+    return f"识别到 {len(charges)} 项订阅扣费，合计 {grand_total.yuan} 元：{detail}"
 
 
 class SubscriptionsHandler(ScenarioHandler):
@@ -149,3 +217,43 @@ def _require_subscription(gateway: FactGateway, subscription_id: str) -> None:
         gateway.subscription(subscription_id)
     except GatewayNotFoundError as error:
         raise ScenarioRefused(f"订阅不存在：{subscription_id}") from error
+
+
+def _cancel_handler(context: WriteContext) -> WriteReceipt:
+    """把 `subscription.cancel` 映射到 `CoreBank.cancel_subscription`。"""
+    return context.core_bank.cancel_subscription(
+        subscription_id=require_str(context.params, "subscription_id"),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+def _sign_handler(context: WriteContext) -> WriteReceipt:
+    """把 `subscription.sign` 映射到 `CoreBank.sign_subscription`。"""
+    return context.core_bank.sign_subscription(
+        user_id=require_str(context.params, "user_id"),
+        merchant=require_str(context.params, "merchant"),
+        amount=Money(money_cents(context.params, context.spec)),
+        period=require_str(context.params, "period"),
+        next_charge_on=require_date(context.params, "next_charge_on"),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+WRITE_HANDLERS: Mapping[str, WriteHandler] = {
+    "subscription.cancel": _cancel_handler,
+    "subscription.sign": _sign_handler,
+}
+"""订阅域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+
+
+def _subscription_list(context: QueryContext) -> QueryResult:
+    subscriptions = context.gateway.subscriptions_of(require_str(context.params, "user_id"))
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in subscriptions),
+        provenance=tuple((item.record_id, item.content_hash) for item in subscriptions),
+        detail=f"共 {len(subscriptions)} 项订阅",
+    )
+
+
+QUERY_HANDLERS: Mapping[str, QueryHandler] = {"subscription.list": _subscription_list}
+"""订阅域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""

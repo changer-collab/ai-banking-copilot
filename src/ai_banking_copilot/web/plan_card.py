@@ -25,7 +25,7 @@ PROMPT_USER_CONFIRM = "user_confirm"
 """黄色：用户确认。"""
 
 PROMPT_STRONG_VERIFY = "strong_verify"
-"""红色：强验证（多因子）。"""
+"""红色：强验证（服务端一次性验证码挑战）。"""
 
 PROMPT_MANUAL_TAKEOVER = "manual_takeover"
 """增强层 L3：人工接管。"""
@@ -38,6 +38,7 @@ _ACTION_LABELS: dict[str, str] = {
     "account.transactions": "交易记录查询",
     "bills.monthly": "月度账单分析",
     "bills.category_trend": "分类趋势分析",
+    "bills.yearly": "年度账单汇总",
     "wealth.list": "理财查询",
     "card.list": "卡片查询",
     "subscription.list": "订阅查询",
@@ -171,7 +172,11 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
         user_id = _str_param(node, "user_id")
         if user_id is not None:
             upcoming = subscriptions.upcoming_charges(gateway, user_id)
-            return f"订阅：{subscriptions.describe_upcoming_charges(upcoming)}"
+            detected = subscriptions.detected_charges(gateway, user_id)
+            return (
+                f"订阅：{subscriptions.describe_upcoming_charges(upcoming)}"
+                f"；{subscriptions.describe_detected_charges(detected)}"
+            )
     if node.action == "account.transactions":
         account_id = _str_param(node, "account_id")
         start = _str_param(node, "start")

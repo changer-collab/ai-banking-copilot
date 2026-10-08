@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 
 DEFAULT_REVERSAL_TTL = timedelta(hours=24)
 
@@ -30,7 +30,7 @@ class CompensationError(RuntimeError):
     """补偿（回滚）失败：必须如实告知，且不得宣称已取消。"""
 
 
-class ReversalState(str, Enum):
+class ReversalState(StrEnum):
     REVERSED = "reversed"
     COMPENSATING = "compensating"
     EXPIRED = "expired"
@@ -92,7 +92,7 @@ class ReversalWindow:
             )
         return ReversalOutcome(
             state=ReversalState.COMPENSATING,
-            message=f"{self.subject_id} 本期已扣、已发起退回（补偿事务）",
+            message=f"{self.subject_id} 本期已扣、已按补偿事务退回",
             compensated_steps=steps,
         )
 

@@ -90,9 +90,10 @@ def test_reverse_over_http(deps: AppDeps) -> None:
         "/api/confirm",
         json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},
     )
-    outcome = client.post("/api/reverse", json={"settled": True}).json()
-    assert outcome["state"] == "compensating"
-    assert "已取消" not in outcome["message"]
+    outcome = client.post("/api/reverse", json={}).json()
+    assert outcome["state"] == "reversed"
+    assert "已按补偿事务退回" in outcome["message"]
+    assert outcome["compensated_steps"]
 
 
 def test_request_models_reject_missing_fields(deps: AppDeps) -> None:

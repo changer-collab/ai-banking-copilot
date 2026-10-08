@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录，其中 `Pep(...)` 的构造与 `execute` 签名已被后续改动更新——现行接口以 [README.md](README.md) 的「跨计划接口主线（冻结面）」表与**裁决 #25 / #26** 为准：`Pep(registry, gateway, core_bank, audit, breaker, write_handlers, query_handlers)`、`execute(call, decision, plan, idempotency_key)`；`HANDLED_ACTIONS` 常量已删除（改为 `Pep.handled_actions()` = 读/写**处理器键的并集**），写分派与读分派**都已**改为各场景模块自带的 handler 注册表（`WRITE_HANDLERS` / `QUERY_HANDLERS`，`QueryContext` / `QueryResult` 见裁决 #26），`_require_*` / `_money_cents` 已改名公开为 `require_*` / `money_cents`。
+
 **Goal:** 落地**可信执行内核（安全下限）**——官方三色策略引擎（PDP）＋ 策略执行点（PEP）＋ 执行门（防 TOCTOU）＋ 追加式审计链 ＋ 异常熔断 ＋ 撤销窗口 / saga 补偿，让"计划"只能沿确定性边界落地：**PEP 无裁决不执行**、绿色只含纯查询、`blocked` 吸收态否决、执行后数值出处可校验、熔断只加严不降级。
 
 **Architecture:** `policy/` 与 `planning/`（能力上限）严格解耦。**PDP 是纯函数**（零 I/O）：只吃 `PolicyRequest`（单对象）或 `Plan + NetEffectView`（计划级），产出 `contracts.authorization.Decision`，冲突一律 `strictest`（fail-safe 取更严）。**执行门 = 计划级 + 节点级叠加**：**`gate.assert_frozen(plan, frozen_hash)`** 用 `contracts.plan.cfhash` 把"用户确认的那份 DAG"冻结成**计划级**判据（`frozen_hash == cfhash(plan.nodes)`）；**`pep.manifest_hash(call)`** 对每次工具调用做**节点级**成员资格校验。**两者叠加**即 PRD 硬约束 #4 的"节点 ∈ 已冻结确认子图"（06 必须在确认记录里**同时保存 `Plan` 与 `cfhash`**）。**PEP 是唯一执行通道**：`tools.registry`（白名单 + 参数强校验）→ `gateway.facts`（只读事实）→ `gateway.core_bank`（幂等写）→ `policy.audit`（JSONL 哈希链）→ `policy.breaker`（只加严熔断）。审计**不占用 01 的 SQLite schema**，改用**追加式 JSONL + sha256 哈希链**；`saga` 提供撤销窗口与补偿，竞态时**如实告知**而非谎称"已取消"。

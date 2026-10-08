@@ -83,7 +83,7 @@ INDEX_HTML = """<!DOCTYPE html>
             <span class="legend__dot" style="background:#b3362a"></span>
             <span>
               <span class="legend__name">红色 · 强验证</span><br />
-              <span class="legend__desc">日累计 &gt; ¥1,000 / 不可逆</span>
+              <span class="legend__desc">服务端验证码 · 大额 / 不可逆 / 理财申购 · 解挂</span>
             </span>
           </li>
         </ul>
@@ -102,7 +102,7 @@ INDEX_HTML = """<!DOCTYPE html>
   </main>
 </div>
 
-<script src="/assets/app.js?v=4"></script>
+<script src="/assets/app.js?v=6"></script>
 </body>
 </html>
 """

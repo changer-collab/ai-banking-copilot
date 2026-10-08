@@ -23,7 +23,7 @@ def test_pyproject_declares_channel_dependencies() -> None:
 
 def test_app_deps_holds_channel_wiring(deps: AppDeps) -> None:
     assert deps.user_id == DEMO_USER_ID
-    assert len(deps.registry.actions()) == 20
+    assert len(deps.registry.actions()) >= 20
     assert deps.gateway.account("acc_savings").payload.balance.cents == 12843000
 
 

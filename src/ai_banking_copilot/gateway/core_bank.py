@@ -20,6 +20,7 @@ from ai_banking_copilot.gateway.errors import (
     CoreBankError,
     IdempotencyConflictError,
     InsufficientFundsError,
+    NotReversibleError,
     StoreError,
     UnknownAccountError,
     UnknownCardError,
@@ -207,6 +208,56 @@ class CoreBank:
             )
 
         return self._run_once("unfreeze_funds", idempotency_key, body)
+
+    def reverse_transfer(self, *, txn_id: str, idempotency_key: str) -> WriteReceipt:
+        """冲正一笔**流出**转账：回补余额 + 写一条反向分录（幂等）。
+
+        判据：目标流水必须存在且 `direction = 'out'`；非流出流水抛 `NotReversibleError`
+        （补偿方按「无可回退的资金影响」跳过）。冲正本身走 `_run_once` 的幂等机制。
+        """
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            row = conn.execute(
+                "SELECT user_id, account_id, amount_cents, booked_on, direction"
+                " FROM transactions WHERE txn_id = ?",
+                (txn_id,),
+            ).fetchone()
+            if row is None:
+                raise CoreBankError(f"冲正失败：流水不存在 {txn_id}")
+            direction = str(row["direction"])
+            amount_cents = -int(row["amount_cents"])
+            if direction != "out" or amount_cents <= 0:
+                raise NotReversibleError(f"{txn_id} 方向为 {direction}，无流出资金可冲正")
+            account_id = str(row["account_id"])
+            reversal_id = _effect_id("txn", "reverse", idempotency_key)
+            conn.execute(
+                "UPDATE accounts SET balance_cents = balance_cents + ? WHERE account_id = ?",
+                (amount_cents, account_id),
+            )
+            conn.execute(
+                "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
+                " merchant, category, channel, direction) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    reversal_id,
+                    str(row["user_id"]),
+                    account_id,
+                    str(row["booked_on"]),
+                    amount_cents,
+                    f"冲正 {txn_id}",
+                    "冲正",
+                    "agent",
+                    "in",
+                ),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="reverse_transfer",
+                status="reversed",
+                record_ids=(f"transactions:{reversal_id}",),
+                effect_ids=(f"accounts:{account_id}", f"txn_{reversal_id}"),
+            )
+
+        return self._run_once("reverse_transfer", idempotency_key, body)
 
     def subscribe_product(
         self,

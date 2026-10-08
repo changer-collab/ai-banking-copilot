@@ -9,11 +9,14 @@ from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.scenarios.base import ScenarioHandler, ScenarioStatus
 from ai_banking_copilot.scenarios.registry import (
+    QUERY_HANDLERS,
     SCENARIO_HANDLERS,
+    WRITE_HANDLERS,
     UnknownScenarioError,
     run_scenario,
     select_handler,
 )
+from ai_banking_copilot.tools.catalog import build_default_registry
 
 
 def _transfer_intent(payee: str = "p_lina") -> Intent:
@@ -101,3 +104,16 @@ def test_run_scenario_treats_refusal_as_blocked(gateway: FactGateway) -> None:
     outcome = run_scenario(select_handler([intent]), [intent], gateway)
     assert outcome.status is ScenarioStatus.BLOCKED
     assert outcome.plan is None
+
+
+def test_every_canonical_action_has_exactly_one_handler() -> None:
+    """生产侧**严格双向**断言：读处理器 ∪ 写处理器 == 注册表动作集，且两侧不相交。
+
+    这是「新增动作不必改 `policy/pep.py`」这条不变式的守卫：漏登记任一处理器、
+    或把同动作登记进两侧，此处立即报红（对称断言见 `tests/policy/test_pep.py`）。
+    """
+    registry_actions = set(build_default_registry().actions())
+    queries = set(QUERY_HANDLERS)
+    writes = set(WRITE_HANDLERS)
+    assert queries.isdisjoint(writes)
+    assert queries | writes == registry_actions

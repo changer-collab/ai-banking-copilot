@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
@@ -16,6 +16,7 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
+from ai_banking_copilot.gateway.core_bank import WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
@@ -23,6 +24,15 @@ from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pdp import ObjectState, PolicyRequest
+from ai_banking_copilot.policy.pep import (
+    QueryContext,
+    QueryHandler,
+    QueryResult,
+    WriteContext,
+    WriteHandler,
+    money_cents,
+    require_str,
+)
 from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
     ScenarioRefused,
@@ -115,3 +125,57 @@ def _require_card(gateway: FactGateway, card_id: str) -> None:
         gateway.card(card_id)
     except GatewayNotFoundError as error:
         raise ScenarioRefused(f"卡片不存在：{card_id}") from error
+
+
+def _card_status_handler(status: str) -> WriteHandler:
+    """生成把动作映射到 `CoreBank.set_card_status` 的处理器（锁 / 解挂 / 挂失共用）。"""
+
+    def handle(context: WriteContext) -> WriteReceipt:
+        return context.core_bank.set_card_status(
+            card_id=require_str(context.params, "card_id"),
+            status=status,
+            idempotency_key=context.idempotency_key,
+        )
+
+    return handle
+
+
+def _apply_virtual_handler(context: WriteContext) -> WriteReceipt:
+    """把 `card.apply_virtual` 映射到 `CoreBank.apply_virtual_card`。"""
+    return context.core_bank.apply_virtual_card(
+        user_id=require_str(context.params, "user_id"),
+        daily_limit=Money(money_cents(context.params, context.spec)),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+def _set_limit_handler(context: WriteContext) -> WriteReceipt:
+    """把 `card.set_limit` 映射到 `CoreBank.set_card_limit`。"""
+    return context.core_bank.set_card_limit(
+        card_id=require_str(context.params, "card_id"),
+        daily_limit=Money(money_cents(context.params, context.spec)),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+WRITE_HANDLERS: Mapping[str, WriteHandler] = {
+    "card.lock": _card_status_handler("locked"),
+    "card.unlock": _card_status_handler("active"),
+    "card.report_lost": _card_status_handler("lost"),
+    "card.apply_virtual": _apply_virtual_handler,
+    "card.set_limit": _set_limit_handler,
+}
+"""卡片域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+
+
+def _card_list(context: QueryContext) -> QueryResult:
+    cards = context.gateway.cards_of(require_str(context.params, "user_id"))
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in cards),
+        provenance=tuple((item.record_id, item.content_hash) for item in cards),
+        detail=f"共 {len(cards)} 张卡",
+    )
+
+
+QUERY_HANDLERS: Mapping[str, QueryHandler] = {"card.list": _card_list}
+"""卡片域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""

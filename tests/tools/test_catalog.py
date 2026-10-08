@@ -12,6 +12,7 @@ SCENARIO_ACTIONS = {
     "account.transactions",
     "bills.monthly",
     "bills.category_trend",
+    "bills.yearly",
     "wealth.list",
     "card.list",
     "subscription.list",
@@ -33,6 +34,7 @@ PURE_QUERY_ACTIONS = {
     "account.transactions",
     "bills.monthly",
     "bills.category_trend",
+    "bills.yearly",
     "wealth.list",
     "card.list",
     "subscription.list",
@@ -113,6 +115,10 @@ def test_tools_layer_declares_no_io_imports() -> None:
 
 CANONICAL_ACTIONS = SCENARIO_ACTIONS | {"funds.freeze", "funds.release"}
 
+MINIMUM_CANONICAL_ACTIONS = 20
+"""基线规范动作数**下限**（防误删）。2026-10-08 起计数断言由等号改为下限：等号会让
+**每个新增动作的人都去改同一行**（必然冲突），与步骤 1 的目标相悖；集合仍须逐项精确。"""
+
 MONEY_ACTIONS = {
     "transfer.create",
     "transfer.schedule",
@@ -155,10 +161,11 @@ def test_money_actions_point_to_control_slot_param() -> None:
         assert declared[spec.money_param].slot is SlotKind.CONTROL
 
 
-def test_default_registry_registers_all_twenty_canonical_actions() -> None:
+def test_default_registry_registers_all_canonical_actions() -> None:
+    """基线 20 个动作**逐项登记**、且不得少于该下限（新增动作只增不减）。"""
     actions = build_default_registry().actions()
     assert set(actions) == CANONICAL_ACTIONS
-    assert len(actions) == 20
+    assert len(actions) >= MINIMUM_CANONICAL_ACTIONS
 
 
 def test_card_application_and_limit_actions_declare_money_control_slots() -> None:

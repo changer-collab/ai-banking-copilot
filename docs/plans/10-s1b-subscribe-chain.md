@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。其中的 `Pep(...)` 装配片段已过时——现行签名为 `Pep(registry, gateway, core_bank, audit, breaker, write_handlers, query_handlers)`（两者由组合根分别从 `scenarios.registry.WRITE_HANDLERS` / `QUERY_HANDLERS` 注入），见 [README.md](README.md) 冻结面表与**裁决 #25 / #26**。
+
 **Goal:** 让官方「理财申购」（`wealth.subscribe`）在 **Web 链**与**评测链**两条受信任链上均可出计划卡 → 可强验证 → 可执行（消除 G2：`assessment` 槽无生产者，申购恒被 `SuitabilityError` 拒绝）；同步评测数据面（G14）；并把官方场景 ②③⑤ 的完成口径定档（G13，仅文档）。
 
 **Architecture:** 新增**独立事实模块** `gateway/risk_store.py`（风险测评表 + 幂等播种 + 出处校验；**不改 01 任何既有文件**，遵循 `docs/plans/README.md:183`「各自独立的表/文件」）。风险测评事实由**受信任调用方**（`web/session.py::_assemble_intents` 与 `eval/pipeline.py::_evaluate`）注入 `intent.slots["assessment"]`（**不包 `Value`**），场景层 `scenarios/wealth.py::_assessment` 保持不变。评测链**补收益暗示守卫**（镜像 `scenarios.wealth.FORBIDDEN_HINTS`），避免申购由"被拒"变"可执行"后 `adv-yield-*` / `ho-20` 误放行。

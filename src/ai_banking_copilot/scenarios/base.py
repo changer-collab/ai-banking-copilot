@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from enum import Enum
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from ai_banking_copilot.contracts.authorization import Decision
@@ -48,7 +48,7 @@ class ScenarioRefused(ValueError):
     """场景级硬拒绝（适当性不达标 / 对象不存在 / 不支持的组合）：安全拒绝，不产出计划。"""
 
 
-class ScenarioStatus(str, Enum):
+class ScenarioStatus(StrEnum):
     """场景运行状态。`EXECUTED` / `PARTIAL` 预留给执行层（06）填写。"""
 
     PLANNED = "planned"

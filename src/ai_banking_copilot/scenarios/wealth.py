@@ -7,10 +7,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from enum import Enum
+from enum import StrEnum
 
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
@@ -19,12 +19,21 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
-from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import WealthProduct
+from ai_banking_copilot.gateway.models import Money, WealthProduct
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import (
+    QueryContext,
+    QueryHandler,
+    QueryResult,
+    WriteContext,
+    WriteHandler,
+    money_cents,
+    require_str,
+)
 from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
     ScenarioRefused,
@@ -66,7 +75,7 @@ FORBIDDEN_HINTS = (
 S3 加严（append-only）：追加「推荐 / 择优 / 收益高低」同义 12 词，原 8 词保留。"""
 
 
-class AssessmentState(str, Enum):
+class AssessmentState(StrEnum):
     """风险测评状态机（申购闸门的唯一判据来源）。"""
 
     UNASSESSED = "unassessed"
@@ -216,3 +225,45 @@ def to_risk_assessment(record: object) -> RiskAssessment | None:
         assessed_on=assessed_on,
         valid_days=valid_days,
     )
+
+
+def _subscribe_handler(context: WriteContext) -> WriteReceipt:
+    """把 `wealth.subscribe` 映射到 `CoreBank.subscribe_product`。"""
+    return context.core_bank.subscribe_product(
+        user_id=require_str(context.params, "user_id"),
+        account_id=require_str(context.params, "account_id"),
+        product_id=require_str(context.params, "product_id"),
+        amount=Money(money_cents(context.params, context.spec)),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+def _redeem_handler(context: WriteContext) -> WriteReceipt:
+    """把 `wealth.redeem` 映射到 `CoreBank.redeem_product`。"""
+    return context.core_bank.redeem_product(
+        user_id=require_str(context.params, "user_id"),
+        account_id=require_str(context.params, "account_id"),
+        product_id=require_str(context.params, "product_id"),
+        amount=Money(money_cents(context.params, context.spec)),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+WRITE_HANDLERS: Mapping[str, WriteHandler] = {
+    "wealth.subscribe": _subscribe_handler,
+    "wealth.redeem": _redeem_handler,
+}
+"""理财域写处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 1.5）。"""
+
+
+def _wealth_list(context: QueryContext) -> QueryResult:
+    products = context.gateway.wealth_products()
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in products),
+        provenance=tuple((item.record_id, item.content_hash) for item in products),
+        detail=f"共 {len(products)} 只理财产品",
+    )
+
+
+QUERY_HANDLERS: Mapping[str, QueryHandler] = {"wealth.list": _wealth_list}
+"""理财域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""

@@ -38,6 +38,8 @@ data/
 logs/
 *.log
 artifacts/
+# 运行期产物：演示库 / 审计日志（.jsonl 不被 *.log 覆盖）/ 本机审计密钥
+runtime/
 # 例外：评测数据集随包分发，必须入库（覆盖上方通用 data/ 规则）
 !src/ai_banking_copilot/eval/data/
 

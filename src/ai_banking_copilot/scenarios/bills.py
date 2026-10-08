@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import calendar
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 
@@ -21,7 +21,7 @@ from ai_banking_copilot.contracts.plan import (
     validate_plan,
 )
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
-from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.facts import FactGateway, Record
 from ai_banking_copilot.gateway.models import BillSummary, Money, Transaction
 from ai_banking_copilot.gateway.operators import DerivedValue, run_operator
 from ai_banking_copilot.gateway.sandbox import (
@@ -32,6 +32,14 @@ from ai_banking_copilot.gateway.sandbox import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import (
+    QueryContext,
+    QueryHandler,
+    QueryResult,
+    require_date,
+    require_int,
+    require_str,
+)
 from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
     ScenarioRefused,
@@ -41,9 +49,15 @@ from ai_banking_copilot.scenarios.base import (
 )
 
 BILLS_ACTIONS = frozenset(
-    {"account.balance", "account.transactions", "bills.monthly", "bills.category_trend"}
+    {
+        "account.balance",
+        "account.transactions",
+        "bills.monthly",
+        "bills.category_trend",
+        "bills.yearly",
+    }
 )
-"""账单域动作（README 规范动作表 #1–#4）。"""
+"""账单域动作（README 规范动作表 #1–#4 + 步骤 2 冻结的 `bills.yearly`）。"""
 
 ANOMALY_THRESHOLD_CENTS: int = 500_000
 """异常大额阈值（**单位=分**，= 5000 元）。**展示层谓词**，不进算子 / PDP / PEP。"""
@@ -115,6 +129,7 @@ class BillsHandler(ScenarioHandler):
         account_txn = [
             intent for intent in intents if intent.action == "account.transactions"
         ]
+        yearly = [intent for intent in intents if intent.action == "bills.yearly"]
         bills_specific = [
             intent
             for intent in intents
@@ -144,7 +159,19 @@ class BillsHandler(ScenarioHandler):
                         ),
                     )
                 )
-        if build_bills:
+        if yearly:
+            nodes.append(
+                PlanNode(
+                    node_id="y1",
+                    action="bills.yearly",
+                    params={"user_id": DEMO_USER_ID, "year": _year(intents)},
+                    intent=IntentRef(
+                        source=AnchorSource.EXPLICIT,
+                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "年度账单汇总"),
+                    ),
+                )
+            )
+        elif build_bills:
             year, month = _period(intents)
             summary = category_totals(gateway, DEMO_USER_ID, year, month)
             category = _chosen_category(intents, summary)
@@ -177,7 +204,7 @@ class BillsHandler(ScenarioHandler):
                     depends_on=("n1",),
                 )
             )
-        plan = Plan(plan_id="bills_monthly", nodes=tuple(nodes))
+        plan = Plan(plan_id="bills_yearly" if yearly else "bills_monthly", nodes=tuple(nodes))
         validate_plan(plan)
         return plan
 
@@ -206,6 +233,14 @@ def _period(intents: Sequence[Intent]) -> tuple[int, int]:
     return _previous_month(DEFAULT_BOOKING_DATE.year, DEFAULT_BOOKING_DATE.month)
 
 
+def _year(intents: Sequence[Intent]) -> int:
+    """年度账单的年份：取可信 `year` 槽；缺省用基准记账日的年份（不猜）。"""
+    for intent in intents:
+        if intent.action == "bills.yearly" and "year" in intent.slots:
+            return as_int(require_trusted(intent.slots["year"], "year"), "year")
+    return DEFAULT_BOOKING_DATE.year
+
+
 def _previous_month(year: int, month: int) -> tuple[int, int]:
     if month == 1:
         return year - 1, 12
@@ -229,3 +264,100 @@ def _chosen_category(intents: Sequence[Intent], summary: BillSummary) -> str:
         raise ScenarioRefused("当期账单无可分析支出，拒绝生成趋势节点")
     top = max(expenses, key=lambda item: (-item.total.cents, item.category))
     return top.category
+
+
+def _account_balance(context: QueryContext) -> QueryResult:
+    record = context.gateway.account(require_str(context.params, "account_id"))
+    return QueryResult(
+        record_ids=(record.record_id,),
+        provenance=((record.record_id, record.content_hash),),
+        detail=f"账户 {record.payload.account_id} 余额 {record.payload.balance.yuan} 元",
+    )
+
+
+def _account_transactions(context: QueryContext) -> QueryResult:
+    account_id = require_str(context.params, "account_id")
+    rows = context.gateway.transactions_between(
+        account_id,
+        require_date(context.params, "start"),
+        require_date(context.params, "end"),
+    )
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in rows),
+        provenance=tuple((item.record_id, item.content_hash) for item in rows),
+        detail=f"账户 {account_id} 区间交易 {len(rows)} 笔",
+    )
+
+
+def _monthly_bill(context: QueryContext) -> QueryResult:
+    year = require_int(context.params, "year")
+    month = require_int(context.params, "month")
+    summary = context.gateway.monthly_bill(
+        require_str(context.params, "user_id"), year, month
+    )
+    return QueryResult(
+        record_ids=(summary.record_id,),
+        provenance=((summary.record_id, summary.content_hash),),
+        detail=(
+            f"{year}-{month:02d} 支出 {summary.payload.total_expense.yuan} 元"
+            f" / 收入 {summary.payload.total_income.yuan} 元"
+        ),
+    )
+
+
+def _category_trend(context: QueryContext) -> QueryResult:
+    summary = context.gateway.monthly_bill(
+        require_str(context.params, "user_id"),
+        require_int(context.params, "base_year"),
+        require_int(context.params, "base_month"),
+    )
+    category = require_str(context.params, "category")
+    total = Money(0)
+    for item in summary.payload.by_category:
+        if item.category == category:
+            total = item.total
+    return QueryResult(
+        record_ids=(summary.record_id,),
+        provenance=((summary.record_id, summary.content_hash),),
+        detail=f"分类 {category} 基期合计 {total.yuan} 元",
+    )
+
+
+def _yearly_bill(context: QueryContext) -> QueryResult:
+    """年度账单：读 12 个月度事实，合计**只走算子白名单**（H1，出处=12 个 record_id）。"""
+    user_id = require_str(context.params, "user_id")
+    year = require_int(context.params, "year")
+    months = tuple(
+        context.gateway.monthly_bill(user_id, year, month) for month in range(1, 13)
+    )
+    expense = _annual_sum(months, lambda bill: bill.total_expense.cents)
+    income = _annual_sum(months, lambda bill: bill.total_income.cents)
+    return QueryResult(
+        record_ids=tuple(item.record_id for item in months),
+        provenance=tuple((item.record_id, item.content_hash) for item in months),
+        detail=(
+            f"{year} 年度支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
+            f"（{len(months)} 个月度账单事实合计）"
+        ),
+    )
+
+
+def _annual_sum(
+    records: tuple[Record[BillSummary], ...], pick: Callable[[BillSummary], int]
+) -> Money:
+    """年度合计：派生数字只走白名单算子，输出携带全部来源 `record_id`。"""
+    derived = run_operator(
+        "sum",
+        tuple((record.record_id, Decimal(pick(record.payload))) for record in records),
+    )
+    return Money(int(derived.value))
+
+
+QUERY_HANDLERS: Mapping[str, QueryHandler] = {
+    "account.balance": _account_balance,
+    "account.transactions": _account_transactions,
+    "bills.monthly": _monthly_bill,
+    "bills.category_trend": _category_trend,
+    "bills.yearly": _yearly_bill,
+}
+"""账单域**读**处理器（组合根汇入 PEP；`docs/待修复清单.md` 步骤 4「残留」补做）。"""

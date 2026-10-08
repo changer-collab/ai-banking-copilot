@@ -40,6 +40,10 @@ class IdempotencyConflictError(CoreBankError):
     """同一幂等键被用于不同动作。"""
 
 
+class NotReversibleError(CoreBankError):
+    """该流水没有可冲正的资金影响（非流出）——补偿时**跳过**，不算失败。"""
+
+
 class UnknownAccountError(GatewayError):
     """账户不存在。"""
 

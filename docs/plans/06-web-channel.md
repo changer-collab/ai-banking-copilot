@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。其中的 `Pep(...)` 装配片段已过时——`Pep` 现行签名为 `Pep(registry, gateway, core_bank, audit, breaker, write_handlers, query_handlers)`，两者由组合根分别从 `scenarios.registry.WRITE_HANDLERS` / `QUERY_HANDLERS` 注入（见 [README.md](README.md) 冻结面表与**裁决 #25 / #26**）。
+
 **Goal:** 落地**渠道与交互层**——把「已裁决 DAG + 事实网关数值」渲染成**确定性计划卡**（LLM 只能做不改三元组的润色）；把用户确认**绑定到冻结计划**（同时保存 `Plan` 与 `cfhash`，执行前 `gate.assert_frozen` 做**计划级**校验、`pep.manifest_hash` 做**节点级**校验）；交付**提交 → 确认 → 执行 → 中断/恢复/回退 → 人工接管**的完整会话，并提供 **FastAPI 单页渠道**与**可机读演示脚本**（成功主路径 ≥ 3 + 对抗四连 + 未知任务 + LLM-on/off 差分）。
 
 **Architecture:** 单体 Python 包 `ai_banking_copilot`，`src/` 布局。本计划在 `src/ai_banking_copilot/web/` 下交付三个职责单一的模块：`plan_card.py`（计划卡：确定性模板 + 三元组守护）、`session.py`（会话：状态机 + 意图装配 + 计划级/节点级裁决组合 + 冻结绑定 + 中断/回退/接管）、`app.py`（`AppDeps` 装配契约 + `create_app` FastAPI 单页）。**分层纪律（H2）**：计划与场景来自 04（`planning`）/ 05（`scenarios`），级别来自 03（`policy.pdp`），执行**只经** 03 的 `policy.pep.Pep`（无裁决不执行）；本层不产事实、不裁决级别、不新增写原语。`web/` 是本仓库**唯一允许 I/O 与网络框架**的模块。

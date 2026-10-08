@@ -11,10 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class AnchorSource(str, Enum):
+class AnchorSource(StrEnum):
     """意图锚点来源。"""
 
     EXPLICIT = "explicit"
@@ -117,6 +117,36 @@ def _assert_acyclic(nodes: dict[str, PlanNode]) -> None:
                     ready.append(node.node_id)
     if visited != len(nodes):
         raise PlanValidationError("plan contains a cycle")
+
+
+def topological_order(plan: Plan) -> tuple[str, ...]:
+    """按 `depends_on` 求**确定性**拓扑序（执行序的唯一判据）。
+
+    存在理由：执行器原先直接按 `plan.nodes` 的列表顺序执行，**从不读 `depends_on`**——
+    只是各场景构造器恰好按依赖序追加节点，属隐式契约。本函数让「先冻结、后依赖」成为
+    显式判据：任何合法 DAG 都能得到正确执行序，而不依赖构造顺序。
+
+    确定性：就绪集内取**计划中靠前**的节点，故同一份计划每次得到同一执行序（可复现、可审计）。
+    环 / 未知依赖由 `validate_plan` 先行拒绝；本函数对已校验的计划恒返回全部节点。
+    """
+    order = [node.node_id for node in plan.nodes]
+    position = {node_id: index for index, node_id in enumerate(order)}
+    nodes = plan.node_map()
+    indegree = {node_id: len(nodes[node_id].depends_on) for node_id in nodes}
+    ready = [node_id for node_id in order if indegree[node_id] == 0]
+    resolved: list[str] = []
+    while ready:
+        current = min(ready, key=lambda node_id: position[node_id])
+        ready.remove(current)
+        resolved.append(current)
+        for node_id in order:
+            if current in nodes[node_id].depends_on:
+                indegree[node_id] -= 1
+                if indegree[node_id] == 0:
+                    ready.append(node_id)
+    if len(resolved) != len(order):
+        raise PlanValidationError("plan contains a cycle")
+    return tuple(resolved)
 
 
 def cfhash(nodes: tuple[PlanNode, ...]) -> str:

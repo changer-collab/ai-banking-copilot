@@ -25,9 +25,17 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
+from ai_banking_copilot.gateway.core_bank import WriteReceipt
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
+from ai_banking_copilot.policy.pep import (
+    WriteContext,
+    WriteHandler,
+    money_cents,
+    require_str,
+)
 from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
     ScenarioRefused,
@@ -244,3 +252,28 @@ def _build_freeze_node(node_id: str, intent: Intent, ledger: AnchorLedger) -> Pl
         params=params,
         intent=IntentRef(source=source, anchor_id=anchor_id),
     )
+
+
+def _freeze_handler(context: WriteContext) -> WriteReceipt:
+    """把 `funds.freeze` 映射到 `CoreBank.freeze_funds`。"""
+    return context.core_bank.freeze_funds(
+        account_id=require_str(context.params, "account_id"),
+        amount=Money(money_cents(context.params, context.spec)),
+        reason=require_str(context.params, "reason"),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+def _release_handler(context: WriteContext) -> WriteReceipt:
+    """把 `funds.release` 映射到 `CoreBank.unfreeze_funds`。"""
+    return context.core_bank.unfreeze_funds(
+        hold_id=require_str(context.params, "hold_id"),
+        idempotency_key=context.idempotency_key,
+    )
+
+
+WRITE_HANDLERS: Mapping[str, WriteHandler] = {
+    "funds.freeze": _freeze_handler,
+    "funds.release": _release_handler,
+}
+"""`funds.*` 域写处理器（随该域场景模块自带；组合根汇入 PEP）。"""

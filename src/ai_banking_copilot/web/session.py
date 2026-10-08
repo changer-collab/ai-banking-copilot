@@ -14,14 +14,15 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
-from enum import Enum
+from datetime import date, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, strictest
-from ai_banking_copilot.contracts.plan import Plan, PlanNode
+from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
 from ai_banking_copilot.contracts.security import (
     INJECTION_MARKERS as INJECTION_MARKERS,
 )
@@ -33,11 +34,32 @@ from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
 from ai_banking_copilot.planning.slots import SLOT_PARAMS, SlotInputs, fill_control_slots
-from ai_banking_copilot.policy.audit import KIND_DECISION, KIND_REVERSAL, AuditEvent
+from ai_banking_copilot.policy.audit import (
+    KIND_BREAKER,
+    KIND_DECISION,
+    KIND_REVERSAL,
+    AuditEvent,
+)
+from ai_banking_copilot.policy.breaker import (
+    DEFAULT_POLICY_REJECTION_THRESHOLD,
+    HIGH_FREQUENCY_LIMIT,
+    HIGH_FREQUENCY_WINDOW,
+    BreakerTrigger,
+)
 from ai_banking_copilot.policy.gate import assert_frozen
-from ai_banking_copilot.policy.pdp import DAILY_LIMIT_YUAN, FLAG_INJECTION_DETECTED, evaluate
-from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, manifest_hash
-from ai_banking_copilot.policy.saga import ReversalOutcome, ReversalWindow, Saga
+from ai_banking_copilot.policy.pdp import (
+    DAILY_LIMIT_YUAN,
+    FLAG_DEVICE_CHANGE,
+    FLAG_INJECTION_DETECTED,
+    evaluate,
+)
+from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError
+from ai_banking_copilot.policy.saga import (
+    CompensationError,
+    ReversalOutcome,
+    ReversalState,
+    Saga,
+)
 from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
     ScenarioOutcome,
@@ -80,7 +102,7 @@ _RETURN_PROMISE_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝
 _FABRICATION_REFUSAL = "不生成事实（H1）：无法提供事实网关之外的数值或预测，安全拒绝"
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     """会话状态机。"""
 
     IDLE = "idle"
@@ -105,7 +127,39 @@ class ConfirmationMismatchError(RuntimeError):
 
 
 class StrongVerificationRequiredError(RuntimeError):
-    """红色（大额 / 不可逆）需强验证（多因子）后方可执行。"""
+    """红色（大额 / 不可逆）需通过强验证挑战后方可执行。"""
+
+
+VERIFICATION_TTL_S = 300
+"""强验证挑战有效期（秒）：过期即失效，必须重新申请。"""
+
+_DEMO_VERIFICATION_TARGET = "138****8888"
+"""演示环境回显用的脱敏接收号码（**未接入真实短信网关**）。"""
+
+
+@dataclass(frozen=True)
+class VerificationPrompt:
+    """一次强验证挑战的下发结果。
+
+    **演示声明**：本仓库未接入真实短信 / 人脸 / U 盾渠道，`code` 随响应回显以便路演现场输入。
+    接入真实下发渠道时只需替换 `Session.request_verification` 的**下发一步**；
+    校验逻辑（一次性 + TTL + 与 `card_id` + `frozen_hash` 绑定）保持不变。
+    """
+
+    channel: str
+    target: str
+    code: str
+    expires_in_s: int
+
+
+@dataclass(frozen=True)
+class _Challenge:
+    """服务端持有的强验证挑战：**一次性**、有 TTL、与卡号 + 冻结哈希绑定。"""
+
+    code: str
+    card_id: str
+    frozen_hash: str
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -137,6 +191,14 @@ class DailyQuota:
 
 
 @dataclass(frozen=True)
+class ClarificationAsk:
+    """一条待澄清提问：`slot` 为需补齐的槽位名（与 `selected` 同口径），`prompt` 为文案。"""
+
+    slot: str
+    prompt: str
+
+
+@dataclass(frozen=True)
 class SubmissionView:
     """一次提交的产出（澄清 / 拒绝时 `card` / `plan` 为 `None`，**不产出级别**）。"""
 
@@ -148,6 +210,9 @@ class SubmissionView:
     questions: tuple[str, ...]
     quota: DailyQuota | None = None
     """黄/红卡的当日额度（`None` = 绿卡 / 转人工 / 拒绝不显示）。"""
+
+    clarifications: tuple[ClarificationAsk, ...] = ()
+    """待澄清的**结构化**提问（槽位 + 文案）：渠道层据此渲染「回答即可继续」的闭环输入。"""
 
 
 @dataclass(frozen=True)
@@ -202,6 +267,14 @@ class Session:
         self._exec_results: list[ExecResult] = []
         self._completed_node_ids: list[str] = []
         self._pending_node_ids: list[str] = []
+        self._challenge: _Challenge | None = None
+        # 熔断触发 3 / 4 的**跨提交**计数（有意不被 `_reset()` 清空：它们是会话级而非单次提交级）
+        self._risky_at: list[datetime] = []
+        self._policy_rejections = 0
+        self._reversed_records: list[str] = []
+        # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
+        self._last_utterance: str | None = None
+        self._last_selected: Mapping[str, object] | None = None
 
     def state(self) -> SessionState:
         """当前会话状态。"""
@@ -216,42 +289,90 @@ class Session:
         return self._confirmation
 
     def submit(
-        self, utterance: str, *, selected: Mapping[str, object] | None = None
+        self,
+        utterance: str,
+        *,
+        selected: Mapping[str, object] | None = None,
+        session_anomaly: bool = False,
+        now: datetime | None = None,
     ) -> SubmissionView:
-        """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。"""
+        """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
+
+        `session_anomaly`：**受信任调用方**上报的会话异常（设备 / 地点跳变）——本层无此信号源，
+        故由调用方按事实传入；命中即按触发 5 熔断，并同时给 PDP 加 `device_change` 标记。
+        """
         self._reset()
+        moment = now if now is not None else datetime.now()
+        self._last_utterance = utterance
+        self._last_selected = dict(selected) if selected is not None else None
         refusal = _guard_utterance(utterance)
         if refusal is not None:
             return self._refuse(refusal, utterance)
-        intents, questions = self._assemble_intents(utterance, selected)
+        intents, asks, notes = self._assemble_intents(utterance, selected)
         if not intents:
-            if questions:
+            if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
-                self._message = "信息不足，请补充：" + "；".join(questions)
-                return SubmissionView(self._state, self._message, None, None, None, questions)
-            return self._refuse("未知意图：无法匹配任何场景", utterance)
+                self._message = _with_notes(
+                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+                )
+                return SubmissionView(
+                    self._state, self._message, None, None, None,
+                    tuple(ask.prompt for ask in asks), clarifications=asks,
+                )
+            return self._refuse(_with_notes("未知意图：无法匹配任何场景", notes), utterance)
         try:
             handler = select_handler(intents)
         except UnknownScenarioError:
-            return self._refuse("未知意图：无法匹配任何场景", utterance)
+            return self._refuse(_with_notes("未知意图：无法匹配任何场景", notes), utterance)
         outcome = run_scenario(handler, intents, self._deps.gateway)
-        return self._after_outcome(outcome, utterance, questions)
+        if outcome.plan is not None:
+            self._note_risky_activity(
+                now=moment, risky=not plan_is_pure_query(outcome.plan)
+            )
+        return self._after_outcome(
+            outcome, utterance, asks, session_anomaly=session_anomaly, notes=notes
+        )
+
+    def clarify(self, answers: Mapping[str, object]) -> SubmissionView:
+        """澄清闭环：用**补充答案**重跑上一次的指令（用户不必整句重述）。
+
+        `answers` 是「槽位名 → 值」，与 `selected` 同口径——因此模板通道与 LLM 通道都能用，
+        不依赖模型从补充文本里重新推断。没有待澄清的上一次指令时抛 `SessionStateError`。
+        """
+        if self._last_utterance is None:
+            raise SessionStateError("尚无上一条指令：无法澄清")
+        merged: dict[str, object] = dict(self._last_selected or {})
+        merged.update(answers)
+        return self.submit(self._last_utterance, selected=merged)
 
     def _after_outcome(
-        self, outcome: ScenarioOutcome, utterance: str, questions: tuple[str, ...]
+        self,
+        outcome: ScenarioOutcome,
+        utterance: str,
+        asks: tuple[ClarificationAsk, ...],
+        *,
+        session_anomaly: bool = False,
+        notes: tuple[str, ...] = (),
     ) -> SubmissionView:
+        questions = tuple(ask.prompt for ask in asks)
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
             self._state = SessionState.NEEDS_CLARIFICATION
-            self._message = outcome.message
+            self._message = _with_notes(outcome.message, notes)
             return SubmissionView(
-                self._state, self._message, None, None, None, questions or (outcome.message,)
+                self._state,
+                self._message,
+                None,
+                None,
+                None,
+                questions or (outcome.message,),
+                clarifications=asks,
             )
         if outcome.status is not ScenarioStatus.PLANNED or outcome.plan is None:
             return self._refuse(outcome.message or "场景安全拒绝", utterance)
         plan = outcome.plan
         if outcome.decision is None:
             return self._refuse("场景未产出裁决，安全拒绝", utterance)
-        flags = self._context_flags(utterance)
+        flags = self._context_flags(utterance, session_anomaly=session_anomaly)
         node_decisions = tuple(self._node_decision(node, flags) for node in plan.nodes)
         decision = strictest(outcome.decision, *node_decisions)
         card = render_plan_card(plan, decision, self._deps.gateway)
@@ -278,13 +399,17 @@ class Session:
         if decision.level >= Level.MANUAL:
             self._enter_takeover("高风险裁决（≥ L3）：" + "，".join(hit_rules), pending)
             return SubmissionView(self._state, self._message, card, decision, plan, ())
+        self._clear_policy_rejections()
         self._state = SessionState.AWAITING_CONFIRM
-        self._message = f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）"
+        self._message = _with_notes(
+            f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）", notes
+        )
         return SubmissionView(self._state, self._message, card, decision, plan, (), quota)
 
     def _assemble_intents(
         self, utterance: str, selected: Mapping[str, object] | None
-    ) -> tuple[tuple[Intent, ...], tuple[str, ...]]:
+    ) -> tuple[tuple[Intent, ...], tuple[ClarificationAsk, ...], tuple[str, ...]]:
+        """装配意图，并返回**未采纳提示**（低置信度意图不再静默丢弃，必须让用户看得见）。"""
         proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
@@ -295,9 +420,11 @@ class Session:
         extras = {key: value for key, value in chosen.items() if key not in SLOT_PARAMS}
         remark = extract_remark(utterance)
         intents: list[Intent] = []
-        questions: list[str] = []
+        asks: list[ClarificationAsk] = []
+        dropped: list[str] = []
         for intent in proposal.intents:
             if intent.confidence < CONFIDENCE_THRESHOLD:
+                dropped.append(intent.action)
                 continue
             span = _intent_span(intent, utterance)
             fill = fill_control_slots(
@@ -320,7 +447,10 @@ class Session:
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
             _inject_assessment(intent.action, slots, self._deps)
-            questions.extend(question.prompt for question in fill.questions)
+            asks.extend(
+                ClarificationAsk(slot=question.slot, prompt=question.prompt)
+                for question in fill.questions
+            )
             intents.append(
                 Intent(
                     action=intent.action,
@@ -329,12 +459,65 @@ class Session:
                     evidence=intent.evidence,
                 )
             )
-        return tuple(intents), tuple(questions)
+        return tuple(intents), tuple(asks), _dropped_notes(dropped)
 
-    def _context_flags(self, utterance: str) -> frozenset[str]:
+    def _context_flags(
+        self, utterance: str, *, session_anomaly: bool = False
+    ) -> frozenset[str]:
+        """上下文异常标记的**唯一生产者**，并同步接线熔断触发 2 / 5。
+
+        - 注入检测命中 → 标记 `injection_detected`（PDP 单向升 `MANUAL`）+ 触发 2 熔断；
+        - 调用方上报会话异常 → 标记 `device_change`（PDP 升黄）+ 触发 5 熔断。
+        """
+        flags: set[str] = set()
         if detect_injection(utterance):
-            return frozenset({FLAG_INJECTION_DETECTED})
-        return frozenset()
+            flags.add(FLAG_INJECTION_DETECTED)
+            self._trip(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
+        if session_anomaly:
+            flags.add(FLAG_DEVICE_CHANGE)
+            self._trip(
+                BreakerTrigger.SESSION_ANOMALY, "会话异常：设备 / 地点跳变（调用方上报）"
+            )
+        return frozenset(flags)
+
+    def _trip(self, trigger: BreakerTrigger, detail: str) -> None:
+        """显式熔断（触发 2–5）：只加严不降级，并写 `breaker` 审计事件留痕。"""
+        self._deps.breaker.trip(trigger)
+        self._audit(
+            KIND_BREAKER,
+            {
+                "trigger": trigger.value,
+                "detail": detail,
+                "state": self._deps.breaker.state().value,
+            },
+        )
+
+    def _note_risky_activity(self, *, now: datetime, risky: bool) -> None:
+        """高频判定（触发 3）：滑动窗口内高风险操作达上限即熔断。"""
+        if not risky:
+            return
+        cutoff = now - HIGH_FREQUENCY_WINDOW
+        self._risky_at = [stamp for stamp in self._risky_at if stamp > cutoff]
+        self._risky_at.append(now)
+        if len(self._risky_at) >= HIGH_FREQUENCY_LIMIT:
+            window_s = int(HIGH_FREQUENCY_WINDOW.total_seconds())
+            self._trip(
+                BreakerTrigger.HIGH_FREQUENCY_RISK,
+                f"{window_s}s 内高风险操作达 {len(self._risky_at)} 次",
+            )
+
+    def _note_policy_rejection(self) -> None:
+        """策略引擎**连续**拒绝（触发 4）：达阈值即熔断。"""
+        self._policy_rejections += 1
+        if self._policy_rejections >= DEFAULT_POLICY_REJECTION_THRESHOLD:
+            self._trip(
+                BreakerTrigger.POLICY_REJECTIONS,
+                f"策略引擎连续拒绝 {self._policy_rejections} 次",
+            )
+
+    def _clear_policy_rejections(self) -> None:
+        """产出可确认计划 ⇒ 连续拒绝计数归零。"""
+        self._policy_rejections = 0
 
     def _node_decision(self, node: PlanNode, flags: frozenset[str]) -> Decision:
         request = node_policy_request(
@@ -380,6 +563,7 @@ class Session:
         self._state = SessionState.BLOCKED
         self._message = f"安全拒绝：{reason}"
         self._takeover = self._build_takeover(reason, decision, plan, card, utterance)
+        self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
@@ -388,6 +572,7 @@ class Session:
         self._takeover = self._build_takeover(
             reason, pending.decision, pending.plan, pending.card, pending.intent_text
         )
+        self._note_policy_rejection()
 
     def _build_takeover(
         self,
@@ -439,12 +624,14 @@ class Session:
         card_id: str,
         *,
         frozen_hash: str,
-        strong_verified: bool = False,
+        verification_code: str | None = None,
         steps: int | None = None,
+        now: datetime | None = None,
     ) -> ExecutionView:
         """确认并执行：计划级冻结校验 → 强验证闸门 → 熔断闸门 → 逐节点执行。
 
         `steps=None` 执行全部待执行节点；`steps=k` 最多执行 k 个（用于中断/恢复演示）。
+        红色卡须先经 `request_verification` 取得挑战，再以 `verification_code` 通过闸门。
         """
         pending = self._require_pending()
         if self._state not in (
@@ -458,9 +645,9 @@ class Session:
                 f"计划卡不匹配：收到 {card_id}｜待确认 {pending.card.card_id}"
             )
         assert_frozen(pending.plan, frozen_hash)
-        if PROMPT_STRONG_VERIFY in pending.card.requires and not strong_verified:
-            raise StrongVerificationRequiredError(
-                "红色（大额 / 不可逆）需强验证（多因子）后方可执行"
+        if PROMPT_STRONG_VERIFY in pending.card.requires:
+            self._assert_strong_verification(
+                pending, verification_code, now=now if now is not None else datetime.now()
             )
         self._confirmation = ConfirmationRecord(
             plan=pending.plan, frozen_hash=pending.card.frozen_hash
@@ -471,6 +658,49 @@ class Session:
         if not self._pending_node_ids:
             self._pending_node_ids = list(pending.node_ids)
         return self._execute(steps=steps)
+
+    def request_verification(self, *, now: datetime | None = None) -> VerificationPrompt:
+        """下发强验证挑战（**仅**红色卡）：一次性 + TTL + 与冻结计划绑定。
+
+        每次调用**轮换**验证码（覆盖上一个未使用的挑战）。
+        """
+        pending = self._require_pending()
+        if PROMPT_STRONG_VERIFY not in pending.card.requires:
+            raise StrongVerificationRequiredError("当前计划卡无需强验证")
+        moment = now if now is not None else datetime.now()
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        self._challenge = _Challenge(
+            code=code,
+            card_id=pending.card.card_id,
+            frozen_hash=pending.card.frozen_hash,
+            expires_at=moment + timedelta(seconds=VERIFICATION_TTL_S),
+        )
+        return VerificationPrompt(
+            channel="sms",
+            target=_DEMO_VERIFICATION_TARGET,
+            code=code,
+            expires_in_s=VERIFICATION_TTL_S,
+        )
+
+    def _assert_strong_verification(
+        self, pending: _Pending, code: str | None, *, now: datetime
+    ) -> None:
+        """红色闸门：必须提交**服务端下发**的验证码，且未过期、未使用、绑定当前冻结计划。"""
+        challenge = self._challenge
+        if challenge is None:
+            raise StrongVerificationRequiredError(
+                "红色（大额 / 不可逆）需强验证：请先申请验证码"
+            )
+        if (
+            challenge.card_id != pending.card.card_id
+            or challenge.frozen_hash != pending.card.frozen_hash
+        ):
+            raise StrongVerificationRequiredError("验证码与当前计划不匹配：请重新申请")
+        if now >= challenge.expires_at:
+            raise StrongVerificationRequiredError("验证码已过期：请重新申请")
+        if not code or not secrets.compare_digest(code, challenge.code):
+            raise StrongVerificationRequiredError("验证码不正确")
+        self._challenge = None
 
     def _require_pending(self) -> _Pending:
         if self._pending is None:
@@ -485,19 +715,22 @@ class Session:
         node_map = pending.plan.node_map()
         decision_map = dict(zip(pending.node_ids, pending.node_decisions, strict=True))
         remaining = [
-            node_id for node_id in pending.node_ids if node_id not in self._completed_node_ids
+            node_id
+            for node_id in topological_order(pending.plan)
+            if node_id not in self._completed_node_ids
         ]
         if steps is not None:
             remaining = remaining[:steps]
         self._state = SessionState.EXECUTING
         for node_id in remaining:
             node = node_map[node_id]
+            self._assert_dependencies_done(node)
             try:
                 call = self._to_call(node)
                 result = self._deps.pep.execute(
                     call,
                     decision_map[node_id],
-                    manifest_hash(call),
+                    pending.plan,
                     f"{pending.card.frozen_hash[:12]}-{node_id}",
                 )
             except (NotAuthorizedError, GatewayError) as error:
@@ -518,6 +751,19 @@ class Session:
                 f"已执行 {len(self._completed_node_ids)} / {len(pending.node_ids)} 步，可中断"
             )
         return self._execution_view()
+
+    def _assert_dependencies_done(self, node: PlanNode) -> None:
+        """执行前置：节点声明的依赖必须**已完成**（拓扑序与执行记录一致，fail-closed）。
+
+        正常情况下由 `topological_order` 保证不触发；此处是防御性断言——一旦触发，
+        说明执行记录与冻结计划不一致，宁可拒绝也不带病执行。
+        """
+        done = set(self._completed_node_ids)
+        missing = [dep for dep in node.depends_on if dep not in done]
+        if missing:
+            raise SessionStateError(
+                f"计划依赖未满足：{node.node_id} 依赖 {missing} 尚未执行（拒绝执行）"
+            )
 
     def _to_call(self, node: PlanNode) -> ToolCall:
         """把计划节点适配成工具调用：类型转换 + **taint 槽位**把关（H3）。
@@ -542,23 +788,39 @@ class Session:
             params[param.name] = Value(value, trust)
         return ToolCall(action=node.action, params=params)
 
-    def reverse(self, *, now: datetime, settled: bool) -> ReversalOutcome:
-        """回退：撤销窗口 + saga 补偿；已结算（竞态）**如实告知**，绝不宣称「已取消」。"""
-        pending = self._require_pending()
+    def reverse(self) -> ReversalOutcome:
+        """回退：对本次执行的每一条回执走补偿事务，结论**一律取自 saga 的如实告知**。
+
+        模拟核心银行执行即结算，故不存在「尚未结算 ⇒ 无扣款」这一档：一律走补偿——
+        有资金影响的（流出转账）真正回补，无资金影响的（纯查询）跳过，冲正失败则如实报告。
+        """
+        self._require_pending()
         if self._confirmation is None:
             raise SessionStateError("尚未确认执行：不可回退")
+        self._reversed_records = []
         saga = Saga()
         for index, result in enumerate(self._exec_results, start=1):
             subject = result.record_ids[0] if result.record_ids else result.status
             saga.add(f"{subject}#{index}", _noop_forward(subject), self._compensation(subject))
         saga.run()
-        window = ReversalWindow.open(pending.card.card_id, now=now)
-        outcome = window.reverse(now=now, settled=settled, compensate=saga.compensate)
-        self._audit_ids.append(self._deps.audit.head())
-        if outcome.state.value in ("reversed", "compensating"):
-            self._state = SessionState.REVERSED
-        self._message = outcome.message
-        return outcome
+        try:
+            saga.compensate()
+        except CompensationError as error:
+            self._state = SessionState.FAILED
+            self._message = f"补偿失败（{error}）：已如实告知，未宣称已取消"
+            return ReversalOutcome(state=ReversalState.FAILED, message=self._message)
+        compensated = tuple(self._reversed_records)
+        self._state = SessionState.REVERSED
+        self._message = (
+            f"已按补偿事务退回 {len(compensated)} 笔（原扣款已回补）"
+            if compensated
+            else "无可回退的资金动作：本次执行未产生扣款（纯查询 / 未执行）"
+        )
+        return ReversalOutcome(
+            state=ReversalState.REVERSED,
+            message=self._message,
+            compensated_steps=compensated,
+        )
 
     def takeover_package(self) -> TakeoverPackage:
         """人工接管上下文包：意图 / 计划 / 命中规则 / 审计 ID（PRD §5.8）。"""
@@ -567,12 +829,45 @@ class Session:
         return self._takeover
 
     def _compensation(self, subject: str) -> Callable[[], str]:
+        """补偿动作：调用**组合根注入**的冲正通道（`AppDeps.reversal`）。
+
+        未装配通道 ⇒ 如实失败；无资金影响的记录（纯查询）跳过并留痕；真正冲正成功则记
+        `reversed` 与新增分录标识。**一律不宣称「已发起退回」**。
+        """
+
         def rollback() -> str:
+            service = self._deps.reversal
+            if service is None:
+                self._audit(
+                    KIND_REVERSAL,
+                    {
+                        "subject": subject,
+                        "outcome": "compensation_unavailable",
+                        "note": "未装配冲正通道，资金未退回",
+                    },
+                )
+                raise CompensationError("未装配冲正通道，资金未退回")
+            reversed_records = service.compensate((subject,))
+            if not reversed_records:
+                self._audit(
+                    KIND_REVERSAL,
+                    {
+                        "subject": subject,
+                        "outcome": "nothing_to_reverse",
+                        "note": "该记录无资金影响（纯查询等），无需冲正",
+                    },
+                )
+                return subject
+            self._reversed_records.extend(reversed_records)
             self._audit(
                 KIND_REVERSAL,
-                {"subject": subject, "outcome": "compensation_requested", "note": "已发起退回"},
+                {
+                    "subject": subject,
+                    "outcome": "reversed",
+                    "records": list(reversed_records),
+                },
             )
-            return subject
+            return reversed_records[0]
 
         return rollback
 
@@ -616,6 +911,18 @@ class Session:
         self._exec_results = []
         self._completed_node_ids = []
         self._pending_node_ids = []
+        self._challenge = None
+
+
+def _with_notes(message: str, notes: tuple[str, ...]) -> str:
+    """把未采纳提示并入对外文案（低置信度意图必须让用户看得见，不静默丢弃）。"""
+    return message + ("；" + "；".join(notes) if notes else "")
+
+
+def _dropped_notes(dropped: list[str]) -> tuple[str, ...]:
+    if not dropped:
+        return ()
+    return (f"另有 {len(dropped)} 条意图置信度不足未采纳：{'、'.join(dropped)}",)
 
 
 def extract_remark(utterance: str) -> str | None:

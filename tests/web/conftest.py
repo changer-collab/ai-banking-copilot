@@ -20,6 +20,8 @@ from ai_banking_copilot.planning.llm import TemplateIntentModel
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.policy.reversal import ReversalService
+from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.app import AppDeps
@@ -95,7 +97,7 @@ def pep(
     breaker: CircuitBreaker,
 ) -> Pep:
     """策略执行点：本层唯一的执行通道。"""
-    return Pep(registry, gateway, core_bank, audit, breaker)
+    return Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS)
 
 
 @pytest.fixture
@@ -106,6 +108,7 @@ def deps(
     breaker: CircuitBreaker,
     audit: AuditLog,
     risk: StoreRiskAssessmentSource,
+    core_bank: CoreBank,
 ) -> AppDeps:
     """渠道层依赖装配（默认 LLM-off：模板通道）。"""
     return AppDeps(
@@ -118,6 +121,7 @@ def deps(
         user_id=DEMO_USER_ID,
         today=DEFAULT_BOOKING_DATE,
         risk=risk,
+        reversal=ReversalService(core_bank),
     )
 
 
