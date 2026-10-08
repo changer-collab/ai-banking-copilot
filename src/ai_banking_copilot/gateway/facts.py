@@ -14,6 +14,7 @@ from typing import Generic, TypeVar
 
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError, ReadOnlyViolation
 from ai_banking_copilot.gateway.hashing import canonical_json, sha256_hex
+from ai_banking_copilot.gateway.merchant_store import MerchantOrder, UserProfile
 from ai_banking_copilot.gateway.models import (
     Account,
     BillSummary,
@@ -193,6 +194,23 @@ class FactGateway:
             self._one("scheduled_transfers", "schedule_id", schedule_id)
         )
 
+    def merchant_order(self, order_id: str) -> Record[MerchantOrder]:
+        """按订单号读取商户下单事实（`merchant_orders`；缺失抛 `GatewayNotFoundError`）。"""
+        return _record(
+            "merchant_orders",
+            order_id,
+            _merchant_order(self._one("merchant_orders", "order_id", order_id)),
+        )
+
+    def user_profile(self, user_id: str) -> Record[UserProfile] | None:
+        """按用户读取资料（生日来源；`user_profiles` 为演示播种，缺行返回 `None`）。"""
+        rows = self._store.query(
+            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+        )
+        if not rows:
+            return None
+        return _record("user_profiles", user_id, _user_profile(rows[0]))
+
     def verify(self, record_id: str, content_hash: str) -> bool:
         """出处校验：按 `record_id` 回读事实并比对哈希（**比哈希而非比文本**）。"""
         table, _, pk = record_id.partition(":")
@@ -223,6 +241,8 @@ class FactGateway:
             return self.collection_request(pk).content_hash
         if table == "scheduled_transfers":
             return self.scheduled_transfer(pk).content_hash
+        if table == "merchant_orders":
+            return self.merchant_order(pk).content_hash
         raise GatewayNotFoundError(f"未知记录表：{table}")
 
     def _one(self, table: str, key: str, value: str) -> sqlite3.Row:
@@ -343,4 +363,22 @@ def _record(table: str, pk: str, payload: T) -> Record[T]:
         record_id=f"{table}:{pk}",
         payload=payload,
         content_hash=sha256_hex(canonical_json(payload)),
+    )
+
+
+def _merchant_order(row: object) -> MerchantOrder:
+    return MerchantOrder(
+        order_id=str(row["order_id"]),  # type: ignore[index]
+        user_id=str(row["user_id"]),  # type: ignore[index]
+        merchant=str(row["merchant"]),  # type: ignore[index]
+        amount_cents=int(row["amount_cents"]),  # type: ignore[index]
+        order_on=str(row["order_on"]),  # type: ignore[index]
+        status=str(row["status"]),  # type: ignore[index]
+    )
+
+
+def _user_profile(row: object) -> UserProfile:
+    return UserProfile(
+        user_id=str(row["user_id"]),  # type: ignore[index]
+        birthday=str(row["birthday"]),  # type: ignore[index]
     )

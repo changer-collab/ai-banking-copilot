@@ -526,6 +526,46 @@ class CoreBank:
 
         return self._run_once("book_transfer", idempotency_key, body)
 
+    def place_merchant_order(
+        self,
+        *,
+        user_id: str,
+        merchant: str,
+        amount: Money,
+        order_on: date,
+        idempotency_key: str,
+    ) -> WriteReceipt:
+        """向商户下单（P2-5 生日联动的流出动作）：登记一条 `merchant_orders` 事实。
+
+        纪律与其他写原语一致：**幂等**（`write_receipts` 命中即回放）、**全或无**（单事务）、
+        **确定性 id**（由 `action + key` 派生）、**不做授权判断**（裁决归 `policy.pdp`）。
+        本原语只**登记订单**（订单本身即持久化效果），不在模拟核心银行里做资金划转。
+        """
+        if amount.cents <= 0:
+            raise CoreBankError("下单金额必须为正")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            user = conn.execute(
+                "SELECT user_id FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if user is None:
+                raise CoreBankError(f"用户不存在：{user_id}")
+            order_id = _effect_id("order", "place_merchant_order", idempotency_key)
+            conn.execute(
+                "INSERT INTO merchant_orders(order_id, user_id, merchant, amount_cents,"
+                " order_on, status) VALUES(?, ?, ?, ?, ?, 'placed')",
+                (order_id, user_id, merchant, amount.cents, order_on.isoformat()),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="place_merchant_order",
+                status="placed",
+                record_ids=(f"merchant_orders:{order_id}",),
+                effect_ids=(f"merchant_orders:{order_id}",),
+            )
+
+        return self._run_once("place_merchant_order", idempotency_key, body)
+
     def _wealth_flow(
         self,
         *,

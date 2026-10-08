@@ -207,6 +207,7 @@ def test_required_slots_follow_the_catalog_required_control_slots() -> None:
         "wealth.subscribe",
         "wealth.redeem",
         "subscription.sign",
+        "merchant.order",
     }
     for action in requires_user_id:
         assert "user_id" in REQUIRED_SLOTS[action]
