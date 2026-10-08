@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。Task 3 的 `seed_database` 由「查 `schema_meta.seeded` 即返回」改为**逐行 `INSERT OR IGNORE` 补种**，流水覆盖由 **3 → 21** 个月（`2025-01..2026-09`，`2025` 金额按 **85%** 确定性整数缩放）；**符号与签名零改动**（仍 `seed_database(store) -> None`、仍幂等）。改因：种子扩充后**既有演示库必须自动补行**（否则年度账单仍显示「同比不可判」），且**不得覆盖**演示中产生的真实变更。故下文 Task 3 代码片段中的「已播种则直接返回」与 `_SEED_MONTHS = (7, 8, 9)` / 「覆盖三个月」测试均**已过时**，见 [README.md](README.md) 冻结面表与**裁决 #28**。
+
 **Goal:** 建成本方案的**唯一可信根（TCB）**——模拟核心银行 + 只读事实网关 + 确定性解析器 + 算子白名单 + 受限沙箱；一切"事实"（数值 / 实体 / 语义）只从这里产出，且每条事实都带可校验出处。
 
 **Architecture:** 单进程 SQLite（`store.py` 是唯一物理写入通道，只读连接靠 `PRAGMA query_only` 由 SQLite 自身强制）。`facts.FactGateway` 只拿只读连接；`core_bank.CoreBank` 拿读写连接，是所有写原语的唯一入口，且全部**幂等**（`write_receipts` 表 + 确定性 effect id）。解析器（`resolvers.py`）只做**规则/词典**匹配，零模型参与；派生数字只走 `operators.py` 的**白名单算子**，并在 `sandbox.py` 的受限子进程里执行（无网络 / 禁库 / 禁写 / 限时）。

@@ -31,6 +31,46 @@ def test_seed_is_idempotent(seeded_db: Path) -> None:
     store.close()
 
 
+def test_seed_tops_up_a_partially_seeded_database(seeded_db: Path) -> None:
+    """**补种语义**：种子扩充（新增历史区间）后，既有库会被自动补齐，无需重建库。"""
+    store = Store(seeded_db)
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM transactions WHERE substr(booked_on, 1, 4) = '2025'")
+        conn.execute("DELETE FROM schema_meta WHERE key = 'seeded'")
+    store.close()
+
+    reopened = Store(seeded_db)
+    seed_database(reopened)
+    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 168
+    reopened.close()
+
+
+def test_seed_never_overwrites_demo_changes(seeded_db: Path) -> None:
+    """**不覆盖真实变更**：演示中改过的余额 / 卡片状态在重复播种后保持不变。"""
+    store = Store(seeded_db)
+    with store.transaction() as conn:
+        conn.execute("UPDATE accounts SET balance_cents = 1 WHERE account_id = 'acc_savings'")
+        conn.execute("UPDATE cards SET status = 'locked' WHERE card_id = 'card_debit'")
+        conn.execute(
+            "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
+            " merchant, category, channel, direction)"
+            " VALUES('txn_demo_flow', 'u_demo', 'acc_savings', '2026-10-01', -100,"
+            " '演示转账', '转账', 'app', 'out')"
+        )
+
+    seed_database(store)
+    assert store.query("SELECT balance_cents FROM accounts WHERE account_id = 'acc_savings'")[0][
+        "balance_cents"
+    ] == 1
+    assert store.query("SELECT status FROM cards WHERE card_id = 'card_debit'")[0]["status"] == (
+        "locked"
+    )
+    assert store.query("SELECT COUNT(*) AS n FROM transactions WHERE txn_id = 'txn_demo_flow'")[0][
+        "n"
+    ] == 1
+    store.close()
+
+
 def test_seed_covers_full_history_through_baseline(seeded_db: Path) -> None:
     store = Store(seeded_db)
     months = store.query(

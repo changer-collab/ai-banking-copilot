@@ -99,11 +99,24 @@ function stripNo(line) {
   return String(line).replace(/^\s*\d+\.\s*/, "");
 }
 
+/* 会话标识（P2-7 · README 裁决 #27）：**每个页面实例一个新会话**。
+   「新开页面 / 刷新 = 新会话」是本演示的恢复语义——裁决 #27 把触发 3/4/5 的熔断降为**会话级**
+   （只让本会话转人工接管，不再锁死全局），因此需要这次隔离才能真正生效。 */
+const SESSION_ID = (() => {
+  try {
+    if (window.crypto && crypto.randomUUID) return "web-" + crypto.randomUUID();
+  } catch (_) {
+    /* 降级到时间戳 + 随机串（老浏览器 / 非安全上下文） */
+  }
+  return "web-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+})();
+
 async function post(path, body) {
+  const payload = Object.assign({ session_id: SESSION_ID }, body || {});
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body || {}),
+    body: JSON.stringify(payload),
   });
   return { status: response.status, data: await response.json() };
 }
@@ -500,7 +513,7 @@ async function onReverse() {
 }
 
 async function onTakeover() {
-  const response = await fetch("/api/takeover");
+  const response = await fetch("/api/takeover?session_id=" + encodeURIComponent(SESSION_ID));
   if (response.status !== 200) {
     timelineAdd("当前状态无接管包", "warn");
     return;

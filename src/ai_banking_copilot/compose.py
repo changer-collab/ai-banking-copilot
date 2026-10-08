@@ -110,27 +110,37 @@ def build_audit_log(db_path: Path, env: Mapping[str, str] | None = None) -> Audi
 
 
 BREAKER_STATE_ENV = "AIB_BREAKER_STATE"
-"""置为真值 / `durable` 时把熔断状态**落盘**（跨重启、跨 worker 共享，见 `breaker_store.py`）。
+"""置为 `memory`（或 `0` / `false` / `off`）时熔断状态**只留进程内**；**默认落盘**（裁决 #27）。
 
-**默认不启用**（纯进程内）：一旦 `OPEN` 落盘，它会跨重启保留——这正是「只加严不降级」的语义，
-但本项目**尚无运维解锁入口**，故演示默认不启用，避免锁死现场。生产多 worker 部署应开启。
+落盘的**理由（完整性）**：内存态下「重启进程即把熔断复位」，等于给安全机制留了一条绕过路径。
+落盘的**代价**（已由解锁出口抵消）：`OPEN` 会跨重启保留——这正是「只加严不降级」的正确语义，
+而运维可用 `POST /api/operator/breaker-unlock`（需 `AIB_OPERATOR_TOKEN`）显式、留痕地恢复。
 """
 
-_DURABLE_VALUES = frozenset({"1", "true", "yes", "on", "durable", "store"})
+_MEMORY_VALUES = frozenset({"memory", "0", "false", "no", "off", "none"})
+
+OPERATOR_TOKEN_ENV = "AIB_OPERATOR_TOKEN"
+"""运维口令（裁决 #27）：未配置 / 空白 ⇒ 解锁端点一律 403（fail-closed）。"""
 
 
 def build_breaker(
     db_path: Path, env: Mapping[str, str] | None = None
 ) -> tuple[CircuitBreaker, Store | None]:
-    """装配熔断器：默认**进程内**；`AIB_BREAKER_STATE` 为真值时改为**落盘**。
+    """装配熔断器：**默认落盘**（跨重启 / 跨 worker）；`AIB_BREAKER_STATE=memory` 退回进程内。
 
     返回 `(breaker, store)`，`store` 非空表示持有写连接（由调用方持有到进程结束）。
     """
     source = os.environ if env is None else env
-    if source.get(BREAKER_STATE_ENV, "").strip().lower() not in _DURABLE_VALUES:
+    if source.get(BREAKER_STATE_ENV, "").strip().lower() in _MEMORY_VALUES:
         return CircuitBreaker(), None
     store = Store(db_path, StoreMode.READ_WRITE)
     return CircuitBreaker(store=StoreBreakerStateStore(store)), store
+
+
+def build_operator_token(env: Mapping[str, str] | None = None) -> str | None:
+    """运维口令：**空 / 纯空白视为未配置**（`None` ⇒ 解锁端点 fail-closed 403）。"""
+    source = os.environ if env is None else env
+    return source.get(OPERATOR_TOKEN_ENV, "").strip() or None
 
 
 def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
@@ -162,4 +172,5 @@ def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
         user_id=DEMO_USER_ID,
         risk=StoreRiskAssessmentSource(read_store),
         reversal=ReversalService(core_bank),
+        operator_token=build_operator_token(env),
     )

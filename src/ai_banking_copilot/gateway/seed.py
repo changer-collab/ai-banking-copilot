@@ -2,7 +2,8 @@
 
 设计要点：
 - **零随机**：全部为字面量或按固定公式生成，任何两次播种结果逐字节一致。
-- **幂等**：`schema_meta.seeded` 已存在即返回，重复调用不产生副作用。
+- **幂等补种**：逐行 `INSERT OR IGNORE` —— 重复调用零副作用；种子扩充后既有库会自动补行；
+  演示中产生的真实变更（余额 / 状态 / 用户发起的交易）不被覆盖。详见 `seed_database` 的 docstring。
 - 数据刻意埋入四类演示点：① 同名多候选收款人（王伟 ×2）；② `blocked` 收款人；
   ③ 备注夹带指令的商户文本（H3 taint 演示，**只是数据**）；④ 单笔 6880 元异常大额。
 """
@@ -83,44 +84,53 @@ _TXN_SPECS = (
 
 
 def seed_database(store: Store) -> None:
-    """幂等播种：已播种则直接返回。"""
-    if store.query("SELECT value FROM schema_meta WHERE key = ?", (SEEDED_KEY,)):
-        return
+    """幂等**补种**：逐行 `INSERT OR IGNORE`（与 `risk_store.seed_risk_assessment` 同口径）。
+
+    三条后果，都是我们要的：
+    1. **重复调用零副作用**——已存在的行被忽略；
+    2. **种子扩充后无需重建库**——新增的历史数据自动补进既有库（例：3 个月 → 21 个月）；
+    3. **不覆盖演示过程中产生的真实变更**——余额、卡片状态、订阅状态、用户发起的交易都不在种子行里
+       （`transactions` 的种子主键是 `txn_{YYYYMMDD}`，与用户产生的 `txn_*` 不会撞）。
+    """
     with store.transaction() as conn:
         conn.executemany(
-            "INSERT INTO users(user_id, display_name, risk_profile) VALUES(?, ?, ?)", _USERS
+            "INSERT OR IGNORE INTO users(user_id, display_name, risk_profile) VALUES(?, ?, ?)",
+            _USERS,
         )
         conn.executemany(
-            "INSERT INTO accounts(account_id, user_id, kind, balance_cents, currency)"
+            "INSERT OR IGNORE INTO accounts(account_id, user_id, kind, balance_cents, currency)"
             " VALUES(?, ?, ?, ?, ?)",
             _ACCOUNTS,
         )
         conn.executemany(
-            "INSERT INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
+            "INSERT OR IGNORE INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
             " identity_confirmed, blocked) VALUES(?, ?, ?, ?, ?, ?, ?)",
             _PAYEES,
         )
         conn.executemany(
-            "INSERT INTO cards(card_id, user_id, card_type, status, daily_limit_cents)"
+            "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents)"
             " VALUES(?, ?, ?, ?, ?)",
             _CARDS,
         )
         conn.executemany(
-            "INSERT INTO wealth_products(product_id, name, risk_level, term_days, yield_bp,"
-            " min_amount_cents) VALUES(?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO wealth_products(product_id, name, risk_level, term_days,"
+            " yield_bp, min_amount_cents) VALUES(?, ?, ?, ?, ?, ?)",
             _WEALTH_PRODUCTS,
         )
         conn.executemany(
-            "INSERT INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
+            "INSERT OR IGNORE INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
             " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
             _SUBSCRIPTIONS,
         )
         conn.executemany(
-            "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
-            " merchant, category, channel, direction) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO transactions(txn_id, user_id, account_id, booked_on,"
+            " amount_cents, merchant, category, channel, direction)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _build_transactions(),
         )
-        conn.execute("INSERT INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,))
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,)
+        )
 
 
 def _seed_months() -> tuple[tuple[int, int], ...]:

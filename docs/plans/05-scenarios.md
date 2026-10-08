@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ 回溯说明（2026-10-08）**：本文是**当时**的实施记录。此后两处结构性变化：① 各场景模块**新增导出** `WRITE_HANDLERS` / `QUERY_HANDLERS`（由 `scenarios.registry` 汇合、组合根注入 `Pep`），故本文中「处理器只做意图 → 计划的确定性映射」之外，还多了「**自带执行 handler**」这一职责（见 [README.md](README.md) 冻结面表与**裁决 #25 / #26**）；② 动作集由 **20 → 24**、域由**六 → 七**（新增第七域 `merchant`），新增 `bills.yearly` / `transfer.book`（登记未来转账，登记时不扣款）/ `transfer.request_collection`（AA **收款**，与既有 `transfer.split_aa()` 按份额**转出**语义相反）/ `merchant.order` 四个动作（见**裁决 #28**）。本文所写既有六场景的组装规则**逐条不变**。
+
 **Goal:** 落地**六场景业务闭环**——把意图组装成**白名单动作的 DAG**（含各场景专属规则：多候选强制澄清、AA 机械推导、派生数字走沙箱、风险测评状态机、挂失不可逆、取消负未来流出、跨场景多步 DAG），并用**统一产出形态 `ScenarioOutcome`** 承载"计划 + 级别 + 执行结果"，全程**只组装计划、不产事实、不裁决级别、不执行动作**。
 
 **Architecture:** 位于 `src/ai_banking_copilot/scenarios/`，七个职责单一的小模块：`base.py`（产出形态 + 处理器协议 + 复用 04 规范动作词表的净效应计算 + 槽位取值助手的 H3 把关）、`registry.py`（六处理器装配 + 选择 + 统一运行出口）、`transfer.py` / `bills.py` / `wealth.py` / `cards.py` / `subscriptions.py` / `cross.py` 六个场景处理器。场景处理器只做**意图 → 计划**的确定性映射：事实取自 01（`FactGateway`），控制槽取值来自受信任调用方（`Intent.slots`）并经 `contracts.taint` 类型层把关；级别由 03（`policy.pdp`）裁决、执行由 03（`policy.pep`）承担——这是 H2「动作零越权」的落点。

@@ -13,11 +13,12 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,7 +30,7 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import IntentModel
-from ai_banking_copilot.policy.audit import AuditLog
+from ai_banking_copilot.policy.audit import KIND_OPERATOR, AuditEvent, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pep import Pep
@@ -67,6 +68,10 @@ class AppDeps:
     risk: RiskAssessmentSource | None = None
     reversal: ReversalService | None = None
     """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
+    operator_token: str | None = None
+    """**运维口令**（裁决 #27）：`POST /api/operator/breaker-unlock` 的凭证，取自环境变量
+    `AIB_OPERATOR_TOKEN`。**未配置（`None` / 空串）⇒ 该端点一律 403**（fail-closed）——
+    绝不允许「默认无口令即可解锁熔断」这种自毁式配置。"""
 
 
 DEFAULT_SESSION_ID = "default"
@@ -102,6 +107,12 @@ class _EmptyRequest(BaseModel):
     """空请求体（中断 / 恢复 / 回退）。"""
 
     session_id: str = DEFAULT_SESSION_ID
+
+
+class _UnlockRequest(BaseModel):
+    """运维解锁请求体（裁决 #27）：**必须给理由**，凭证走请求头（不落请求体、不进日志）。"""
+
+    reason: str
 
 
 def create_app(deps: AppDeps) -> FastAPI:
@@ -219,6 +230,54 @@ def create_app(deps: AppDeps) -> FastAPI:
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _takeover_payload(package)
+
+    @app.post("/api/operator/breaker-unlock")
+    def breaker_unlock(request: Request, body: _UnlockRequest) -> dict[str, object]:
+        """**运维解锁**：全局熔断的**唯一**降级出口（裁决 #27）。
+
+        纪律（每一条都不可放宽）：
+        - **凭证**：请求头 `X-Operator-Token` 必须与 `AppDeps.operator_token`（环境变量
+          `AIB_OPERATOR_TOKEN`）一致，用**定长比较**防时序侧信道；
+        - **未配置口令 ⇒ 一律 403**（fail-closed）——不存在「无口令也能解锁」的配置；
+        - **必须给理由**（空理由 400）——运维动作要能被人读懂；
+        - **必须留痕**：解锁前后状态 + 触发项 + 理由写入审计链（`KIND_OPERATOR`），
+          「唯一降级出口 + 二次确认 + 留痕」的纪律不变；
+        - 只解锁**全局**熔断器；**会话级**熔断由会话自身生命周期决定（新开会话即隔离）。
+        """
+        expected = deps.operator_token or ""
+        provided = request.headers.get("X-Operator-Token", "")
+        if not expected or not secrets.compare_digest(provided, expected):
+            raise HTTPException(status_code=403, detail="运维口令未配置或不正确")
+
+        reason = body.reason.strip()
+        if not reason:
+            raise HTTPException(status_code=400, detail="必须填写解锁理由")
+
+        before_state = deps.breaker.state().value
+        before_triggers = [trigger.value for trigger in deps.breaker.triggers()]
+        deps.breaker.unlock()
+        deps.audit.append(
+            AuditEvent(
+                event_id=f"{KIND_OPERATOR}:breaker-unlock:{secrets.token_hex(8)}",
+                kind=KIND_OPERATOR,
+                payload={
+                    "action": "breaker-unlock",
+                    "reason": reason,
+                    "scope": "global",
+                    "state_before": before_state,
+                    "triggers_before": before_triggers,
+                    "state_after": deps.breaker.state().value,
+                },
+                prev_hash="",
+            )
+        )
+        return {
+            "action": "breaker-unlock",
+            "reason": reason,
+            "state_before": before_state,
+            "triggers_before": before_triggers,
+            "state_after": deps.breaker.state().value,
+        }
 
     return app
 

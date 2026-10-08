@@ -83,30 +83,68 @@ def test_injection_trips_the_breaker_and_is_audited(deps: AppDeps) -> None:
     assert deps.audit.verify_chain() is True
 
 
-def test_repeated_policy_rejections_trip_the_breaker(deps: AppDeps) -> None:
-    """触发 4：同一会话**连续**安全拒绝达阈值 ⇒ 熔断。"""
+def test_repeated_policy_rejections_trip_the_session_breaker(deps: AppDeps) -> None:
+    """触发 4（README 裁决 #27）：同一会话**连续真策略拒绝**达阈值 ⇒ **本会话**熔断。
+
+    「未识别 / 无匹配场景」是**能力边界**而非策略拒绝，**不计入**本计数器——否则用户正常的探索输入
+    （演示时随口一句）连着三次就会把系统锁死（这正是 `e2e_check.py` 曾自我污染的根因）。
+    """
     session = Session(deps)
-    for _ in range(DEFAULT_POLICY_REJECTION_THRESHOLD):
+    for _ in range(DEFAULT_POLICY_REJECTION_THRESHOLD + 2):
         assert session.submit("帮我订一张去上海的机票").state is SessionState.BLOCKED
-    assert BreakerTrigger.POLICY_REJECTIONS in deps.breaker.triggers()
+    assert session.submit("转给李娜 100 元").card is not None
+
+    # 真策略拒绝（收款人在阻断名册内 ⇒ PDP 判 `OBJECT_BLOCKED`）才计数
+    for _ in range(DEFAULT_POLICY_REJECTION_THRESHOLD):
+        assert session.submit("转给赵六 100 元").state is SessionState.BLOCKED
+
+    view = session.submit("转给李娜 100 元")
+    assert view.card is not None
+    assert session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash).state is (
+        SessionState.TAKEN_OVER
+    )
+    # 裁决 #27：全局熔断器**不**被单会话的连续拒绝打开（惩罚精确落在出问题的会话）
+    assert deps.breaker.is_open() is False
+    assert deps.breaker.triggers() == ()
+    other = Session(deps)
+    other_view = other.submit("转给李娜 100 元")
+    assert other_view.card is not None
+    assert other.confirm(
+        other_view.card.card_id, frozen_hash=other_view.card.frozen_hash
+    ).state is SessionState.COMPLETED
 
 
-def test_high_frequency_risky_submissions_trip_the_breaker(deps: AppDeps) -> None:
-    """触发 3：滑动窗口内高风险操作达上限 ⇒ 熔断（同一会话连续提交）。"""
+def test_high_frequency_risky_submissions_trip_the_session_breaker(deps: AppDeps) -> None:
+    """触发 3（README 裁决 #27）：滑动窗口内高风险操作达上限 ⇒ **本会话**熔断，全局不受影响。"""
     session = Session(deps)
     base = datetime(2026, 10, 1, 9, 0, 0)
     for index in range(HIGH_FREQUENCY_LIMIT):
         session.submit("转给李娜 100 元", now=base + timedelta(seconds=index))
-    assert BreakerTrigger.HIGH_FREQUENCY_RISK in deps.breaker.triggers()
+    view = session.submit("转给李娜 100 元", now=base + timedelta(seconds=HIGH_FREQUENCY_LIMIT))
+    assert view.card is not None
+    assert session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash).state is (
+        SessionState.TAKEN_OVER
+    )
+    assert deps.breaker.is_open() is False
 
 
-def test_session_anomaly_trips_the_breaker_and_raises_the_policy_flag(deps: AppDeps) -> None:
-    """触发 5：调用方上报会话异常 ⇒ 熔断 + PDP 升黄（`device_change`）。"""
+def test_session_anomaly_trips_the_session_breaker_and_raises_the_policy_flag(
+    deps: AppDeps,
+) -> None:
+    """触发 5（裁决 #27）：会话异常 ⇒ **本会话**熔断 + PDP 升黄（`device_change`）。"""
     session = Session(deps)
     view = session.submit("转给李娜 100 元", session_anomaly=True)
-    assert BreakerTrigger.SESSION_ANOMALY in deps.breaker.triggers()
+    assert BreakerTrigger.SESSION_ANOMALY not in deps.breaker.triggers()
     assert view.decision is not None
     assert "MANUAL_REVIEW" in [reason.value for reason in view.decision.reasons]
+    # 会话级熔断生效：本会话的非纯查询动作在确认时转人工接管
+    assert view.card is not None
+    assert session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash).state is (
+        SessionState.TAKEN_OVER
+    )
+    # 其他会话完全不受影响（设备 / 地点跳变是单会话信号）
+    other = Session(deps)
+    assert other.submit("转给李娜 100 元").card is not None
 
 
 def test_clarify_continues_the_previous_utterance(deps: AppDeps) -> None:

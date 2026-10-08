@@ -45,6 +45,7 @@ from ai_banking_copilot.policy.breaker import (
     HIGH_FREQUENCY_LIMIT,
     HIGH_FREQUENCY_WINDOW,
     BreakerTrigger,
+    CircuitBreaker,
 )
 from ai_banking_copilot.policy.gate import assert_frozen
 from ai_banking_copilot.policy.pdp import (
@@ -271,6 +272,9 @@ class Session:
         # 熔断触发 3 / 4 的**跨提交**计数（有意不被 `_reset()` 清空：它们是会话级而非单次提交级）
         self._risky_at: list[datetime] = []
         self._policy_rejections = 0
+        self._session_breaker = CircuitBreaker()
+        """**会话级熔断器**（README 裁决 #27）：触发 3 / 4 / 5 的**作用域**——只让本会话转人工接管，
+        不波及其他会话。全局熔断器（`deps.breaker`）只由**系统性**信号触发（触发 1 / 2）。"""
         self._reversed_records: list[str] = []
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
@@ -319,11 +323,19 @@ class Session:
                     self._state, self._message, None, None, None,
                     tuple(ask.prompt for ask in asks), clarifications=asks,
                 )
-            return self._refuse(_with_notes("未知意图：无法匹配任何场景", notes), utterance)
+            return self._refuse(
+                _with_notes("未知意图：无法匹配任何场景", notes),
+                utterance,
+                capability_boundary=True,
+            )
         try:
             handler = select_handler(intents)
         except UnknownScenarioError:
-            return self._refuse(_with_notes("未知意图：无法匹配任何场景", notes), utterance)
+            return self._refuse(
+                _with_notes("未知意图：无法匹配任何场景", notes),
+                utterance,
+                capability_boundary=True,
+            )
         outcome = run_scenario(handler, intents, self._deps.gateway)
         if outcome.plan is not None:
             self._note_risky_activity(
@@ -464,36 +476,56 @@ class Session:
     def _context_flags(
         self, utterance: str, *, session_anomaly: bool = False
     ) -> frozenset[str]:
-        """上下文异常标记的**唯一生产者**，并同步接线熔断触发 2 / 5。
+        """上下文异常标记的**唯一生产者**，并同步接线熔断触发 2 / 5（**作用域不同**，裁决 #27）。
 
-        - 注入检测命中 → 标记 `injection_detected`（PDP 单向升 `MANUAL`）+ 触发 2 熔断；
-        - 调用方上报会话异常 → 标记 `device_change`（PDP 升黄）+ 触发 5 熔断。
+        - 注入检测命中 → 标记 `injection_detected`（PDP 单向升 `MANUAL`）+ **全局**熔断（触发 2）：
+          注入是**系统性**威胁（可能来自任何会话 / 任何入参面），配得上全局拒绝；
+        - 调用方上报会话异常 → 标记 `device_change`（PDP 升黄）+ **会话级**熔断（触发 5）：
+          设备 / 地点跳变是**单个会话**的信号，只惩罚该会话。
         """
         flags: set[str] = set()
         if detect_injection(utterance):
             flags.add(FLAG_INJECTION_DETECTED)
-            self._trip(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
+            self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
         if session_anomaly:
             flags.add(FLAG_DEVICE_CHANGE)
-            self._trip(
+            self._trip_session(
                 BreakerTrigger.SESSION_ANOMALY, "会话异常：设备 / 地点跳变（调用方上报）"
             )
         return frozenset(flags)
 
-    def _trip(self, trigger: BreakerTrigger, detail: str) -> None:
-        """显式熔断（触发 2–5）：只加严不降级，并写 `breaker` 审计事件留痕。"""
+    def _trip_global(self, trigger: BreakerTrigger, detail: str) -> None:
+        """**全局**熔断（触发 1 / 2 = 系统性信号）：跨会话、跨 worker；只加严不降级，写审计留痕。"""
         self._deps.breaker.trip(trigger)
         self._audit(
             KIND_BREAKER,
             {
                 "trigger": trigger.value,
                 "detail": detail,
+                "scope": "global",
                 "state": self._deps.breaker.state().value,
             },
         )
 
+    def _trip_session(self, trigger: BreakerTrigger, detail: str) -> None:
+        """**会话级**熔断（触发 3 / 4 / 5 = 单会话行为异常）：只惩罚本会话，不动全局。
+
+        裁决 #27 的判据：全局熔断意味着「拒绝**所有**用户的非纯查询动作」，只有系统性威胁
+        （注入检测 / 连续授权失败）配得上；「某个会话在刷 / 连续被拒」应精确落在该会话。
+        """
+        self._session_breaker.trip(trigger)
+        self._audit(
+            KIND_BREAKER,
+            {
+                "trigger": trigger.value,
+                "detail": detail,
+                "scope": "session",
+                "state": self._session_breaker.state().value,
+            },
+        )
+
     def _note_risky_activity(self, *, now: datetime, risky: bool) -> None:
-        """高频判定（触发 3）：滑动窗口内高风险操作达上限即熔断。"""
+        """高频判定（触发 3）：滑动窗口内高风险操作达上限 ⇒ **本会话**熔断。"""
         if not risky:
             return
         cutoff = now - HIGH_FREQUENCY_WINDOW
@@ -501,16 +533,16 @@ class Session:
         self._risky_at.append(now)
         if len(self._risky_at) >= HIGH_FREQUENCY_LIMIT:
             window_s = int(HIGH_FREQUENCY_WINDOW.total_seconds())
-            self._trip(
+            self._trip_session(
                 BreakerTrigger.HIGH_FREQUENCY_RISK,
                 f"{window_s}s 内高风险操作达 {len(self._risky_at)} 次",
             )
 
     def _note_policy_rejection(self) -> None:
-        """策略引擎**连续**拒绝（触发 4）：达阈值即熔断。"""
+        """策略引擎**连续**拒绝（触发 4）：达阈值 ⇒ **本会话**熔断。"""
         self._policy_rejections += 1
         if self._policy_rejections >= DEFAULT_POLICY_REJECTION_THRESHOLD:
-            self._trip(
+            self._trip_session(
                 BreakerTrigger.POLICY_REJECTIONS,
                 f"策略引擎连续拒绝 {self._policy_rejections} 次",
             )
@@ -559,11 +591,20 @@ class Session:
         decision: Decision | None = None,
         plan: Plan | None = None,
         card: PlanCard | None = None,
+        *,
+        capability_boundary: bool = False,
     ) -> SubmissionView:
+        """安全拒绝。
+
+        `capability_boundary=True` = 「**未识别 / 无匹配场景**」：它是**能力边界**而非策略拒绝，
+        因此**不计入**触发 4（裁决 #27）——否则用户正常的探索输入（演示时随口一句、口音误识别）
+        会被当成攻击信号，连着三次就把系统锁死（这正是 `e2e_check.py` 自我污染的根因）。
+        """
         self._state = SessionState.BLOCKED
         self._message = f"安全拒绝：{reason}"
         self._takeover = self._build_takeover(reason, decision, plan, card, utterance)
-        self._note_policy_rejection()
+        if not capability_boundary:
+            self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
@@ -708,7 +749,15 @@ class Session:
         return self._pending
 
     def _breaker_blocks(self, pending: _Pending) -> bool:
-        return self._deps.breaker.is_open() and not plan_is_pure_query(pending.plan)
+        """熔断是否阻断本节点计划（裁决 #27）。
+
+        - **纯查询永不受阻**（硬约束：绿色只允许纯查询，且查询始终可用）；
+        - 非纯查询在**全局熔断**（系统性信号）或**本会话熔断**（会话级信号）任一打开时转人工接管；
+        - 其他会话的会话级熔断**不影响本会话**。
+        """
+        if plan_is_pure_query(pending.plan):
+            return False
+        return self._deps.breaker.is_open() or self._session_breaker.is_open()
 
     def _execute(self, *, steps: int | None) -> ExecutionView:
         pending = self._require_pending()

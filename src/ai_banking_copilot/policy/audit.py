@@ -52,6 +52,9 @@ KIND_BREAKER = "breaker"
 KIND_REVERSAL = "reversal"
 """撤销 / 补偿事件（未真正落地时须记 `compensation_unavailable`，不得记为「已发起退回」）。"""
 
+KIND_OPERATOR = "operator"
+"""**运维动作**事件（裁决 #27）：含动作名、理由、动作前后的状态——解锁熔断等降级出口必须留痕。"""
+
 _REQUIRED_KEYS = ("event_id", "kind", "payload", "prev_hash", "entry_hash")
 
 

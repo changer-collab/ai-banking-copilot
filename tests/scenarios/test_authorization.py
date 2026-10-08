@@ -28,7 +28,7 @@ from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import TemplateIntentModel
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
-from ai_banking_copilot.policy.pdp import ObjectState
+from ai_banking_copilot.policy.pdp import ObjectState, evaluate
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.scenarios.authorization import node_policy_request, object_state_for_node
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
@@ -206,6 +206,54 @@ def test_object_state_for_node_covers_five_states(gateway: FactGateway) -> None:
     assert object_state_for_node(gateway, verified) is ObjectState.VERIFIED_SAVED
     assert object_state_for_node(gateway, known) is ObjectState.KNOWN_UNVERIFIED
     assert object_state_for_node(gateway, unknown) is ObjectState.UNKNOWN
+
+
+def test_object_state_covers_the_payer_of_a_collection_request(gateway: FactGateway) -> None:
+    """P2-3 裁决：**收款**请求的对手方是付款方（`payer_id`），与转出对象同口径处置。
+
+    阻断名册若只认 `payee_id`，等于给被冻结 / 涉诈的对手方留了一条**资金入口**。
+    """
+    assert (
+        object_state_for_node(
+            gateway, _node("pc", "transfer.request_collection", {"payer_id": "p_zhaoliu"})
+        )
+        is ObjectState.BLOCKED
+    )
+    assert (
+        object_state_for_node(
+            gateway, _node("pv", "transfer.request_collection", {"payer_id": "p_lina"})
+        )
+        is ObjectState.VERIFIED_SAVED
+    )
+    assert (
+        object_state_for_node(
+            gateway, _node("pk", "transfer.request_collection", {"payer_id": "p_wangwei_b"})
+        )
+        is ObjectState.KNOWN_UNVERIFIED
+    )
+    assert (
+        object_state_for_node(
+            gateway, _node("px", "transfer.request_collection", {"payer_id": "p_nope"})
+        )
+        is ObjectState.UNKNOWN
+    )
+
+
+def test_blocked_payer_makes_the_collection_node_a_deny(
+    gateway: FactGateway, registry: ToolRegistry
+) -> None:
+    """端到端口径：PDP 对 `blocked` 付款方的收款节点直接判 `DENY`（不再只靠写层兜底）。"""
+    node = _node("pc", "transfer.request_collection", {"payer_id": "p_zhaoliu"})
+    request = node_policy_request(
+        node,
+        spec=registry.get(node.action),
+        gateway=gateway,
+        user_id=DEMO_USER_ID,
+        today=DEFAULT_BOOKING_DATE,
+        flags=frozenset(),
+    )
+    assert request.object_state is ObjectState.BLOCKED
+    assert evaluate(request).level is Level.DENY
 
 
 def test_node_policy_request_outflow_takes_amount_and_baseline(
