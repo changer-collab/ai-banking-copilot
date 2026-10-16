@@ -74,12 +74,16 @@ def intents_domains(intents: Sequence[Intent]) -> frozenset[str]:
     return frozenset(intent.action.split(".", 1)[0] for intent in intents if intent.action)
 
 
-def _build_release_node(node_id: str, intent: Intent, ledger: AnchorLedger) -> PlanNode:
+def _build_release_node(
+    node_id: str, intent: Intent, ledger: AnchorLedger, gateway: FactGateway
+) -> PlanNode:
     source = _grant_source(intent)
     anchor_id = grant_anchor(ledger, source, "解冻")
     params: dict[str, object] = {
         "hold_id": as_str(trusted_slot(intent, ("hold", "hold_id"), "hold"), "hold"),
     }
+    hold = gateway.hold(str(params["hold_id"])).payload
+    params["amount_cents"] = hold.amount.cents
     return PlanNode(
         node_id=node_id,
         action=_RELEASE_ACTION,
@@ -106,7 +110,7 @@ class _FundsHandler(ScenarioHandler):
             if intent.action == _FREEZE_ACTION:
                 nodes.append(_build_freeze_node(node_id, intent, ledger))
             elif intent.action == _RELEASE_ACTION:
-                nodes.append(_build_release_node(node_id, intent, ledger))
+                nodes.append(_build_release_node(node_id, intent, ledger, gateway))
             else:
                 raise ScenarioRefused(f"funds 域暂不支持动作 {intent.action}")
         plan = Plan(plan_id="funds_plan", nodes=tuple(nodes))
@@ -268,28 +272,34 @@ _BIRTHDAY_LEAD_DAYS = 2
 """「生日前 N 天」的提前量（P2-5）。"""
 
 
-def birthday_plan(gateway: FactGateway, as_of: date) -> tuple[PlanNode, ...]:
+def birthday_plan(
+    gateway: FactGateway, as_of: date, *, user_id: str = DEMO_USER_ID
+) -> tuple[PlanNode, ...]:
     """生日联动：**到期则**装配「生日前 2 天 → `merchant.order`」的下单节点（P2-5）。
 
     日期算术**一律走公共调度** `scenarios.scheduling`（`due_date(..., lead_days=2)` +
     `plan_due`），不另写一套；基准时钟只取入参 `as_of`（演示 / 评测统一用
     `scheduling.REFERENCE_DATE`）。生日数据源 = `user_profiles`（**演示播种值**，非真实客户资料）。
     """
-    profile = gateway.user_profile(DEMO_USER_ID)
+    profile = gateway.user_profile(user_id)
     if profile is None:
         return ()
     birthday = _birthday_in_year(profile.payload.birthday, as_of.year)
     if birthday is None:
         return ()
     order_on = due_date(birthday, lead_days=_BIRTHDAY_LEAD_DAYS)
+    occasion_id = f"birthday:{as_of.year}:flowers"
+    if gateway.merchant_occasion_completed(user_id, occasion_id):
+        return ()
     item = ScheduledItem(
-        key=f"birthday:{DEMO_USER_ID}",
+        key=f"birthday:{user_id}:{as_of.year}",
         due_on=order_on,
         action="merchant.order",
         params={
             "merchant": BIRTHDAY_MERCHANT,
             "amount_cents": BIRTHDAY_ORDER_CENTS,
             "order_on": order_on.isoformat(),
+            "occasion_id": occasion_id,
         },
     )
     return plan_due((item,), as_of=as_of, ledger=AnchorLedger(), node_prefix="order")
@@ -333,6 +343,10 @@ def _merchant_order_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(money_cents(context.params, context.spec)),
         order_on=require_date(context.params, "order_on"),
         idempotency_key=context.idempotency_key,
+        occasion_id=(
+            require_str(context.params, "occasion_id")
+            if "occasion_id" in context.params else None
+        ),
     )
 
 

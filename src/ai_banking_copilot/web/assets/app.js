@@ -8,6 +8,10 @@ const PRESETS = [
   "转给李娜 500 元",
   "转给李娜 1200 元，再查一下上月账单",
   "查一下上月账单",
+  "查余额",
+  "代扣签约",
+  "解冻资金",
+  "登记预约转账 给李娜 100 元 今天",
   "冻结 500 元，转给李娜 300 元",
   "转给李娜 500 元，取消订阅",
   "订阅取消",
@@ -16,8 +20,20 @@ const PRESETS = [
   "帮我做点什么",
 ];
 
-/* 演示页无选择器：按真实 UI 的做法声明「当前选中对象」（受信任调用方职责） */
-const SELECTED = { account: "acc_savings", card: "card_debit", subscription: "sub_video", daily_limit: 100000 };
+const OBJECT_OPTIONS = {
+  account: { key: "accounts", label: "账户" },
+  card: { key: "cards", label: "卡片" },
+  subscription: { key: "subscriptions", label: "订阅" },
+  hold: { key: "holds", label: "冻结记录" },
+};
+
+const SLOT_LABELS = {
+  account: "账户", card: "卡片", subscription: "订阅", hold: "冻结记录",
+  payee: "收款人", payer: "付款人", amount: "金额", amount_cents: "金额",
+  daily_limit: "日限额", when: "执行日期", next_charge_on: "下次扣费日期",
+  period: "扣费周期", merchant: "商户名称", product: "理财产品",
+};
+const MONEY_SLOTS = new Set(["amount", "amount_cents", "daily_limit"]);
 
 const LEVEL = {
   GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
@@ -54,6 +70,10 @@ const state = {
   chain: [],
   verification: null,
   clarifications: [],
+  options: null,
+  busy: false,
+  notice: "",
+  resultCount: 0,
 };
 
 function el(id) {
@@ -119,6 +139,72 @@ async function post(path, body) {
     body: JSON.stringify(payload),
   });
   return { status: response.status, data: await response.json() };
+}
+
+function optionLabel(item) {
+  const names = {
+    savings: "储蓄", current: "活期", debit: "借记", credit: "信用",
+    active: "有效", cancelled: "已取消", locked: "已锁定", lost: "已挂失",
+  };
+  return String(item.label).replace(/\b(savings|current|debit|credit|active|cancelled|locked|lost)\b/g,
+    (name) => names[name]);
+}
+
+function optionsHtml(slot, selected = "") {
+  const spec = OBJECT_OPTIONS[slot];
+  const records = state.options ? state.options[spec.key] || [] : [];
+  const placeholder = records.length ? `请选择${spec.label}` : `暂无可用${spec.label}`;
+  return `<option value="">${placeholder}</option>` + records.map((item) =>
+    `<option value="${esc(item.id)}"${item.id === selected ? " selected" : ""}>${esc(optionLabel(item))}</option>`
+  ).join("");
+}
+
+async function refreshOptions() {
+  const response = await fetch("/api/options");
+  if (!response.ok) throw new Error("无法读取可选对象");
+  state.options = await response.json();
+  el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
+  Object.keys(OBJECT_OPTIONS).forEach((slot) => {
+    const select = el(`select-${slot}`);
+    select.innerHTML = optionsHtml(slot, select.value);
+  });
+  setButtons();
+}
+
+function selectedObjects() {
+  const selected = {};
+  Object.keys(OBJECT_OPTIONS).forEach((slot) => {
+    const value = el(`select-${slot}`).value;
+    if (value) selected[slot] = value;
+  });
+  return selected;
+}
+
+async function refreshAfterExecution() {
+  try {
+    await refreshOptions();
+  } catch (_) {
+    timelineAdd("业务结果已返回，对象列表刷新失败；请重新加载页面后核对。", "warn");
+  }
+}
+
+function action(handler) {
+  return async () => {
+    if (state.busy) return;
+    state.busy = true;
+    setButtons();
+    try {
+      await handler();
+    } catch (_) {
+      state.phase = "failed";
+      state.notice = interceptHtml("请求未能完成", "请检查网络后重新查询业务状态。", false);
+      renderStage();
+      timelineAdd("请求未能完成，请重新查询业务状态。", "stop");
+    } finally {
+      state.busy = false;
+      setButtons();
+    }
+  };
 }
 
 /* ---------------- 右栏：审计链 / 时间线 ---------------- */
@@ -284,10 +370,10 @@ function takeoverHtml(pack) {
 function renderStage() {
   const stage = el("stage");
   if (state.card) {
-    stage.innerHTML = voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "");
+    stage.innerHTML = voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice;
     return;
   }
-  stage.innerHTML = state.panel || "";
+  stage.innerHTML = (state.panel || "") + state.notice;
 }
 
 /* 强验证挑战面板：验证码由服务端下发，一次性 + TTL；演示环境直接展示以便现场输入 */
@@ -306,10 +392,17 @@ function verifyHtml() {
 }
 
 function setButtons() {
-  const busy = state.phase === "executing";
+  const busy = state.busy || state.phase === "executing";
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
-  el("btn-submit").disabled = busy;
+  el("btn-submit").disabled = busy || !state.options;
+  el("btn-due").disabled = busy || !state.options;
+  el("btn-reset").disabled = busy;
+  Object.keys(OBJECT_OPTIONS).forEach((slot) => {
+    el(`select-${slot}`).disabled = busy || !state.options;
+  });
+  const clarifyButton = el("btn-clarify");
+  if (clarifyButton) clarifyButton.disabled = busy;
   const redPending = state.card && state.card.level === "RED" && !strongPhase;
   el("btn-confirm").textContent = strongPhase
     ? "提交验证码并执行"
@@ -317,10 +410,10 @@ function setButtons() {
       ? "申请强验证"
       : "确认并执行";
   el("btn-confirm").disabled = !(awaiting || strongPhase) || busy;
-  el("btn-interrupt").disabled = !(busy || awaiting);
-  el("btn-resume").disabled = state.phase !== "interrupted";
-  el("btn-reverse").disabled = state.stepStates.filter((s) => s === "done").length === 0;
-  el("btn-takeover").disabled = state.phase === "idle";
+  el("btn-interrupt").disabled = state.busy || !(state.phase === "executing" || awaiting);
+  el("btn-resume").disabled = busy || state.phase !== "interrupted";
+  el("btn-reverse").disabled = busy || state.stepStates.filter((s) => s === "done").length === 0;
+  el("btn-takeover").disabled = busy || state.phase === "idle";
 }
 
 function reset(keepUtterance) {
@@ -333,6 +426,8 @@ function reset(keepUtterance) {
   state.panel = "";
   state.verification = null;
   state.clarifications = [];
+  state.notice = "";
+  state.resultCount = 0;
   if (!keepUtterance) el("utterance").value = "转给李娜 500 元";
   renderStage();
   renderChain();
@@ -349,7 +444,7 @@ function renderPresets() {
 /* ---------------- 交互 ---------------- */
 
 /* 把一次提交（/api/submit 或 /api/clarify）的结果落到界面：两条路径共用同一处理 */
-function applySubmission(data) {
+async function applySubmission(data) {
   if (data.state === "awaiting_confirm" && data.card) {
     state.card = data.card;
     state.decision = data.decision || null;
@@ -357,33 +452,36 @@ function applySubmission(data) {
     state.phase = "awaiting_confirm";
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
-    timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（等待确认）`, data.card.level === "RED" ? "warn" : "done");
+    const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
+    timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
+    if (data.card.level === "GREEN") await onConfirm();
+    return;
+  }
+  if (data.state === "idle") {
+    state.phase = "idle";
+    state.panel = `<div class="takeover"><p>${esc(data.message || "当前没有到期待办。")}</p></div>`;
+    renderStage();
+    timelineAdd(data.message || "当前没有到期待办。", "done");
     return;
   }
   state.phase = data.state === "blocked" ? "blocked" : "clarifying";
   state.clarifications = data.clarifications || [];
-  const questions = (data.questions || []).map((q) => `· ${q}`).join("<br />");
-  state.panel =
-    interceptHtml(
-      data.state === "blocked" ? "安全拒绝（未产生可执行计划）" : "需要澄清（不产出级别）",
-      data.state === "blocked"
-        ? data.message || "未知意图不猜测执行；已留痕。"
-        : `${data.message || "请补充信息"}<br />${questions}`,
-      false
-    ) + clarifyHtml();
+  state.panel = data.state === "blocked"
+    ? interceptHtml("安全拒绝（未产生可执行计划）", data.message || "未知意图不猜测执行；已留痕。", false)
+    : clarifyHtml() || `<div class="takeover">请补充所需信息后重新提交。</div>`;
   renderStage();
   timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
 }
 
 /* 澄清闭环表单：按结构化提问逐槽位补值，回答后重跑原指令（无需整句重述） */
 function clarifyHtml() {
-  const asks = state.clarifications || [];
+  const asks = (state.clarifications || []).filter((ask) => ask.slot !== "user_id");
   if (!asks.length) return "";
   const fields = asks
     .map(
       (ask) =>
-        `<label class="field__label" for="ask-${esc(ask.slot)}">${esc(ask.prompt)}</label>` +
-        `<input class="textarea" id="ask-${esc(ask.slot)}" data-slot="${esc(ask.slot)}" placeholder="填写 ${esc(ask.slot)}" />`
+        `<div class="field"><label class="field__label" for="ask-${esc(ask.slot)}">${esc(clarifyPrompt(ask))}</label>` +
+        clarifyControl(ask) + `</div>`
     )
     .join("");
   return `<div class="takeover" style="margin-top: var(--s-4)">
@@ -395,19 +493,44 @@ function clarifyHtml() {
   </div>`;
 }
 
+function clarifyPrompt(ask) {
+  if (MONEY_SLOTS.has(ask.slot)) return `请填写${SLOT_LABELS[ask.slot]}（元）。`;
+  if (ask.slot === "period") return "请选择扣费周期。";
+  return ask.prompt;
+}
+
+function clarifyControl(ask) {
+  const slot = ask.slot;
+  const attrs = `class="input" id="ask-${esc(slot)}" data-slot="${esc(slot)}" required`;
+  if (OBJECT_OPTIONS[slot]) return `<select ${attrs}>${optionsHtml(slot)}</select>`;
+  if (slot === "period") {
+    return `<select ${attrs}><option value="">请选择扣费周期</option>` +
+      `<option value="monthly">每月</option><option value="yearly">每年</option></select>`;
+  }
+  if (slot === "when" || slot === "next_charge_on") return `<input ${attrs} type="date" />`;
+  if (MONEY_SLOTS.has(slot)) {
+    return `<input ${attrs} type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="金额单位：元，例如 25" />` +
+      `<span class="muted">${esc(SLOT_LABELS[slot])}单位为元，例如输入 25 表示 25 元。</span>`;
+  }
+  const label = SLOT_LABELS[slot] || "所需信息";
+  return `<input ${attrs} type="text" placeholder="请填写${esc(label)}" />`;
+}
+
 async function onClarify() {
   const answers = {};
-  document.querySelectorAll("[data-slot]").forEach((node) => {
+  const inputs = Array.from(document.querySelectorAll("[data-slot]"));
+  if (!inputs.every((node) => node.reportValidity())) return;
+  inputs.forEach((node) => {
     const value = (node.value || "").trim();
-    if (value) answers[node.dataset.slot] = value;
+    if (value) answers[node.dataset.slot] = MONEY_SLOTS.has(node.dataset.slot) ? `${value}元` : value;
   });
   const result = await post("/api/clarify", { answers });
   if (result.status !== 200) {
     timelineAdd(`补充被拒绝：${result.data.detail || "当前无待澄清指令"}`, "stop");
     return;
   }
-  timelineAdd(`已补充并继续：${Object.keys(answers).join("、") || "（未新增）"}`, "live");
-  applySubmission(result.data);
+  timelineAdd(`已补充并继续：${Object.keys(answers).map((slot) => SLOT_LABELS[slot] || "所需信息").join("、") || "（未新增）"}`, "live");
+  await applySubmission(result.data);
   setButtons();
 }
 
@@ -416,10 +539,29 @@ async function onSubmit() {
   const text = el("utterance").value;
   state.phase = "submitting";
   setButtons();
-  const result = await post("/api/submit", { utterance: text, selected: SELECTED });
+  const result = await post("/api/submit", { utterance: text, selected: selectedObjects() });
   timelineAdd(`提交：${text}`, "live");
-  applySubmission(result.data);
+  if (result.status !== 200) {
+    state.phase = "failed";
+    state.notice = interceptHtml("提交未完成", result.data.detail || "请检查输入后重试", false);
+    renderStage();
+    return;
+  }
+  await applySubmission(result.data);
   setButtons();
+}
+
+async function onDue() {
+  reset(true);
+  const result = await post("/api/due", {});
+  if (result.status !== 200) {
+    state.phase = "failed";
+    state.notice = interceptHtml("待办检查未完成", result.data.detail || "请稍后重试", false);
+    renderStage();
+    return;
+  }
+  timelineAdd("已检查到期待办，需确认后才会执行。", "live");
+  await applySubmission(result.data);
 }
 
 /* 申请服务端强验证挑战（红色卡）：验证码一次性 + 有 TTL，与当前冻结计划绑定 */
@@ -451,21 +593,33 @@ async function onConfirm() {
   const result = await post("/api/confirm", payload);
   if (result.status !== 200) {
     state.phase = state.verification ? "strong-verify" : "awaiting_confirm";
-    state.panel = interceptHtml("确认被拒绝", String(result.data.detail || "确认不通过"), false);
-    el("stage").insertAdjacentHTML("beforeend", state.panel);
+    state.notice = interceptHtml("确认被拒绝", String(result.data.detail || "确认不通过"), false);
+    renderStage();
     timelineAdd(`确认被拒绝：${result.data.detail || ""}`, "stop");
     setButtons();
     return;
   }
-  const data = result.data;
-  (data.results || []).forEach((item, index) => {
+  applyExecution(result.data);
+  await refreshAfterExecution();
+}
+
+function applyExecution(data) {
+  const results = data.results || [];
+  results.forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
+    if (index < state.resultCount) return;
     if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
-    timelineAdd(`${item.status}：${item.message}`, item.status === "settled" || item.status === "cancelled" ? "done" : "warn");
+    timelineAdd(item.message, "done");
   });
-  state.phase = "done";
+  state.resultCount = results.length;
+  state.phase = data.state === "completed" ? "done" : data.state;
+  const complete = data.state === "completed";
+  state.notice = complete
+    ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
+      results.map((item) => `<p>${esc(item.message)}</p>`).join("") + `</div>`
+    : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
   renderStage();
-  timelineAdd(`执行完成 · 回执记录 ${(data.record_ids || []).length} 条`, "done");
+  timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
   setButtons();
 }
 
@@ -483,18 +637,14 @@ async function onInterrupt() {
 
 async function onResume() {
   const result = await post("/api/resume", {});
-  const data = result.data;
-  (data.results || []).forEach((item, index) => {
-    if (state.stepStates[index] !== undefined && state.stepStates[index] !== "done") {
-      state.stepStates[index] = "done";
-    }
-    if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
-    timelineAdd(`${item.status}：${item.message}`, "done");
-  });
-  state.phase = "done";
-  renderStage();
-  timelineAdd("恢复执行：从未执行节点继续", "done");
-  setButtons();
+  if (result.status !== 200) {
+    state.notice = interceptHtml("恢复被拒绝", result.data.detail || "当前状态不可恢复", false);
+    renderStage();
+    timelineAdd(`恢复被拒绝：${result.data.detail || "当前状态不可恢复"}`, "stop");
+    return;
+  }
+  applyExecution(result.data);
+  await refreshAfterExecution();
 }
 
 async function onReverse() {
@@ -509,6 +659,7 @@ async function onReverse() {
   state.phase = "done";
   renderStage();
   timelineAdd(`${data.message || "已回退"} · 回滚 ${(data.compensated_steps || []).length} 步`, "stop");
+  await refreshAfterExecution();
   setButtons();
 }
 
@@ -530,16 +681,17 @@ el("presets").addEventListener("click", (event) => {
   const button = event.target.closest("[data-preset]");
   if (button) el("utterance").value = button.dataset.preset;
 });
-el("btn-submit").addEventListener("click", onSubmit);
-el("btn-confirm").addEventListener("click", onConfirm);
-el("btn-interrupt").addEventListener("click", onInterrupt);
-el("btn-resume").addEventListener("click", onResume);
-el("btn-reverse").addEventListener("click", onReverse);
-el("btn-takeover").addEventListener("click", onTakeover);
+el("btn-submit").addEventListener("click", action(onSubmit));
+el("btn-due").addEventListener("click", action(onDue));
+el("btn-confirm").addEventListener("click", action(onConfirm));
+el("btn-interrupt").addEventListener("click", action(onInterrupt));
+el("btn-resume").addEventListener("click", action(onResume));
+el("btn-reverse").addEventListener("click", action(onReverse));
+el("btn-takeover").addEventListener("click", action(onTakeover));
 el("btn-reset").addEventListener("click", () => reset(false));
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
-  if (event.target && event.target.id === "btn-clarify") onClarify();
+  if (event.target && event.target.id === "btn-clarify") action(onClarify)();
 });
 
 function readTheme() {
@@ -583,3 +735,7 @@ if (techToggle) {
 
 timelineReset();
 setButtons();
+refreshOptions().catch(() => {
+  el("business-date").textContent = "演示数据读取失败，请重新加载页面。";
+  timelineAdd("可选对象读取失败，请重新加载页面。", "stop");
+});

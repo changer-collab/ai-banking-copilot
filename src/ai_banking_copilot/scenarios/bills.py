@@ -45,8 +45,10 @@ from ai_banking_copilot.scenarios.base import (
     ScenarioHandler,
     ScenarioRefused,
     as_int,
+    as_str,
     grant_anchor,
     require_trusted,
+    trusted_slot,
 )
 from ai_banking_copilot.scenarios.scheduling import REFERENCE_DATE
 
@@ -128,6 +130,7 @@ class BillsHandler(ScenarioHandler):
         return any(intent.action in BILLS_ACTIONS for intent in intents)
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+        balances = [intent for intent in intents if intent.action == "account.balance"]
         account_txn = [
             intent for intent in intents if intent.action == "account.transactions"
         ]
@@ -137,9 +140,25 @@ class BillsHandler(ScenarioHandler):
             for intent in intents
             if intent.action in {"bills.monthly", "bills.category_trend"}
         ]
-        build_bills = bool(bills_specific) or not account_txn
+        build_bills = bool(bills_specific)
         ledger = AnchorLedger()
         nodes: list[PlanNode] = []
+        for index, intent in enumerate(balances, start=1):
+            nodes.append(
+                PlanNode(
+                    node_id=f"balance{index}",
+                    action="account.balance",
+                    params={
+                        "account_id": as_str(
+                            trusted_slot(intent, ("account", "account_id"), "account"), "account"
+                        ),
+                    },
+                    intent=IntentRef(
+                        source=AnchorSource.EXPLICIT,
+                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账户余额查询"),
+                    ),
+                )
+            )
         if account_txn:
             year, month = _period(intents)
             start, end = _month_range(year, month)

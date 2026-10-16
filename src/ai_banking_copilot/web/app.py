@@ -140,6 +140,46 @@ def create_app(deps: AppDeps) -> FastAPI:
     def index() -> HTMLResponse:
         return HTMLResponse(INDEX_HTML)
 
+    @app.get("/api/options")
+    def options() -> dict[str, object]:
+        """对象选择只展示当前用户的事实；金额不由前端编造。"""
+        gateway, user_id = deps.gateway, deps.user_id
+        account_kinds = {"savings": "储蓄", "current": "活期"}
+        card_types = {"debit": "借记", "credit": "信用", "virtual": "虚拟"}
+        statuses = {"active": "正常", "locked": "已锁定", "lost": "已挂失", "cancelled": "已取消"}
+        return {
+            "today": deps.today.isoformat(),
+            "accounts": [
+                {"id": record.payload.account_id,
+                 "label": f"{account_kinds.get(record.payload.kind, record.payload.kind)}账户"
+                          f" · 余额 {record.payload.balance.yuan} 元",
+                 "balance_cents": record.payload.balance.cents}
+                for record in gateway.accounts_of(user_id)
+            ],
+            "cards": [
+                {"id": record.payload.card_id,
+                 "label": f"{card_types.get(record.payload.card_type, record.payload.card_type)}卡"
+                          f" · {statuses.get(record.payload.status, record.payload.status)}"}
+                for record in gateway.cards_of(user_id)
+            ],
+            "subscriptions": [
+                {"id": record.payload.subscription_id,
+                 "label": f"{record.payload.merchant}"
+                          f" · {statuses.get(record.payload.status, record.payload.status)}"}
+                for record in gateway.subscriptions_of(user_id)
+            ],
+            "holds": [
+                {"id": record.payload.hold_id,
+                 "label": f"{record.payload.reason} · 冻结 {record.payload.amount.yuan} 元"}
+                for record in gateway.active_holds_of(user_id)
+            ],
+        }
+
+    @app.post("/api/due")
+    def due(request: _EmptyRequest) -> dict[str, object]:
+        # 到期日只取服务端时钟；客户端不能提前触发未来预约。
+        return _submission_payload(_session_for(request.session_id).check_due())
+
     @app.post("/api/submit")
     def submit(request: _SubmitRequest) -> dict[str, object]:
         view = _session_for(request.session_id).submit(

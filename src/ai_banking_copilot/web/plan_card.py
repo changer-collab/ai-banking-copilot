@@ -43,8 +43,8 @@ _ACTION_LABELS: dict[str, str] = {
     "card.list": "卡片查询",
     "subscription.list": "订阅查询",
     "transfer.create": "转账",
-    "transfer.schedule": "定时转账",
-    "transfer.book": "登记定时转账",
+    "transfer.schedule": "定时转账（立即扣款，指定记账日）",
+    "transfer.book": "登记定时转账（本次不扣款）",
     "transfer.request_collection": "发起 AA 收款",
     "wealth.subscribe": "理财申购",
     "wealth.redeem": "理财赎回",
@@ -57,6 +57,7 @@ _ACTION_LABELS: dict[str, str] = {
     "card.set_limit": "调整卡片额度",
     "funds.freeze": "冻结资金",
     "funds.release": "解冻资金",
+    "merchant.order": "演示商户订单登记（不扣款）",
 }
 
 
@@ -168,6 +169,19 @@ def _requires_for_level(level: Level) -> tuple[str, ...]:
 
 
 def _object_label(node: PlanNode, gateway: FactGateway) -> str:
+    if node.action == "account.balance":
+        account_id = _str_param(node, "account_id")
+        if account_id is not None:
+            balance = gateway.account(account_id).payload.balance
+            return f"账户 {account_id} · 余额 {balance.yuan} 元"
+    if node.action in ("subscription.sign", "merchant.order"):
+        merchant = _str_param(node, "merchant") or "商户"
+        if node.action == "subscription.sign":
+            period = {"monthly": "每月", "yearly": "每年"}.get(
+                _str_param(node, "period") or "", ""
+            )
+            return f"{merchant} · {period}"
+        return merchant
     if node.action == "wealth.list":
         return f"理财产品：{'；'.join(wealth.product_comparison(gateway))}"
     if node.action == "subscription.list":
@@ -222,6 +236,10 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
 
 
 def _when_label(node: PlanNode, gateway: FactGateway) -> str:
+    for name in ("executed_on", "next_charge_on", "order_on"):
+        when = _str_param(node, name)
+        if when is not None:
+            return when
     if node.action == "account.transactions":
         start = _str_param(node, "start")
         end = _str_param(node, "end")

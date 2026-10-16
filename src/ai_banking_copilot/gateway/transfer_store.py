@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from ai_banking_copilot.gateway.hashing import canonical_json, sha256_hex
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.store import Store
 
@@ -74,6 +75,12 @@ class ScheduledTransfer:
     booked_on: date
     remark: str
     status: str
+
+
+def due_execution_key(action: str, user_id: str, reference_id: str) -> str:
+    """到期业务身份跨会话保持不变，复用既有 write_receipts 持久去重。"""
+    digest = sha256_hex(canonical_json((user_id, reference_id)))
+    return f"due:{action}:{digest}"
 
 
 def init_transfer_schema(store: Store) -> None:

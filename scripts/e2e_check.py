@@ -18,6 +18,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+import uuid
 
 
 def _post(base: str, path: str, body: dict[str, object]) -> tuple[int, dict[str, object]]:
@@ -44,6 +45,8 @@ def _norm(state: object) -> str:
 
 def run(base: str) -> list[str]:
     failures: list[str] = []
+    # 每次运行对应一个新页面会话，避免沿用其他自检的 pending 或高频计数。
+    session_id = f"e2e-{uuid.uuid4().hex}"
 
     status, html = _get(base, "/")
     asset_status, _asset = _get(base, "/assets/app.js")
@@ -62,6 +65,7 @@ def run(base: str) -> list[str]:
         base,
         "/api/submit",
         {
+            "session_id": session_id,
             "utterance": "转给李娜 500 元，取消订阅",
             "selected": {"account": "acc_savings", "subscription": "sub_video"},
         },
@@ -76,13 +80,14 @@ def run(base: str) -> list[str]:
 
     if card:
         payload: dict[str, object] = {
+            "session_id": session_id,
             "card_id": card.get("card_id"),
             "frozen_hash": card.get("frozen_hash"),
         }
         # 红色卡按官方口径需强验证：向服务端申请挑战（演示环境验证码随响应回显）。
         # 注意：若演示库日累计已超 1000 元，同一计划会合法升为红色。
         if str(card.get("level", "")).upper() == "RED":
-            vstatus, prompt = _post(base, "/api/verify/request", {})
+            vstatus, prompt = _post(base, "/api/verify/request", {"session_id": session_id})
             payload["verification_code"] = prompt.get("code")
             print(
                 f"[2b] POST /api/verify/request  -> {vstatus} "
@@ -101,7 +106,8 @@ def run(base: str) -> list[str]:
     status, frozen = _post(
         base,
         "/api/submit",
-        {"utterance": "冻结 500 元，转给李娜 300 元", "selected": {"account": "acc_savings"}},
+        {"session_id": session_id, "utterance": "冻结 500 元，转给李娜 300 元",
+         "selected": {"account": "acc_savings"}},
     )
     fcard = frozen.get("card") or {}
     frozen_ok = status == 200 and _norm(frozen.get("state")) == "awaiting_confirm" and bool(fcard)
@@ -115,7 +121,8 @@ def run(base: str) -> list[str]:
     status, clarify = _post(
         base,
         "/api/submit",
-        {"utterance": "转给王伟 500 元", "selected": {"account": "acc_savings"}},
+        {"session_id": session_id, "utterance": "转给王伟 500 元",
+         "selected": {"account": "acc_savings"}},
     )
     clarify_ok = status == 200 and _norm(clarify.get("state")) == "needs_clarification"
     print(
@@ -126,7 +133,8 @@ def run(base: str) -> list[str]:
         failures.append("多候选收款人未触发澄清")
 
     status, blocked = _post(
-        base, "/api/submit", {"utterance": "帮我做点什么", "selected": {"account": "acc_savings"}}
+        base, "/api/submit", {"session_id": session_id, "utterance": "帮我做点什么",
+                              "selected": {"account": "acc_savings"}}
     )
     blocked_ok = status == 200 and _norm(blocked.get("state")) in {"blocked", "needs_clarification"}
     print(

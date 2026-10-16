@@ -28,7 +28,11 @@ from ai_banking_copilot.gateway.models import (
     WealthProduct,
 )
 from ai_banking_copilot.gateway.store import Store, StoreMode
-from ai_banking_copilot.gateway.transfer_store import CollectionRequest, ScheduledTransfer
+from ai_banking_copilot.gateway.transfer_store import (
+    CollectionRequest,
+    ScheduledTransfer,
+    due_execution_key,
+)
 
 T = TypeVar("T")
 
@@ -93,6 +97,14 @@ class FactGateway:
     def holds_of(self, account_id: str) -> tuple[Record[Hold], ...]:
         rows = self._store.query(
             "SELECT * FROM holds WHERE account_id = ? ORDER BY hold_id", (account_id,)
+        )
+        return tuple(self._hold(row) for row in rows)
+
+    def active_holds_of(self, user_id: str) -> tuple[Record[Hold], ...]:
+        """只返回本人账户下仍有效的冻结记录，供解冻选择。"""
+        rows = self._store.query(
+            "SELECT h.* FROM holds h JOIN accounts a ON a.account_id = h.account_id"
+            " WHERE a.user_id = ? AND h.status = 'active' ORDER BY h.hold_id", (user_id,),
         )
         return tuple(self._hold(row) for row in rows)
 
@@ -188,6 +200,18 @@ class FactGateway:
         rows = self._store.query("SELECT * FROM scheduled_transfers ORDER BY schedule_id")
         return tuple(self._scheduled_transfer(row) for row in rows)
 
+    def scheduled_transfers_of(
+        self, user_id: str, *, status: str | None = None
+    ) -> tuple[Record[ScheduledTransfer], ...]:
+        """按用户读取预约，可进一步筛选仍待执行的登记。"""
+        sql = "SELECT * FROM scheduled_transfers WHERE user_id = ?"
+        params: tuple[str, ...] = (user_id,)
+        if status is not None:
+            sql += " AND status = ?"
+            params += (status,)
+        rows = self._store.query(sql + " ORDER BY booked_on, schedule_id", params)
+        return tuple(self._scheduled_transfer(row) for row in rows)
+
     def scheduled_transfer(self, schedule_id: str) -> Record[ScheduledTransfer]:
         """按主键回读一条定时转账登记（转账线独立表；出处校验用）。"""
         return self._scheduled_transfer(
@@ -201,6 +225,17 @@ class FactGateway:
             order_id,
             _merchant_order(self._one("merchant_orders", "order_id", order_id)),
         )
+
+    def merchant_occasion_completed(self, user_id: str, occasion_id: str) -> bool:
+        """查询该用户本次到期服务是否已有持久下单回执。"""
+        rows = self._store.query(
+            "SELECT 1 FROM write_receipts WHERE idempotency_key = ? AND action = ?",
+            (
+                due_execution_key("place_merchant_order", user_id, occasion_id),
+                "place_merchant_order",
+            ),
+        )
+        return bool(rows)
 
     def user_profile(self, user_id: str) -> Record[UserProfile] | None:
         """按用户读取资料（生日来源；`user_profiles` 为演示播种，缺行返回 `None`）。"""

@@ -42,6 +42,25 @@ INDEX_HTML = """<!DOCTYPE html>
   <main class="layout">
     <div>
       <section class="panel" style="margin-top: var(--s-5)">
+        <p class="muted" id="business-date">正在读取演示业务日期与可选对象…</p>
+        <div class="btn-row" id="object-selectors">
+          <div class="field">
+            <label class="field__label" for="select-account">操作账户</label>
+            <select class="input" id="select-account" disabled></select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="select-card">操作卡片</label>
+            <select class="input" id="select-card" disabled></select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="select-subscription">已有订阅</label>
+            <select class="input" id="select-subscription" disabled></select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="select-hold">有效冻结记录</label>
+            <select class="input" id="select-hold" disabled></select>
+          </div>
+        </div>
         <div class="field">
           <label class="field__label" for="utterance">一句话指令（可自由编辑，或点下方样例）</label>
           <textarea class="textarea" id="utterance">转给李娜 500 元</textarea>
@@ -49,6 +68,7 @@ INDEX_HTML = """<!DOCTYPE html>
         <div class="btn-row" id="presets"></div>
         <div class="btn-row">
           <button class="btn btn--primary" id="btn-submit">提交</button>
+          <button class="btn" id="btn-due">检查到期待办</button>
           <button class="btn" id="btn-confirm" disabled>确认并执行</button>
           <button class="btn" id="btn-interrupt" disabled>中断</button>
           <button class="btn" id="btn-resume" disabled>恢复</button>
@@ -58,7 +78,7 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
       </section>
 
-      <div id="stage"></div>
+      <div id="stage" aria-live="polite"></div>
     </div>
 
     <aside class="rail">
@@ -102,7 +122,7 @@ INDEX_HTML = """<!DOCTYPE html>
   </main>
 </div>
 
-<script src="/assets/app.js?v=6"></script>
+<script src="/assets/app.js?v=8"></script>
 </body>
 </html>
 """

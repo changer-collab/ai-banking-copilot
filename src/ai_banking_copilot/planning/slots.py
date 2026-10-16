@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -102,10 +103,12 @@ _PROMPTS: Mapping[str, str] = {
     "hold": "请选择要解冻的冻结记录。",
     "user_id": "请确认要操作的用户身份（由受信任调用方提供）。",
     "merchant": "请给出代扣签约的商户名。",
-    "amount_cents": "请给出代扣金额（单位：分）。",
-    "period": "请给出代扣周期（monthly / yearly）。",
+    "amount_cents": "请给出代扣金额（数字默认单位为分，也可输入 25 元）。",
+    "period": "请给出代扣周期（每月 / 每年，或 monthly / yearly）。",
     "next_charge_on": "请给出下次扣款日（例如 2026-11-01）。",
 }
+
+_PERIOD_ALIASES = {"monthly": "monthly", "yearly": "yearly", "每月": "monthly", "每年": "yearly"}
 
 
 @dataclass(frozen=True)
@@ -179,17 +182,59 @@ def _resolve_slot(
         raw = inputs.selected[slot]
         if _is_trusted(raw):
             notes.append(f"selected:{slot}")
-            return (raw.raw if isinstance(raw, Value) else raw), None, tuple(notes)
+            value = _normalize_selected(
+                slot, raw.raw if isinstance(raw, Value) else raw, inputs.today
+            )
+            if value is not None:
+                return value, None, tuple(notes)
+            notes.append(f"invalid selected:{slot}")
+            return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
         notes.append(f"rejected unverified:{slot}")
     if slot in {"payee", "payer"}:
         return _resolve_payee(inputs, notes)
-    if slot == "amount":
-        return _resolve_amount(inputs, notes)
+    if slot in {"amount", "amount_cents"}:
+        return _resolve_amount(inputs, notes, slot)
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
     if slot == "when":
         return _resolve_when(inputs, notes)
+    if slot == "period":
+        periods = {
+            canonical
+            for alias, canonical in _PERIOD_ALIASES.items()
+            if re.search(rf"\b{alias}\b" if alias.isascii() else alias, inputs.text)
+        }
+        if len(periods) == 1:
+            return periods.pop(), None, tuple(notes)
+    if slot == "next_charge_on":
+        parsed = parse_temporal(inputs.text, inputs.today)
+        if parsed.matched and parsed.when is not None:
+            return parsed.when.isoformat(), None, tuple(notes)
     return None, SlotQuestion(slot=slot, prompt=_PROMPTS[slot]), tuple(notes)
+
+
+def _normalize_selected(slot: str, raw: object, today: date) -> object | None:
+    """把澄清表单的可信字符串转回工具要求的金额 / 周期 / 日期类型。"""
+    if slot in {"amount", "amount_cents", "daily_limit"} and isinstance(raw, str):
+        text = raw.strip()
+        if slot == "amount_cents" and text.isdigit():
+            return int(text)
+        parsed_amount = parse_amount(text)
+        return parsed_amount.value.cents if parsed_amount.value is not None else None
+    if slot == "period" and isinstance(raw, str):
+        return _PERIOD_ALIASES.get(raw.strip().lower())
+    if slot == "next_charge_on":
+        if isinstance(raw, date):
+            return raw.isoformat()
+        if isinstance(raw, str):
+            try:
+                return date.fromisoformat(raw.strip()).isoformat()
+            except ValueError:
+                parsed_date = parse_temporal(raw, today)
+                if parsed_date.matched and parsed_date.when is not None:
+                    return parsed_date.when.isoformat()
+        return None
+    return raw
 
 
 def _is_trusted(value: object) -> bool:
@@ -215,13 +260,13 @@ def _resolve_payee(
 
 
 def _resolve_amount(
-    inputs: SlotInputs, notes: list[str]
+    inputs: SlotInputs, notes: list[str], slot: str
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     parsed = parse_amount(inputs.text)
     if not parsed.matched or parsed.value is None:
-        notes.append("missing amount")
-        return None, SlotQuestion("amount", _PROMPTS["amount"]), tuple(notes)
-    notes.append(f"resolved amount:{parsed.value.cents}")
+        notes.append(f"missing {slot}")
+        return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
+    notes.append(f"resolved {slot}:{parsed.value.cents}")
     return parsed.value.cents, None, tuple(notes)
 
 

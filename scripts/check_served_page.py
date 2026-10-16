@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 import urllib.request
+import uuid
 
 
 def _get(base: str, path: str) -> str:
@@ -35,10 +36,11 @@ def _post(base: str, path: str, body: dict[str, object]) -> dict[str, object]:
 
 def run(base: str) -> list[str]:
     failures: list[str] = []
+    session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=3")
-    js = _get(base, "/assets/app.js?v=4")
+    js = _get(base, "/assets/app.js?v=8")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -46,7 +48,7 @@ def run(base: str) -> list[str]:
         "page: 顶栏/两栏/侧栏": (
             'class="topbar"' in html and 'class="layout"' in html and 'class="rail"' in html
         ),
-        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=6" in html,
+        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=8" in html,
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
@@ -73,7 +75,9 @@ def run(base: str) -> list[str]:
 
     selected = {"account": "acc_savings", "card": "card_debit", "subscription": "sub_video"}
 
-    yellow = _post(base, "/api/submit", {"utterance": "转给李娜 500 元", "selected": selected})
+    yellow = _post(base, "/api/submit", {
+        "session_id": session_id, "utterance": "转给李娜 500 元", "selected": selected,
+    })
     ycard = yellow.get("card") or {}
     limit = ycard.get("daily_limit_cents")
     used = ycard.get("daily_accumulated_cents")
@@ -91,7 +95,9 @@ def run(base: str) -> list[str]:
     if not y_ok:
         failures.append("黄/红卡额度字段与级别不一致")
 
-    red = _post(base, "/api/submit", {"utterance": "转给李娜 1500 元", "selected": selected})
+    red = _post(base, "/api/submit", {
+        "session_id": session_id, "utterance": "转给李娜 1500 元", "selected": selected,
+    })
     rcard = red.get("card") or {}
     rlimit = rcard.get("daily_limit_cents")
     rused = rcard.get("daily_accumulated_cents")
@@ -105,7 +111,9 @@ def run(base: str) -> list[str]:
     if not r_ok:
         failures.append("红卡未体现超额（daily_accumulated_cents 应 > daily_limit_cents）")
 
-    green = _post(base, "/api/submit", {"utterance": "查一下上月账单", "selected": selected})
+    green = _post(base, "/api/submit", {
+        "session_id": session_id, "utterance": "查一下上月账单", "selected": selected,
+    })
     gcard = green.get("card") or {}
     g_ok = (
         gcard.get("level") == "GREEN"

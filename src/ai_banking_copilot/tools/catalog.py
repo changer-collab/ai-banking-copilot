@@ -57,6 +57,8 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
             ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
+            ParamSpec("schedule_id", SlotKind.CONTROL, str, required=False),
+            ParamSpec("executed_on", SlotKind.CONTROL, date, required=False),
             ParamSpec("remark", SlotKind.DATA, str, required=False),
         ),
         is_pure_query=False,
@@ -360,7 +362,11 @@ _CROSS_SPECS: tuple[ToolSpec, ...] = (
         action="funds.release",
         risk=RiskClass.SMALL_CHANGE,
         kind=ActionKind.INFLOW,
-        params=(ParamSpec("hold_id", SlotKind.CONTROL, str, slot_name="hold"),),
+        params=(
+            ParamSpec("hold_id", SlotKind.CONTROL, str, slot_name="hold"),
+            # 场景从冻结事实回读，用于计划净额与成员校验；执行金额仍取冻结记录。
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, required=False),
+        ),
         is_pure_query=False,
         reversible=True,
         money_param=None,
@@ -382,6 +388,7 @@ _MERCHANT_SPECS: tuple[ToolSpec, ...] = (
             # 故这里声明为 `slot_name=None`：订单日期由**场景层**（`scenarios.cross.birthday_plan`）
             # 填充，规划层不补全——与 `ParamSpec.slot_name` 的判据（「是否由规划层补全」）一致。
             ParamSpec("order_on", SlotKind.CONTROL, date),
+            ParamSpec("occasion_id", SlotKind.CONTROL, str, required=False),
         ),
         is_pure_query=False,
         reversible=False,
