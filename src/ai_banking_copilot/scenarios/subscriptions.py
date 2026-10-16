@@ -224,6 +224,7 @@ def _cancel_handler(context: WriteContext) -> WriteReceipt:
     return context.core_bank.cancel_subscription(
         subscription_id=require_str(context.params, "subscription_id"),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -236,6 +237,7 @@ def _sign_handler(context: WriteContext) -> WriteReceipt:
         period=require_str(context.params, "period"),
         next_charge_on=require_date(context.params, "next_charge_on"),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 

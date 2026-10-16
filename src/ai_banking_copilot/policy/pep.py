@@ -17,11 +17,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date
 
-from ai_banking_copilot.contracts.authorization import Decision, Level
+from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
     IntentRef,
@@ -34,8 +35,21 @@ from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank,
 from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.hashing import canonical_json
+from ai_banking_copilot.gateway.preconditions import (
+    BeforeWrite,
+    PreconditionResult,
+    PreconditionStatus,
+    WritePreconditionError,
+)
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID
+from ai_banking_copilot.gateway.transaction_facts import TransactionFacts
 from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditEvent, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
+from ai_banking_copilot.policy.execution import (
+    CommittedWriteError,
+    ExecutionContext,
+    assess_plan,
+)
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.tools.registry import ForbiddenParamError, ToolCall, ToolRegistry, ToolSpec
 
@@ -53,6 +67,7 @@ class WriteContext:
     params: dict[str, object]
     spec: ToolSpec
     idempotency_key: str
+    before_write: BeforeWrite | None = None
 
 
 WriteHandler = Callable[[WriteContext], WriteReceipt]
@@ -215,6 +230,8 @@ class Pep:
         decision: Decision,
         plan: Plan,
         idempotency_key: str,
+        *,
+        execution: ExecutionContext | None = None,
     ) -> ExecResult:
         """执行一次已裁决的工具调用。任一前置条件不满足即 fail-closed。
 
@@ -240,7 +257,10 @@ class Pep:
             return self._execute_query(
                 call, spec, resolved, decision, frozen_hash, idempotency_key
             )
-        return self._execute_write(call, resolved, spec, decision, frozen_hash, idempotency_key)
+        return self._execute_write(
+            call, resolved, spec, decision, frozen_hash, idempotency_key,
+            plan, execution,
+        )
 
     def _assert_member(self, action: str, resolved: dict[str, object], plan: Plan) -> None:
         """执行门（**节点级**成员资格）：本次调用必须属于**已确认的冻结计划**。
@@ -299,11 +319,65 @@ class Pep:
         decision: Decision,
         frozen_hash: str,
         idempotency_key: str,
+        plan: Plan,
+        execution: ExecutionContext | None,
     ) -> ExecResult:
         """写路径：幂等执行 → 执行后出处校验 → 熔断联动 → 审计落链。"""
+        if execution is None:
+            # 仅兼容可信程序化调用；Decision 是授权上限，不代表 Web/IM 验证码证据。
+            execution = ExecutionContext(
+                execution_id=idempotency_key,
+                frozen_hash=_plan_hash(plan),
+                user_id=str(params.get("user_id", DEMO_USER_ID)),
+                today=DEFAULT_BOOKING_DATE,
+                approved_level=decision.level,
+                strong_verified=decision.level >= Level.RED,
+            )
+        if (not execution.execution_id or execution.frozen_hash != _plan_hash(plan)
+                or ("user_id" in params and execution.user_id != params["user_id"])):
+            raise StalePlanError("执行上下文与冻结计划或用户不匹配")
+
+        active_execution = execution
+
+        def before_write(conn: sqlite3.Connection) -> PreconditionResult:
+            facts = TransactionFacts(conn)
+            if facts.global_breaker_open() or self._breaker.is_open():
+                return PreconditionResult(
+                    PreconditionStatus.TAKEOVER, level=int(Level.MANUAL),
+                    reasons=(ReasonCode.MANUAL_REVIEW.value,),
+                    message="熔断打开，转人工接管",
+                )
+            risk = assess_plan(
+                plan, registry=self._registry, gateway=facts,
+                user_id=active_execution.user_id, today=active_execution.today,
+                flags=active_execution.flags,
+                completed_records=active_execution.completed_records,
+                floor=decision,
+            )
+            level = risk.decision.level
+            status = PreconditionStatus.ALLOW
+            if level is Level.DENY:
+                status = PreconditionStatus.DENY
+            elif level is Level.MANUAL:
+                status = PreconditionStatus.TAKEOVER
+            elif level > active_execution.approved_level or (
+                level >= Level.RED and not active_execution.strong_verified
+            ):
+                status = PreconditionStatus.REAUTHORIZE
+            return PreconditionResult(
+                status, level=int(level),
+                reasons=tuple(reason.value for reason in risk.decision.reasons),
+                limit_cents=risk.limit_cents,
+                accumulated_cents=risk.accumulated_cents,
+                message="最新风险要求重新授权" if status is PreconditionStatus.REAUTHORIZE else "",
+            )
+
         try:
-            receipt = self._dispatch_write(call, params, spec, idempotency_key)
+            receipt = self._dispatch_write(call, params, spec, idempotency_key, before_write)
         except NotAuthorizedError:
+            self._breaker.record_failure()
+            raise
+        except WritePreconditionError:
             self._breaker.record_failure()
             raise
         except GatewayError as error:
@@ -319,19 +393,22 @@ class Pep:
                 detail=str(error),
             )
             raise
-        provenance = self._verify_receipt(receipt)
-        self._breaker.record_success()
-        suffix = "（幂等回放）" if receipt.replayed else ""
-        return self._finish(
-            call,
-            decision,
-            frozen_hash,
-            idempotency_key,
-            status=receipt.status,
-            record_ids=receipt.record_ids,
-            provenance=provenance,
-            detail=f"{receipt.action}{suffix}",
-        )
+        try:
+            provenance = self._verify_receipt(receipt)
+            self._breaker.record_success()
+            suffix = "（幂等回放）" if receipt.replayed else ""
+            return self._finish(
+                call,
+                decision,
+                frozen_hash,
+                idempotency_key,
+                status=receipt.status,
+                record_ids=receipt.record_ids,
+                provenance=provenance,
+                detail=f"{receipt.action}{suffix}",
+            )
+        except Exception as error:
+            raise CommittedWriteError(receipt, error) from error
 
     def _dispatch_write(
         self,
@@ -339,6 +416,7 @@ class Pep:
         params: dict[str, object],
         spec: ToolSpec,
         idempotency_key: str,
+        before_write: BeforeWrite,
     ) -> WriteReceipt:
         """按动作查 **handler 注册表**并执行（handler 由场景模块自带、组合根汇入）。
 
@@ -355,6 +433,7 @@ class Pep:
                 params=params,
                 spec=spec,
                 idempotency_key=idempotency_key,
+                before_write=before_write,
             )
         )
 
@@ -424,6 +503,11 @@ def _canonical_params(params: dict[str, object]) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise NotAuthorizedError("工具参数必须是 JSON 对象")
     return {str(key): value for key, value in parsed.items()}
+
+
+def _plan_hash(plan: Plan) -> str:
+    nodes = tuple(replace(node, params=_canonical_params(node.params)) for node in plan.nodes)
+    return cfhash(nodes)
 
 
 def require_str(params: dict[str, object], key: str) -> str:

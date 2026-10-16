@@ -324,6 +324,7 @@ def _freeze_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(money_cents(context.params, context.spec)),
         reason=require_str(context.params, "reason"),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -332,6 +333,7 @@ def _release_handler(context: WriteContext) -> WriteReceipt:
     return context.core_bank.unfreeze_funds(
         hold_id=require_str(context.params, "hold_id"),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -343,6 +345,7 @@ def _merchant_order_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(money_cents(context.params, context.spec)),
         order_on=require_date(context.params, "order_on"),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
         occasion_id=(
             require_str(context.params, "occasion_id")
             if "occasion_id" in context.params else None
