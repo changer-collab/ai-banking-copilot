@@ -37,6 +37,7 @@ from ai_banking_copilot.planning.llm import (
     TemplateIntentModel,
 )
 from ai_banking_copilot.policy.audit import AuditLog, ChainBrokenError
+from ai_banking_copilot.policy.audit_validation import verify_for_service
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.breaker_store import StoreBreakerStateStore, init_breaker_schema
 from ai_banking_copilot.policy.pep import Pep
@@ -104,9 +105,9 @@ def build_audit_log(db_path: Path, env: Mapping[str, str] | None = None) -> Audi
     source = os.environ if env is None else env
     audit_path = db_path.parent / "audit.jsonl"
     audit = AuditLog(audit_path, key=_audit_key(audit_path, source))
-    if not audit.verify_chain():
+    if not verify_for_service(audit):
         raise ChainBrokenError(
-            f"审计链校验失败：{audit_path}（拒绝以被篡改或密钥不匹配的审计链启动）"
+            f"审计链校验失败：{audit_path}（拒绝损坏、密钥不匹配或未经显式迁移的 SHA 历史）"
         )
     return audit
 
