@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from functools import wraps
+from threading import RLock
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
-from ai_banking_copilot.contracts.authorization import Decision, Level, strictest
+from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
 from ai_banking_copilot.contracts.security import (
     INJECTION_MARKERS as INJECTION_MARKERS,
@@ -31,6 +33,11 @@ from ai_banking_copilot.contracts.security import (
 )
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
+from ai_banking_copilot.gateway.preconditions import (
+    PreconditionResult,
+    PreconditionStatus,
+    WritePreconditionError,
+)
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
 from ai_banking_copilot.planning.slots import SLOT_PARAMS, SlotInputs, fill_control_slots
@@ -47,9 +54,13 @@ from ai_banking_copilot.policy.breaker import (
     BreakerTrigger,
     CircuitBreaker,
 )
+from ai_banking_copilot.policy.execution import (
+    CommittedWriteError,
+    ExecutionContext,
+    assess_plan,
+)
 from ai_banking_copilot.policy.gate import assert_frozen
 from ai_banking_copilot.policy.pdp import (
-    DAILY_LIMIT_YUAN,
     FLAG_DEVICE_CHANGE,
     FLAG_INJECTION_DETECTED,
     evaluate,
@@ -84,8 +95,19 @@ from ai_banking_copilot.web.plan_card import (
 if TYPE_CHECKING:
     from ai_banking_copilot.web.app import AppDeps
 
-_CENTS_PER_YUAN = 100
-"""元 → 分换算（与 `policy.pdp` 同口径）。"""
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _serialized(
+    method: Callable[Concatenate[Session, _P], _R],
+) -> Callable[Concatenate[Session, _P], _R]:
+    """同一会话的状态变化串行，嵌套的澄清 / 确认复用可重入锁。"""
+    @wraps(method)
+    def wrapped(self: Session, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 FABRICATION_MARKERS: tuple[str, ...] = (
     "编一个",
@@ -162,6 +184,7 @@ class _Challenge:
     card_id: str
     frozen_hash: str
     expires_at: datetime
+    execution_id: str
 
 
 @dataclass(frozen=True)
@@ -170,6 +193,9 @@ class ConfirmationRecord:
 
     plan: Plan
     frozen_hash: str
+    execution_id: str
+    approved_level: Level
+    strong_verified: bool
 
 
 @dataclass(frozen=True)
@@ -226,6 +252,9 @@ class ExecutionView:
     frozen_hash: str
     exec_results: tuple[ExecResult, ...]
     record_ids: tuple[str, ...]
+    card: PlanCard | None = None
+    quota: DailyQuota | None = None
+    decision: Decision | None = None
 
 
 @dataclass(frozen=True)
@@ -253,13 +282,16 @@ class _Pending:
     node_ids: tuple[str, ...]
     intent_text: str
     hit_rules: tuple[str, ...]
+    flags: frozenset[str] = frozenset()
 
 
 class Session:
     """单会话编排：`Session(deps)`。"""
 
     def __init__(self, deps: AppDeps) -> None:
+        self._lock = RLock()
         self._deps = deps
+        self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
         self._message = "会话就绪"
         self._pending: _Pending | None = None
@@ -270,6 +302,8 @@ class Session:
         self._completed_node_ids: list[str] = []
         self._pending_node_ids: list[str] = []
         self._challenge: _Challenge | None = None
+        self._unverified_results: dict[str, ExecResult] = {}
+        self._quota: DailyQuota | None = None
         # 熔断触发 3 / 4 的**跨提交**计数（有意不被 `_reset()` 清空：它们是会话级而非单次提交级）
         self._risky_at: list[datetime] = []
         self._policy_rejections = 0
@@ -293,6 +327,7 @@ class Session:
         """确认记录（未确认则 `None`）。"""
         return self._confirmation
 
+    @_serialized
     def submit(
         self,
         utterance: str,
@@ -301,12 +336,28 @@ class Session:
         session_anomaly: bool = False,
         now: datetime | None = None,
     ) -> SubmissionView:
+        """一次新的用户意图拥有独立执行身份，即使内容完全相同。"""
+        return self._submit(
+            utterance, selected=selected, session_anomaly=session_anomaly, now=now,
+            execution_id=secrets.token_hex(16),
+        )
+
+    def _submit(
+        self,
+        utterance: str,
+        *,
+        selected: Mapping[str, object] | None = None,
+        session_anomaly: bool = False,
+        now: datetime | None = None,
+        execution_id: str,
+    ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
         `session_anomaly`：**受信任调用方**上报的会话异常（设备 / 地点跳变）——本层无此信号源，
         故由调用方按事实传入；命中即按触发 5 熔断，并同时给 PDP 加 `device_change` 标记。
         """
         self._reset()
+        self._execution_id = execution_id
         moment = now if now is not None else datetime.now()
         self._last_utterance = utterance
         self._last_selected = dict(selected) if selected is not None else None
@@ -349,6 +400,7 @@ class Session:
             outcome, utterance, asks, session_anomaly=session_anomaly, notes=notes
         )
 
+    @_serialized
     def clarify(self, answers: Mapping[str, object]) -> SubmissionView:
         """澄清闭环：用**补充答案**重跑上一次的指令（用户不必整句重述）。
 
@@ -359,8 +411,10 @@ class Session:
             raise SessionStateError("尚无上一条指令：无法澄清")
         merged: dict[str, object] = dict(self._last_selected or {})
         merged.update(answers)
-        return self.submit(self._last_utterance, selected=merged)
+        execution_id = self._execution_id if self._pending is None else secrets.token_hex(16)
+        return self._submit(self._last_utterance, selected=merged, execution_id=execution_id)
 
+    @_serialized
     def check_due(self) -> SubmissionView:
         """只提案；到期不沿用旧授权，确认、强验证和熔断仍走同一条链。"""
         self._reset()
@@ -423,11 +477,16 @@ class Session:
         if outcome.decision is None:
             return self._refuse("场景未产出裁决，安全拒绝", utterance)
         flags = self._context_flags(utterance, session_anomaly=session_anomaly)
-        node_decisions = tuple(self._node_decision(node, flags) for node in plan.nodes)
-        decision = strictest(outcome.decision, *node_decisions)
-        card = render_plan_card(plan, decision, self._deps.gateway)
+        risk = assess_plan(
+            plan, registry=self._deps.registry, gateway=self._deps.gateway,
+            user_id=self._deps.user_id, today=self._deps.today, flags=flags,
+            floor=outcome.decision,
+        )
+        node_decisions = risk.node_decisions
+        decision = risk.decision
+        card = self._render_card(plan, decision)
         quota = (
-            self._daily_quota(plan)
+            DailyQuota(risk.limit_cents, risk.accumulated_cents)
             if decision.level in (Level.YELLOW, Level.RED) and _plan_has_outflow(plan)
             else None
         )
@@ -440,8 +499,10 @@ class Session:
             node_ids=tuple(node.node_id for node in plan.nodes),
             intent_text=utterance,
             hit_rules=hit_rules,
+            flags=flags,
         )
         self._pending = pending
+        self._quota = quota
         if decision.level >= Level.DENY:
             return self._refuse(
                 "命中拒绝规则：" + "，".join(hit_rules), utterance, decision, plan, card
@@ -510,6 +571,18 @@ class Session:
                 )
             )
         return tuple(intents), tuple(asks), _dropped_notes(dropped)
+
+    def _render_card(self, plan: Plan, decision: Decision) -> PlanCard:
+        card = render_plan_card(plan, decision, self._deps.gateway)
+        # 相同内容的新提交也不能接受上一轮的确认请求。
+        return replace(card, card_id=f"{card.card_id}_{self._execution_id}")
+
+    def _node_decision(self, node: PlanNode, flags: frozenset[str]) -> Decision:
+        """单节点口径的兼容入口；产品执行另叠加完整计划风险。"""
+        return evaluate(node_policy_request(
+            node, spec=self._deps.registry.get(node.action), gateway=self._deps.gateway,
+            user_id=self._deps.user_id, today=self._deps.today, flags=flags,
+        ))
 
     def _context_flags(
         self, utterance: str, *, session_anomaly: bool = False
@@ -589,39 +662,6 @@ class Session:
         """产出可确认计划 ⇒ 连续拒绝计数归零。"""
         self._policy_rejections = 0
 
-    def _node_decision(self, node: PlanNode, flags: frozenset[str]) -> Decision:
-        request = node_policy_request(
-            node,
-            spec=self._deps.registry.get(node.action),
-            gateway=self._deps.gateway,
-            user_id=self._deps.user_id,
-            today=self._deps.today,
-            flags=flags,
-        )
-        return evaluate(request)
-
-    def _daily_quota(self, plan: Plan) -> DailyQuota:
-        """当日额度（展示用只读透传）：有效阈值 = `min(官方 1000 元, 客户限额)`。
-
-        当日累计与裁决**同源**（复用 `node_policy_request` 的 `daily_accumulated`，含本笔），
-        取各节点最大值（与计划级 `strictest` 同向）；只透结论性数字，不暴露资产分档规则，
-        也不改变 PDP 判定语义。仅含 ≥1 流出节点的计划会走到这里（见 `_after_outcome`）。
-        """
-        customer = self._deps.gateway.daily_transfer_limit(self._deps.user_id)
-        effective = min(DAILY_LIMIT_YUAN * _CENTS_PER_YUAN, customer.cents)
-        accumulated = max(
-            node_policy_request(
-                node,
-                spec=self._deps.registry.get(node.action),
-                gateway=self._deps.gateway,
-                user_id=self._deps.user_id,
-                today=self._deps.today,
-                flags=frozenset(),
-            ).daily_accumulated.cents
-            for node in plan.nodes
-        )
-        return DailyQuota(limit_cents=effective, accumulated_cents=accumulated)
-
     def _refuse(
         self,
         reason: str,
@@ -698,6 +738,7 @@ class Session:
         self._audit_ids.append(event_hash)
         return event_hash
 
+    @_serialized
     def confirm(
         self,
         card_id: str,
@@ -713,6 +754,12 @@ class Session:
         红色卡须先经 `request_verification` 取得挑战，再以 `verification_code` 通过闸门。
         """
         pending = self._require_pending()
+        if self._state is SessionState.COMPLETED:
+            if card_id != pending.card.card_id:
+                raise ConfirmationMismatchError("计划卡不匹配")
+            assert_frozen(pending.plan, frozen_hash)
+            self._require_confirmation(pending)
+            return self._execution_view()
         if self._state not in (
             SessionState.AWAITING_CONFIRM,
             SessionState.EXECUTING,
@@ -724,12 +771,22 @@ class Session:
                 f"计划卡不匹配：收到 {card_id}｜待确认 {pending.card.card_id}"
             )
         assert_frozen(pending.plan, frozen_hash)
-        if PROMPT_STRONG_VERIFY in pending.card.requires:
+        prior = self._confirmation
+        strong_verified = (
+            prior is not None
+            and prior.execution_id == self._execution_id
+            and prior.frozen_hash == pending.card.frozen_hash
+            and prior.strong_verified
+        )
+        if PROMPT_STRONG_VERIFY in pending.card.requires and not strong_verified:
             self._assert_strong_verification(
                 pending, verification_code, now=now if now is not None else datetime.now()
             )
+            strong_verified = True
         self._confirmation = ConfirmationRecord(
-            plan=pending.plan, frozen_hash=pending.card.frozen_hash
+            plan=pending.plan, frozen_hash=pending.card.frozen_hash,
+            execution_id=self._execution_id, approved_level=pending.card.level,
+            strong_verified=strong_verified,
         )
         if self._breaker_blocks(pending):
             self._enter_takeover("熔断打开：非纯查询转人工接管", pending)
@@ -738,12 +795,15 @@ class Session:
             self._pending_node_ids = list(pending.node_ids)
         return self._execute(steps=steps)
 
+    @_serialized
     def request_verification(self, *, now: datetime | None = None) -> VerificationPrompt:
         """下发强验证挑战（**仅**红色卡）：一次性 + TTL + 与冻结计划绑定。
 
         每次调用**轮换**验证码（覆盖上一个未使用的挑战）。
         """
         pending = self._require_pending()
+        if self._state is not SessionState.AWAITING_CONFIRM:
+            raise SessionStateError("当前状态不允许申请验证码")
         if PROMPT_STRONG_VERIFY not in pending.card.requires:
             raise StrongVerificationRequiredError("当前计划卡无需强验证")
         moment = now if now is not None else datetime.now()
@@ -753,6 +813,7 @@ class Session:
             card_id=pending.card.card_id,
             frozen_hash=pending.card.frozen_hash,
             expires_at=moment + timedelta(seconds=VERIFICATION_TTL_S),
+            execution_id=self._execution_id,
         )
         return VerificationPrompt(
             channel="sms",
@@ -773,6 +834,7 @@ class Session:
         if (
             challenge.card_id != pending.card.card_id
             or challenge.frozen_hash != pending.card.frozen_hash
+            or challenge.execution_id != self._execution_id
         ):
             raise StrongVerificationRequiredError("验证码与当前计划不匹配：请重新申请")
         if now >= challenge.expires_at:
@@ -785,6 +847,20 @@ class Session:
         if self._pending is None:
             raise SessionStateError("尚无已裁决计划：请先 submit")
         return self._pending
+
+    def _require_confirmation(self, pending: _Pending) -> ConfirmationRecord:
+        record = self._confirmation
+        if (
+            record is None
+            or record.execution_id != self._execution_id
+            or record.frozen_hash != pending.card.frozen_hash
+            or record.approved_level < pending.decision.level
+        ):
+            raise SessionStateError("执行缺少与当前计划绑定的确认")
+        assert_frozen(pending.plan, record.frozen_hash)
+        if PROMPT_STRONG_VERIFY in pending.card.requires and not record.strong_verified:
+            raise StrongVerificationRequiredError("当前计划尚未完成强验证")
+        return record
 
     def _breaker_blocks(self, pending: _Pending) -> bool:
         """熔断是否阻断本节点计划（裁决 #27）。
@@ -799,8 +875,8 @@ class Session:
 
     def _execute(self, *, steps: int | None) -> ExecutionView:
         pending = self._require_pending()
+        confirmation = self._require_confirmation(pending)
         node_map = pending.plan.node_map()
-        decision_map = dict(zip(pending.node_ids, pending.node_decisions, strict=True))
         remaining = [
             node_id
             for node_id in topological_order(pending.plan)
@@ -810,22 +886,56 @@ class Session:
             remaining = remaining[:steps]
         self._state = SessionState.EXECUTING
         for node_id in remaining:
+            self._require_confirmation(pending)
+            if self._breaker_blocks(pending):
+                self._enter_takeover("熔断打开：非纯查询转人工接管", pending)
+                return self._execution_view()
             node = node_map[node_id]
             self._assert_dependencies_done(node)
             try:
                 call = self._to_call(node)
                 result = self._deps.pep.execute(
                     call,
-                    decision_map[node_id],
+                    pending.decision,
                     pending.plan,
-                    f"{pending.card.frozen_hash[:12]}-{node_id}",
+                    f"{self._execution_id}:{pending.card.frozen_hash}:{node_id}",
+                    execution=ExecutionContext(
+                        execution_id=self._execution_id,
+                        frozen_hash=pending.card.frozen_hash,
+                        user_id=self._deps.user_id,
+                        today=self._deps.today,
+                        approved_level=confirmation.approved_level,
+                        strong_verified=confirmation.strong_verified,
+                        completed_records=tuple(
+                            record_id
+                            for item in self._exec_results
+                            for record_id in item.record_ids
+                        ) + tuple(
+                            record_id
+                            for item in self._unverified_results.values()
+                            for record_id in item.record_ids
+                        ),
+                        flags=pending.flags,
+                    ),
                 )
+            except WritePreconditionError as error:
+                self._refresh_authorization(error.result)
+                return self._execution_view()
+            except CommittedWriteError as error:
+                self._unverified_results[node_id] = ExecResult(
+                    status="committed_unverified", record_ids=error.receipt.record_ids,
+                    message=f"业务已提交，后续核验或审计未完成：{error}",
+                )
+                self._message = "业务已提交，核验或审计未完成；已暂停后续步骤，可恢复核对回执"
+                self._state = SessionState.INTERRUPTED
+                return self._execution_view()
             except (NotAuthorizedError, GatewayError) as error:
                 self._message = f"执行受阻（{node.action}）：{error}"
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
                 return self._execution_view()
+            self._unverified_results.pop(node_id, None)
             self._exec_results.append(result)
             self._completed_node_ids.append(node_id)
             self._audit_ids.append(self._deps.audit.head())
@@ -838,6 +948,34 @@ class Session:
                 f"已执行 {len(self._completed_node_ids)} / {len(pending.node_ids)} 步，可中断"
             )
         return self._execution_view()
+
+    def _refresh_authorization(self, result: PreconditionResult) -> None:
+        """事务已回滚；保留已完成步骤，要求满足最新授权后再继续。"""
+        pending = self._require_pending()
+        decision = strictest(
+            pending.decision,
+            Decision(Level(result.level), tuple(ReasonCode(code) for code in result.reasons)),
+        )
+        card = self._render_card(pending.plan, decision)
+        pending = replace(
+            pending, card=card, decision=decision,
+            hit_rules=tuple(reason.value for reason in decision.reasons),
+        )
+        self._pending = pending
+        self._confirmation = None
+        self._challenge = None
+        self._quota = (
+            DailyQuota(result.limit_cents, result.accumulated_cents)
+            if _plan_has_outflow(pending.plan) else None
+        )
+        if result.status is PreconditionStatus.TAKEOVER or decision.level is Level.MANUAL:
+            self._enter_takeover(result.message or "当前风险需人工接管", pending)
+        elif result.status is PreconditionStatus.DENY or decision.level is Level.DENY:
+            self._state = SessionState.BLOCKED
+            self._message = result.message or "当前策略拒绝执行，未新增业务写入"
+        else:
+            self._state = SessionState.AWAITING_CONFIRM
+            self._message = result.message or "风险条件已变化，请按新计划卡重新确认"
 
     def _assert_dependencies_done(self, node: PlanNode) -> None:
         """执行前置：节点声明的依赖必须**已完成**（拓扑序与执行记录一致，fail-closed）。
@@ -875,6 +1013,7 @@ class Session:
             params[param.name] = Value(value, trust)
         return ToolCall(action=node.action, params=params)
 
+    @_serialized
     def reverse(self) -> ReversalOutcome:
         """回退：对本次执行的每一条回执走补偿事务，结论**一律取自 saga 的如实告知**。
 
@@ -882,8 +1021,10 @@ class Session:
         有资金影响的（流出转账）真正回补，无资金影响的（纯查询）跳过，冲正失败则如实报告。
         """
         self._require_pending()
-        if self._confirmation is None:
+        if self._confirmation is None and not self._exec_results:
             raise SessionStateError("尚未确认执行：不可回退")
+        if self._unverified_results:
+            raise SessionStateError("存在已提交但尚未核验的回执，请先恢复核对后再回退")
         self._reversed_records = []
         saga = Saga()
         for index, result in enumerate(self._exec_results, start=1):
@@ -958,6 +1099,7 @@ class Session:
 
         return rollback
 
+    @_serialized
     def interrupt(self) -> SessionView:
         """中断：保留已完成节点，未执行节点挂起（PRD §5.8）。"""
         pending = self._require_pending()
@@ -970,25 +1112,37 @@ class Session:
         )
         return SessionView(self._state, self._message)
 
+    @_serialized
     def resume(self) -> ExecutionView:
         """恢复：继续执行剩余节点（幂等：已完成节点不重复执行）。"""
         if self._state is not SessionState.INTERRUPTED:
             raise SessionStateError(f"当前状态不可恢复：{self._state.value}")
+        pending = self._require_pending()
+        if self._confirmation is None:
+            self._state = SessionState.AWAITING_CONFIRM
+            self._message = "计划尚未确认，请先确认当前计划卡"
+            return self._execution_view()
+        self._require_confirmation(pending)
         return self._execute(steps=None)
 
     def _execution_view(self) -> ExecutionView:
         frozen_hash = self._pending.card.frozen_hash if self._pending is not None else ""
+        results = (*self._exec_results, *self._unverified_results.values())
         return ExecutionView(
             state=self._state,
             message=self._message,
             frozen_hash=frozen_hash,
-            exec_results=tuple(self._exec_results),
+            exec_results=results,
             record_ids=tuple(
-                record_id for result in self._exec_results for record_id in result.record_ids
+                record_id for result in results for record_id in result.record_ids
             ),
+            card=self.card(),
+            quota=self._quota,
+            decision=self._pending.decision if self._pending is not None else None,
         )
 
     def _reset(self) -> None:
+        self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
         self._message = "会话已重置"
         self._pending = None
@@ -999,6 +1153,8 @@ class Session:
         self._completed_node_ids = []
         self._pending_node_ids = []
         self._challenge = None
+        self._unverified_results = {}
+        self._quota = None
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:

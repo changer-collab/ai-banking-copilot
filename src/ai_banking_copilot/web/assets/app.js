@@ -604,6 +604,9 @@ async function onConfirm() {
 }
 
 function applyExecution(data) {
+  if (data.card) state.card = data.card;
+  if (data.decision) state.decision = data.decision;
+  if (data.state === "awaiting_confirm") state.verification = null;
   const results = data.results || [];
   results.forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";

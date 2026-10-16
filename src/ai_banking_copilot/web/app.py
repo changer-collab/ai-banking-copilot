@@ -344,10 +344,19 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
 
 
 def _execution_payload(view: ExecutionView) -> dict[str, object]:
+    card = _card_payload(view.card)
+    if card is not None and view.quota is not None:
+        card = {
+            **card,
+            "daily_limit_cents": view.quota.limit_cents,
+            "daily_accumulated_cents": view.quota.accumulated_cents,
+        }
     return {
         "state": view.state.value,
         "message": view.message,
         "frozen_hash": view.frozen_hash,
+        "card": card,
+        "decision": _decision_payload(view.decision),
         "record_ids": list(view.record_ids),
         "results": [
             {
