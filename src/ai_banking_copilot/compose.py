@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import secrets
 from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
 
 from ai_banking_copilot.gateway.core_bank import CoreBank
@@ -26,6 +27,7 @@ from ai_banking_copilot.gateway.risk_store import (
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
+from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
 from ai_banking_copilot.planning.llm import (
     DEFAULT_LLM_ENDPOINT,
     DEFAULT_LLM_MODEL,
@@ -143,8 +145,10 @@ def build_operator_token(env: Mapping[str, str] | None = None) -> str | None:
     return source.get(OPERATOR_TOKEN_ENV, "").strip() or None
 
 
-def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
-    """装配默认依赖：模拟核心银行 + 只读事实网关 + 全量策略/工具依赖。"""
+def build_deps(
+    db_path: Path, env: Mapping[str, str] | None = None, *, resources: ExitStack | None = None
+) -> AppDeps:
+    """装配默认依赖；短期评测可传资源栈，在用例结束时关闭数据库连接。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     writer = Store(db_path)
     init_schema(writer)
@@ -153,15 +157,23 @@ def build_deps(db_path: Path, env: Mapping[str, str] | None = None) -> AppDeps:
     seed_risk_assessment(writer)
     init_merchant_schema(writer)
     seed_user_profiles(writer)
+    init_transfer_schema(writer)
     init_breaker_schema(writer)
     writer.close()
 
     read_store = Store(db_path, StoreMode.READ_ONLY)
+    if resources is not None:
+        resources.callback(read_store.close)
     gateway = FactGateway(read_store)
     registry = build_default_registry()
     breaker, _breaker_store = build_breaker(db_path, env)
+    if resources is not None and _breaker_store is not None:
+        resources.callback(_breaker_store.close)
     audit = build_audit_log(db_path, env)
-    core_bank = CoreBank(Store(db_path, StoreMode.READ_WRITE))
+    core_store = Store(db_path, StoreMode.READ_WRITE)
+    if resources is not None:
+        resources.callback(core_store.close)
+    core_bank = CoreBank(core_store)
     return AppDeps(
         intent_model=build_intent_model(env),
         registry=registry,

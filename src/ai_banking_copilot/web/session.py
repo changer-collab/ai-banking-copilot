@@ -67,6 +67,7 @@ from ai_banking_copilot.scenarios.base import (
     ScenarioStatus,
     plan_is_pure_query,
 )
+from ai_banking_copilot.scenarios.pending import PendingHandler
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
     run_scenario,
@@ -312,6 +313,9 @@ class Session:
         refusal = _guard_utterance(utterance)
         if refusal is not None:
             return self._refuse(refusal, utterance)
+        invalid = self._invalid_selection(selected or {})
+        if invalid is not None:
+            return self._refuse(invalid, utterance)
         intents, asks, notes = self._assemble_intents(utterance, selected)
         if not intents:
             if asks:
@@ -356,6 +360,40 @@ class Session:
         merged: dict[str, object] = dict(self._last_selected or {})
         merged.update(answers)
         return self.submit(self._last_utterance, selected=merged)
+
+    def check_due(self) -> SubmissionView:
+        """只提案；到期不沿用旧授权，确认、强验证和熔断仍走同一条链。"""
+        self._reset()
+        handler = PendingHandler(self._deps.user_id, self._deps.today)
+        plan = handler.build((), self._deps.gateway)
+        if not plan.nodes:
+            self._state = SessionState.IDLE
+            self._message = "当前没有到期待办。"
+            return SubmissionView(self._state, self._message, None, None, None, ())
+        outcome = run_scenario(handler, (), self._deps.gateway)
+        self._note_risky_activity(now=datetime.now(), risky=True)
+        return self._after_outcome(outcome, "检查到期待办并生成待确认提案", ())
+
+    def _invalid_selection(self, selected: Mapping[str, object]) -> str | None:
+        """对象由本人事实列表选取；客户端不能靠填写内部 ID 操作其他人的对象。"""
+        gateway, user_id = self._deps.gateway, self._deps.user_id
+        owned = {
+            "account": {r.payload.account_id for r in gateway.accounts_of(user_id)},
+            "card": {r.payload.card_id for r in gateway.cards_of(user_id)},
+            "subscription": {r.payload.subscription_id for r in gateway.subscriptions_of(user_id)},
+            "hold": {r.payload.hold_id for r in gateway.active_holds_of(user_id)},
+            "payee": {r.payload.payee_id for r in gateway.payees_of(user_id)},
+            "payer": {r.payload.payee_id for r in gateway.payees_of(user_id)},
+        }
+        for slot, identifiers in owned.items():
+            # 场景兼容内部参数名；两套名字都必须检查，不能从 extras 绕过本人范围。
+            for key in (slot, SLOT_PARAMS.get(slot, slot)):
+                value = selected.get(key)
+                if isinstance(value, Value):
+                    value = value.raw
+                if isinstance(value, str) and value not in identifiers:
+                    return "所选对象不存在、已失效或不属于当前用户，请重新选择。"
+        return None
 
     def _after_outcome(
         self,
@@ -1012,14 +1050,11 @@ _SUBSCRIBE_DEFAULT_PRODUCT = "wp_cash"
 def _per_intent_selected(
     action: str, chosen: Mapping[str, object], deps: AppDeps
 ) -> dict[str, object]:
-    """受信任的 per-intent 选中对象：**仅** `wealth.subscribe` 补默认产品与用户身份。
-
-    不改共享 `chosen`，故 `wealth.redeem` 等动作的既有澄清行为不变（收窄）。
-    """
+    """身份始终取服务端；申购另补默认产品，不改共享的选中对象。"""
     selected = dict(chosen)
+    selected["user_id"] = deps.user_id
     if action == "wealth.subscribe":
         selected.setdefault("product", _SUBSCRIBE_DEFAULT_PRODUCT)
-        selected.setdefault("user_id", deps.user_id)
     return selected
 
 
@@ -1043,7 +1078,7 @@ def _intent_span(intent: Intent, utterance: str) -> str:
     return utterance
 
 
-_DATE_PARAMS = frozenset({"booked_on", "start", "end", "order_on"})
+_DATE_PARAMS = frozenset({"booked_on", "start", "end", "order_on", "next_charge_on", "executed_on"})
 """需要从 ISO 文本还原为 `date` 的工具参数（02 目录声明为 `date`，计划节点里是 ISO 字符串）。
 
 `order_on`（`merchant.order` 的订单日期）由**场景层**装配为 ISO 文本，同样需在此还原。"""

@@ -237,7 +237,9 @@ def _payee_label(candidate: Candidate) -> str:
     return f"{candidate.full_name}(尾号 {candidate.account_tail}/{candidate.phone_tail})"
 
 
-def due_transfer_plan(gateway: FactGateway, as_of: date) -> tuple[PlanNode, ...]:
+def due_transfer_plan(
+    gateway: FactGateway, as_of: date, user_id: str = DEMO_USER_ID
+) -> tuple[PlanNode, ...]:
     """把**到期**的定时转账登记项装配成 `transfer.create` 节点（P2-6）。
 
     纪律：
@@ -257,9 +259,11 @@ def due_transfer_plan(gateway: FactGateway, as_of: date) -> tuple[PlanNode, ...]
                 "payee_id": record.payload.payee_id,
                 "amount_cents": record.payload.amount.cents,
                 "booked_on": record.payload.booked_on.isoformat(),
+                "schedule_id": record.payload.schedule_id,
+                "executed_on": as_of.isoformat(),
             },
         )
-        for record in gateway.scheduled_transfers()
+        for record in gateway.scheduled_transfers_of(user_id, status="scheduled")
     )
     return plan_due(items, as_of=as_of, ledger=AnchorLedger(), node_prefix="due")
 
@@ -273,6 +277,12 @@ def _transfer_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
         booked_on=require_date(context.params, "booked_on"),
+        schedule_id=(
+            require_str(context.params, "schedule_id") if "schedule_id" in context.params else None
+        ),
+        executed_on=(
+            require_date(context.params, "executed_on") if "executed_on" in context.params else None
+        ),
     )
 
 

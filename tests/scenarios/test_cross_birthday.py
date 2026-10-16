@@ -98,6 +98,7 @@ def test_birthday_order_executes_and_verifies_provenance(
             "merchant": Value(node.params["merchant"], Trust.TRUSTED),
             "amount_cents": Value(node.params["amount_cents"], Trust.TRUSTED),
             "order_on": Value(date.fromisoformat(str(node.params["order_on"])), Trust.TRUSTED),
+            "occasion_id": Value(node.params["occasion_id"], Trust.TRUSTED),
         },
     )
     result = pep.execute(

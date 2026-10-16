@@ -14,6 +14,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from threading import RLock
 
 from ai_banking_copilot.gateway.errors import (
     BlockedPayeeError,
@@ -34,6 +35,7 @@ from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     COLLECTION_REQUESTS_SCHEMA_SQL,
     SCHEDULED_TRANSFERS_SCHEMA_SQL,
+    due_execution_key,
 )
 
 # 演示与评测的基准记账日（固定值，保证评测可复现）
@@ -64,6 +66,8 @@ class CoreBank:
         if store.mode is not StoreMode.READ_WRITE:
             raise StoreError("CoreBank 需要读写连接（TCB 写权限独占）")
         self._store = store
+        # Web 的多个 Session 共享组合根中的 CoreBank；SQLite 连接本身不可并发事务。
+        self._write_lock = RLock()
 
     def transfer(
         self,
@@ -74,9 +78,32 @@ class CoreBank:
         amount: Money,
         idempotency_key: str,
         booked_on: date,
+        schedule_id: str | None = None,
+        executed_on: date | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
             raise CoreBankError("转账金额必须为正")
+        if schedule_id is not None:
+            idempotency_key = due_execution_key("transfer", user_id, schedule_id)
+        settlement_on = (executed_on or DEFAULT_BOOKING_DATE) if schedule_id else booked_on
+
+        def validate_schedule(conn: sqlite3.Connection) -> None:
+            conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+            row = conn.execute(
+                "SELECT * FROM scheduled_transfers WHERE schedule_id = ?", (schedule_id,)
+            ).fetchone()
+            if row is None:
+                raise CoreBankError(f"预约转账不存在：{schedule_id}")
+            original = (
+                str(row["user_id"]), str(row["account_id"]), str(row["payee_id"]),
+                int(row["amount_cents"]), str(row["booked_on"]),
+            )
+            if original != (user_id, account_id, payee_id, amount.cents, booked_on.isoformat()):
+                raise CoreBankError("预约转账参数与原登记不一致")
+            if booked_on > (executed_on or DEFAULT_BOOKING_DATE):
+                raise CoreBankError("预约转账尚未到期")
+            if str(row["status"]) not in ("scheduled", "completed"):
+                raise CoreBankError("预约转账当前状态不可执行")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             account = conn.execute(
@@ -109,7 +136,7 @@ class CoreBank:
                     txn_id,
                     user_id,
                     account_id,
-                    booked_on.isoformat(),
+                    settlement_on.isoformat(),
                     -amount.cents,
                     f"转给{payee_id}",
                     "转账",
@@ -117,15 +144,27 @@ class CoreBank:
                     "out",
                 ),
             )
+            record_ids: tuple[str, ...] = (f"transactions:{txn_id}",)
+            if schedule_id is not None:
+                changed = conn.execute(
+                    "UPDATE scheduled_transfers SET status = 'completed'"
+                    " WHERE schedule_id = ? AND status = 'scheduled'", (schedule_id,),
+                ).rowcount
+                if changed != 1:
+                    raise CoreBankError("预约转账已完成，缺少可回放回执")
+                record_ids += (f"scheduled_transfers:{schedule_id}",)
             return WriteReceipt(
                 idempotency_key=idempotency_key,
                 action="transfer",
                 status="settled",
-                record_ids=(f"transactions:{txn_id}",),
+                record_ids=record_ids,
                 effect_ids=(f"accounts:{account_id}", f"txn_{txn_id}"),
             )
 
-        return self._run_once("transfer", idempotency_key, body)
+        return self._run_once(
+            "transfer", idempotency_key, body,
+            validate=validate_schedule if schedule_id is not None else None,
+        )
 
     def cancel_subscription(self, *, subscription_id: str, idempotency_key: str) -> WriteReceipt:
         def body(conn: sqlite3.Connection) -> WriteReceipt:
@@ -534,6 +573,7 @@ class CoreBank:
         amount: Money,
         order_on: date,
         idempotency_key: str,
+        occasion_id: str | None = None,
     ) -> WriteReceipt:
         """向商户下单（P2-5 生日联动的流出动作）：登记一条 `merchant_orders` 事实。
 
@@ -543,6 +583,20 @@ class CoreBank:
         """
         if amount.cents <= 0:
             raise CoreBankError("下单金额必须为正")
+        if occasion_id is not None:
+            idempotency_key = due_execution_key("place_merchant_order", user_id, occasion_id)
+
+        def validate_order(conn: sqlite3.Connection) -> None:
+            order_id = _effect_id("order", "place_merchant_order", idempotency_key)
+            row = conn.execute(
+                "SELECT user_id, merchant, amount_cents, order_on FROM merchant_orders"
+                " WHERE order_id = ?", (order_id,),
+            ).fetchone()
+            if row is not None and (
+                str(row["user_id"]), str(row["merchant"]),
+                int(row["amount_cents"]), str(row["order_on"]),
+            ) != (user_id, merchant, amount.cents, order_on.isoformat()):
+                raise CoreBankError("到期订单参数与原订单不一致")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             user = conn.execute(
@@ -564,7 +618,10 @@ class CoreBank:
                 effect_ids=(f"merchant_orders:{order_id}",),
             )
 
-        return self._run_once("place_merchant_order", idempotency_key, body)
+        return self._run_once(
+            "place_merchant_order", idempotency_key, body,
+            validate=validate_order if occasion_id is not None else None,
+        )
 
     def _wealth_flow(
         self,
@@ -633,21 +690,32 @@ class CoreBank:
         action: str,
         idempotency_key: str,
         body: Callable[[sqlite3.Connection], WriteReceipt],
+        *,
+        validate: Callable[[sqlite3.Connection], None] | None = None,
     ) -> WriteReceipt:
-        existing = self._existing_receipt(action, idempotency_key)
-        if existing is not None:
-            return existing
-        try:
-            with self._store.transaction() as conn:
-                receipt = body(conn)
-                self._store_receipt(conn, receipt)
-                return receipt
-        except sqlite3.IntegrityError as error:
-            if "write_receipts" in str(error) or "UNIQUE" in str(error):
-                replay = self._existing_receipt(action, idempotency_key)
-                if replay is not None:
-                    return replay
-            raise
+        with self._write_lock:
+            if validate is None:
+                existing = self._existing_receipt(action, idempotency_key)
+                if existing is not None:
+                    return existing
+            try:
+                with self._store.transaction() as conn:
+                    if validate is not None:
+                        # 先取写锁，再核对业务身份与回执，避免同时确认的两个页面重复执行。
+                        conn.execute("BEGIN IMMEDIATE")
+                        validate(conn)
+                        existing = self._existing_receipt(action, idempotency_key)
+                        if existing is not None:
+                            return existing
+                    receipt = body(conn)
+                    self._store_receipt(conn, receipt)
+                    return receipt
+            except sqlite3.IntegrityError as error:
+                if "write_receipts" in str(error) or "UNIQUE" in str(error):
+                    replay = self._existing_receipt(action, idempotency_key)
+                    if replay is not None:
+                        return replay
+                raise
 
     def _existing_receipt(self, action: str, idempotency_key: str) -> WriteReceipt | None:
         rows = self._store.query(

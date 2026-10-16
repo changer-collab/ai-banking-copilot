@@ -94,6 +94,11 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "transfer.request_collection",
         "命中『AA 收款』模板",
     ),
+    (
+        re.compile(r"登记\s*(?:预约|定时)转账"),
+        "transfer.book",
+        "命中『登记预约转账』模板",
+    ),
     (re.compile(r"定时|定转|预约转"), "transfer.schedule", "命中『定时转账』模板"),
     (re.compile(r"转账|转给|汇款|打款"), "transfer.create", "命中『转账』模板"),
     (re.compile(r"赎回|卖出理财"), "wealth.redeem", "命中『赎回』模板"),
@@ -128,7 +133,19 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "命中『订阅列表/续费提醒』模板",
     ),
     (re.compile(r"签约|代扣|自动续费|续费"), "subscription.sign", "命中『代扣签约』模板"),
+    (re.compile(r"解冻|解除冻结|释放冻结"), "funds.release", "命中『解冻资金』模板"),
     (re.compile(r"冻结|锁定.*资金|锁.*元"), "funds.freeze", "命中『冻结资金』模板"),
+    (
+        # 模板只承诺本人余额；不能把未解析的第三人对象替换成本人账户。
+        re.compile(
+            r"^(?:请|帮我|我想)?\s*(?:查一下|查询|查看|查查|看看|查|看)?\s*"
+            r"(?:我|我的|本人|当前)?的?\s*"
+            r"(?:账户|帐户|银行卡|储蓄卡|储蓄账户|活期账户|主账户)?\s*"
+            r"余额(?:有多少|是多少|还剩多少)?[？?。！!\s]*$"
+        ),
+        "account.balance",
+        "命中『本人余额查询』模板",
+    ),
     (
         re.compile(r"年度账单|全年账单|一年的账单|年度消费"),
         "bills.yearly",
