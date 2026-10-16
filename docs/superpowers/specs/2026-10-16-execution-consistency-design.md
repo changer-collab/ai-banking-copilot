@@ -53,7 +53,7 @@
 }
 ```
 
-`execution_order` 冻结现有拓扑排序的并列节点取舍，避免两个独立节点交换顺序却哈希不变。参数字典键序和同一依赖集合的声明顺序不改变哈希；修改节点 ID、依赖边、实际执行顺序、动作、参数、锚点都改变哈希。仅重新排列节点列表且不影响拓扑执行序时，哈希不变。重复依赖在 `validate_plan` 中拒绝，避免入度与拓扑遍历口径不一致。实现时先校验节点集合，再计算拓扑序；非法计划不进入哈希或执行路径。
+`cfhash` 先对临时 `Plan` 调用 `validate_plan`，再调用 `topological_order` 计算 `execution_order`；非法 DAG（重复 ID、重复依赖、未知依赖、缺锚点、循环）不得被哈希冻结。`topological_order` 保持现有“计划列表顺序决定并列节点”的 tie-break，因此改变实际执行顺序就改变哈希；只改变参数字典键序或同一依赖集合的声明顺序不改变哈希。修改节点 ID、依赖边、动作、参数、锚点都改变哈希。
 
 `plan_id` 不作为业务内容摘要的一部分；独立操作由执行 ID 区分。`policy/gate.py` 仍使用原判据 `cfhash(plan.nodes) == frozen_hash`，不修改执行门算法。每次实际写入前复核计划哈希；确认后的可变参数不得绕过该检查。
 
@@ -75,9 +75,9 @@ ExecutionContext(
 node_key = f"{execution_id}:{frozen_hash}:{node_id}"
 ```
 
-执行 ID 在一次新提交开始时生成，澄清续答、确认重试、中断恢复均沿用。用户重新提交，即使文字与计划相同，也生成新 ID。确认记录同时绑定执行 ID、计划、完整哈希、获准级别、强验证结果。挑战除现有卡片 / 哈希 / TTL 外，也绑定本次执行 ID，避免相同计划间复用。
+执行 ID 在一次新用户提交开始时生成。澄清续答走内部 `_continue_submit(execution_id=...)`，仅在重建出的计划内容与原 pending 一致时沿用原 ID；计划内容变化或真正重新提交时生成新 ID并使旧挑战失效。确认重试、中断恢复均沿用当前 ID。确认记录同时绑定执行 ID、计划、完整哈希、获准级别、强验证结果。挑战除现有卡片 / 哈希 / TTL 外，也绑定本次执行 ID，避免相同计划间复用。
 
-同一会话的状态修改入口串行执行，防止并发确认、提交、恢复覆盖 pending / confirmation。数据库幂等仍是最后保障，不以会话锁替代业务事务。
+同一会话用 `RLock` 串行覆盖 `submit`、`clarify`、`confirm`、`request_verification`、`interrupt`、`resume`、`check_due`，防止并发确认、提交、恢复覆盖 pending / confirmation。数据库幂等仍是最后保障，不以会话锁替代业务事务。
 
 既有到期预约与商户业务的稳定身份键继续由对应业务原语控制，不能被新会话执行 ID 覆盖。低层 CoreBank 目前不保证“任意同动作、同 key、不同参数”都报冲突；本阶段通过完整计划哈希绑定产品路径的普通节点键，不对低层 API 额外宣称该能力。
 
@@ -87,7 +87,7 @@ node_key = f"{execution_id}:{frozen_hash}:{node_id}"
 
 提交时的裁决用于展示计划卡；写入时的裁决用于决定能否产生副作用。两者复用现有 PDP 和动作注册表，不维护第二套金额 / 动作分级表。
 
-最新裁决取以下结果的 `strictest`：原计划级下限、当前节点级裁决、全计划累计正向流出裁决、当前风险修饰。原先要求的强验证不得因后续事实降低风险而自动取消。
+最新裁决取以下结果的 `strictest`：原计划级下限、当前节点级裁决、全计划累计正向流出裁决、当前风险修饰。原计划级 Decision 只保留其级别和原因作为不可降低的下限，不能代替当前事实复核；当前级别超过 `approved_level` 时必须重新授权。原先要求的强验证不得因后续事实降低风险而自动取消。
 
 计划累计口径：
 
@@ -118,11 +118,11 @@ Session：核对确认绑定、冻结哈希、会话熔断
   → PEP：提交后回读出处、更新熔断、追加审计
 ```
 
-事务唯一所有者是 CoreBank。给现有写原语增加可选的写前校验回调，经 `WriteContext` 和 handler 明确传递，在 `_run_once` 中执行；不在 Web 加外层事务，不用全局临时回调变量，不让嵌套事务提前提交。
+事务唯一所有者是 CoreBank。给现有写原语增加结构化写前校验回调；面向用户的 PEP 写路径、Web / IM、到期派发缺少回调或执行上下文时必须 fail-closed。仅离线迁移和明确标记为 TCB 的底层单元测试可以省略。回调经 `WriteContext` 和 handler 明确传递，在 `_run_once` 中执行；不在 Web 加外层事务，不用全局临时回调变量，不让嵌套事务提前提交。
 
-回调通过 gateway 内部的事务事实读取器获得只读快照；SQL 与数值 / 实体构造留在 gateway，PDP 仍为纯函数。读取器只供这次受控校验使用，不把写连接交给 Web / LLM，也不把普通 `FactGateway` 的只读连接断言改成接受读写 Store。CoreBank 不反向导入 policy 或 planning。
+gateway 定义不依赖 policy / planning 的 `PreconditionContext`、`PreconditionResult` 和 `WritePreconditionError`：回调接收同一 SQLite 连接的 `TxFacts`、当前节点 / 冻结计划及 `ExecutionContext`，返回 `ALLOW`、`REAUTHORIZE(level, reasons, quota)`、`TAKEOVER(reason)` 或 `DENY(reason)`。`CoreBank` 只执行回调、识别结构化结果并在非 `ALLOW` 时回滚；PEP / Session 将结果映射为更新计划卡、清除挑战、回到待确认 / 接管 / 拒绝。回调通过 gateway 内部的事务事实读取器获得只读快照；SQL 与数值 / 实体构造留在 gateway，PDP 仍为纯函数。读取器只供这次受控校验使用，不把写连接交给 Web / LLM，也不把普通 `FactGateway` 的只读连接断言改成接受读写 Store。CoreBank 不反向导入 policy 或 planning。
 
-所有产品写入口，包括 Web、IM 共用 Session、到期业务，必须经过相同写前校验。保留既有程序化 PEP 入口时，以其可信调用方提供的 Decision 为授权上限，仍重新计算最新风险；不能因省略新上下文而省略复核。直接调用 CoreBank 属于 TCB 内部原语，不是面向用户的授权入口。
+所有产品写入口，包括 Web、IM 共用 Session、到期业务，必须经过相同写前校验。保留既有程序化 PEP 入口时，缺失执行上下文直接拒绝；提供上下文时，以其可信调用方提供的 Decision 为授权上限，仍重新计算最新风险。直接调用 CoreBank 属于 TCB 内部原语，不是面向用户的授权入口；到期派发必须由受控执行器提供回调，不得以此作为绕过理由。
 
 SQLite 的 `BEGIN IMMEDIATE` 负责不同连接的写串行化，实例 `RLock` 只负责本连接线程安全。事务内不调用通过另一写连接持久化的熔断动作，不写 JSONL。全局熔断状态在受控快照中读取并参与检查；事务退出后才持久化成功 / 失败计数，避免互锁。会话熔断在会话串行区检查。
 
