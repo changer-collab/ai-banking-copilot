@@ -54,8 +54,9 @@ class PlanNode:
     depends_on: tuple[str, ...] = ()
 
     def canonical(self) -> dict[str, object]:
-        """规范化表示——`cfhash` 的输入载体；params 按键排序保证序无关。"""
+        """规范化节点身份、调用、锚点与依赖；字典键序及依赖声明顺序无关。"""
         return {
+            "node_id": self.node_id,
             "action": self.action,
             "intent": (
                 None
@@ -63,6 +64,7 @@ class PlanNode:
                 else {"source": self.intent.source.value, "anchor_id": self.intent.anchor_id}
             ),
             "params": {key: self.params[key] for key in sorted(self.params)},
+            "depends_on": sorted(self.depends_on),
         }
 
 
@@ -82,7 +84,7 @@ class PlanValidationError(ValueError):
 
 
 def validate_plan(plan: Plan) -> None:
-    """校验：锚点齐备、依赖存在、无环、无重复 id。"""
+    """校验：锚点齐备、依赖存在且不重复、无环、无重复 id。"""
     nodes = plan.node_map()
     if len(nodes) != len(plan.nodes):
         raise PlanValidationError("duplicate node_id in plan")
@@ -93,6 +95,8 @@ def validate_plan(plan: Plan) -> None:
             raise PlanValidationError(
                 f"node {node.node_id}: derived anchor is not allowed at node level"
             )
+        if len(set(node.depends_on)) != len(node.depends_on):
+            raise PlanValidationError(f"node {node.node_id} has duplicate dependency")
         for dep in node.depends_on:
             if dep not in nodes:
                 raise PlanValidationError(f"node {node.node_id} depends on unknown node {dep}")
@@ -150,7 +154,13 @@ def topological_order(plan: Plan) -> tuple[str, ...]:
 
 
 def cfhash(nodes: tuple[PlanNode, ...]) -> str:
-    """执行门判据：节点集合（含锚点与控制槽参数）的确定性 SHA-256。"""
-    payload = [node.canonical() for node in sorted(nodes, key=lambda n: n.node_id)]
+    """执行门判据：校验并冻结完整 DAG 及实际执行顺序的版本化 SHA-256。"""
+    plan = Plan(plan_id="cfhash", nodes=nodes)
+    validate_plan(plan)
+    payload = {
+        "version": 2,
+        "execution_order": list(topological_order(plan)),
+        "nodes": [node.canonical() for node in sorted(nodes, key=lambda item: item.node_id)],
+    }
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
