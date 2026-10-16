@@ -2,7 +2,7 @@
 
 日期：2026-10-16。代码基线：`53065f0`。
 
-状态：方案 A 已获用户批准；用户明确允许修改受保护的 `contracts/plan.py`。本文待书面审阅，尚未实施。其他受保护的算法、执行门判据、三条 PEP 硬约束及既有测试语义保持原约束。
+状态：方案 A 与本文已获用户批准，进入实施；用户明确允许修改受保护的 `contracts/plan.py`。其他受保护的算法、执行门判据、三条 PEP 硬约束及既有测试语义保持原约束。
 
 ## 1. 目标与路线
 
@@ -75,7 +75,7 @@ ExecutionContext(
 node_key = f"{execution_id}:{frozen_hash}:{node_id}"
 ```
 
-执行 ID 在一次新用户提交开始时生成。澄清续答走内部 `_continue_submit(execution_id=...)`，仅在重建出的计划内容与原 pending 一致时沿用原 ID；计划内容变化或真正重新提交时生成新 ID并使旧挑战失效。确认重试、中断恢复均沿用当前 ID。确认记录同时绑定执行 ID、计划、完整哈希、获准级别、强验证结果。挑战除现有卡片 / 哈希 / TTL 外，也绑定本次执行 ID，避免相同计划间复用。
+执行 ID 在一次新用户提交开始时生成。尚无已冻结计划的澄清续答沿用 ID；对已有计划修改内容或真正重新提交时生成新 ID 并使旧挑战失效。澄清使用内部续提交入口，不能直接调用会无条件生成新 ID 的公开 `submit`。确认重试、中断恢复均沿用当前 ID。确认记录同时绑定执行 ID、计划、完整哈希、获准级别、强验证结果。挑战除现有卡片 / 哈希 / TTL 外，也绑定本次执行 ID，避免相同计划间复用。
 
 同一会话用 `RLock` 串行覆盖 `submit`、`clarify`、`confirm`、`request_verification`、`interrupt`、`resume`、`check_due`，防止并发确认、提交、恢复覆盖 pending / confirmation。数据库幂等仍是最后保障，不以会话锁替代业务事务。
 
@@ -118,11 +118,11 @@ Session：核对确认绑定、冻结哈希、会话熔断
   → PEP：提交后回读出处、更新熔断、追加审计
 ```
 
-事务唯一所有者是 CoreBank。给现有写原语增加结构化写前校验回调；面向用户的 PEP 写路径、Web / IM、到期派发缺少回调或执行上下文时必须 fail-closed。仅离线迁移和明确标记为 TCB 的底层单元测试可以省略。回调经 `WriteContext` 和 handler 明确传递，在 `_run_once` 中执行；不在 Web 加外层事务，不用全局临时回调变量，不让嵌套事务提前提交。
+事务唯一所有者是 CoreBank。给现有写原语增加结构化写前校验回调；所有 PEP 写路径都由 PEP 构造并强制传递回调，Web / IM / 到期派发提供完整执行上下文。仅 CoreBank 底层 TCB 调用可以省略回调；旧程序化 PEP 调用由 PEP 根据可信 Decision、计划及幂等键构造兼容上下文，仍执行相同最新风险复核。回调经 `WriteContext` 和 handler 明确传递，在 `_run_once` 中执行；不在 Web 加外层事务，不用全局临时回调变量，不让嵌套事务提前提交。
 
-gateway 定义不依赖 policy / planning 的 `PreconditionContext`、`PreconditionResult` 和 `WritePreconditionError`：回调接收同一 SQLite 连接的 `TxFacts`、当前节点 / 冻结计划及 `ExecutionContext`，返回 `ALLOW`、`REAUTHORIZE(level, reasons, quota)`、`TAKEOVER(reason)` 或 `DENY(reason)`。`CoreBank` 只执行回调、识别结构化结果并在非 `ALLOW` 时回滚；PEP / Session 将结果映射为更新计划卡、清除挑战、回到待确认 / 接管 / 拒绝。回调通过 gateway 内部的事务事实读取器获得只读快照；SQL 与数值 / 实体构造留在 gateway，PDP 仍为纯函数。读取器只供这次受控校验使用，不把写连接交给 Web / LLM，也不把普通 `FactGateway` 的只读连接断言改成接受读写 Store。CoreBank 不反向导入 policy 或 planning。
+gateway 定义不依赖 policy / planning 的 `PreconditionResult` 和 `WritePreconditionError`。回调读取同一 SQLite 连接的事务事实快照，通过闭包绑定当前节点、冻结计划及 policy 层的 `ExecutionContext`，返回 `ALLOW`、`REAUTHORIZE(level, reasons, quota)`、`TAKEOVER(reason)` 或 `DENY(reason)`；gateway 不持有 policy 类型。`CoreBank` 只执行回调、识别结构化结果并在非 `ALLOW` 时回滚；PEP / Session 将结果映射为更新计划卡、清除挑战、回到待确认 / 接管 / 拒绝。SQL 与数值 / 实体构造留在 gateway，PDP 仍为纯函数。事务事实读取器只供受控校验使用，不把写连接交给 Web / LLM，也不把普通 `FactGateway` 的只读连接断言改成接受读写 Store。CoreBank 不反向导入 policy 或 planning。
 
-所有产品写入口，包括 Web、IM 共用 Session、到期业务，必须经过相同写前校验。保留既有程序化 PEP 入口时，缺失执行上下文直接拒绝；提供上下文时，以其可信调用方提供的 Decision 为授权上限，仍重新计算最新风险。直接调用 CoreBank 属于 TCB 内部原语，不是面向用户的授权入口；到期派发必须由受控执行器提供回调，不得以此作为绕过理由。
+所有产品写入口，包括 Web、IM 共用 Session、到期业务，必须经过相同写前校验。PEP 构造回调失败、完整上下文与计划不匹配时直接拒绝；兼容程序化入口以可信调用方提供的 Decision 为授权上限，不能把省略上下文视为关闭复核。直接调用 CoreBank 属于 TCB 内部原语，不是面向用户的授权入口；到期派发必须由受控执行器提供回调，不得以此作为绕过理由。
 
 SQLite 的 `BEGIN IMMEDIATE` 负责不同连接的写串行化，实例 `RLock` 只负责本连接线程安全。事务内不调用通过另一写连接持久化的熔断动作，不写 JSONL。全局熔断状态在受控快照中读取并参与检查；事务退出后才持久化成功 / 失败计数，避免互锁。会话熔断在会话串行区检查。
 
