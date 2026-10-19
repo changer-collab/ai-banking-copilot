@@ -162,13 +162,23 @@ class BillsHandler(ScenarioHandler):
         if account_txn:
             year, month = _period(intents)
             start, end = _month_range(year, month)
-            for index, record in enumerate(gateway.accounts_of(DEMO_USER_ID), start=1):
+            account_ids: list[str] = []
+            for intent in account_txn:
+                if "account" in intent.slots or "account_id" in intent.slots:
+                    account_ids.append(as_str(
+                        trusted_slot(intent, ("account", "account_id"), "account"), "account"
+                    ))
+                else:
+                    account_ids.extend(
+                        record.payload.account_id for record in gateway.accounts_of(DEMO_USER_ID)
+                    )
+            for index, account_id in enumerate(account_ids, start=1):
                 nodes.append(
                     PlanNode(
                         node_id=f"txn{index}",
                         action="account.transactions",
                         params={
-                            "account_id": record.payload.account_id,
+                            "account_id": account_id,
                             "start": start.isoformat(),
                             "end": end.isoformat(),
                         },

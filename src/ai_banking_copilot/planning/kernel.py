@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date
@@ -38,6 +39,7 @@ CONFIDENCE_THRESHOLD = 0.5
 CONTEXT_PAYEES = "payees"
 CONTEXT_TODAY = "today"
 CONTEXT_SELECTED = "selected"
+_QUERY_SCOPE_BOUNDARY = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 _RESOURCE_PARAM: Mapping[str, str] = {
     "transfer.create": "account_id",
@@ -101,6 +103,11 @@ class Kernel:
         today = _context_today(context)
         payees = _context_payees(context)
         selected = _context_selected(context)
+        scoped_intents = tuple(
+            intent
+            for intent in proposal.intents
+            if intent.confidence >= CONFIDENCE_THRESHOLD and intent.action in known
+        )
 
         nodes: list[PlanNode] = []
         questions: list[Question] = []
@@ -115,6 +122,12 @@ class Kernel:
                 notes.append(f"丢弃未注册动作 {intent.action}")
                 continue
             accepted.append(intent)
+            scope_text = None
+            if intent.action in {"account.balance", "account.transactions"}:
+                scope_text = _query_scope_text(intent, utterance, intents=scoped_intents)
+                if scope_text is None:
+                    questions.append(Question("account", "请单独说明本项查询的对象及原文片段。"))
+                    continue
             fill = fill_control_slots(
                 intent.action,
                 SlotInputs(
@@ -122,6 +135,7 @@ class Kernel:
                     today=today,
                     payees=payees,
                     selected=selected,
+                    scope_text=scope_text,
                 ),
             )
             if fill.negated:
@@ -206,6 +220,47 @@ def _resolution_text(intent: Intent, utterance: str) -> str:
     if isinstance(span, str) and span and span in utterance:
         return span
     return utterance
+
+
+def _query_scope_text(
+    intent: Intent, utterance: str, *, intents: tuple[Intent, ...],
+) -> str | None:
+    """相邻意图片段定界；查询后的未分配限定保留，其他动作和备注不参与。"""
+    text = utterance.partition("备注")[0]
+    if len(intents) <= 1:
+        return text
+    span = intent.slots.get("span")
+    if not isinstance(span, str) or not span or text.count(span) != 1:
+        return None
+    start = text.index(span)
+    end = start + len(span)
+    left, right = 0, len(text)
+    for other in intents:
+        if other is intent:
+            continue
+        other_span = other.slots.get("span")
+        if not isinstance(other_span, str) or not other_span or text.count(other_span) != 1:
+            return None
+        other_start = text.index(other_span)
+        other_end = other_start + len(other_span)
+        if other_end <= start:
+            left = max(left, other_end)
+        elif other_start >= end:
+            right = min(right, other_start)
+        else:
+            return None
+    # 左侧跳过连接词，右侧回到下一动作的子句开头，避免其对象修饰语串入。
+    if left:
+        boundary = _QUERY_SCOPE_BOUNDARY.search(text, left, start)
+        if boundary is not None:
+            left = boundary.end()
+    while boundary := _QUERY_SCOPE_BOUNDARY.match(text, left):
+        left = boundary.end()
+    if right < len(text):
+        boundaries = list(_QUERY_SCOPE_BOUNDARY.finditer(text, end, right))
+        if boundaries:
+            right = boundaries[-1].start()
+    return text[left:right]
 
 
 def _context_today(context: Mapping[str, object]) -> date:

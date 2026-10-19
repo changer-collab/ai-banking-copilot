@@ -2,13 +2,16 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from ai_banking_copilot.contracts.plan import validate_plan
+from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import QueryContext, QueryResult
-from ai_banking_copilot.scenarios.base import plan_is_pure_query
+from ai_banking_copilot.scenarios.base import ClarificationRequired, plan_is_pure_query
 from ai_banking_copilot.scenarios.bills import (
     ANOMALY_THRESHOLD_CENTS,
     QUERY_HANDLERS,
@@ -88,6 +91,47 @@ def test_account_and_bills_mixed_plan_has_unique_ids(gateway: FactGateway) -> No
     validate_plan(plan)
     assert any(node_id.startswith("txn") for node_id in ids)
     assert {"n1", "n2"}.issubset(set(ids))
+
+
+@pytest.mark.parametrize("slot_name", ["account", "account_id"])
+def test_account_transactions_respects_trusted_account(
+    gateway: FactGateway, slot_name: str
+) -> None:
+    intent = Intent(
+        action="account.transactions",
+        slots={slot_name: Value("acc_savings", Trust.TRUSTED)},
+    )
+    plan = BillsHandler().build([intent], gateway)
+    assert [node.params["account_id"] for node in plan.nodes] == ["acc_savings"]
+    assert [node.node_id for node in plan.nodes] == ["txn1"]
+
+
+def test_account_transactions_keeps_each_intents_account(gateway: FactGateway) -> None:
+    intents = [
+        Intent(
+            action="account.transactions",
+            slots={"account": Value(account_id, Trust.TRUSTED)},
+        )
+        for account_id in ("acc_savings", "acc_current")
+    ]
+    plan = BillsHandler().build(intents, gateway)
+    assert [node.params["account_id"] for node in plan.nodes] == [
+        "acc_savings", "acc_current"
+    ]
+    assert [node.node_id for node in plan.nodes] == ["txn1", "txn2"]
+    validate_plan(plan)
+
+
+@pytest.mark.parametrize("slot_name", ["account", "account_id"])
+def test_account_transactions_rejects_untrusted_account(
+    gateway: FactGateway, slot_name: str
+) -> None:
+    intent = Intent(
+        action="account.transactions",
+        slots={slot_name: Value("acc_savings", Trust.UNVERIFIED)},
+    )
+    with pytest.raises(ClarificationRequired, match="拒绝不可信来源"):
+        BillsHandler().build([intent], gateway)
 
 
 def test_large_transactions_is_out_only_and_in_cents(gateway: FactGateway) -> None:

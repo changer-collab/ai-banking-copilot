@@ -395,16 +395,16 @@ class Session:
         if invalid is not None:
             return self._refuse(invalid, utterance)
         intents, asks, notes = self._assemble_intents(utterance, selected)
+        if asks:
+            self._state = SessionState.NEEDS_CLARIFICATION
+            self._message = _with_notes(
+                "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+            )
+            return SubmissionView(
+                self._state, self._message, None, None, None,
+                tuple(ask.prompt for ask in asks), clarifications=asks,
+            )
         if not intents:
-            if asks:
-                self._state = SessionState.NEEDS_CLARIFICATION
-                self._message = _with_notes(
-                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
-                )
-                return SubmissionView(
-                    self._state, self._message, None, None, None,
-                    tuple(ask.prompt for ask in asks), clarifications=asks,
-                )
             return self._refuse(
                 _with_notes("未知意图：无法匹配任何场景", notes),
                 utterance,
@@ -731,7 +731,13 @@ class Session:
             spans.append(span)
         if len(candidates) > 1 and not _spans_are_unambiguous(utterance, spans):
             return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
-        contexts = _intent_semantic_contexts(utterance, spans)
+        contexts = _intent_semantic_contexts(
+            utterance, spans,
+            query_indexes=frozenset(
+                index for index, intent in enumerate(candidates)
+                if intent.action in {"account.balance", "account.transactions"}
+            ),
+        )
         if contexts is None:
             return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
         prefix_targets = _unassigned_booking_prefix_targets(utterance, spans, candidates)
@@ -774,13 +780,21 @@ class Session:
                 _BOOKING_NO_DEBIT_MARKER.sub("不扣款", span)
                 if intent.action == "transfer.book" else span
             )
+            slot_selected = _per_intent_selected(intent.action, intent_selected, self._deps)
+            if (
+                intent.action in {"account.balance", "account.transactions"}
+                and selected is None
+                and re.search(r"(?:这个|那个|这张|那张|该)(?:账户|帐户|银行卡|储蓄卡|卡)", span)
+            ):
+                # 默认账户不能证明指示词所指；显式选择或澄清答案才可绑定对象。
+                slot_selected.pop("account", None)
             fill = fill_control_slots(
                 intent.action,
                 SlotInputs(
                     text=slot_text,
                     today=self._deps.today,
                     payees=payees,
-                    selected=_per_intent_selected(intent.action, intent_selected, self._deps),
+                    selected=slot_selected,
                 ),
             )
             if fill.negated:
@@ -1629,7 +1643,9 @@ def _spans_are_unambiguous(utterance: str, spans: tuple[str, ...] | list[str]) -
 _INTENT_CLAUSE_BOUNDARY = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 
-def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ...] | None:
+def _intent_semantic_contexts(
+    utterance: str, spans: list[str], *, query_indexes: frozenset[int] = frozenset(),
+) -> tuple[str, ...] | None:
     """从原文恢复完整语义，防止模型裁掉“登记预约”等决定动作性质的前缀。"""
     if len(spans) <= 1:
         # 备注是数据，不参与动作类型选择。
@@ -1640,7 +1656,7 @@ def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ..
         clauses.append((start, boundary.start()))
         start = boundary.end()
     clauses.append((start, len(utterance)))
-    contexts: list[str] = []
+    ranges: list[tuple[int, int]] = []
     used_clauses: set[tuple[int, int]] = set()
     cursor = 0
     for span in spans:
@@ -1654,8 +1670,21 @@ def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ..
             return None
         left, right = matches[0]
         used_clauses.add(matches[0])
-        contexts.append(utterance[left:right].partition("备注")[0])
+        ranges.append((left, right))
         cursor = span_end
+    contexts: list[str] = []
+    for index, (left, right) in enumerate(ranges):
+        if index in query_indexes:
+            # 前后对象限定可以另起短句；相邻已分配动作子句之外的片段仍属待核对范围。
+            left = (
+                next(
+                    start for start, end in clauses
+                    if start >= ranges[index - 1][1] and utterance[start:end].strip()
+                )
+                if index else 0
+            )
+            right = ranges[index + 1][0] if index + 1 < len(ranges) else len(utterance)
+        contexts.append(utterance[left:right].partition("备注")[0])
     return tuple(contexts)
 
 
