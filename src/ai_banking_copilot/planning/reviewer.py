@@ -73,6 +73,7 @@ class ReviewerFailure(StrEnum):
     INVALID_STATUS = "invalid_status"
     TIMEOUT = "timeout"
     TRANSPORT_ERROR = "transport_error"
+    HTTP_ERROR = "http_error"
     UNAVAILABLE = "unavailable"
 
 
@@ -196,6 +197,8 @@ class ReviewReport:
     error: str | None = None
     diagnostic_only: bool = False
     fallback_reason: str | None = None
+    error_type: str | None = None
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", ReviewStatus(self.status))
@@ -275,6 +278,8 @@ def _report(
     error: str | None = None,
     diagnostic_only: bool = False,
     fallback_reason: str | None = None,
+    error_type: str | None = None,
+    http_status: int | None = None,
 ) -> ReviewReport:
     return ReviewReport(
         execution_id=request.execution_id,
@@ -293,6 +298,8 @@ def _report(
         error=error,
         diagnostic_only=diagnostic_only,
         fallback_reason=fallback_reason,
+        error_type=error_type,
+        http_status=http_status,
     )
 
 
@@ -435,6 +442,8 @@ class BypassPlanReviewer:
             error=report.error,
             diagnostic_only=True,
             fallback_reason=report.fallback_reason,
+            error_type=report.error_type,
+            http_status=report.http_status,
         )
 
 
@@ -481,27 +490,27 @@ class StrictPlanReviewer:
         payload = _request_payload(request)
         try:
             raw_response = transport(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
-        except TimeoutError as error:
-            return _report(
-                request,
-                status=ReviewStatus.MANUAL,
-                channel=ReviewChannel.LLM_STRICT,
-                model=self._model,
-                findings=("严格 Reviewer 调用超时",),
-                failure_code=ReviewerFailure.TIMEOUT,
-                error=str(error) or "timeout",
-                timeout_s=self._timeout_s,
-                latency_ms=_elapsed_ms(started),
-            )
         except Exception as error:
+            failure_code = ReviewerFailure.TRANSPORT_ERROR
+            detail = "严格 Reviewer transport 失败"
+            http_status = None
+            if isinstance(error, _HTTPStatusError):
+                failure_code = ReviewerFailure.HTTP_ERROR
+                detail = "严格 Reviewer 返回非 200 HTTP 状态"
+                http_status = error.status_code
+            elif _is_timeout(error):
+                failure_code = ReviewerFailure.TIMEOUT
+                detail = "严格 Reviewer 调用超时"
             return _report(
                 request,
                 status=ReviewStatus.MANUAL,
                 channel=ReviewChannel.LLM_STRICT,
                 model=self._model,
-                findings=("严格 Reviewer transport 失败",),
-                failure_code=ReviewerFailure.TRANSPORT_ERROR,
-                error=str(error),
+                findings=(detail,),
+                failure_code=failure_code,
+                error=detail,
+                error_type=type(error).__name__,
+                http_status=http_status,
                 timeout_s=self._timeout_s,
                 latency_ms=_elapsed_ms(started),
             )
@@ -522,14 +531,20 @@ class StrictPlanReviewer:
                 if "绑定不符" in str(error)
                 else ReviewerFailure.FORMAT_ERROR
             )
+            detail = (
+                "严格 Reviewer 响应绑定不符"
+                if failure_code is ReviewerFailure.BINDING_MISMATCH
+                else "严格 Reviewer 响应格式错误"
+            )
             return _report(
                 request,
                 status=ReviewStatus.MANUAL,
                 channel=ReviewChannel.LLM_STRICT,
                 model=self._model,
-                findings=(f"严格 Reviewer 响应格式错误：{error}",),
+                findings=(detail,),
                 failure_code=failure_code,
-                error=str(error),
+                error=detail,
+                error_type=type(error).__name__,
                 timeout_s=self._timeout_s,
                 latency_ms=_elapsed_ms(started),
             )
@@ -581,14 +596,34 @@ class FallbackPlanReviewer:
                 latency_ms=report.latency_ms,
                 timeout_s=report.timeout_s,
                 failure_code=ReviewerFailure.UNAVAILABLE,
-                error=str(error),
+                error="严格 Reviewer 不可用",
                 diagnostic_only=report.diagnostic_only,
                 fallback_reason="strict_reviewer_unavailable",
+                error_type=report.error_type or type(error).__name__,
+                http_status=report.http_status,
             )
 
 
 class _ResponseFormatError(ValueError):
     pass
+
+
+class _HTTPStatusError(RuntimeError):
+    """仅保留状态码，不携带 URL、请求或响应正文。"""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("Reviewer 返回非 200 HTTP 状态")
+        self.status_code = status_code
+
+
+def _is_timeout(error: Exception) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    try:
+        module = importlib.import_module("httpx")
+    except ImportError:
+        return False
+    return isinstance(error, module.TimeoutException)
 
 
 def _env_api_key() -> str | None:
@@ -701,7 +736,7 @@ def _report_from_response(
     try:
         status = ReviewStatus(raw_status.lower())
     except ValueError as error:
-        raise _ResponseFormatError(f"未知 status：{raw_status}") from error
+        raise _ResponseFormatError("未知 status") from error
     findings = _string_tuple(data.get("findings", ()), "findings")
     clarifications = _string_tuple(
         data.get("clarifications", data.get("questions", ())), "clarifications"
@@ -759,7 +794,7 @@ def _load_http_transport(
             timeout=timeout_s,
         )
         if response.status_code != 200:
-            raise RuntimeError(f"Reviewer 返回状态 {response.status_code}")
+            raise _HTTPStatusError(response.status_code)
         return cast(str, response.text)
 
     return transport

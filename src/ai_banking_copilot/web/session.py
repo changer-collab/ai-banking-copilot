@@ -606,6 +606,9 @@ class Session:
                         else None,
                         "review_diagnostic_only": report.diagnostic_only,
                         "review_latency_ms": report.latency_ms,
+                        "review_error_type": report.error_type,
+                        "review_http_status": report.http_status,
+                        "review_timeout_s": report.timeout_s,
                     },
                 )
                 if reviewer_enforced and report.status is ReviewStatus.CLARIFY:

@@ -9,8 +9,11 @@ import pytest
 
 from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode, cfhash
 from ai_banking_copilot.planning.reviewer import (
+    BypassPlanReviewer,
+    FallbackPlanReviewer,
     ReviewerFailure,
     ReviewerUnavailableError,
+    ReviewReport,
     ReviewRequest,
     ReviewStatus,
     StrictPlanReviewer,
@@ -282,3 +285,147 @@ def test_reviewer_instances_do_not_share_reports() -> None:
         reports = list(pool.map(TemplatePlanReviewer().review, requests))
     assert [report.execution_id for report in reports] == [f"exec-{i}" for i in range(8)]
     assert len({id(report) for report in reports}) == 8
+
+
+@pytest.mark.parametrize(
+    ("error_type", "failure_code"),
+    [
+        (TimeoutError, ReviewerFailure.TIMEOUT),
+        (httpx.TimeoutException, ReviewerFailure.TIMEOUT),
+        (httpx.ConnectTimeout, ReviewerFailure.TIMEOUT),
+        (httpx.ReadTimeout, ReviewerFailure.TIMEOUT),
+        (httpx.WriteTimeout, ReviewerFailure.TIMEOUT),
+        (httpx.PoolTimeout, ReviewerFailure.TIMEOUT),
+        (httpx.ConnectError, ReviewerFailure.TRANSPORT_ERROR),
+        (httpx.ReadError, ReviewerFailure.TRANSPORT_ERROR),
+        (httpx.WriteError, ReviewerFailure.TRANSPORT_ERROR),
+        (httpx.RemoteProtocolError, ReviewerFailure.TRANSPORT_ERROR),
+        (httpx.LocalProtocolError, ReviewerFailure.TRANSPORT_ERROR),
+        (RuntimeError, ReviewerFailure.TRANSPORT_ERROR),
+    ],
+)
+def test_strict_http_failures_keep_safe_diagnostics_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    failure_code: ReviewerFailure,
+) -> None:
+    calls = 0
+    secret = "secret-key https://private.example.test/?token=secret-token private-body"
+
+    class Client:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 20.0
+
+        def post(self, _endpoint: str, **kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            assert kwargs["timeout"] == 20.0
+            raise error_type(secret)
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    report = StrictPlanReviewer(api_key="test-key").review(_request())
+
+    assert calls == 1
+    assert report.status is ReviewStatus.MANUAL
+    assert report.channel == "llm-strict"
+    assert report.failure_code is failure_code
+    assert report.error_type == error_type.__name__
+    assert report.http_status is None
+    assert report.timeout_s == 20.0
+    assert report.latency_ms >= 0
+    assert report.fallback_reason is None
+    for token in ("secret-key", "private.example.test", "secret-token", "private-body"):
+        assert token not in repr(report)
+
+
+@pytest.mark.parametrize("http_status", [401, 429, 500, 503])
+def test_strict_http_status_is_preserved_without_reading_error_body_or_retry(
+    monkeypatch: pytest.MonkeyPatch, http_status: int
+) -> None:
+    calls = 0
+
+    class Response:
+        status_code = http_status
+
+        @property
+        def text(self) -> str:
+            raise AssertionError("不得读取 HTTP 错误正文")
+
+    class Client:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 20.0
+
+        def post(self, _endpoint: str, **_kwargs: object) -> Response:
+            nonlocal calls
+            calls += 1
+            return Response()
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    report = StrictPlanReviewer(api_key="test-key").review(_request())
+
+    assert calls == 1
+    assert report.status is ReviewStatus.MANUAL
+    assert report.channel == "llm-strict"
+    assert report.failure_code is not None
+    assert report.failure_code.value == "http_error"
+    assert report.http_status == http_status
+    assert report.error_type == "_HTTPStatusError"
+    assert report.timeout_s == 20.0
+    assert report.fallback_reason is None
+
+
+@pytest.mark.parametrize("field", ["status", "cfhash"])
+def test_strict_response_errors_do_not_echo_model_values(field: str) -> None:
+    request = _request()
+    content = {
+        "execution_id": request.execution_id,
+        "cfhash": request.cfhash,
+        "prompt_version": request.prompt_version,
+        "status": "allow",
+    }
+    content[field] = "secret-key https://private.example.test private-body"
+    report = StrictPlanReviewer(transport=lambda _raw: content).review(request)
+
+    assert report.status is ReviewStatus.MANUAL
+    assert report.failure_code is (
+        ReviewerFailure.FORMAT_ERROR if field == "status" else ReviewerFailure.BINDING_MISMATCH
+    )
+    assert report.error_type == "_ResponseFormatError"
+    assert report.http_status is None
+    assert "secret-key" not in repr(report)
+    assert "private.example.test" not in repr(report)
+    assert "private-body" not in repr(report)
+
+
+@pytest.mark.parametrize("wrapper", ["bypass", "fallback"])
+def test_reviewer_wrappers_preserve_failure_diagnostics(wrapper: str) -> None:
+    request = _request()
+    original = ReviewReport(
+        execution_id=request.execution_id,
+        cfhash=request.cfhash,
+        prompt_version=request.prompt_version,
+        status=ReviewStatus.MANUAL,
+        error_type="_HTTPStatusError",
+        http_status=503,
+    )
+
+    class FixedReviewer:
+        def review(self, _request: ReviewRequest) -> ReviewReport:
+            return original
+
+    class UnavailableReviewer:
+        def review(self, _request: ReviewRequest) -> ReviewReport:
+            raise ReviewerUnavailableError("secret-key https://private.example.test")
+
+    reviewer = (
+        BypassPlanReviewer(FixedReviewer())
+        if wrapper == "bypass"
+        else FallbackPlanReviewer(UnavailableReviewer(), FixedReviewer())
+    )
+    report = reviewer.review(request)
+
+    assert report.error_type == original.error_type
+    assert report.http_status == original.http_status
+    assert report.status is ReviewStatus.MANUAL
+    assert "secret-key" not in repr(report)
+    assert "private.example.test" not in repr(report)
