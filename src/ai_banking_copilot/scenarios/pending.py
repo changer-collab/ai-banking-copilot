@@ -8,7 +8,12 @@ from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
-from ai_banking_copilot.scenarios.cross import birthday_plan
+from ai_banking_copilot.scenarios import cross
+from ai_banking_copilot.scenarios.cross import (
+    BIRTHDAY_MERCHANT,
+    BIRTHDAY_ORDER_CENTS,
+    birthday_plan,
+)
 from ai_banking_copilot.scenarios.transfer import due_transfer_plan
 
 
@@ -32,10 +37,39 @@ class PendingHandler:
             replace(
                 node,
                 intent=IntentRef(
-                    source=AnchorSource.USER_APPROVED,
-                    anchor_id=ledger.grant_approved("到期待办提案：须在计划卡上批准后执行"),
+                    source=AnchorSource.EXPLICIT,
+                    anchor_id=ledger.grant_explicit("用户请求检查到期待办；执行仍须确认计划卡"),
                 ),
             )
             for node in (*scheduled, *birthday)
         )
         return Plan(plan_id="pending", nodes=nodes)
+
+    def review_sources(self, gateway: FactGateway) -> list[dict[str, object]]:
+        """独立回读真正到期的登记和生日资料；配置常量明示来源。"""
+        facts: list[dict[str, object]] = []
+        for record in gateway.scheduled_transfers_of(self.user_id, status="scheduled"):
+            item = record.payload
+            if item.booked_on > self.today:
+                continue
+            facts.append({
+                "source": "gateway", "record_id": record.record_id,
+                "content_hash": record.content_hash, "schedule_id": item.schedule_id,
+                "user_id": item.user_id, "account_id": item.account_id,
+                "payee_id": item.payee_id, "amount_cents": item.amount.cents,
+                "booked_on": item.booked_on.isoformat(), "status": item.status,
+            })
+        if birthday_plan(gateway, self.today, user_id=self.user_id):
+            profile = gateway.user_profile(self.user_id)
+            if profile is not None:
+                facts.append({
+                    "source": "gateway", "record_id": profile.record_id,
+                    "content_hash": profile.content_hash, "user_id": profile.payload.user_id,
+                    "birthday": profile.payload.birthday,
+                })
+                facts.append({
+                    "source": "demo_configuration", "merchant": BIRTHDAY_MERCHANT,
+                    "amount_cents": BIRTHDAY_ORDER_CENTS, "unit": "cents",
+                    "lead_days": cross._BIRTHDAY_LEAD_DAYS,
+                })
+        return facts

@@ -39,21 +39,31 @@ def run(base: str) -> list[str]:
     session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
-    css = _get(base, "/assets/app.css?v=3")
-    js = _get(base, "/assets/app.js?v=8")
+    css = _get(base, "/assets/app.css?v=5")
+    workspace_css = _get(base, "/assets/workspace.css?v=2")
+    js = _get(base, "/assets/app.js?v=10")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
         "page: 技术详情开关": 'id="tech-toggle"' in html and "技术详情" in html,
-        "page: 顶栏/两栏/侧栏": (
-            'class="topbar"' in html and 'class="layout"' in html and 'class="rail"' in html
+        "page: 顶栏/三栏/处理详情": (
+            'class="topbar"' in html and 'class="layout layout--workspace"' in html
+            and 'class="side"' in html and 'class="main"' in html and 'class="trace rail"' in html
         ),
-        "page: 资源 ?v": "/assets/app.css?v=3" in html and "/assets/app.js?v=8" in html,
+        "page: 资源 ?v": (
+            "/assets/app.css?v=5" in html
+            and "/assets/workspace.css?v=2" in html
+            and "/assets/app.js?v=10" in html
+        ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
         "css: .tech 默认收起": ".tech {" in css and "display: none;" in css,
         "css: data-tech 展开": 'html[data-tech="on"] .tech' in css,
+        "workspace: 三栏/抽屉样式": (
+            ".layout.layout--workspace" in workspace_css
+            and ".shell.is-trace-open .trace" in workspace_css
+        ),
         "js: 额度行渲染": (
             "function quotaHtml(card)" in js and "本人当日限额" in js and "已超额" in js
         ),

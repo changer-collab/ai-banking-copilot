@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import os
 import secrets
-from collections.abc import Mapping
-from contextlib import ExitStack
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from ai_banking_copilot.gateway.core_bank import CoreBank
@@ -36,6 +36,7 @@ from ai_banking_copilot.planning.llm import (
     LlmIntentModel,
     TemplateIntentModel,
 )
+from ai_banking_copilot.planning.reviewer import ReviewChannel, Reviewer, create_reviewer
 from ai_banking_copilot.policy.audit import AuditLog, ChainBrokenError
 from ai_banking_copilot.policy.audit_validation import verify_for_service
 from ai_banking_copilot.policy.breaker import CircuitBreaker
@@ -45,11 +46,16 @@ from ai_banking_copilot.policy.reversal import ReversalService
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.web.app import AppDeps
+from ai_banking_copilot.web.insights import InsightService, SQLiteInsightMetadataStore
 
 DISABLE_LLM_ENV = "AIB_DISABLE_LLM"
 """置为真值时强制**只用模板通道**（现场演示保稳的可选开关）。"""
 
 _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
+
+REVIEW_CHANNEL_ENV = "AIB_REVIEW_CHANNEL"
+REVIEW_REQUIRED_ENV = "AIB_REVIEW_REQUIRED"
+INSIGHT_DB_ENV = "AIB_INSIGHT_DB"
 
 _KEY_ENV_NAMES = ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
 """凭据环境变量（按序取首个非空）：通用 `AI_*` 优先，兼容本仓库历史 `DASHSCOPE_API_KEY`。"""
@@ -77,6 +83,32 @@ def build_intent_model(env: Mapping[str, str] | None = None) -> IntentModel:
     )
     model = source.get("AI_MODEL", "").strip() or DEFAULT_LLM_MODEL
     return FallbackIntentModel(LlmIntentModel(api_key=api_key, model=model, endpoint=endpoint))
+
+
+def build_reviewer(env: Mapping[str, str] | None = None) -> Reviewer:
+    """装配计划后置审查；默认是明确标注的旁路模板诊断。"""
+    source = os.environ if env is None else env
+    mode = source.get(REVIEW_CHANNEL_ENV, ReviewChannel.BYPASS.value).strip().lower()
+    if source.get(DISABLE_LLM_ENV, "").strip().lower() in _DISABLED_VALUES:
+        mode = ReviewChannel.BYPASS.value
+    api_key = ""
+    for name in _KEY_ENV_NAMES:
+        candidate = source.get(name, "").strip()
+        if candidate:
+            api_key = candidate
+            break
+    endpoint = (
+        source.get("AI_BASE_URL", "").strip()
+        or source.get("OPENAI_API_BASE_URL", "").strip()
+        or DEFAULT_LLM_ENDPOINT
+    )
+    model = source.get("AI_MODEL", "").strip() or DEFAULT_LLM_MODEL
+    return create_reviewer(mode, api_key=api_key, model=model, endpoint=endpoint)
+
+
+def reviewer_required(env: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if env is None else env
+    return source.get(REVIEW_REQUIRED_ENV, "").strip().lower() in _DISABLED_VALUES
 
 
 AUDIT_KEY_ENV = "AIB_AUDIT_KEY"
@@ -175,6 +207,23 @@ def build_deps(
     if resources is not None:
         resources.callback(core_store.close)
     core_bank = CoreBank(core_store)
+    source = os.environ if env is None else env
+    insight_path = Path(
+        source.get(INSIGHT_DB_ENV, "").strip()
+        or db_path.with_name(f"{db_path.stem}-insights.db")
+    )
+    insight_metadata = SQLiteInsightMetadataStore(insight_path)
+    if resources is not None:
+        resources.callback(insight_metadata.close)
+
+    @contextmanager
+    def read_gateway_factory() -> Iterator[FactGateway]:
+        store = Store(db_path, StoreMode.READ_ONLY)
+        try:
+            yield FactGateway(store)
+        finally:
+            store.close()
+
     return AppDeps(
         intent_model=build_intent_model(env),
         registry=registry,
@@ -186,4 +235,7 @@ def build_deps(
         risk=StoreRiskAssessmentSource(read_store),
         reversal=ReversalService(core_bank),
         operator_token=build_operator_token(env),
+        reviewer=build_reviewer(env),
+        reviewer_required=reviewer_required(env),
+        insights=InsightService(read_gateway_factory, insight_metadata),
     )

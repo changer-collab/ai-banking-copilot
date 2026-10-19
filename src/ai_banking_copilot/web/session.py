@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -33,6 +34,7 @@ from ai_banking_copilot.contracts.security import (
 )
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
+from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
@@ -40,7 +42,19 @@ from ai_banking_copilot.gateway.preconditions import (
 )
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
-from ai_banking_copilot.planning.slots import SLOT_PARAMS, SlotInputs, fill_control_slots
+from ai_banking_copilot.planning.review_context import referenced_facts
+from ai_banking_copilot.planning.reviewer import (
+    ReviewerUnavailableError,
+    ReviewReport,
+    ReviewRequest,
+    ReviewStatus,
+)
+from ai_banking_copilot.planning.slots import (
+    REQUIRED_SLOTS,
+    SLOT_PARAMS,
+    SlotInputs,
+    fill_control_slots,
+)
 from ai_banking_copilot.policy.audit import (
     KIND_BREAKER,
     KIND_DECISION,
@@ -78,6 +92,7 @@ from ai_banking_copilot.scenarios.base import (
     ScenarioStatus,
     plan_is_pure_query,
 )
+from ai_banking_copilot.scenarios.bill_advice import BillAdvice, build_bill_advice
 from ai_banking_copilot.scenarios.pending import PendingHandler
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
@@ -255,6 +270,9 @@ class ExecutionView:
     card: PlanCard | None = None
     quota: DailyQuota | None = None
     decision: Decision | None = None
+    bill_advice: tuple[BillAdvice, ...] = ()
+    """月账单执行完成后的只读消费建议；不改变计划和授权。"""
+    bill_advice_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -314,6 +332,9 @@ class Session:
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
         self._last_selected: Mapping[str, object] | None = None
+        self._review_intents: list[dict[str, object]] = []
+        self._clarification_keys: frozenset[str] = frozenset()
+        self._review_report: ReviewReport | None = None
 
     def state(self) -> SessionState:
         """当前会话状态。"""
@@ -326,6 +347,10 @@ class Session:
     def confirmation(self) -> ConfirmationRecord | None:
         """确认记录（未确认则 `None`）。"""
         return self._confirmation
+
+    def review_report(self) -> ReviewReport | None:
+        """当前执行的独立计划审查结果；确认重试沿用同一报告。"""
+        return self._review_report
 
     @_serialized
     def submit(
@@ -350,6 +375,7 @@ class Session:
         session_anomaly: bool = False,
         now: datetime | None = None,
         execution_id: str,
+        clarification_keys: frozenset[str] = frozenset(),
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
@@ -361,6 +387,7 @@ class Session:
         moment = now if now is not None else datetime.now()
         self._last_utterance = utterance
         self._last_selected = dict(selected) if selected is not None else None
+        self._clarification_keys = clarification_keys
         refusal = _guard_utterance(utterance)
         if refusal is not None:
             return self._refuse(refusal, utterance)
@@ -397,7 +424,12 @@ class Session:
                 now=moment, risky=not plan_is_pure_query(outcome.plan)
             )
         return self._after_outcome(
-            outcome, utterance, asks, session_anomaly=session_anomaly, notes=notes
+            outcome,
+            utterance,
+            asks,
+            candidate_actions=tuple(intent.action for intent in intents),
+            session_anomaly=session_anomaly,
+            notes=notes,
         )
 
     @_serialized
@@ -412,21 +444,33 @@ class Session:
         merged: dict[str, object] = dict(self._last_selected or {})
         merged.update(answers)
         execution_id = self._execution_id if self._pending is None else secrets.token_hex(16)
-        return self._submit(self._last_utterance, selected=merged, execution_id=execution_id)
+        return self._submit(
+            self._last_utterance, selected=merged, execution_id=execution_id,
+            clarification_keys=self._clarification_keys | frozenset(answers),
+        )
 
     @_serialized
     def check_due(self) -> SubmissionView:
         """只提案；到期不沿用旧授权，确认、强验证和熔断仍走同一条链。"""
         self._reset()
+        self._last_selected = None
+        self._last_utterance = None
         handler = PendingHandler(self._deps.user_id, self._deps.today)
-        plan = handler.build((), self._deps.gateway)
-        if not plan.nodes:
+        outcome = run_scenario(handler, (), self._deps.gateway)
+        plan = outcome.plan
+        if plan is None:
             self._state = SessionState.IDLE
             self._message = "当前没有到期待办。"
             return SubmissionView(self._state, self._message, None, None, None, ())
-        outcome = run_scenario(handler, (), self._deps.gateway)
         self._note_risky_activity(now=datetime.now(), risky=True)
-        return self._after_outcome(outcome, "检查到期待办并生成待确认提案", ())
+        return self._after_outcome(
+            outcome,
+            "检查到期待办并生成待确认提案",
+            (),
+            candidate_actions=tuple(node.action for node in plan.nodes),
+            review_sources=handler.review_sources(self._deps.gateway),
+            review_kind="due_proposal",
+        )
 
     def _invalid_selection(self, selected: Mapping[str, object]) -> str | None:
         """对象由本人事实列表选取；客户端不能靠填写内部 ID 操作其他人的对象。"""
@@ -441,7 +485,12 @@ class Session:
         }
         for slot, identifiers in owned.items():
             # 场景兼容内部参数名；两套名字都必须检查，不能从 extras 绕过本人范围。
-            for key in (slot, SLOT_PARAMS.get(slot, slot)):
+            aliases = (slot, SLOT_PARAMS.get(slot, slot))
+            scoped = tuple(
+                key for key in selected
+                if any(re.fullmatch(rf"intent_\d+_{alias}", key) for alias in aliases)
+            )
+            for key in (*aliases, *scoped):
                 value = selected.get(key)
                 if isinstance(value, Value):
                     value = value.raw
@@ -455,8 +504,11 @@ class Session:
         utterance: str,
         asks: tuple[ClarificationAsk, ...],
         *,
+        candidate_actions: tuple[str, ...] = (),
         session_anomaly: bool = False,
         notes: tuple[str, ...] = (),
+        review_sources: list[dict[str, object]] | None = None,
+        review_kind: str = "user_request",
     ) -> SubmissionView:
         questions = tuple(ask.prompt for ask in asks)
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
@@ -503,6 +555,112 @@ class Session:
         )
         self._pending = pending
         self._quota = quota
+        review_error: str | None = None
+        reviewer_enforced = self._deps.reviewer_required and not plan_is_pure_query(plan)
+        if self._deps.reviewer is not None:
+            request = ReviewRequest(
+                execution_id=self._execution_id,
+                cfhash=card.frozen_hash,
+                prompt_version="reviewer-v1",
+                raw_text=utterance,
+                candidate_actions=candidate_actions,
+                plan=plan,
+                slot_sources={
+                    "request": {
+                        "kind": review_kind, "user_id": self._deps.user_id,
+                        "today": self._deps.today.isoformat(),
+                        "authorization": "pending_confirmation",
+                    },
+                    "intents": self._review_intents,
+                    "facts": review_sources if review_sources is not None else referenced_facts(
+                        self._deps.gateway, self._deps.user_id, self._review_intents
+                    ),
+                },
+                source_spans=(utterance,),
+                plan_summary=(
+                    "到期待办提案：用户只请求检查；须确认计划卡并通过风险分级后才能执行。"
+                    if review_kind == "due_proposal" else "用户提交的待确认计划"
+                ),
+            )
+            try:
+                self._review_report = self._deps.reviewer.review(request)
+            except ReviewerUnavailableError as error:
+                review_error = str(error)
+                self._review_report = None
+            except Exception as error:  # noqa: BLE001 - strict channel fail-closed when required
+                review_error = f"{type(error).__name__}: {error}"
+                self._review_report = None
+            if self._review_report is not None:
+                report = self._review_report
+                self._audit(
+                    KIND_DECISION,
+                    {
+                        "execution_id": report.execution_id,
+                        "frozen_hash": report.cfhash,
+                        "review_status": report.status.value,
+                        "review_channel": report.channel,
+                        "review_model": report.model,
+                        "review_prompt_hash": report.prompt_hash,
+                        "review_failure": report.failure_code.value
+                        if report.failure_code is not None
+                        else None,
+                        "review_diagnostic_only": report.diagnostic_only,
+                        "review_latency_ms": report.latency_ms,
+                    },
+                )
+                if reviewer_enforced and report.status is ReviewStatus.CLARIFY:
+                    if review_kind == "due_proposal":
+                        self._enter_takeover(
+                            "到期待办审查需要重新检查："
+                            + "；".join(report.clarifications or report.findings)
+                            + "。请重新检查待办或转人工处理。",
+                            pending,
+                        )
+                        return SubmissionView(
+                            self._state, self._message, card, decision, plan, ()
+                        )
+                    self._pending = None
+                    self._confirmation = None
+                    clarification_text = report.clarifications or report.findings
+                    self._state = SessionState.NEEDS_CLARIFICATION
+                    self._message = "独立审查需要澄清：" + "；".join(clarification_text)
+                    return SubmissionView(
+                        self._state,
+                        self._message,
+                        None,
+                        None,
+                        None,
+                        tuple(clarification_text),
+                    )
+                if reviewer_enforced and report.status in {
+                    ReviewStatus.REJECT,
+                    ReviewStatus.MANUAL,
+                }:
+                    self._enter_takeover(
+                        "独立审查未通过：" + "；".join(report.findings or (report.status.value,)),
+                        pending,
+                    )
+                    return SubmissionView(self._state, self._message, card, decision, plan, ())
+            else:
+                self._audit(
+                    KIND_DECISION,
+                    {
+                        "execution_id": self._execution_id,
+                        "frozen_hash": card.frozen_hash,
+                        "review_status": ReviewStatus.MANUAL.value,
+                        "review_channel": "unavailable",
+                        "review_model": None,
+                        "review_prompt_hash": None,
+                        "review_failure": review_error or "unknown",
+                        "review_diagnostic_only": True,
+                        "review_latency_ms": 0.0,
+                    },
+                )
+                if reviewer_enforced:
+                    self._enter_takeover(
+                        "独立审查通道不可用：" + (review_error or "未知错误"), pending
+                    )
+                    return SubmissionView(self._state, self._message, card, decision, plan, ())
         if decision.level >= Level.DENY:
             return self._refuse(
                 "命中拒绝规则：" + "，".join(hit_rules), utterance, decision, plan, card
@@ -518,7 +676,7 @@ class Session:
         return SubmissionView(self._state, self._message, card, decision, plan, (), quota)
 
     def _assemble_intents(
-        self, utterance: str, selected: Mapping[str, object] | None
+        self, utterance: str, selected: Mapping[str, object] | None,
     ) -> tuple[tuple[Intent, ...], tuple[ClarificationAsk, ...], tuple[str, ...]]:
         """装配意图，并返回**未采纳提示**（低置信度意图不再静默丢弃，必须让用户看得见）。"""
         proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
@@ -528,38 +686,154 @@ class Session:
         chosen: dict[str, object] = (
             dict(selected) if selected is not None else _default_selected(self._deps)
         )
-        extras = {key: value for key, value in chosen.items() if key not in SLOT_PARAMS}
+        # `action` / `intent_spans` 是会话澄清用的元数据，不能作为场景槽位透传。
+        extras = {
+            key: value for key, value in chosen.items()
+            if key not in SLOT_PARAMS and key not in {"action", "intent_spans"}
+            and not key.startswith("intent_")
+        }
         remark = extract_remark(utterance)
         intents: list[Intent] = []
         asks: list[ClarificationAsk] = []
         dropped: list[str] = []
-        for intent in proposal.intents:
-            if intent.confidence < CONFIDENCE_THRESHOLD:
-                dropped.append(intent.action)
-                continue
-            span = _intent_span(intent, utterance)
+        candidates = tuple(
+            intent for intent in proposal.intents
+            if intent.confidence >= CONFIDENCE_THRESHOLD
+        )
+        dropped.extend(
+            intent.action for intent in proposal.intents
+            if intent.confidence < CONFIDENCE_THRESHOLD
+        )
+        local_slots = _local_intent_slots(candidates)
+
+        # 多动作时每个动作必须回指用户原文中的**不同片段**。模型省略 span，或把
+        # 两个动作都指向整句，多金额解析会拒绝、无法可靠绑定；此时逐动作澄清，
+        # 也不猜测金额归属。每个动作单独给出普通文本问题，供页面直接续答。
+        span_overrides = _intent_span_overrides(chosen.get("intent_spans"))
+        spans: list[str] = []
+        for index, intent in enumerate(candidates):
+            override = chosen.get(f"intent_{index}_span")
+            if not isinstance(override, str):
+                override = _span_override_for(span_overrides, intent.action, index)
+            span = _intent_span(
+                intent, utterance, multiple=len(candidates) > 1,
+                override=override,
+            )
+            if span is None:
+                return (
+                    (),
+                    _multi_intent_span_questions(candidates),
+                    _dropped_notes(dropped),
+                )
+            spans.append(span)
+        if len(candidates) > 1 and not _spans_are_unambiguous(utterance, spans):
+            return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
+        contexts = _intent_semantic_contexts(utterance, spans)
+        if contexts is None:
+            return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
+        prefix_targets = _unassigned_booking_prefix_targets(utterance, spans, candidates)
+
+        # “登记/预约转账”表达的是登记未来动作；`transfer.create` 与
+        # `transfer.schedule` 当前都可能直接扣款。明确的登记语义确定性落到
+        # `transfer.book`，只有同句又出现“立即/马上/现在”等冲突语义时才澄清，
+        # 避免把登记请求送进立即扣款 handler。
+        for index, (intent, span, context) in enumerate(
+            zip(candidates, spans, contexts, strict=True)
+        ):
+            # 完整原文范围同时用于控制槽解析，模型不能裁掉否定词或另一金额。
+            span = context
+            if index in prefix_targets:
+                # 独立短句的作用范围未被模型采纳时，只澄清紧随其后的首个转账，
+                # 不能把全局 action 答案复制到多个转账动作。
+                resolved_action = _transfer_action_choice(chosen.get(f"intent_{index}_action"))
+                if resolved_action is None:
+                    return (
+                        (),
+                        (_booking_semantics_question(index, len(candidates)),),
+                        _dropped_notes(dropped),
+                    )
+                intent = replace(intent, action=resolved_action)
+            elif intent.action in _TRANSFER_ACTIONS and _has_booking_transfer_marker(context):
+                if _has_immediate_transfer_marker(context):
+                    choice = chosen.get(f"intent_{index}_action", chosen.get("action"))
+                    resolved_action = _transfer_action_choice(choice)
+                    if resolved_action is None:
+                        return (
+                            (),
+                            (_booking_semantics_question(index, len(candidates)),),
+                            _dropped_notes(dropped),
+                        )
+                    intent = replace(intent, action=resolved_action)
+                elif intent.action in _IMMEDIATE_TRANSFER_ACTIONS:
+                    intent = replace(intent, action="transfer.book")
+            intent_selected = _scoped_intent_selected(chosen, index, local_slots)
+            slot_text = (
+                _BOOKING_NO_DEBIT_MARKER.sub("不扣款", span)
+                if intent.action == "transfer.book" else span
+            )
             fill = fill_control_slots(
                 intent.action,
                 SlotInputs(
-                    text=span,
+                    text=slot_text,
                     today=self._deps.today,
                     payees=payees,
-                    selected=_per_intent_selected(intent.action, chosen, self._deps),
+                    selected=_per_intent_selected(intent.action, intent_selected, self._deps),
                 ),
             )
             if fill.negated:
                 continue
+            sources: dict[str, str] = {}
+            for slot in fill.slots:
+                if f"selected:{slot}" in fill.trace:
+                    if slot == "user_id":
+                        sources[slot] = "server_identity"
+                    elif (
+                        slot in self._clarification_keys
+                        or f"intent_{index}_{slot}" in self._clarification_keys
+                    ):
+                        sources[slot] = "clarification_answer"
+                    elif selected is None or (slot == "product" and slot not in chosen):
+                        sources[slot] = "server_default"
+                    else:
+                        sources[slot] = "user_selection"
+                elif slot in {"payee", "payer"}:
+                    sources[slot] = "gateway_resolution"
+                elif f"default {slot}:{fill.slots[slot]}" in fill.trace:
+                    sources[slot] = "server_default"
+                else:
+                    sources[slot] = "text_parser"
+            self._review_intents.append({
+                "action": intent.action, "span": span,
+                "slots": {slot: _review_value(value) for slot, value in fill.slots.items()},
+                "trace": list(fill.trace), "selected_sources": sources,
+            })
+            if remark is not None:
+                self._review_intents[-1]["data_slots"] = {
+                    "remark": {"value": remark, "trust": "unverified", "role": "data_only"}
+                }
             slots: dict[str, object] = {
                 key: Value(value, Trust.TRUSTED) for key, value in fill.slots.items()
             }
-            slots.update(extras)
+            slots.update({
+                key: value for key, value in extras.items()
+                if key not in {SLOT_PARAMS[slot] for slot in local_slots}
+            })
             slots.setdefault("grant", "explicit")
             slots["span"] = span
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
             _inject_assessment(intent.action, slots, self._deps)
             asks.extend(
-                ClarificationAsk(slot=question.slot, prompt=question.prompt)
+                ClarificationAsk(
+                    slot=(
+                        f"intent_{index}_{question.slot}"
+                        if question.slot in local_slots else question.slot
+                    ),
+                    prompt=(
+                        f"第 {index + 1} 项{_intent_label(intent.action)}：{question.prompt}"
+                        if len(candidates) > 1 else question.prompt
+                    ),
+                )
                 for question in fill.questions
             )
             intents.append(
@@ -1128,6 +1402,13 @@ class Session:
     def _execution_view(self) -> ExecutionView:
         frozen_hash = self._pending.card.frozen_hash if self._pending is not None else ""
         results = (*self._exec_results, *self._unverified_results.values())
+        bill_advice: tuple[BillAdvice, ...] = ()
+        bill_advice_message = ""
+        try:
+            bill_advice = self._completed_bill_advice()
+        except Exception:
+            # 只隔离附加建议：存储或计算失败不能掩盖已完成的业务回执。
+            bill_advice_message = "消费建议暂不可用，请稍后重新分析账单。"
         return ExecutionView(
             state=self._state,
             message=self._message,
@@ -1139,7 +1420,23 @@ class Session:
             card=self.card(),
             quota=self._quota,
             decision=self._pending.decision if self._pending is not None else None,
+            bill_advice=bill_advice,
+            bill_advice_message=bill_advice_message,
         )
+
+    def _completed_bill_advice(self) -> tuple[BillAdvice, ...]:
+        if self._state is not SessionState.COMPLETED or self._pending is None:
+            return ()
+        advice: list[BillAdvice] = []
+        for node in self._pending.plan.nodes:
+            if node.action == "bills.monthly" and node.node_id in self._completed_node_ids:
+                # 参数已由账单执行的白名单校验；只读回用同一账期。
+                advice.extend(build_bill_advice(
+                    self._deps.gateway, self._deps.user_id,
+                    int(str(node.params["year"])), int(str(node.params["month"])),
+                    as_of=self._deps.today,
+                ))
+        return tuple(advice[:3])
 
     def _reset(self) -> None:
         self._execution_id = secrets.token_hex(16)
@@ -1155,11 +1452,25 @@ class Session:
         self._challenge = None
         self._unverified_results = {}
         self._quota = None
+        self._review_report = None
+        self._review_intents = []
+        self._clarification_keys = frozenset()
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:
     """把未采纳提示并入对外文案（低置信度意图必须让用户看得见，不静默丢弃）。"""
     return message + ("；" + "；".join(notes) if notes else "")
+
+
+def _review_value(value: object) -> object:
+    """审查输入只放可序列化的已采纳值；金额统一为整数分。"""
+    if isinstance(value, Money):
+        return value.cents
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _dropped_notes(dropped: list[str]) -> tuple[str, ...]:
@@ -1203,6 +1514,32 @@ _SUBSCRIBE_DEFAULT_PRODUCT = "wp_cash"
 """申购的受信任默认产品（起购 1 元，R1 ≤ 客户测评）；**仅** `wealth.subscribe` 使用。"""
 
 
+def _local_intent_slots(intents: tuple[Intent, ...]) -> frozenset[str]:
+    """多动作的金额、对象和时间单独续答；账户与服务端身份可共享。"""
+    if len(intents) <= 1:
+        return frozenset()
+    local = {"amount", "amount_cents", "daily_limit", "when", "payee", "payer"}
+    for slot in SLOT_PARAMS:
+        if slot not in {"account", "user_id"} and sum(
+            slot in REQUIRED_SLOTS.get(intent.action, ()) for intent in intents
+        ) > 1:
+            local.add(slot)
+    return frozenset(local)
+
+
+def _scoped_intent_selected(
+    chosen: Mapping[str, object], index: int, local_slots: frozenset[str],
+) -> dict[str, object]:
+    selected = dict(chosen)
+    for slot in local_slots:
+        selected.pop(slot, None)
+        selected.pop(SLOT_PARAMS[slot], None)
+        key = f"intent_{index}_{slot}"
+        if key in chosen:
+            selected[slot] = chosen[key]
+    return selected
+
+
 def _per_intent_selected(
     action: str, chosen: Mapping[str, object], deps: AppDeps
 ) -> dict[str, object]:
@@ -1227,11 +1564,186 @@ def _inject_assessment(action: str, slots: dict[str, object], deps: AppDeps) -> 
         slots["assessment"] = assessment
 
 
-def _intent_span(intent: Intent, utterance: str) -> str:
-    span = intent.slots.get("span")
-    if isinstance(span, str) and span and span in utterance:
-        return span
-    return utterance
+_TRANSFER_ACTIONS = frozenset(
+    {"transfer.book", "transfer.create", "transfer.schedule"}
+)
+_IMMEDIATE_TRANSFER_ACTIONS = frozenset({"transfer.create", "transfer.schedule"})
+_BOOKING_TRANSFER_MARKER = re.compile(r"登记|预约")
+_TRANSFER_TEXT_MARKER = re.compile(r"转账|转给|汇款|打款")
+_IMMEDIATE_TRANSFER_MARKER = re.compile(
+    r"(?:立即|马上|立刻|现在\s*(?:就)?)\s*(?:转账|转给|汇款|打款|扣款|执行)"
+)
+_BOOKING_NO_DEBIT_MARKER = re.compile(r"(?:不要|不用)\s*(?:立即|马上|现在|立刻)?\s*扣款")
+
+
+def _intent_span(
+    intent: Intent,
+    utterance: str,
+    *,
+    multiple: bool = False,
+    override: str | None = None,
+) -> str | None:
+    """取可回指原文的意图片段；多动作没有片段时禁止用整句兜底。
+
+    单动作保留整句兜底是为了兼容旧模型（其只返回 action），但多动作若共享整句，
+    多金额解析会拒绝、无法绑定到各节点，因此必须进入澄清闭环。
+    """
+    candidates = (override, intent.slots.get("span"))
+    for span in candidates:
+        if isinstance(span, str) and span and span in utterance:
+            return span
+    return None if multiple else utterance
+
+
+def _intent_span_overrides(raw: object) -> Mapping[str, object]:
+    """读取澄清闭环的动作片段映射；其值仍须经过原文包含校验。"""
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _span_override_for(
+    overrides: Mapping[str, object], action: str, index: int,
+) -> str | None:
+    raw = overrides.get(action)
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (tuple, list)) and index < len(raw):
+        value = raw[index]
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _spans_are_unambiguous(utterance: str, spans: tuple[str, ...] | list[str]) -> bool:
+    """确认多个片段在原文中按顺序出现且不重叠。"""
+    cursor = 0
+    for span in spans:
+        start = utterance.find(span, cursor)
+        if start < 0:
+            return False
+        cursor = start + len(span)
+    return True
+
+
+_INTENT_CLAUSE_BOUNDARY = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
+
+
+def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ...] | None:
+    """从原文恢复完整语义，防止模型裁掉“登记预约”等决定动作性质的前缀。"""
+    if len(spans) <= 1:
+        # 备注是数据，不参与动作类型选择。
+        return (utterance.partition("备注")[0],) if spans else ()
+    clauses: list[tuple[int, int]] = []
+    start = 0
+    for boundary in _INTENT_CLAUSE_BOUNDARY.finditer(utterance):
+        clauses.append((start, boundary.start()))
+        start = boundary.end()
+    clauses.append((start, len(utterance)))
+    contexts: list[str] = []
+    used_clauses: set[tuple[int, int]] = set()
+    cursor = 0
+    for span in spans:
+        span_start = utterance.find(span, cursor)
+        span_end = span_start + len(span)
+        matches = [
+            (left, right) for left, right in clauses
+            if left <= span_start and span_end <= right
+        ]
+        if len(matches) != 1 or matches[0] in used_clauses:
+            return None
+        left, right = matches[0]
+        used_clauses.add(matches[0])
+        contexts.append(utterance[left:right].partition("备注")[0])
+        cursor = span_end
+    return tuple(contexts)
+
+
+_BOOKING_PREFIX_CLAUSE = re.compile(r"\s*(?:只登记|登记预约|先预约|不扣款)\s*[:：]?\s*")
+
+
+def _unassigned_booking_prefix_targets(
+    utterance: str, spans: list[str], intents: tuple[Intent, ...],
+) -> frozenset[int]:
+    """未被任何意图片段覆盖的登记短句，只关联之后第一个转账候选。"""
+    if len(intents) <= 1:
+        return frozenset()
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for span in spans:
+        start = utterance.find(span, cursor)
+        cursor = start + len(span)
+        ranges.append((start, cursor))
+    targets: set[int] = set()
+    clause_start = 0
+    clause_ends = [match.start() for match in _INTENT_CLAUSE_BOUNDARY.finditer(utterance)]
+    boundary_ends = [match.end() for match in _INTENT_CLAUSE_BOUNDARY.finditer(utterance)]
+    for clause_end, next_start in zip(
+        [*clause_ends, len(utterance)], [*boundary_ends, len(utterance)], strict=True,
+    ):
+        clause = utterance[clause_start:clause_end]
+        covered = any(left < clause_end and right > clause_start for left, right in ranges)
+        if not covered and _BOOKING_PREFIX_CLAUSE.fullmatch(clause):
+            for index, ((left, _), intent) in enumerate(zip(ranges, intents, strict=True)):
+                if left >= clause_end and intent.action in _TRANSFER_ACTIONS:
+                    targets.add(index)
+                    break
+        clause_start = next_start
+    return frozenset(targets)
+
+
+def _has_booking_transfer_marker(utterance: str) -> bool:
+    return (
+        _BOOKING_TRANSFER_MARKER.search(utterance) is not None
+        and _TRANSFER_TEXT_MARKER.search(utterance) is not None
+    )
+
+
+def _has_immediate_transfer_marker(utterance: str) -> bool:
+    return _IMMEDIATE_TRANSFER_MARKER.search(
+        _BOOKING_NO_DEBIT_MARKER.sub("不扣款", utterance)
+    ) is not None
+
+
+def _multi_intent_span_questions(intents: tuple[Intent, ...]) -> tuple[ClarificationAsk, ...]:
+    return tuple(
+        ClarificationAsk(
+            slot=f"intent_{index}_span",
+            prompt=f"请复制第 {index + 1} 项{_intent_label(intent.action)}对应的原话，包含金额。",
+        )
+        for index, intent in enumerate(intents)
+    )
+
+
+def _booking_semantics_question(index: int, count: int) -> ClarificationAsk:
+    return ClarificationAsk(
+        slot="action" if count == 1 else f"intent_{index}_action",
+        prompt="这句话包含登记/预约转账。请确认是登记未来转账（登记时不扣款），还是立即转账。",
+    )
+
+
+def _transfer_action_choice(raw: object) -> str | None:
+    if isinstance(raw, Value):
+        if raw.trust is not Trust.TRUSTED:
+            return None
+        raw = raw.raw
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip()
+    if normalized in _TRANSFER_ACTIONS:
+        return normalized
+    if normalized in {"登记", "预约", "登记未来转账", "登记预约转账", "只登记", "不扣款"}:
+        return "transfer.book"
+    if normalized in {"立即", "立即转账", "马上转账", "现在转账"}:
+        return "transfer.create"
+    return None
+
+
+def _intent_label(action: str) -> str:
+    return {
+        "funds.freeze": "冻结资金",
+        "funds.release": "解冻资金",
+        "transfer.book": "登记预约转账",
+        "transfer.create": "立即转账",
+        "transfer.schedule": "定时转账",
+    }.get(action, action)
 
 
 _DATE_PARAMS = frozenset({"booked_on", "start", "end", "order_on", "next_charge_on", "executed_on"})

@@ -11,6 +11,8 @@ from ai_banking_copilot.eval.dataset import (
     EvalCase,
     load_cases,
     load_default_cases,
+    load_frozen_heldout_cases,
+    load_frozen_heldout_manifest,
     load_heldout_cases,
 )
 
@@ -123,3 +125,13 @@ def test_load_default_and_heldout_use_explicit_dir(tmp_path: Path) -> None:
     )
     assert [case.id for case in load_default_cases(tmp_path)] == ["c1"]
     assert [case.id for case in load_heldout_cases(tmp_path)] == ["h1"]
+
+
+def test_frozen_heldout_manifest_is_verified() -> None:
+    cases = load_frozen_heldout_cases()
+    manifest = load_frozen_heldout_manifest()
+    assert len(cases) >= 40
+    assert manifest["case_count"] == len(cases)
+    assert manifest["freeze_status"]
+    categories = {case.category for case in cases}
+    assert {"legitimate", "clarification", "adversarial"} <= categories

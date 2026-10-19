@@ -1,6 +1,6 @@
 # 系统架构 · AI 银行副驾
 
-> 2026 第八届 FinTechathon · 国内赛道 · 人工智能 · 参赛作品
+> 面向银行业务的 AI 智能体演示项目
 > 本文件覆盖官方要求的三项必交技术文档之一：**系统架构图**。
 
 ## 1. 总览：双核 + 事实网关 + 评测
@@ -14,6 +14,12 @@
 │  LLM 只提案；降级通道 = 模板 + 规则 │
 └──────────────────┬────────────────┘
                    │ 结构化执行计划（动作 / 对象 / 金额 / 时间 + intent_ref）
+                   ▼
+┌──── 计划后置审查 planning/reviewer.py ────┐
+│ 旁路诊断或严格 Reviewer；绑定 execution_id + cfhash │
+│ 不改 Plan / 金额 / 授权；写动作失败则转澄清或人工 │
+└──────────────────┬────────────────────────┘
+                   │ 审查后的同一份结构化计划
                    ▼
 ┌──── 可信执行内核 policy/（安全下限）┐
 │ ① PDP 三色策略引擎（绿只含纯查询）  │
@@ -43,10 +49,11 @@
 | 场景层 | `scenarios/` | 六场景业务闭环（意图 → 白名单动作 DAG） | — |
 | Web 渠道 | `web/` | 计划卡 · 中断 / 回退 / 人工接管 | — |
 | 评测 | `eval/` | 端到端评测链 · 序关系不变式 · 指标 | H8 |
+| 主动洞察 | `web/insights.py` | 只读扫描、独立元数据收件箱、来源回读 | 不继承执行授权 |
 
 ## 3. 管道
 
-`意图 → 计划 → 分级授权 → 执行 → 审计`。六场景是同一根管道的六个应用面；
+`意图 → 可信补槽 → 计划 → Reviewer（可选旁路 / 严格）→ 分级授权 → 执行 → 审计`。六场景是同一根管道的六个应用面；
 **跨场景联动 = 管道串联（DAG 多步）**。
 
 ## 4. 评测链（`eval/pipeline.py`）
@@ -54,7 +61,7 @@
 评测链把已有模块**串起来**而不新增业务逻辑：
 `01 FactGateway`（确定性播种库）→ `04 Kernel`（拆解 + 槽位）→ `05 scenarios`（组装 DAG）→
 `03 PDP`（逐节点 + 计划级裁决）→ `03 PEP`（逐节点执行取证）。
-判据是「是否拦截」与「授权级别」；执行结果（回执 / `unsupported` / `failed`）只作过程证据。
+判据是「是否拦截」与「授权级别」；执行结果（回执 / `unsupported` / `failed`）只作过程证据。Web 的 `Session` 在已形成实际 Plan 后调用 `planning.reviewer`；规则风险官仍是 `assess_plan` / PDP，Reviewer 不拥有执行权限。
 
 ## 5. 分层原则
 
@@ -84,6 +91,7 @@
 | 扩展点 | 接缝（Protocol / 注册表 / 组合根） | 换什么 · 加什么 | 改冻结面？ |
 |---|---|---|---|
 | 意图模型 | `planning.llm.IntentModel` Protocol（`runtime_checkable`）；三实现 `Template` / `Llm` / `Fallback` | 换 / 加模型 —— **只改组合根一处** `compose.build_intent_model`（`AIB_DISABLE_LLM` / `DASHSCOPE_API_KEY`） | 否 |
+| 计划审查 | `planning.reviewer.Reviewer` Protocol；`Template` / `Bypass` / `Strict` | 审查原文、可信补槽来源、相关事实与已冻结 Plan；严格通道无凭据不回落模板 | 否 |
 | 场景处理器 | `scenarios.base.ScenarioHandler` Protocol + `SCENARIO_HANDLERS` 注册表（**顺序即优先级**） | 加场景 = 新增实现类 + 注册一行（声明式） | 加**动作**才需 |
 | 动作 / 工具 | `tools.registry.register(ToolSpec)` + `build_default_registry()` | 加动作 = 注册一个 `ToolSpec` | **是**（裁决表） |
 | 核心银行 / 写面 | 组合根 `compose.build_deps` 注入 `CoreBank` / `Pep` / `AuditLog` / `CircuitBreaker` | 换核心银行 / 换审计后端 —— 只动组合根，`web/` 零改动 | 否 |

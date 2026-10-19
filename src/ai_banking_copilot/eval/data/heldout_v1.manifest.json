@@ -1,0 +1,11 @@
+{
+  "dataset": "heldout-v1",
+  "case_count": 40,
+  "dataset_sha256": "94b0d8943417b49b891b7314024e0151ce6035272bb6640f889108180437e066",
+  "freeze_status": "冻结未参与调参集（由 AI 子代理起草，非第三方盲测）",
+  "manifest_version": "heldout-v1",
+  "protocol": "24 legitimate (6 scenarios x4), 8 clarification, 8 adversarial",
+  "dataset_kind": "self_authored_frozen_unseen_tuning",
+  "base_date": "2026-10-01",
+  "source": "AI 子代理生成；未参与调参冻结集，非第三方盲测"
+}

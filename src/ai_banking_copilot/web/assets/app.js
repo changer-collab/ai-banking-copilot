@@ -74,6 +74,8 @@ const state = {
   busy: false,
   notice: "",
   resultCount: 0,
+  insights: [],
+  offline: typeof navigator !== "undefined" && navigator.onLine === false,
 };
 
 function el(id) {
@@ -132,6 +134,9 @@ const SESSION_ID = (() => {
 })();
 
 async function post(path, body) {
+  if (state.offline || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+    throw new Error("当前离线，已禁用需要在线确认的操作");
+  }
   const payload = Object.assign({ session_id: SESSION_ID }, body || {});
   const response = await fetch(path, {
     method: "POST",
@@ -160,7 +165,7 @@ function optionsHtml(slot, selected = "") {
 }
 
 async function refreshOptions() {
-  const response = await fetch("/api/options");
+  const response = await fetch("/api/options", { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取可选对象");
   state.options = await response.json();
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
@@ -169,6 +174,56 @@ async function refreshOptions() {
     select.innerHTML = optionsHtml(slot, select.value);
   });
   setButtons();
+}
+
+function insightRuleLabel(ruleId) {
+  return {
+    "subscription-renewal": "订阅续费提醒",
+    "large-expense-review": "大额待核对",
+    "monthly-budget": "月预算提醒",
+  }[ruleId] || ruleId;
+}
+
+function renderInsights(data) {
+  const payload = data || {};
+  state.insights = Array.isArray(payload) ? payload : payload.insights || [];
+  const status = el("insights-status");
+  const list = el("insights-list");
+  if (payload.scan_error) {
+    status.textContent = `扫描失败（${payload.scanned_at || "未知时间"}）`;
+    list.innerHTML = `<p class="muted">${esc(payload.scan_error)}；未修改既有洞察。</p>`;
+    return;
+  }
+  status.textContent = `最近扫描：${payload.scanned_at || "服务端时间"}`;
+  if (!state.insights.length) {
+    list.innerHTML = '<p class="muted">当前没有待处理洞察。</p>';
+    return;
+  }
+  list.innerHTML = state.insights.map((item) => {
+    const refs = (item.source_refs || []).map((source) =>
+      `<li class="mono"><span class="tech">${esc(source.record_id)} · ${esc(source.content_hash)}</span></li>`
+    ).join("");
+    const value = item.value === undefined ? "—" : JSON.stringify(item.value);
+    return `<article class="takeover insight-item">
+      <div><b>${esc(insightRuleLabel(item.rule_id))}</b>` +
+      ` <span class="chip">${esc(item.status === "needs_setup" ? "待设置" : "待查看")}</span></div>
+      <p>${esc(item.suggestion || "请查看来源后自行决定")}</p>
+      <p class="muted">业务日 ${esc(item.business_day || "—")} · 窗口 ${esc(item.window_start || "—")} 至 ${esc(item.window_end || "—")}</p>
+      <p class="muted">计算式：<span class="mono">${esc(item.formula || "—")}</span> · 值：<span class="mono">${esc(value)}</span></p>
+      ${refs ? `<details><summary>来源（${(item.source_refs || []).length}）</summary><ul>${refs}</ul></details>` : "<p class=\"muted\">暂无来源记录（预算尚未设置）。</p>"}
+    </article>`;
+  }).join("");
+}
+
+async function refreshInsights() {
+  if (state.offline || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+  const response = await fetch("/api/insights", { cache: "no-store" });
+  if (response.status === 404) {
+    el("insights-status").textContent = "主动洞察服务尚未接入";
+    return;
+  }
+  if (!response.ok) throw new Error("无法读取主动洞察");
+  renderInsights(await response.json());
 }
 
 function selectedObjects() {
@@ -195,7 +250,10 @@ function action(handler) {
     setButtons();
     try {
       await handler();
-    } catch (_) {
+    } catch (error) {
+      if (String(error).includes("fetch") || String(error).includes("离线")) {
+        setOfflineState(true);
+      }
       state.phase = "failed";
       state.notice = interceptHtml("请求未能完成", "请检查网络后重新查询业务状态。", false);
       renderStage();
@@ -391,29 +449,38 @@ function verifyHtml() {
   </div>`;
 }
 
+function setOfflineState(offline) {
+  state.offline = offline;
+  const marker = el("offline-state");
+  if (marker) marker.hidden = !offline;
+  if (offline) timelineAdd("当前离线：提交、确认、挑战和其他写操作已禁用。", "warn");
+  setButtons();
+}
+
 function setButtons() {
   const busy = state.busy || state.phase === "executing";
+  const offline = state.offline || (typeof navigator !== "undefined" && navigator.onLine === false);
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
-  el("btn-submit").disabled = busy || !state.options;
-  el("btn-due").disabled = busy || !state.options;
+  el("btn-submit").disabled = offline || busy || !state.options;
+  el("btn-due").disabled = offline || busy || !state.options;
   el("btn-reset").disabled = busy;
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
-    el(`select-${slot}`).disabled = busy || !state.options;
+    el(`select-${slot}`).disabled = offline || busy || !state.options;
   });
   const clarifyButton = el("btn-clarify");
-  if (clarifyButton) clarifyButton.disabled = busy;
+  if (clarifyButton) clarifyButton.disabled = offline || busy;
   const redPending = state.card && state.card.level === "RED" && !strongPhase;
   el("btn-confirm").textContent = strongPhase
     ? "提交验证码并执行"
     : redPending
       ? "申请强验证"
       : "确认并执行";
-  el("btn-confirm").disabled = !(awaiting || strongPhase) || busy;
-  el("btn-interrupt").disabled = state.busy || !(state.phase === "executing" || awaiting);
-  el("btn-resume").disabled = busy || state.phase !== "interrupted";
-  el("btn-reverse").disabled = busy || state.stepStates.filter((s) => s === "done").length === 0;
-  el("btn-takeover").disabled = busy || state.phase === "idle";
+  el("btn-confirm").disabled = offline || !(awaiting || strongPhase) || busy;
+  el("btn-interrupt").disabled = offline || state.busy || !(state.phase === "executing" || awaiting);
+  el("btn-resume").disabled = offline || busy || state.phase !== "interrupted";
+  el("btn-reverse").disabled = offline || busy || state.phase === "reversed" || state.stepStates.filter((s) => s === "done").length === 0;
+  el("btn-takeover").disabled = offline || busy || state.phase === "idle";
 }
 
 function reset(keepUtterance) {
@@ -436,9 +503,13 @@ function reset(keepUtterance) {
 }
 
 function renderPresets() {
-  el("presets").innerHTML = PRESETS.map(
+  const html = PRESETS.map(
     (text) => `<button class="btn btn--ghost" data-preset="${esc(text)}">${esc(text)}</button>`
   ).join("");
+  ["quick-scenes", "presets"].forEach((id) => {
+    const container = el(id);
+    if (container) container.innerHTML = html;
+  });
 }
 
 /* ---------------- 交互 ---------------- */
@@ -603,6 +674,31 @@ async function onConfirm() {
   await refreshAfterExecution();
 }
 
+function billAdviceHtml(items) {
+  const advice = Array.isArray(items) ? items.slice(0, 3) : [];
+  if (!advice.length) return "";
+  return `<section class="takeover" style="margin-top: var(--s-4)">
+    <h3>消费建议</h3>
+    ${advice.map((item) => {
+      const refs = (item.source_refs || []).map((source) => {
+        const recordId = String(source.record_id || "");
+        const label = recordId.startsWith("bills:")
+          ? `月度账单（${recordId.split(":").pop()}）`
+          : recordId.startsWith("subscriptions:")
+            ? "订阅记录"
+            : recordId.startsWith("transactions:") ? "交易流水" : "事实记录";
+        return `<li>${esc(label)} <span class="tech mono">记录编号：${esc(recordId)} · 内容校验：${esc(source.content_hash || "—")}</span></li>`;
+      }).join("");
+      return `<article>
+        <p><b>${esc(item.title)}</b> <span class="chip">账期 ${esc(item.period)}</span></p>
+        <p><span class="muted">事实依据：</span>${esc(item.evidence)}</p>
+        <p><span class="muted">建议：</span>${esc(item.suggestion)}</p>
+        ${refs ? `<details><summary>查看来源（${item.source_refs.length}）</summary><ul>${refs}</ul></details>` : '<p class="muted">暂无来源记录。</p>'}
+      </article>`;
+    }).join("")}
+  </section>`;
+}
+
 function applyExecution(data) {
   if (data.card) state.card = data.card;
   if (data.decision) state.decision = data.decision;
@@ -619,7 +715,9 @@ function applyExecution(data) {
   const complete = data.state === "completed";
   state.notice = complete
     ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
-      results.map((item) => `<p>${esc(item.message)}</p>`).join("") + `</div>`
+      results.map((item) => `<p>${esc(item.message)}</p>`).join("") + `</div>` +
+      billAdviceHtml(data.bill_advice) +
+      (data.bill_advice_message ? `<p class="muted">${esc(data.bill_advice_message)}</p>` : "")
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
   renderStage();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
@@ -654,20 +752,24 @@ async function onReverse() {
   const result = await post("/api/reverse", {});
   const data = result.data;
   if (result.status !== 200) {
+    state.notice = interceptHtml("回退被拒绝", data.detail || "当前状态不可回退", false);
+    renderStage();
     timelineAdd(`回退被拒绝：${data.detail || "当前状态不可回退"}`, "stop");
     return;
   }
-  const rolled = state.stepStates.lastIndexOf("done");
-  if (rolled >= 0) state.stepStates[rolled] = "rolled";
-  state.phase = "done";
+  state.phase = "reversed";
+  state.notice = `<div class="takeover"><p>${esc(data.message || "已完成回退")}</p></div>`;
   renderStage();
-  timelineAdd(`${data.message || "已回退"} · 回滚 ${(data.compensated_steps || []).length} 步`, "stop");
+  timelineAdd(data.message || "已完成回退", "stop");
   await refreshAfterExecution();
   setButtons();
 }
 
 async function onTakeover() {
-  const response = await fetch("/api/takeover?session_id=" + encodeURIComponent(SESSION_ID));
+  if (state.offline || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+  const response = await fetch("/api/takeover?session_id=" + encodeURIComponent(SESSION_ID), {
+    cache: "no-store",
+  });
   if (response.status !== 200) {
     timelineAdd("当前状态无接管包", "warn");
     return;
@@ -680,9 +782,14 @@ async function onTakeover() {
 /* ---------------- 装配 ---------------- */
 
 renderPresets();
-el("presets").addEventListener("click", (event) => {
+function onPresetClick(event) {
   const button = event.target.closest("[data-preset]");
-  if (button) el("utterance").value = button.dataset.preset;
+  const utterance = el("utterance");
+  if (button && utterance) utterance.value = button.dataset.preset;
+}
+["quick-scenes", "presets"].forEach((id) => {
+  const container = el(id);
+  if (container) container.addEventListener("click", onPresetClick);
 });
 el("btn-submit").addEventListener("click", action(onSubmit));
 el("btn-due").addEventListener("click", action(onDue));
@@ -692,6 +799,31 @@ el("btn-resume").addEventListener("click", action(onResume));
 el("btn-reverse").addEventListener("click", action(onReverse));
 el("btn-takeover").addEventListener("click", action(onTakeover));
 el("btn-reset").addEventListener("click", () => reset(false));
+const app = el("app");
+
+function setMobileDrawer(name, open) {
+  if (!app) return;
+  const other = name === "scenes" ? "trace" : "scenes";
+  app.classList.toggle(`is-${name}-open`, open);
+  app.classList.remove(`is-${other}-open`);
+  const button = el(`btn-${name}-mobile`);
+  if (button) button.setAttribute("aria-expanded", String(open));
+  const otherButton = el(`btn-${other}-mobile`);
+  if (otherButton) otherButton.setAttribute("aria-expanded", "false");
+}
+
+["scenes", "trace"].forEach((name) => {
+  const button = el(`btn-${name}-mobile`);
+  if (button) {
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => {
+      if (!app) return;
+      setMobileDrawer(name, !app.classList.contains(`is-${name}-open`));
+    });
+  }
+});
+const newButton = el("btn-new");
+if (newButton) newButton.addEventListener("click", () => reset(false));
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
   if (event.target && event.target.id === "btn-clarify") action(onClarify)();
@@ -737,8 +869,28 @@ if (techToggle) {
 }
 
 timelineReset();
+if (state.offline) setOfflineState(true);
 setButtons();
 refreshOptions().catch(() => {
   el("business-date").textContent = "演示数据读取失败，请重新加载页面。";
   timelineAdd("可选对象读取失败，请重新加载页面。", "stop");
 });
+refreshInsights().catch(() => {
+  el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
+});
+
+window.addEventListener("offline", () => setOfflineState(true));
+window.addEventListener("online", () => {
+  setOfflineState(false);
+  refreshOptions().catch(() => {});
+  refreshInsights().catch(() => {});
+  timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
+});
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/assets/sw.js?v=3", { scope: "/" }).catch(() => {
+    timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
+  });
+}
+setInterval(() => {
+  refreshInsights().catch(() => {});
+}, 15000);

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,9 @@ CASE_FILES: tuple[str, ...] = ("cases.json", "adversarial.json")
 
 HELD_OUT_FILE = "heldout.json"
 """held-out 文件（实现冻结后另建，不参与迭代）。"""
+
+FROZEN_HELD_OUT_FILE = "heldout_v1.json"
+FROZEN_HELD_OUT_MANIFEST = "heldout_v1.manifest.json"
 
 MUST_PASS_IDS: tuple[str, ...] = (
     "transfer-yellow",
@@ -100,6 +104,34 @@ def load_heldout_cases(data_dir: str | Path | None = None) -> tuple[EvalCase, ..
     """加载 held-out 用例（实现冻结后另建，不参与开发迭代）。"""
     directory = Path(data_dir) if data_dir is not None else EVAL_DATA_DIR
     return load_cases(directory / HELD_OUT_FILE)
+
+
+def load_frozen_heldout_cases(data_dir: str | Path | None = None) -> tuple[EvalCase, ...]:
+    """加载 40 例冻结未参与调参集；不改变既有 20 例 held-out API。"""
+    directory = Path(data_dir) if data_dir is not None else EVAL_DATA_DIR
+    cases = load_cases(directory / FROZEN_HELD_OUT_FILE)
+    if len(cases) < 40:
+        raise ValueError("冻结留出集必须至少包含 40 例")
+    return cases
+
+
+def load_frozen_heldout_manifest(data_dir: str | Path | None = None) -> dict[str, object]:
+    """读取并校验冻结留出 manifest，防止数据被静默替换。"""
+    directory = Path(data_dir) if data_dir is not None else EVAL_DATA_DIR
+    manifest_path = directory / FROZEN_HELD_OUT_MANIFEST
+    path = directory / FROZEN_HELD_OUT_FILE
+    manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("冻结留出 manifest 必须是对象")
+    expected = manifest.get("dataset_sha256")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if expected != actual:
+        raise ValueError("冻结留出 manifest 的数据哈希不匹配")
+    expected_count = manifest.get("case_count")
+    cases = load_frozen_heldout_cases(directory)
+    if expected_count != len(cases):
+        raise ValueError("冻结留出 manifest 的样本数不匹配")
+    return manifest
 
 
 def _case_of(item: object, path: object) -> EvalCase:
