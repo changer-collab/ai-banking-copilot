@@ -7,11 +7,11 @@
 
 | # | 官方要求 | 本项目落点 | 状态 |
 |---|---|---|---|
-| 1 | 作品简介（报名系统，**≤200 字**，含创作理念 + 所用 AI 技术） | `docs/作品简介.md` | 待出 |
-| 2 | **技术文档：系统架构图 · 核心算法说明 · 安全设计文档** | `docs/architecture.md` · `docs/algorithms.md` · `docs/security-design.md` | 待补 |
+| 1 | 作品简介（报名系统，**≤200 字**，含创作理念 + 所用 AI 技术） | `docs/作品简介.md` | 已有，需按实际交付复核 |
+| 2 | **技术文档：系统架构图 · 核心算法说明 · 安全设计文档** | `docs/architecture.md` · `docs/algorithms.md` · `docs/security-design.md` | 已有，同步计划审查、PWA 与事实来源校验 |
 | 3 | 答辩 PPT（**≤10 分钟**）；演示视频（**≤5 分钟**，可选） | 提交材料，不入仓库 | — |
-| 4 | **源代码：README · GitHub 仓库地址 · 部署说明 · 测试用例** | `README.md` · 本仓库 · `deploy/README.md` · `tests/` | 进行中 |
-| 5 | **安全自评报告：权限分级实现说明 + 已知风险清单** | `docs/security-self-assessment.md` | 待补 |
+| 4 | **源代码：README · GitHub 仓库地址 · 部署说明 · 测试用例** | `README.md` · 本仓库 · `deploy/README.md` · `tests/` | 已有；服务和全量门禁需按当前提交复跑 |
+| 5 | **安全自评报告：权限分级实现说明 + 已知风险清单** | `docs/security-self-assessment.md` | 已有，包含权限实现与已知安全边界 |
 
 ## 二、核心技术要求（官方，实现优先级：高）
 

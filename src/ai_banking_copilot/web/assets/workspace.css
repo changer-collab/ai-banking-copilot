@@ -1,0 +1,209 @@
+/* 三栏工作台：快捷场景 / 对话流 / 追踪信息 ------------------------------ */
+.layout--workspace #presets {
+  display: none;
+}
+
+.layout.layout--workspace,
+.layout:has(> .side) {
+  grid-template-columns: 260px minmax(0, 1fr) 340px;
+  gap: var(--s-5);
+}
+
+.side,
+.main,
+.trace {
+  min-width: 0;
+}
+
+.side,
+.trace {
+  display: grid;
+  align-content: start;
+  gap: var(--s-4);
+}
+
+.side,
+.trace {
+  position: sticky;
+  top: var(--s-5);
+}
+
+.main {
+  display: grid;
+  align-content: start;
+  gap: var(--s-4);
+}
+
+.stream {
+  display: grid;
+  gap: var(--s-4);
+  min-width: 0;
+}
+
+.composer {
+  display: grid;
+  gap: var(--s-3);
+  min-width: 0;
+  padding: var(--s-4);
+  background: var(--voucher);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-card);
+  box-shadow: var(--sh-1);
+}
+
+.composer .textarea {
+  margin: 0;
+}
+
+#quick-scenes {
+  display: grid;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-4);
+  background: var(--voucher);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-card);
+  box-shadow: var(--sh-1);
+}
+
+#quick-scenes .btn {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+#btn-scenes-mobile,
+#btn-trace-mobile {
+  display: none;
+}
+
+.scenes-drawer {
+  display: none;
+}
+
+/* 消费建议沿用接管包的票据容器，仅收紧原生文本元素的默认间距。 */
+.takeover h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  letter-spacing: var(--ls-display);
+}
+
+.takeover article {
+  display: grid;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.takeover article + article {
+  padding-top: var(--s-3);
+  border-top: 1px dashed var(--rule-strong);
+}
+
+.takeover article p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.takeover details {
+  margin-top: var(--s-1);
+  min-width: 0;
+}
+
+.takeover summary {
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.takeover details ul {
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-4);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1020px) {
+  .layout.layout--workspace,
+  .layout:has(> .side) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .side,
+  .trace {
+    display: none;
+    position: fixed;
+    z-index: 20;
+    top: var(--s-3);
+    bottom: var(--s-3);
+    width: min(320px, calc(100vw - 2 * var(--s-3)));
+    overflow: auto;
+    padding: var(--s-3);
+    background: var(--paper);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--r-card);
+    box-shadow: var(--sh-3);
+  }
+
+  .side {
+    left: var(--s-3);
+  }
+
+  .trace {
+    right: var(--s-3);
+  }
+
+  .side.is-open,
+  .side.is-visible,
+  .side[data-open="true"],
+  .side[aria-hidden="false"],
+  .shell.is-scenes-open .side,
+  .trace.is-open,
+  .trace.is-visible,
+  .trace[data-open="true"],
+  .trace[aria-hidden="false"],
+  .shell.is-trace-open .trace {
+    display: grid;
+  }
+
+  #btn-scenes-mobile,
+  #btn-trace-mobile {
+    display: inline-flex;
+    position: relative;
+    z-index: 40;
+  }
+
+  .scenes-drawer:not([hidden]) {
+    display: grid;
+    position: fixed;
+    z-index: 30;
+    inset: var(--s-3) auto var(--s-3) var(--s-3);
+    width: min(320px, calc(100vw - 2 * var(--s-3)));
+    align-content: start;
+    gap: var(--s-3);
+    overflow: auto;
+    padding: var(--s-4);
+    background: var(--paper);
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--r-card);
+    box-shadow: var(--sh-3);
+  }
+}
+
+@media (max-width: 860px) {
+  .layout.layout--workspace,
+  .layout:has(> .side) {
+    grid-template-columns: 1fr;
+  }
+
+  .main {
+    gap: var(--s-3);
+  }
+
+  .stream {
+    gap: var(--s-3);
+  }
+
+  .composer {
+    padding: var(--s-3);
+  }
+}

@@ -13,7 +13,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -30,12 +33,14 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import IntentModel
+from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.policy.audit import KIND_OPERATOR, AuditEvent, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
 from ai_banking_copilot.tools.registry import ToolRegistry
+from ai_banking_copilot.web.insights import InsightService
 from ai_banking_copilot.web.page import INDEX_HTML
 from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
 from ai_banking_copilot.web.session import (
@@ -72,6 +77,12 @@ class AppDeps:
     """**运维口令**（裁决 #27）：`POST /api/operator/breaker-unlock` 的凭证，取自环境变量
     `AIB_OPERATOR_TOKEN`。**未配置（`None` / 空串）⇒ 该端点一律 403**（fail-closed）——
     绝不允许「默认无口令即可解锁熔断」这种自毁式配置。"""
+    reviewer: Reviewer | None = None
+    """计划后置审查器；默认空值保持旧版测试装配，组合根可注入旁路或严格通道。"""
+    reviewer_required: bool = False
+    """是否把 Reviewer 结果接入执行前状态机；旁路模式只审计诊断。"""
+    insights: InsightService | None = None
+    """只读主动洞察服务；元数据存储与银行事实连接由组合根隔离装配。"""
 
 
 DEFAULT_SESSION_ID = "default"
@@ -115,13 +126,43 @@ class _UnlockRequest(BaseModel):
     reason: str
 
 
+class _BudgetRequest(BaseModel):
+    """只读洞察的提醒预算；单位为整数分，不进入银行授权。"""
+
+    budget_cents: int | None = None
+    month: str | None = None
+
+
 def create_app(deps: AppDeps) -> FastAPI:
     """装配单页渠道。计划卡与执行全部来自上游；本层只做 HTTP 与序列化。
 
     **多会话（P2-7）**：按 `session_id` 维护**相互隔离**的 `Session`（缺省 `DEFAULT_SESSION_ID`
     保持既有单会话行为）；`AppDeps` 的字段签名不变（上游依赖仍由组合根注入一次）。
     """
-    app = FastAPI(title="AI 银行副驾 · Web 渠道", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        task: asyncio.Task[None] | None = None
+        service = deps.insights
+        if service is not None:
+            service.scan(deps.user_id, deps.today)
+
+            async def periodic_scan() -> None:
+                while True:
+                    await asyncio.sleep(60)
+                    service.scan(deps.user_id, deps.today)
+
+            task = asyncio.create_task(periodic_scan())
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    app = FastAPI(title="AI 银行副驾 · Web 渠道", version="0.1.0", lifespan=lifespan)
     app.mount(
         "/assets",
         StaticFiles(directory=str(Path(__file__).parent / "assets")),
@@ -173,6 +214,44 @@ def create_app(deps: AppDeps) -> FastAPI:
                  "label": f"{record.payload.reason} · 冻结 {record.payload.amount.yuan} 元"}
                 for record in gateway.active_holds_of(user_id)
             ],
+        }
+
+    @app.get("/api/insights")
+    def insights(include_resolved: bool = False) -> dict[str, object]:
+        """读取当前用户的只读洞察收件箱；不会继承任何执行授权。"""
+        service = deps.insights
+        if service is None:
+            return {"insights": [], "scanned_at": None, "scan_error": None}
+        state = service.scan_state(deps.user_id)
+        return {
+            "insights": [
+                item.to_dict()
+                for item in service.list_inbox(
+                    deps.user_id, include_resolved=include_resolved
+                )
+            ],
+            "scanned_at": state.scanned_at if state is not None else None,
+            "scan_error": state.error if state is not None else None,
+        }
+
+    @app.post("/api/insights/budget")
+    def set_insight_budget(request: _BudgetRequest) -> dict[str, object]:
+        """保存提醒偏好并重新扫描；预算不是银行额度或执行授权。"""
+        service = deps.insights
+        if service is None:
+            raise HTTPException(status_code=404, detail="主动洞察未装配")
+        month = request.month or deps.today.strftime("%Y-%m")
+        if len(month) != 7 or month[4] != "-":
+            raise HTTPException(status_code=400, detail="月份格式必须为 YYYY-MM")
+        try:
+            service.set_budget(deps.user_id, month, request.budget_cents)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        result = service.scan(deps.user_id, deps.today)
+        return {
+            "state": "updated",
+            "scan_error": result.scan_error,
+            "insights": [item.to_dict() for item in result.insights],
         }
 
     @app.post("/api/due")
@@ -344,11 +423,35 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
 
 
 def _execution_payload(view: ExecutionView) -> dict[str, object]:
+    card = _card_payload(view.card)
+    if card is not None and view.quota is not None:
+        card = {
+            **card,
+            "daily_limit_cents": view.quota.limit_cents,
+            "daily_accumulated_cents": view.quota.accumulated_cents,
+        }
     return {
         "state": view.state.value,
         "message": view.message,
         "frozen_hash": view.frozen_hash,
+        "card": card,
+        "decision": _decision_payload(view.decision),
         "record_ids": list(view.record_ids),
+        "bill_advice": [
+            {
+                "kind": item.kind,
+                "period": item.period,
+                "title": item.title,
+                "evidence": item.evidence,
+                "suggestion": item.suggestion,
+                "source_refs": [
+                    {"record_id": record_id, "content_hash": content_hash}
+                    for record_id, content_hash in item.source_refs
+                ],
+            }
+            for item in view.bill_advice
+        ],
+        "bill_advice_message": view.bill_advice_message,
         "results": [
             {
                 "status": result.status,

@@ -1,0 +1,20 @@
+{
+  "id": "/?pwa=1",
+  "name": "AI 银行副驾演示入口",
+  "short_name": "银行副驾",
+  "description": "可安装的同源网页入口；金融事实与操作始终在线读取。",
+  "lang": "zh-CN",
+  "start_url": "/?pwa=1",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#0b4fd8",
+  "icons": [
+    {
+      "src": "/assets/icon.svg?v=1",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

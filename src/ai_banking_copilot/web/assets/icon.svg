@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-labelledby="title">
+  <title id="title">AI 银行副驾</title>
+  <rect width="192" height="192" rx="38" fill="#0b4fd8"/>
+  <path d="M39 91 96 46l57 45v62a9 9 0 0 1-9 9H48a9 9 0 0 1-9-9Z" fill="#f5f7fb"/>
+  <path d="M64 161v-46h64v46" fill="#d9e7ff"/>
+  <path d="M70 82h52M76 72h40" stroke="#0b4fd8" stroke-width="9" stroke-linecap="round"/>
+  <circle cx="76" cy="102" r="7" fill="#0f8a5f"/>
+  <circle cx="116" cy="102" r="7" fill="#b3362a"/>
+</svg>

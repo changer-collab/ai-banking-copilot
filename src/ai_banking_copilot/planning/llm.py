@@ -20,6 +20,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ActionKind as ActionKind
+from ai_banking_copilot.tools.registry import UnknownActionError
 
 # `ActionKind` 已于 2026-10-07 **下移**到 `tools/registry.py`
 # （`docs/已修复清单-2026-10-08.md` 步骤 1.1）：
@@ -285,10 +286,29 @@ class LlmIntentModel:
 
 
 def _system_prompt(actions: tuple[str, ...]) -> str:
+    action_lines: list[str] = []
+    for action in actions:
+        try:
+            description = _SPECS.get(action).description
+        except UnknownActionError:
+            # `allow_actions` 通常来自规范目录；保留可注入的自定义白名单兼容性，
+            # 但不为目录外动作臆造语义。
+            description = "未提供动作说明"
+        action_lines.append(f"- {action}：{description}")
+    action_block = "\n".join(action_lines)
     return (
-        "你是银行智能体的意图解析器，只输出 JSON，不解释。"
-        f"可选动作仅限于：{', '.join(actions)}。"
-        '输出格式：{"intents":[{"action":"...","confidence":0.0,"evidence":"..."}]}'
+        "你是银行智能体的意图解析器，只输出 JSON，不解释。\n"
+        "可选动作仅限于以下白名单；动作说明是当前执行语义，必须据此区分相似动作：\n"
+        f"{action_block}\n"
+        "识别规则：\n"
+        "1. 只依据用户原文识别意图，按原文出现顺序输出；不补造账户、收款人、金额或日期事实。\n"
+        "2. 每个 intent 的 slots.span 必须是用户原文中逐字复制的连续片段；"
+        "无法可靠回指原文时不要猜测该意图。\n"
+        "3. 每个动作片段须包含该动作的请求词以及用户明确给出的对应金额或日期；"
+        "多个动作不得共享整句，也不得使用重叠片段。只登记预约时不要选择会立即扣款的动作。\n"
+        "4. slots 中除 span 外的字段只作未验证线索，不能把模型臆测当成控制事实。\n"
+        '输出格式：{"intents":[{"action":"...","confidence":0.0,"evidence":"原文依据",'
+        '"slots":{"span":"原文连续片段"}}]}。'
     )
 
 

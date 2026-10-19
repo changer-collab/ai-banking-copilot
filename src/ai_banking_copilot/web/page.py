@@ -1,4 +1,4 @@
-"""Web 渠道内联单页（版式对齐设计仓 `demo.html`：顶栏 + 左右两栏 + 右栏三块）。
+"""Web 渠道内联单页（版式对齐设计仓 `demo.html`：快捷场景 + 对话流 + 处理详情三栏）。
 
 - 样式与设计令牌**随包分发**：`web/assets/{tokens.css,app.css}`（取自设计仓，同一套令牌）；
 - 交互由**真实 API** 驱动：`web/assets/app.js`（本项目自有实现，非设计仓的 mock `demo.js`）；
@@ -14,20 +14,27 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0b4fd8" />
 <title>AI 银行副驾 · 计划卡（真实连通）</title>
+<link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
-<link rel="stylesheet" href="/assets/app.css?v=3" />
+<link rel="stylesheet" href="/assets/app.css?v=5" />
+<link rel="stylesheet" href="/assets/workspace.css?v=2" />
 </head>
 <body>
 <div class="paper-bg" aria-hidden="true"></div>
 
-<div class="shell">
+<div class="shell" id="app">
   <header class="topbar">
     <div class="topbar__brand">
       <span class="brand-mark">AI 银行<em>副驾</em></span>
-      <span class="brand-sub">真实连通 · 计划卡由确定性模板渲染，执行经双层执行门</span>
+      <span class="brand-sub">真实连通 · 每次操作都可复核</span>
     </div>
     <nav class="topbar__nav">
+      <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
+              aria-controls="quick-scenes" aria-expanded="false">快捷场景</button>
+      <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
+              aria-controls="trace-panels" aria-expanded="false">处理详情</button>
       <label class="switch">
         <input type="checkbox" id="tech-toggle" />
         技术详情
@@ -39,10 +46,27 @@ INDEX_HTML = """<!DOCTYPE html>
     </nav>
   </header>
 
-  <main class="layout">
-    <div>
+  <div class="layout layout--workspace">
+    <aside class="side" aria-label="快捷场景">
+      <div class="side__brand">
+        <span class="brand-mark">AI 银行<em>副驾</em></span>
+        <span class="brand-sub">真实连通 · 计划卡由确定性模板渲染，执行经双层执行门</span>
+      </div>
+      <div class="side__actions btn-row">
+        <button class="btn btn--primary" id="btn-reset" type="button">新建 / 重置</button>
+      </div>
+      <section class="panel" id="quick-scenes" aria-label="快捷场景列表">
+        <p class="panel__title">快捷场景</p>
+        <p class="muted">选择常用场景后，在中间输入区确认并提交。</p>
+      </section>
+    </aside>
+
+    <main class="main">
       <section class="panel" style="margin-top: var(--s-5)">
         <p class="muted" id="business-date">正在读取演示业务日期与可选对象…</p>
+        <p class="muted" id="offline-state" hidden>
+          当前离线：只读静态壳可用，提交、确认和挑战已禁用。
+        </p>
         <div class="btn-row" id="object-selectors">
           <div class="field">
             <label class="field__label" for="select-account">操作账户</label>
@@ -74,14 +98,23 @@ INDEX_HTML = """<!DOCTYPE html>
           <button class="btn" id="btn-resume" disabled>恢复</button>
           <button class="btn btn--danger" id="btn-reverse" disabled>回退</button>
           <button class="btn btn--ghost" id="btn-takeover">人工接管包</button>
-          <button class="btn btn--ghost" id="btn-reset">重置</button>
         </div>
       </section>
 
       <div id="stage" aria-live="polite"></div>
-    </div>
+    </main>
 
-    <aside class="rail">
+    <aside class="trace rail" aria-label="处理详情">
+      <div class="trace__head">
+        <p class="panel__title">处理详情</p>
+      </div>
+      <div id="trace-panels">
+      <div class="panel" id="insights-panel">
+        <p class="panel__title">主动洞察</p>
+        <p class="muted" id="insights-status">正在读取站内洞察…</p>
+        <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
+      </div>
+
       <div class="panel">
         <p class="panel__title">三色分级（官方口径）</p>
         <ul class="legend">
@@ -118,11 +151,12 @@ INDEX_HTML = """<!DOCTYPE html>
         <p class="panel__title">执行时间线</p>
         <ul class="timeline" id="timeline"><li class="timeline__item">等待操作…</li></ul>
       </div>
+      </div>
     </aside>
-  </main>
+  </div>
 </div>
 
-<script src="/assets/app.js?v=8"></script>
+<script src="/assets/app.js?v=10"></script>
 </body>
 </html>
 """

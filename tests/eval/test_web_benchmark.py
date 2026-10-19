@@ -11,6 +11,15 @@ from ai_banking_copilot.eval.web_benchmark import (
 
 def test_web_cases_cover_six_scenarios_and_authorization_attacks() -> None:
     cases = load_cases()
+    assert len(cases) == 21
+    assert all(case.get("metric_group") for case in cases)
+    assert (
+        sum(case.get("metric_group", case["kind"]) == "legitimate" for case in cases)
+        == 14
+    )
+    assert sum(case.get("metric_group") == "attack" for case in cases) == 5
+    assert sum(case.get("metric_group") == "idempotency" for case in cases) == 1
+    assert sum(case.get("metric_group") == "independent_submission" for case in cases) == 1
     assert {case["scenario"] for case in cases if case["kind"] == "legitimate"} >= {
         "transfer",
         "bills",
@@ -45,8 +54,26 @@ def test_real_web_execution_has_reproducible_business_results(tmp_path: Path) ->
     assert first["summary"]["attack_block_rate"]["denominator"] == 1
     assert first["summary"]["false_rejection_rate"]["numerator"] == 0
     assert first["summary"]["money_trace_rate"]["denominator"] > 0
+    assert first["summary"]["idempotency_success_rate"]["denominator"] == 0
     assert (tmp_path / "first" / "results.json").is_file()
     assert (tmp_path / "first" / "summary.csv").is_file()
+    assert (tmp_path / "first" / "manifest.json").is_file()
+
+
+def test_evidence_dev_dataset_has_frozen_coverage() -> None:
+    from ai_banking_copilot.eval.web_benchmark import load_dataset
+
+    cases = load_dataset("evidence-dev-v1")
+    assert len(cases) >= 90
+    assert sum(case.get("metric_group") == "legitimate" for case in cases) >= 48
+    assert sum(case.get("metric_group") == "clarification" for case in cases) >= 12
+    assert sum(case.get("metric_group") == "attack" for case in cases) >= 30
+    categories = {
+        case.get("attack_category")
+        for case in cases
+        if case.get("metric_group") == "attack"
+    }
+    assert len(categories) >= 6
 
 
 def test_wrong_business_expectation_fails_even_if_web_completed(tmp_path: Path) -> None:

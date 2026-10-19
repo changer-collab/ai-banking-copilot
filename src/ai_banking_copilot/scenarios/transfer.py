@@ -276,6 +276,7 @@ def _transfer_handler(context: WriteContext) -> WriteReceipt:
         payee_id=require_str(context.params, "payee_id"),
         amount=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
         booked_on=require_date(context.params, "booked_on"),
         schedule_id=(
             require_str(context.params, "schedule_id") if "schedule_id" in context.params else None
@@ -295,6 +296,7 @@ def _request_collection_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(require_int(context.params, "amount_cents")),
         note="" if note is None else str(note),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -309,6 +311,7 @@ def _book_transfer_handler(context: WriteContext) -> WriteReceipt:
         booked_on=require_date(context.params, "booked_on"),
         remark="" if remark is None else str(remark),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 

@@ -1,6 +1,6 @@
 # AI 银行副驾 · Zero-Trust Dual-Core Banking Agent
 
-> 2026 第八届 FinTechathon 深圳国际金融科技大赛 · 国内赛道 · 人工智能 · 参赛作品
+> 面向银行业务的 AI 智能体演示项目
 
 **我们不赌 AI 不出错，而是让 AI 错了也越不过边界。**
 听得懂 · 办得成 · 管得住 · 说得清
@@ -28,7 +28,7 @@
 | # | 场景 | 典型能力 |
 |---|---|---|
 | 1 | 智能转账 | 按人名/手机号/备注转账、拆分 AA 转出、AA 收款请求、预约转账登记；用户检查到期待办后生成计划卡，确认后才派发扣款 |
-| 2 | 账单分析 | 消费分类统计、异常交易识别、月度/年度账单报告 |
+| 2 | 账单分析 | 消费分类统计、异常交易识别、月度/年度账单报告，以及带依据的消费占比、支出变化和订阅核对建议 |
 | 3 | 理财操作 | 产品推荐与对比、风险评估、一键申购/赎回 |
 | 4 | 卡片管理 | 卡申请、额度调整、交易限制/解锁、卡片挂失 |
 | 5 | 订阅/代扣管理 | 订阅查询与续费提醒、代扣签约、取消订阅 |
@@ -60,7 +60,6 @@
 ├── docs/
 │   ├── roadmap.md                   # 路线图（里程碑 / 模块 / 门禁 / 风险）
 │   ├── official-requirements.md     # 官方要求 → 本项目落点 对照表
-│   ├── 参赛对标与改进方向.md         # 往届获奖画像 · 公开基准 · 差距诊断 · 改进方向与分工
 │   ├── 已修复清单-2026-10-08.md      # 缺陷 / 差距台账（含证据、修复方案、验收标准、状态）
 │   ├── 变更同步-2026-10-08.md        # 面向非开发队友的通俗版变更说明
 │   ├── architecture.md              # 系统架构图与说明
@@ -160,7 +159,9 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 
 - Web 端已打通「事实选项 → 意图提交 → 澄清补槽 → 计划卡 → 确认 / 强验证 → 执行 → 状态回读」链路。
 - `/api/due` 只检查服务端业务日期并生成待确认提案；不会继承登记时授权，也不会自动扣款。
-- 评测使用真实 FastAPI 路由、固定演示种子和每例独立 SQLite；结果明确标注为自建模板回归，**不是盲测或真实模型泛化成绩**。
+- Planner 只提出意图，可信补槽和规则风险官仍由确定性代码完成；可选独立 Reviewer 绑定 `execution_id` 与冻结哈希，旁路只审计，严格审查失败的写动作转人工。
+- 页面提供同源可安装 PWA 和只读主动洞察（订阅续费、大额待核对、月预算）；金融 API 不进缓存，离线不排队或重发写操作，洞察点击后仍需重新提交并确认。
+- 评测使用真实 FastAPI 路由、固定演示种子和每例独立 SQLite；结果明确标注为自建回归，**不是盲测或真实模型泛化成绩**。
 
 ## 大模型通道（可选增强）
 
@@ -168,6 +169,29 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
   未设置 Key / 未安装 `httpx` / 调用失败时，自动回落**确定性模板通道**（能力子集，非等价实现，H9）。
 - `AIB_DISABLE_LLM=1` 可**强制只用模板通道**（现场演示求稳时使用）。
 - Key 只从环境变量读取；**不写入仓库、不写日志**。
+- Reviewer 默认 `AIB_REVIEW_CHANNEL=bypass`，只作模板旁路诊断；设为 `llm-strict` 并同时设置 `AIB_REVIEW_REQUIRED=1` 才要求真实审查通过。端点与模型沿用 `AI_BASE_URL` / `AI_MODEL`，密钥沿用上述环境变量；严格审查失败的写动作转人工，查询仍受既有绿色规则约束。
+
+## 执行一致性（2026-10-16）
+
+- **完整冻结**：摘要覆盖节点身份、参数、授权锚、依赖与确定性执行顺序；确认后改动即拒绝执行。
+- **独立执行**：每次新提交生成独立 `execution_id`；同次确认重试和恢复沿原节点幂等键复用回执。
+- **写前复核**：在业务写入的同一 SQLite 事务内，按实际结算日读取最新累计与熔断状态；
+  完整计划的正向流出总额不被赎回、解冻或取消抵扣，已完成转账不重复累计。风险升档时保留已完成步骤，要求新卡确认与必要的强验证。
+- **确认与恢复**：确认、挑战绑定执行 ID 与完整计划哈希；确认前中断后恢复只回到待确认。
+  业务已提交但出处核验或审计失败时，明确返回 `committed_unverified` 与回执，停止后续步骤；恢复沿原键核对，避免重复扣款。
+- **严格审计**：服务只接受带密钥的空链、完整 HMAC 链，或由 HMAC 迁移事件绑定条数与链头的 SHA 历史前缀；纯 SHA 与未经显式迁移的混链拒绝启动。
+
+旧 SHA 日志须**停服务**后迁移。`expected-count` / `expected-head` 必须来自外部可信记录与独立核对，
+不能把当前日志自算结果直接当作可信锚；密钥仅从 `AIB_AUDIT_KEY` 读取，且应与服务使用的密钥一致：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/migrate_audit.py --help
+.\.venv\Scripts\python.exe scripts/migrate_audit.py --path runtime/audit.jsonl --expected-count <旧条数> --expected-head <旧链头>
+```
+
+命令先创建不覆盖的 `.bak` 备份再追加迁移事件；错误锚、损坏 / 混存链或备份失败不追加。
+迁移表示运维接收历史，不能追溯证明旧 SHA 未遭改写。当前仍为逐节点事务、内存会话与演示验证码；
+审计和业务库之间没有 outbox，默认同目录密钥、日志截断检测与密钥轮换的限制仍在。
 
 ## 测试
 
@@ -177,11 +201,13 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 pytest                                   # 全量（分层单元 + 集成 + 评测）
 pytest tests/eval                        # 原有评测套件（标准、对抗与 held-out 用例）
 pytest tests/gateway tests/tools tests/policy tests/planning tests/scenarios tests/web  # 分层
-python scripts/run_benchmark.py --output runtime/benchmark-final --repeat 2
+python scripts/run_benchmark.py --output runtime/benchmark-final --repeat 2 --channel template --dataset web-smoke-v2 --arm template
+python scripts/run_benchmark.py --output runtime/evidence-dev-v1 --repeat 1 --channel template --dataset evidence-dev-v1 --arm template
+python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --channel llm-strict --dataset web-smoke-v2 --arm reviewer
 ```
 
-当前固定 Web 回归两次运行结果一致：攻击阻断 `5/5`、合法任务成功 `14/14`、误拒 `0/14`、金额及百分比出处回溯 `23/23`。
-这些数字只说明固定演示样本和模板通道可重复通过，不代表生产环境或未知输入的泛化能力。
+评测产物包含配置、源码 / 数据 / 提示词 / 评分器哈希及逐例结果，保存在已忽略的 `runtime/`。
+严格模型通道只接受真实 Planner / Reviewer 结果；缺少凭据、调用失败或解析失败均如实记录，不用模板补分。自建数据仅用于回归验证，不代表未知输入的泛化能力。
 
 ## 熔断与恢复（裁决 #27）
 
@@ -226,7 +252,7 @@ python scripts/operator_unlock.py --reason "注入误报，已人工核实"
 - 使用第三方开源项目 / 模型 / 数据 / 代码的，均在 `THIRD_PARTY_NOTICES.md` 中列明**名称、版本、来源、许可证及具体使用范围**。
 - 本项目**不接真实银行账户、不产生真实资金动作**，全部在模拟核心银行中执行。
 - 本项目**不做投资建议、不承诺收益**。
-- 参赛作品独立完成。
+- 项目独立完成。
 
 ## 许可
 

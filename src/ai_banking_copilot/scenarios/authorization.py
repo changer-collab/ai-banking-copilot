@@ -19,11 +19,12 @@ G3（S2 一致性收口）落点：此前 web `_object_state` / `_amounts` 与 e
 from __future__ import annotations
 
 from datetime import date
+from typing import Protocol
 
 from ai_banking_copilot.contracts.plan import PlanNode
 from ai_banking_copilot.gateway.errors import GatewayError
-from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.facts import Record
+from ai_banking_copilot.gateway.models import Hold, Money, Payee, Subscription
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind
 from ai_banking_copilot.policy.pdp import ObjectState, PolicyRequest
 from ai_banking_copilot.tools.registry import ToolSpec
@@ -46,7 +47,7 @@ def counterparty_id(node: PlanNode) -> str | None:
     return None
 
 
-def object_state_for_node(gateway: FactGateway, node: PlanNode) -> ObjectState:
+def object_state_for_node(gateway: AuthorizationFacts, node: PlanNode) -> ObjectState:
     """由节点参数里的**对手方**推出对象态（谓词 = `identity_confirmed`；`blocked` 为吸收态）。"""
     raw = counterparty_id(node)
     if raw is None:
@@ -66,7 +67,7 @@ def node_policy_request(
     node: PlanNode,
     *,
     spec: ToolSpec,
-    gateway: FactGateway,
+    gateway: AuthorizationFacts,
     user_id: str,
     today: date,
     flags: frozenset[str],
@@ -101,3 +102,9 @@ def _declared_amount(node: PlanNode, spec: ToolSpec, amount_applies: bool) -> Mo
     if isinstance(raw, bool) or not isinstance(raw, int):
         return Money(0)
     return Money(raw)
+class AuthorizationFacts(Protocol):
+    def payee(self, payee_id: str) -> Record[Payee]: ...
+    def subscription(self, subscription_id: str) -> Record[Subscription]: ...
+    def hold(self, hold_id: str) -> Record[Hold]: ...
+    def daily_transfer_total(self, user_id: str, on: date) -> Money: ...
+    def daily_transfer_limit(self, user_id: str) -> Money: ...

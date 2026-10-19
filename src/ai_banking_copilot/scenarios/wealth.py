@@ -235,6 +235,7 @@ def _subscribe_handler(context: WriteContext) -> WriteReceipt:
         product_id=require_str(context.params, "product_id"),
         amount=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -246,6 +247,7 @@ def _redeem_handler(context: WriteContext) -> WriteReceipt:
         product_id=require_str(context.params, "product_id"),
         amount=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from ai_banking_copilot.contracts.plan import (
@@ -80,6 +82,12 @@ def test_duplicate_node_id_is_rejected() -> None:
         validate_plan(Plan(plan_id="p1", nodes=(_node("n1"), _node("n1"))))
 
 
+def test_duplicate_dependency_is_rejected() -> None:
+    plan = Plan(plan_id="p1", nodes=(_node("a"), _node("b", deps=("a", "a"))))
+    with pytest.raises(PlanValidationError, match="duplicate dependency"):
+        validate_plan(plan)
+
+
 def test_cfhash_is_stable_under_param_key_order() -> None:
     n1 = PlanNode(
         node_id="n1",
@@ -98,3 +106,75 @@ def test_cfhash_is_stable_under_param_key_order() -> None:
 
 def test_cfhash_changes_when_control_slot_param_changes() -> None:
     assert cfhash((_node("n1", amount=100),)) != cfhash((_node("n1", amount=101),))
+
+
+def test_cfhash_changes_when_node_identity_changes() -> None:
+    assert cfhash((_node("a"),)) != cfhash((_node("renamed"),))
+
+
+def test_cfhash_changes_when_dependencies_reverse() -> None:
+    forward = (_node("a"), _node("b", deps=("a",)))
+    reverse = (_node("a", deps=("b",)), _node("b"))
+    assert cfhash(forward) != cfhash(reverse)
+
+
+def test_cfhash_changes_when_dependency_changes_without_reordering_execution() -> None:
+    dependent = (_node("a"), _node("b", deps=("a",)))
+    independent = (_node("a"), _node("b"))
+    assert topological_order(Plan(plan_id="p", nodes=dependent)) == ("a", "b")
+    assert topological_order(Plan(plan_id="p", nodes=independent)) == ("a", "b")
+    assert cfhash(dependent) != cfhash(independent)
+
+
+def test_cfhash_changes_when_independent_execution_order_changes() -> None:
+    nodes = (_node("a"), _node("b"))
+    assert cfhash(nodes) != cfhash(tuple(reversed(nodes)))
+
+
+def test_cfhash_is_stable_when_listing_order_does_not_change_execution_order() -> None:
+    nodes = (_node("a"), _node("b", deps=("a",)), _node("c", deps=("b",)))
+    assert cfhash(nodes) == cfhash(tuple(reversed(nodes)))
+
+
+def test_cfhash_is_stable_under_dependency_declaration_order() -> None:
+    nodes = (_node("a"), _node("b"), _node("c", deps=("a", "b")))
+    reordered = nodes[:2] + (replace(nodes[2], depends_on=("b", "a")),)
+    assert cfhash(nodes) == cfhash(reordered)
+
+
+def test_cfhash_changes_when_action_or_anchor_changes() -> None:
+    node = _node("a")
+    assert cfhash((node,)) != cfhash((replace(node, action="transfer.schedule"),))
+    intent = IntentRef(source=AnchorSource.USER_APPROVED, anchor_id="another-anchor")
+    assert cfhash((node,)) != cfhash((replace(node, intent=intent),))
+
+
+@pytest.mark.parametrize(
+    ("nodes", "reason"),
+    [
+        ((_node("a"), _node("a")), "duplicate node_id"),
+        ((_node("a"), _node("b", deps=("a", "a"))), "duplicate dependency"),
+        ((replace(_node("a"), intent=None),), "intent anchor"),
+        ((_node("a", deps=("missing",)),), "unknown"),
+        ((_node("a", deps=("b",)), _node("b", deps=("a",))), "cycle"),
+        (
+            (
+                replace(
+                    _node("a"),
+                    intent=IntentRef(source=AnchorSource.DERIVED, anchor_id="derived"),
+                ),
+            ),
+            "derived",
+        ),
+    ],
+)
+def test_cfhash_rejects_invalid_plan(nodes: tuple[PlanNode, ...], reason: str) -> None:
+    with pytest.raises(PlanValidationError, match=reason):
+        cfhash(nodes)
+
+
+def test_cfhash_accepts_empty_nodes() -> None:
+    empty_hash = cfhash(())
+    assert len(empty_hash) == 64
+    assert int(empty_hash, 16) >= 0
+    assert cfhash(()) == empty_hash

@@ -1,0 +1,2 @@
+# 冻结数据按原始字节校验，禁止检出或提交时转换换行符。
+src/ai_banking_copilot/eval/data/heldout_v1.json -text whitespace=cr-at-eol

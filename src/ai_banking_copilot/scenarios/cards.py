@@ -135,6 +135,7 @@ def _card_status_handler(status: str) -> WriteHandler:
             card_id=require_str(context.params, "card_id"),
             status=status,
             idempotency_key=context.idempotency_key,
+            before_write=context.before_write,
         )
 
     return handle
@@ -146,6 +147,7 @@ def _apply_virtual_handler(context: WriteContext) -> WriteReceipt:
         user_id=require_str(context.params, "user_id"),
         daily_limit=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 
@@ -155,6 +157,7 @@ def _set_limit_handler(context: WriteContext) -> WriteReceipt:
         card_id=require_str(context.params, "card_id"),
         daily_limit=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
     )
 
 

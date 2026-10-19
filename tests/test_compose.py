@@ -12,8 +12,15 @@ from ai_banking_copilot.compose import (
     build_audit_log,
     build_deps,
     build_intent_model,
+    build_reviewer,
 )
-from ai_banking_copilot.planning.llm import FallbackIntentModel, TemplateIntentModel
+from ai_banking_copilot.planning.llm import (
+    DEFAULT_LLM_ENDPOINT,
+    DEFAULT_LLM_MODEL,
+    FallbackIntentModel,
+    TemplateIntentModel,
+)
+from ai_banking_copilot.planning.reviewer import BypassPlanReviewer, Reviewer
 from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditEvent, ChainBrokenError
 from ai_banking_copilot.web.app import AppDeps
 
@@ -35,6 +42,65 @@ def test_key_present_keeps_llm_primary_lazy() -> None:
     model = build_intent_model({"DASHSCOPE_API_KEY": "sk-test"})
     assert isinstance(model, FallbackIntentModel)
     assert model.degraded is False
+
+
+@pytest.mark.parametrize(
+    ("env", "endpoint", "model", "api_key"),
+    [
+        (
+            {
+                "AI_BASE_URL": " https://primary.example/chat/completions ",
+                "OPENAI_API_BASE_URL": "https://secondary.example/chat/completions",
+                "AI_MODEL": " injected-model ",
+                "AI_API_KEY": " primary-test-credential ",
+                "DEEPSEEK_API_KEY": "secondary-test-credential",
+                "DASHSCOPE_API_KEY": "legacy-test-credential",
+            },
+            "https://primary.example/chat/completions", "injected-model", "primary-test-credential",
+        ),
+        (
+            {
+                "AI_BASE_URL": " ",
+                "OPENAI_API_BASE_URL": " https://compatible.example/chat/completions ",
+                "AI_MODEL": " compatible-model ",
+                "AI_API_KEY": " ",
+                "DEEPSEEK_API_KEY": " compatible-test-credential ",
+                "DASHSCOPE_API_KEY": "legacy-test-credential",
+            },
+            "https://compatible.example/chat/completions",
+            "compatible-model", "compatible-test-credential",
+        ),
+        (
+            {"DASHSCOPE_API_KEY": " legacy-test-credential "},
+            DEFAULT_LLM_ENDPOINT, DEFAULT_LLM_MODEL, "legacy-test-credential",
+        ),
+        ({}, DEFAULT_LLM_ENDPOINT, DEFAULT_LLM_MODEL, ""),
+    ],
+)
+def test_reviewer_receives_injected_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str], endpoint: str, model: str, api_key: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def factory(mode: str, **kwargs: object) -> Reviewer:
+        captured.update({"mode": mode, **kwargs})
+        return BypassPlanReviewer()
+
+    monkeypatch.setattr("ai_banking_copilot.compose.create_reviewer", factory)
+    build_reviewer({**env, "AIB_REVIEW_CHANNEL": "llm-strict"})
+    assert captured == {
+        "mode": "llm-strict", "endpoint": endpoint, "model": model, "api_key": api_key,
+    }
+
+
+def test_disabled_llm_forces_reviewer_bypass_even_when_strict_requested() -> None:
+    reviewer = build_reviewer({DISABLE_LLM_ENV: "1", "AIB_REVIEW_CHANNEL": "llm-strict"})
+    assert isinstance(reviewer, BypassPlanReviewer)
+
+
+def test_default_reviewer_remains_bypass() -> None:
+    assert isinstance(build_reviewer({}), BypassPlanReviewer)
 
 
 def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:

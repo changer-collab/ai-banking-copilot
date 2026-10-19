@@ -361,7 +361,7 @@ def test_card_lock_and_unlock_update_status(pep: Pep, gateway: FactGateway) -> N
     assert locked.status == "locked"
     assert gateway.card("card_debit").payload.status == "locked"
     unlock = ToolCall(action="card.unlock", params={"card_id": _trusted("card_debit")})
-    unlocked = pep.execute(unlock, _decision(Level.YELLOW), manifest_plan(unlock), "k4")
+    unlocked = pep.execute(unlock, _decision(Level.RED), manifest_plan(unlock), "k4")
     assert unlocked.status == "active"
     assert gateway.card("card_debit").payload.status == "active"
 

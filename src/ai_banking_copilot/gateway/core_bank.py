@@ -31,6 +31,11 @@ from ai_banking_copilot.gateway.errors import (
 )
 from ai_banking_copilot.gateway.hashing import sha256_hex
 from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.preconditions import (
+    BeforeWrite,
+    PreconditionStatus,
+    WritePreconditionError,
+)
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     COLLECTION_REQUESTS_SCHEMA_SQL,
@@ -80,6 +85,7 @@ class CoreBank:
         booked_on: date,
         schedule_id: str | None = None,
         executed_on: date | None = None,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
             raise CoreBankError("转账金额必须为正")
@@ -105,13 +111,7 @@ class CoreBank:
             if str(row["status"]) not in ("scheduled", "completed"):
                 raise CoreBankError("预约转账当前状态不可执行")
 
-        def body(conn: sqlite3.Connection) -> WriteReceipt:
-            account = conn.execute(
-                "SELECT balance_cents FROM accounts WHERE account_id = ? AND user_id = ?",
-                (account_id, user_id),
-            ).fetchone()
-            if account is None:
-                raise UnknownAccountError(account_id)
+        def validate_transfer(conn: sqlite3.Connection) -> None:
             payee = conn.execute(
                 "SELECT blocked FROM payees WHERE payee_id = ? AND user_id = ?",
                 (payee_id, user_id),
@@ -120,6 +120,14 @@ class CoreBank:
                 raise UnknownPayeeError(payee_id)
             if int(payee["blocked"]) == 1:
                 raise BlockedPayeeError(f"收款对象 {payee_id} 处于 blocked 状态")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            account = conn.execute(
+                "SELECT balance_cents FROM accounts WHERE account_id = ? AND user_id = ?",
+                (account_id, user_id),
+            ).fetchone()
+            if account is None:
+                raise UnknownAccountError(account_id)
             if int(account["balance_cents"]) < amount.cents:
                 raise InsufficientFundsError(
                     f"余额不足：需要 {amount.cents} 分，可用 {int(account['balance_cents'])} 分"
@@ -164,9 +172,14 @@ class CoreBank:
         return self._run_once(
             "transfer", idempotency_key, body,
             validate=validate_schedule if schedule_id is not None else None,
+            validate_new=validate_transfer,
+            before_write=before_write,
         )
 
-    def cancel_subscription(self, *, subscription_id: str, idempotency_key: str) -> WriteReceipt:
+    def cancel_subscription(
+        self, *, subscription_id: str, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             row = conn.execute(
                 "SELECT status FROM subscriptions WHERE subscription_id = ?", (subscription_id,)
@@ -185,10 +198,12 @@ class CoreBank:
                 effect_ids=(f"subscription_cancel_{subscription_id}",),
             )
 
-        return self._run_once("cancel_subscription", idempotency_key, body)
+        return self._run_once("cancel_subscription", idempotency_key, body,
+                              before_write=before_write)
 
     def freeze_funds(
-        self, *, account_id: str, amount: Money, reason: str, idempotency_key: str
+        self, *, account_id: str, amount: Money, reason: str, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
             raise CoreBankError("冻结金额必须为正")
@@ -219,9 +234,13 @@ class CoreBank:
                 effect_ids=(f"holds:{hold_id}",),
             )
 
-        return self._run_once("freeze_funds", idempotency_key, body)
+        return self._run_once("freeze_funds", idempotency_key, body,
+                              before_write=before_write)
 
-    def unfreeze_funds(self, *, hold_id: str, idempotency_key: str) -> WriteReceipt:
+    def unfreeze_funds(
+        self, *, hold_id: str, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             row = conn.execute(
                 "SELECT account_id, amount_cents, status FROM holds WHERE hold_id = ?", (hold_id,)
@@ -250,9 +269,13 @@ class CoreBank:
                 effect_ids=(f"accounts:{row['account_id']}",),
             )
 
-        return self._run_once("unfreeze_funds", idempotency_key, body)
+        return self._run_once("unfreeze_funds", idempotency_key, body,
+                              before_write=before_write)
 
-    def reverse_transfer(self, *, txn_id: str, idempotency_key: str) -> WriteReceipt:
+    def reverse_transfer(
+        self, *, txn_id: str, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
         """冲正一笔**流出**转账：回补余额 + 写一条反向分录（幂等）。
 
         判据：目标流水必须存在且 `direction = 'out'`；非流出流水抛 `NotReversibleError`
@@ -300,7 +323,8 @@ class CoreBank:
                 effect_ids=(f"accounts:{account_id}", f"txn_{reversal_id}"),
             )
 
-        return self._run_once("reverse_transfer", idempotency_key, body)
+        return self._run_once("reverse_transfer", idempotency_key, body,
+                              before_write=before_write)
 
     def subscribe_product(
         self,
@@ -310,6 +334,7 @@ class CoreBank:
         product_id: str,
         amount: Money,
         idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         return self._wealth_flow(
             action="subscribe_product",
@@ -319,6 +344,7 @@ class CoreBank:
             amount=amount,
             idempotency_key=idempotency_key,
             direction="out",
+            before_write=before_write,
         )
 
     def redeem_product(
@@ -329,6 +355,7 @@ class CoreBank:
         product_id: str,
         amount: Money,
         idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         return self._wealth_flow(
             action="redeem_product",
@@ -338,9 +365,13 @@ class CoreBank:
             amount=amount,
             idempotency_key=idempotency_key,
             direction="in",
+            before_write=before_write,
         )
 
-    def set_card_status(self, *, card_id: str, status: str, idempotency_key: str) -> WriteReceipt:
+    def set_card_status(
+        self, *, card_id: str, status: str, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
         if status not in ("active", "lost", "locked"):
             raise CoreBankError(f"非法卡片状态：{status}")
 
@@ -357,10 +388,12 @@ class CoreBank:
                 effect_ids=(f"cards:{card_id}",),
             )
 
-        return self._run_once("set_card_status", idempotency_key, body)
+        return self._run_once("set_card_status", idempotency_key, body,
+                              before_write=before_write)
 
     def apply_virtual_card(
-        self, *, user_id: str, daily_limit: Money, idempotency_key: str
+        self, *, user_id: str, daily_limit: Money, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if daily_limit.cents < 0:
             raise CoreBankError("虚拟卡额度不得为负")
@@ -385,10 +418,12 @@ class CoreBank:
                 effect_ids=(f"cards:{card_id}",),
             )
 
-        return self._run_once("apply_virtual_card", idempotency_key, body)
+        return self._run_once("apply_virtual_card", idempotency_key, body,
+                              before_write=before_write)
 
     def set_card_limit(
-        self, *, card_id: str, daily_limit: Money, idempotency_key: str
+        self, *, card_id: str, daily_limit: Money, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if daily_limit.cents < 0:
             raise CoreBankError("卡片额度不得为负")
@@ -409,7 +444,8 @@ class CoreBank:
                 effect_ids=(f"cards:{card_id}",),
             )
 
-        return self._run_once("set_card_limit", idempotency_key, body)
+        return self._run_once("set_card_limit", idempotency_key, body,
+                              before_write=before_write)
 
     def sign_subscription(
         self,
@@ -420,6 +456,7 @@ class CoreBank:
         period: str,
         next_charge_on: date,
         idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
             raise CoreBankError("签约金额必须为正")
@@ -453,7 +490,8 @@ class CoreBank:
                 effect_ids=(f"subscriptions:{subscription_id}",),
             )
 
-        return self._run_once("sign_subscription", idempotency_key, body)
+        return self._run_once("sign_subscription", idempotency_key, body,
+                              before_write=before_write)
 
     def request_collection(
         self,
@@ -463,6 +501,7 @@ class CoreBank:
         amount: Money,
         note: str,
         idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """发起一笔 **AA 收款**请求（待收款，**不产生资金流**；P2-3）。
 
@@ -503,7 +542,8 @@ class CoreBank:
                 effect_ids=(f"collection_requests:{request_id}",),
             )
 
-        return self._run_once("request_collection", idempotency_key, body)
+        return self._run_once("request_collection", idempotency_key, body,
+                              before_write=before_write)
 
     def book_transfer(
         self,
@@ -515,6 +555,7 @@ class CoreBank:
         booked_on: date,
         remark: str,
         idempotency_key: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """**登记**一笔未来转账（P2-6；登记时**不扣款**）。
 
@@ -563,7 +604,8 @@ class CoreBank:
                 effect_ids=(f"scheduled_transfers:{schedule_id}",),
             )
 
-        return self._run_once("book_transfer", idempotency_key, body)
+        return self._run_once("book_transfer", idempotency_key, body,
+                              before_write=before_write)
 
     def place_merchant_order(
         self,
@@ -574,6 +616,7 @@ class CoreBank:
         order_on: date,
         idempotency_key: str,
         occasion_id: str | None = None,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """向商户下单（P2-5 生日联动的流出动作）：登记一条 `merchant_orders` 事实。
 
@@ -621,6 +664,7 @@ class CoreBank:
         return self._run_once(
             "place_merchant_order", idempotency_key, body,
             validate=validate_order if occasion_id is not None else None,
+            before_write=before_write,
         )
 
     def _wealth_flow(
@@ -633,6 +677,7 @@ class CoreBank:
         amount: Money,
         idempotency_key: str,
         direction: str,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
             raise CoreBankError("金额必须为正")
@@ -683,7 +728,8 @@ class CoreBank:
                 effect_ids=(f"accounts:{account_id}",),
             )
 
-        return self._run_once(action, idempotency_key, body)
+        return self._run_once(action, idempotency_key, body,
+                              before_write=before_write)
 
     def _run_once(
         self,
@@ -692,30 +738,27 @@ class CoreBank:
         body: Callable[[sqlite3.Connection], WriteReceipt],
         *,
         validate: Callable[[sqlite3.Connection], None] | None = None,
+        validate_new: Callable[[sqlite3.Connection], None] | None = None,
+        before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         with self._write_lock:
-            if validate is None:
+            with self._store.transaction() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if validate is not None:
+                    validate(conn)
                 existing = self._existing_receipt(action, idempotency_key)
                 if existing is not None:
                     return existing
-            try:
-                with self._store.transaction() as conn:
-                    if validate is not None:
-                        # 先取写锁，再核对业务身份与回执，避免同时确认的两个页面重复执行。
-                        conn.execute("BEGIN IMMEDIATE")
-                        validate(conn)
-                        existing = self._existing_receipt(action, idempotency_key)
-                        if existing is not None:
-                            return existing
-                    receipt = body(conn)
-                    self._store_receipt(conn, receipt)
-                    return receipt
-            except sqlite3.IntegrityError as error:
-                if "write_receipts" in str(error) or "UNIQUE" in str(error):
-                    replay = self._existing_receipt(action, idempotency_key)
-                    if replay is not None:
-                        return replay
-                raise
+                # 当前对象状态只约束新写入，不能阻止已提交结果的幂等回放。
+                if validate_new is not None:
+                    validate_new(conn)
+                if before_write is not None:
+                    result = before_write(conn)
+                    if result.status is not PreconditionStatus.ALLOW:
+                        raise WritePreconditionError(result)
+                receipt = body(conn)
+                self._store_receipt(conn, receipt)
+                return receipt
 
     def _existing_receipt(self, action: str, idempotency_key: str) -> WriteReceipt | None:
         rows = self._store.query(
