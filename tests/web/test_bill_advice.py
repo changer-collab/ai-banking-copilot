@@ -57,7 +57,7 @@ def test_non_bill_submission_clears_previous_advice(deps: AppDeps) -> None:
 
 def test_advice_waits_for_completion_and_appears_after_resume(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
-    submitted = _submit(client, "查一下上月账单")
+    submitted = _submit(client, "查看账单，再查看分类趋势")
     assert "bill_advice" not in submitted
     partial = _confirm(client, submitted, steps=1)
     assert partial["state"] == "executing"

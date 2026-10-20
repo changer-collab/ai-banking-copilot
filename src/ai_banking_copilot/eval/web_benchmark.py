@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
+import math
 import re
 import subprocess
 import sys
@@ -32,8 +32,14 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.gateway.store import Store, StoreMode
+from ai_banking_copilot.planning.call_observation import CallObservation
 from ai_banking_copilot.planning.llm import LlmIntentModel
-from ai_banking_copilot.planning.reviewer import StrictPlanReviewer
+from ai_banking_copilot.planning.model_config import ModelConfig
+from ai_banking_copilot.planning.reviewer import (
+    ReviewerFailure,
+    ReviewStatus,
+    StrictPlanReviewer,
+)
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 Json = dict[str, Any]
@@ -42,6 +48,8 @@ EXTENSION_DATASET = Path(__file__).with_name("data") / "evidence_dev_v1.json"
 FROZEN_HELDOUT_DATASET = Path(__file__).with_name("data") / "heldout_v1.json"
 BASE_DATE = date(2026, 10, 1)
 _NUMBER = re.compile(r"(?P<value>[+-]?\d+(?:\.\d+)?)\s*(?P<unit>元|%)")
+_REVIEW_GROUPS = ("llm_strict", "template", "bypass", "diagnostic", "unavailable", "unknown")
+_REVIEW_STATUSES = (*[status.value for status in ReviewStatus], "unknown")
 
 
 def _digest(value: object) -> str:
@@ -79,6 +87,41 @@ def _ratio(numerator: int, denominator: int) -> Json:
     }
 
 
+def _aggregate_usage(calls: list[Json]) -> Json | None:
+    """每个字段仅在所有 HTTP 尝试均有有效计数时汇总，不估算缺失量。"""
+    if not calls:
+        return None
+    keys = {"prompt_tokens", "completion_tokens", "total_tokens"}
+    for call in calls:
+        keys.update(call["usage"] or {})
+    usage: Json = {}
+    for key in sorted(keys):
+        values = [(call["usage"] or {}).get(key) for call in calls]
+        usage[key] = (
+            sum(values) if all(type(value) is int and value >= 0 for value in values)
+            else None
+        )
+    return usage
+
+
+def _model_call_metadata(calls: list[Json]) -> Json:
+    by_role: Json = {}
+    for role in ("planner", "reviewer"):
+        grouped = [call for call in calls if call["role"] == role]
+        by_role[role] = {
+            "http_attempts": len(grouped),
+            "latency_ms": sum(call["latency_ms"] for call in grouped),
+            "usage": _aggregate_usage(grouped),
+        }
+    return {
+        "model_call_count": len(calls),
+        "usage": _aggregate_usage(calls),
+        "model_calls_by_role": by_role,
+        "model_call_scope": "原传输路径 HTTP 尝试数，非服务端接收或计费证明",
+        "model_latency_scope": "各角色原 HTTP post 路径总耗时之和；非阶段 trace 或页面总耗时",
+    }
+
+
 def _metric_group(item: Json) -> str:
     """新分组优先；旧样本仍按 kind/attack 兼容。"""
     explicit = item.get("metric_group")
@@ -87,6 +130,51 @@ def _metric_group(item: Json) -> str:
     if item.get("attack") == "replay":
         return "idempotency"
     return str(item.get("kind", "unknown"))
+
+
+def _review_group(review: Json) -> str:
+    channel = review["channel"]
+    if channel in {"bypass", "unavailable"}:
+        return str(channel)
+    if review["diagnostic_only"]:
+        return "diagnostic"
+    return {"llm-strict": "llm_strict", "template": "template"}.get(channel, "unknown")
+
+
+def _reviewer_observations(deps: AppDeps) -> list[Json]:
+    """按审计顺序白名单采集；不是 HTTP 次数，也不读取报告或自由诊断文本。"""
+    observations: list[Json] = []
+    for index, event in enumerate(deps.audit.events()):
+        payload = event.payload
+        if event.kind != "decision" or "review_status" not in payload:
+            continue
+        channel = payload.get("review_channel")
+        failure = payload.get("review_failure")
+        review: Json = {
+            "audit_event_index": index,
+            "status": (
+                payload["review_status"] if payload["review_status"] in _REVIEW_STATUSES
+                else "unknown"
+            ),
+            "channel": channel if channel in {
+                "llm-strict", "template", "bypass", "unavailable"
+            } else "unknown",
+            "failure_code": (
+                "unavailable" if channel == "unavailable" else
+                failure if failure in {item.value for item in ReviewerFailure} else
+                None if failure is None else "unknown"
+            ),
+            "diagnostic_only": payload.get("review_diagnostic_only") is True,
+            "latency_ms": None,
+        }
+        latency = payload.get("review_latency_ms")
+        if (
+            isinstance(latency, (int, float)) and not isinstance(latency, bool)
+            and math.isfinite(latency) and latency >= 0
+        ):
+            review["latency_ms"] = latency
+        observations.append(review)
+    return observations
 
 
 def summarize(results: list[Json], *, dataset_version: str | None = None) -> Json:
@@ -135,14 +223,23 @@ def summarize(results: list[Json], *, dataset_version: str | None = None) -> Jso
     }
     if dataset_version is not None:
         summary["dataset_version"] = dataset_version
+    # 每组分母是该组审计观察数；状态分布不代表语义正确率或业务成功率。
+    reviews = [review for item in results for review in item.get("reviewer_observations", [])]
+    for group in _REVIEW_GROUPS:
+        grouped = [review for review in reviews if _review_group(review) == group]
+        for status in _REVIEW_STATUSES:
+            summary[f"reviewer_{group}_{status}_rate"] = _ratio(
+                sum(review["status"] == status for review in grouped), len(grouped)
+            )
     return summary
 
 
 def _snapshot(store: Store) -> Json:
-    """覆盖所有业务表，攻击前后比较实际行，包含幂等回执。"""
+    """比较业务实际行及幂等回执；会话快照是操作元数据，不是业务副作用。"""
     tables = store.query(
         "SELECT name FROM sqlite_master WHERE type='table'"
-        " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%' ORDER BY name"
+        " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%'"
+        " AND name != 'session_snapshots' ORDER BY name"
     )
     return {
         str(row["name"]): sorted(
@@ -154,10 +251,11 @@ def _snapshot(store: Store) -> Json:
 
 
 def _business_snapshot(store: Store) -> Json:
-    """业务状态快照：保留行内容和数量，去除每次执行随机生成的技术 ID。"""
+    """保留业务行内容和数量；排除会话操作元数据及每次执行随机生成的技术 ID。"""
     tables = store.query(
         "SELECT name FROM sqlite_master WHERE type='table'"
-        " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%' ORDER BY name"
+        " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%'"
+        " AND name != 'session_snapshots' ORDER BY name"
     )
     ignored = {"idempotency_key", "receipt_json", "event_id", "entry_hash", "prev_hash"}
     snapshot: Json = {}
@@ -284,7 +382,7 @@ def _numeric_proofs(texts: list[str], case: Json, store: Store, deps: AppDeps) -
                             proof["passed"] = True
                             proof["failure"] = ""
                 except Exception as error:
-                    proof["failure"] = f"出处回读失败：{type(error).__name__}: {error}"
+                    proof["failure"] = f"numeric_provenance_error:{type(error).__name__}"
             proofs.append(proof)
     return proofs
 
@@ -376,10 +474,13 @@ def _run_case(
         "checks": [],
         "numeric_proofs": [],
         "trace": [],
+        "reviewer_observations": [],
     }
     db_path = case_dir / "demo.db"
     store: Store | None = None
+    deps: AppDeps | None = None
     resources = ExitStack()
+    model_calls: list[CallObservation] = []
     try:
         deps = build_deps(
             db_path,
@@ -393,29 +494,18 @@ def _run_case(
             resources=resources,
         )
         if channel == "llm-strict":
-            api_key = next(
-                (
-                    os.environ.get(name, "").strip()
-                    for name in ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
-                    if os.environ.get(name, "").strip()
-                ),
-                "",
-            )
-            endpoint = (
-                os.environ.get("AI_BASE_URL", "").strip()
-                or os.environ.get("OPENAI_API_BASE_URL", "").strip()
-                or "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-            )
-            model = os.environ.get("AI_MODEL", "").strip() or "qwen-plus"
+            config = ModelConfig.from_env()
             deps = replace(
                 deps,
-                intent_model=LlmIntentModel(api_key=api_key, model=model, endpoint=endpoint),
+                intent_model=LlmIntentModel(
+                    config=config, observer=model_calls.append, task_id=str(case["id"]),
+                ),
             )
             if arm in {"reviewer", "c"}:
                 deps = replace(
                     deps,
                     reviewer=StrictPlanReviewer(
-                        api_key=api_key, model=model, endpoint=endpoint
+                        config=config, observer=model_calls.append,
                     ),
                     reviewer_required=True,
                 )
@@ -539,11 +629,18 @@ def _run_case(
                         )
             result["passed"] = not result["failures"]
     except Exception as error:
-        result["failures"].append(f"{type(error).__name__}: {error}")
+        result["failures"].append(f"case_execution_error:{type(error).__name__}")
     finally:
-        if store is not None:
-            store.close()
-        resources.close()
+        result["model_calls"] = [call.public_dict() for call in model_calls]
+        try:
+            if deps is not None:
+                result["reviewer_observations"] = _reviewer_observations(deps)
+        finally:
+            try:
+                if store is not None:
+                    store.close()
+            finally:
+                resources.close()
     result["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
     return result
 
@@ -727,12 +824,8 @@ def _metadata(
             dependencies[package] = version(package)
         except PackageNotFoundError:
             dependencies[package] = "unavailable"
-    endpoint = (
-        os.environ.get("AI_BASE_URL", "").strip()
-        or os.environ.get("OPENAI_API_BASE_URL", "").strip()
-        or "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    )
-    model = os.environ.get("AI_MODEL", "").strip() or "qwen-plus"
+    config = ModelConfig.from_env()
+    endpoint = config.endpoint
     strict = channel == "llm-strict"
     return {
         "package_version": package_version,
@@ -756,13 +849,16 @@ def _metadata(
         },
         "provider": urlparse(endpoint).netloc if strict else "deterministic-template",
         "models": {
-            "planner": model if strict else "template-intent-v1",
-            "reviewer": model if strict and arm in {"reviewer", "c"} else None,
+            "planner": config.planner_model if strict else "template-intent-v1",
+            "reviewer": config.reviewer_model if strict and arm in {"reviewer", "c"} else None,
         },
         "sampling": "unknown (provider defaults; no template values inferred)",
-        "timeout_s": 20.0 if strict else None,
-        "model_call_count": "unknown" if strict else 0,
-        "usage": "unknown" if strict else None,
+        "timeout_s": config.planner_timeout_s if strict else None,
+        "reviewer_timeout_s": (
+            config.reviewer_timeout_s if strict and arm in {"reviewer", "c"} else None
+        ),
+        "model_config": config.public_metadata(),
+        **_model_call_metadata([]),
         "cost": "unknown" if strict else 0,
         "release": release,
         "run_id": run_id or uuid.uuid4().hex,
@@ -788,10 +884,7 @@ def _metadata(
 
 
 def _strict_credentials_available() -> bool:
-    return any(
-        os.environ.get(name, "").strip()
-        for name in ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
-    )
+    return bool(ModelConfig.from_env().api_key)
 
 
 def run_benchmark(
@@ -883,6 +976,9 @@ def run_benchmark(
         _run_case(case, run_dir / case["id"], channel=channel, arm=arm)
         for case in cases
     ]
+    metadata.update(_model_call_metadata([
+        call for result in results for call in result["model_calls"]
+    ]))
     if release:
         repo = Path(__file__).resolve().parents[3]
         if _digest(_execution_file_hashes(repo)) != metadata["execution_files_sha256"]:

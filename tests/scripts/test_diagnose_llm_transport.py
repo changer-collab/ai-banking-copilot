@@ -56,6 +56,8 @@ def _reviewer_text(payload: dict[str, object]) -> str:
             "cfhash": review["cfhash"],
             "prompt_version": review["prompt_version"],
             "status": "allow",
+            "findings": [],
+            "clarifications": [],
         }
     )
 
@@ -183,6 +185,51 @@ def test_report_has_utc_time_and_separate_checks(monkeypatch: pytest.MonkeyPatch
     assert datetime.fromisoformat(report["run_at_utc"]).tzinfo == UTC
     assert report["protocol_checks"] == {"planner": True, "reviewer": True}
     assert report["reviewer_binding_check"] is True
+
+
+def test_default_timeout_keeps_planner_20_and_reviewer_180(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_key(monkeypatch)
+    calls: list[tuple[object, object, object]] = []
+
+    def fake_probe(**kwargs: object) -> ProbeResult:
+        channel = str(kwargs["channel"])
+        calls.append((channel, kwargs["timeout_s"], kwargs["max_attempts"]))
+        if channel == "planner":
+            return _result(channel, ProbeClass.OK, _planner_text())
+        payload = kwargs["payload"]
+        assert isinstance(payload, dict)
+        return _result(channel, ProbeClass.OK, _reviewer_text(payload))
+
+    report = run_diagnostics(probe=fake_probe)
+    assert calls == [("planner", 20.0, 1), ("reviewer", 180.0, 1)]
+    assert report["timeout_s"] == 20.0
+    assert report["reviewer_timeout_s"] == 180.0
+    assert report["ready_for_smoke"] is True
+
+
+def test_explicit_timeout_overrides_both_diagnostic_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_key(monkeypatch)
+    monkeypatch.setenv("AI_TIMEOUT_S", "7.0")
+    calls: list[tuple[object, object, object]] = []
+
+    def fake_probe(**kwargs: object) -> ProbeResult:
+        channel = str(kwargs["channel"])
+        calls.append((channel, kwargs["timeout_s"], kwargs["max_attempts"]))
+        if channel == "planner":
+            return _result(channel, ProbeClass.OK, _planner_text())
+        payload = kwargs["payload"]
+        assert isinstance(payload, dict)
+        return _result(channel, ProbeClass.OK, _reviewer_text(payload))
+
+    report = run_diagnostics(probe=fake_probe)
+    assert calls == [("planner", 7.0, 1), ("reviewer", 7.0, 1)]
+    assert report["timeout_s"] == 7.0
+    assert report["reviewer_timeout_s"] == 7.0
+    assert report["ready_for_smoke"] is True
 
 
 def test_both_channels_use_production_payload_and_binding(monkeypatch: pytest.MonkeyPatch) -> None:

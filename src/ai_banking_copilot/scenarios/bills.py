@@ -204,9 +204,6 @@ class BillsHandler(ScenarioHandler):
             )
         elif build_bills:
             year, month = _period(intents)
-            summary = category_totals(gateway, DEMO_USER_ID, year, month)
-            category = _chosen_category(intents, summary)
-            base_year, base_month = _previous_month(year, month)
             nodes.append(
                 PlanNode(
                     node_id="n1",
@@ -218,23 +215,27 @@ class BillsHandler(ScenarioHandler):
                     ),
                 )
             )
-            nodes.append(
-                PlanNode(
-                    node_id="n2",
-                    action="bills.category_trend",
-                    params={
-                        "user_id": DEMO_USER_ID,
-                        "category": category,
-                        "base_year": base_year,
-                        "base_month": base_month,
-                    },
-                    intent=IntentRef(
-                        source=AnchorSource.EXPLICIT,
-                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
-                    ),
-                    depends_on=("n1",),
+            if any(intent.action == "bills.category_trend" for intent in bills_specific):
+                summary = category_totals(gateway, DEMO_USER_ID, year, month)
+                category = _chosen_category(intents, summary)
+                base_year, base_month = _previous_month(year, month)
+                nodes.append(
+                    PlanNode(
+                        node_id="n2",
+                        action="bills.category_trend",
+                        params={
+                            "user_id": DEMO_USER_ID,
+                            "category": category,
+                            "base_year": base_year,
+                            "base_month": base_month,
+                        },
+                        intent=IntentRef(
+                            source=AnchorSource.EXPLICIT,
+                            anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
+                        ),
+                        depends_on=("n1",),
+                    )
                 )
-            )
         plan = Plan(plan_id="bills_yearly" if yearly else "bills_monthly", nodes=tuple(nodes))
         validate_plan(plan)
         return plan

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -15,11 +14,10 @@ from urllib.parse import urlparse
 
 from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode, cfhash
 from ai_banking_copilot.planning.llm import (
-    DEFAULT_LLM_ENDPOINT,
-    DEFAULT_LLM_MODEL,
     LlmIntentModel,
     LlmUnavailableError,
 )
+from ai_banking_copilot.planning.model_config import ModelConfig
 from ai_banking_copilot.planning.reviewer import (
     ReviewerFailure,
     ReviewRequest,
@@ -69,24 +67,18 @@ def run_diagnostics(
     probe: Callable[..., ProbeResult] = probe_chat_completion,
 ) -> dict[str, object]:
     """用生产请求与解析器诊断两个真实通道，返回无正文的公开报告。"""
-    key_name = next(
-        (
-            name
-            for name in ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
-            if os.environ.get(name, "").strip()
-        ),
-        None,
-    )
-    api_key = os.environ[key_name].strip() if key_name else ""
-    endpoint = os.environ.get("AI_BASE_URL", "").strip() or DEFAULT_LLM_ENDPOINT
-    model = os.environ.get("AI_MODEL", "").strip() or DEFAULT_LLM_MODEL
-    timeout_text = os.environ.get("AI_TIMEOUT_S", "").strip() or "20"
+    config_reason: str | None = None
     try:
-        timeout_s = float(timeout_text)
-    except ValueError:
-        timeout_s = None
-    if timeout_s is not None and (not math.isfinite(timeout_s) or timeout_s <= 0):
-        timeout_s = None
+        config = ModelConfig.from_env(os.environ)
+    except ValueError as error:
+        config_reason = str(error)
+        config = ModelConfig.from_env({})
+    key_name = config.api_key_env
+    api_key = config.api_key
+    endpoint = config.endpoint
+    model = config.planner_model
+    timeout_s = config.planner_timeout_s if config_reason is None else None
+    reviewer_timeout_s = config.reviewer_timeout_s if config_reason is None else None
 
     parsed_endpoint = urlparse(endpoint)
     hostname = parsed_endpoint.hostname or ""
@@ -97,12 +89,13 @@ def run_diagnostics(
         "endpoint_hostname": hostname,
         "model": model,
         "timeout_s": timeout_s,
+        "reviewer_timeout_s": reviewer_timeout_s,
+        "model_config": config.public_metadata(),
     }
-    config_reason: str | None = None
-    if not api_key:
+    if config_reason is not None:
+        pass
+    elif not api_key:
         config_reason = "缺少模型 API Key"
-    elif timeout_s is None:
-        config_reason = "AI_TIMEOUT_S 必须为正数"
     elif parsed_endpoint.scheme not in ("http", "https") or not hostname:
         config_reason = "AI_BASE_URL 必须是带主机名的 HTTP(S) 地址"
     elif key_name == "DEEPSEEK_API_KEY" and provider == "dashscope":
@@ -120,6 +113,7 @@ def run_diagnostics(
         report["ready_for_smoke"] = False
         return report
     assert timeout_s is not None
+    assert reviewer_timeout_s is not None
 
     planner_result: ProbeResult | None = None
     planner_attempts: list[ProbeAttempt] = []
@@ -178,8 +172,8 @@ def run_diagnostics(
             channel="reviewer",
             endpoint=endpoint,
             api_key=api_key,
-            payload=build_reviewer_chat_payload(request, model=model),
-            timeout_s=timeout_s,
+            payload=build_reviewer_chat_payload(request, model=config.reviewer_model),
+            timeout_s=reviewer_timeout_s,
             max_attempts=1,
         )
         if reviewer_result.classification is not ProbeClass.OK:
@@ -190,9 +184,9 @@ def run_diagnostics(
         review = StrictPlanReviewer(
             transport=reviewer_transport,
             api_key=api_key,
-            model=model,
+            model=config.reviewer_model,
             endpoint=endpoint,
-            timeout_s=timeout_s,
+            timeout_s=reviewer_timeout_s,
         ).review(_review_request())
         assert reviewer_result is not None
         reviewer_class = (

@@ -113,9 +113,9 @@ _PERIOD_ALIASES = {"monthly": "monthly", "yearly": "yearly", "每月": "monthly"
 _ACCOUNT_QUERIES = frozenset({"account.balance", "account.transactions"})
 _QUERY_NOUN = re.compile(r"余额(?!宝)|(?:异常|可疑|大额)?交易(?:流水|记录|明细)?|流水")
 _QUERY_PREFIX = re.compile(
-    r"^(?:(?:请|麻烦|劳驾|帮我|帮忙|我想|我要|想知道|能否|能不能|可以|先|再|就|有没有)"
+    r"^(?:(?:请|麻烦|劳驾|帮我|帮忙|给我|我想|我要|想知道|想|把|能否|能不能|可以|先|再|就|有没有)"
     r"|(?:我)?(?:能|可以)|(?:按|照)(?:我)?选(?:择|定)?的"
-    r"|(?:查询|查看|查查|查|看看|看|核对)(?:一下)?|\s)+"
+    r"|(?:查询|查看|查查|查|看看|看|核对)(?:一下|下)?|\s)+"
 )
 _SELF_QUERY_OBJECT = re.compile(
     r"(?:(?:我|本人|自己|名下|当前|已选|选中|这个|那个|这张|那张|该|本|在|的|银行|账户|帐户|银行卡"
@@ -127,6 +127,7 @@ _THIRD_QUERY_OBJECT = re.compile(
 )
 _QUERY_OBJECT_PART = re.compile(r"[，,。；;、]|" + _QUERY_NOUN.pattern)
 _QUERY_OBJECT_INTRO = re.compile(r"^(?:是|要|用|选)(?:查|看)?")
+_QUERY_OBJECT_SPECIFIED = re.compile(r"^(?:我要|我想用|我想选|要|用|选|是(?!多少|几|什么|否))")
 
 
 @dataclass(frozen=True)
@@ -196,7 +197,7 @@ def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | Non
     """只核对账户查询的对象限定；可信账户 ID 不代表原文对象就是本人。
 
     这里只支持本人或账户泛称，不为命名银行、产品或第三人生成映射。
-    未知口语本身不触发拒绝；对象属格、账户名词或名册姓名才要求范围可解释。
+    查询名词前或明确指定的对象须可解释，不能因省略“的/账户”而套用本人账户。
     """
     if action not in _ACCOUNT_QUERIES:
         return None
@@ -207,14 +208,25 @@ def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | Non
         is not None
         for payee in inputs.payees
     )
+    query_noun = _QUERY_NOUN.search(text)
+    if query_noun is not None:
+        leading = re.split(r"[，,。；;、]", text[:query_noun.start()])[-1]
+        subject = _QUERY_PREFIX.sub("", leading).strip()
+        subject = _QUERY_OBJECT_INTRO.sub("", subject).strip()
+        if subject and not _SELF_QUERY_OBJECT.fullmatch(subject):
+            outside = True
     # 对象可能跟在查询词后，也可能没有“余额”等查询名词；完整 scope 均需保留。
     for index, part in enumerate(_QUERY_OBJECT_PART.split(text)):
         subject = _QUERY_PREFIX.sub("", part).strip()
         introduced = _QUERY_OBJECT_INTRO.match(subject) is not None
+        specified = (
+            _QUERY_OBJECT_SPECIFIED.match(part.strip()) is not None
+            or _QUERY_OBJECT_SPECIFIED.match(subject) is not None
+        )
         subject = _QUERY_OBJECT_INTRO.sub("", subject).strip()
         explicit_subject = any(
             token in subject for token in ("银行", "账户", "帐户", "银行卡", "储蓄卡", "余额宝")
-        ) or ((index == 0 or introduced) and "的" in subject)
+        ) or ((index == 0 or introduced) and "的" in subject) or (specified and bool(subject))
         if explicit_subject and not _SELF_QUERY_OBJECT.fullmatch(subject):
             outside = True
             break

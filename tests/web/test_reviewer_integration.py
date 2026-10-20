@@ -69,7 +69,7 @@ def test_reviewer_read_timeout_keeps_safe_diagnostics_and_never_writes(
     assert review_event.payload["review_failure"] == "timeout"
     assert review_event.payload["review_error_type"] == "ReadTimeout"
     assert review_event.payload["review_http_status"] is None
-    assert review_event.payload["review_timeout_s"] == 20.0
+    assert review_event.payload["review_timeout_s"] == 180.0
     assert "do-not-log-provider-secret" not in audit.path.read_text(encoding="utf-8")
     assert audit.verify_chain()
 

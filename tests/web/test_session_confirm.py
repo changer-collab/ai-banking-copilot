@@ -151,7 +151,7 @@ def test_open_breaker_routes_a_write_to_takeover(deps: AppDeps) -> None:
 
 def test_open_breaker_does_not_block_a_pure_query(deps: AppDeps) -> None:
     session = Session(deps)
-    view = session.submit("查一下上月账单")
+    view = session.submit("查看账单，再查看分类趋势")
     assert view.state is SessionState.AWAITING_CONFIRM
     assert view.card is not None
     assert view.card.level is Level.GREEN

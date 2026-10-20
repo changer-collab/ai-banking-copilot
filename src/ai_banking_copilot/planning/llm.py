@@ -16,8 +16,16 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Protocol, cast, runtime_checkable
 
+from ai_banking_copilot.planning.call_observation import CallObserver, emit_http_observation
+from ai_banking_copilot.planning.model_config import (
+    DEFAULT_ENDPOINT,
+    DEFAULT_MODEL,
+    ModelConfig,
+    NonBlockingLimiter,
+)
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ActionKind as ActionKind
 from ai_banking_copilot.tools.registry import UnknownActionError
@@ -76,6 +84,7 @@ class IntentProposal:
 
     intents: tuple[Intent, ...]
     raw: str
+    channel: str | None = None
 
 
 @runtime_checkable
@@ -152,6 +161,10 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "bills.yearly",
         "命中『年度账单』模板",
     ),
+    (
+        re.compile(r"(?:查看|查询)(?:账单)?分类趋势"),
+        "bills.category_trend", "命中『明确分类趋势』模板",
+    ),
     (re.compile(r"账单|消费分析|花了多少|消费明细"), "bills.monthly", "命中『账单分析』模板"),
     (
         re.compile(r"异常交易|可疑交易|大额交易|交易记录|交易明细|交易流水|有没有异常|异常流水"),
@@ -179,7 +192,7 @@ class TemplateIntentModel:
                         )
                     )
                     break
-        return IntentProposal(intents=tuple(intents), raw=utterance)
+        return IntentProposal(intents=tuple(intents), raw=utterance, channel="template")
 
 
 def _split_clauses(utterance: str) -> tuple[str, ...]:
@@ -219,10 +232,10 @@ class _HttpClientFactory(Protocol):
     def Client(self, *, timeout: float) -> _HttpClient: ...
 
 
-DEFAULT_LLM_MODEL = "qwen-plus"
+DEFAULT_LLM_MODEL = DEFAULT_MODEL
 """默认意图模型（可在组合根经 `AI_MODEL` 覆盖）。"""
 
-DEFAULT_LLM_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+DEFAULT_LLM_ENDPOINT = DEFAULT_ENDPOINT
 """默认端点（可在组合根经 `AI_BASE_URL` 覆盖）。"""
 
 
@@ -238,13 +251,33 @@ class LlmIntentModel:
         endpoint: str = DEFAULT_LLM_ENDPOINT,
         timeout_s: float = 20.0,
         allow_actions: Sequence[str] = CANONICAL_ACTIONS,
+        observer: CallObserver | None = None,
+        config: ModelConfig | None = None,
+        task_id: str | None = None,
+        prompt_version: str | None = None,
     ) -> None:
+        settings = config
         self._transport = transport
-        self._api_key = api_key if api_key is not None else os.environ.get("DASHSCOPE_API_KEY")
-        self._model = model
-        self._endpoint = endpoint
-        self._timeout_s = timeout_s
+        self._api_key = (
+            api_key if api_key is not None
+            else settings.api_key if settings is not None
+            else os.environ.get("DASHSCOPE_API_KEY")
+        )
+        self._model = (
+            settings.planner_model if settings is not None and model == DEFAULT_LLM_MODEL else model
+        )
+        self._endpoint = (
+            settings.endpoint
+            if settings is not None and endpoint == DEFAULT_LLM_ENDPOINT else endpoint
+        )
+        self._timeout_s = (
+            settings.planner_timeout_s if settings is not None and timeout_s == 20.0 else timeout_s
+        )
         self._allow_actions = tuple(allow_actions)
+        self._observer = observer
+        self._limiter = settings.limiter if settings is not None else NonBlockingLimiter(1)
+        self._task_id = task_id
+        self._prompt_version = prompt_version
 
     @property
     def loaded(self) -> bool:
@@ -265,8 +298,10 @@ class LlmIntentModel:
         )
         try:
             raw = transport(request)
+        except LlmUnavailableError:
+            raise
         except Exception as error:
-            raise LlmUnavailableError(f"LLM 调用失败：{error}") from error
+            raise LlmUnavailableError("LLM 调用失败（transport_error）") from error
         return _parse_proposal(raw, utterance, self._allow_actions)
 
     def _ensure_transport(self) -> HttpTransport:
@@ -280,6 +315,10 @@ class LlmIntentModel:
             api_key=api_key,
             endpoint=self._endpoint,
             timeout_s=self._timeout_s,
+            observer=self._observer,
+            limiter=self._limiter,
+            task_id=self._task_id,
+            prompt_version=self._prompt_version,
         )
         self._transport = transport
         return transport
@@ -304,7 +343,9 @@ def _system_prompt(actions: tuple[str, ...]) -> str:
         "1. 只依据用户原文识别意图，按原文出现顺序输出；不补造账户、收款人、金额或日期事实。\n"
         "2. 每个 intent 的 slots.span 必须是用户原文中逐字复制的连续片段；"
         "无法可靠回指原文时不要猜测该意图。\n"
-        "3. 每个动作片段须包含该动作的请求词以及用户明确给出的对应金额或日期；"
+        "3. 每个动作片段须包含支持该动作语义的原文依据；查询不要求出现请求词、金额或日期。"
+        "用户明确给出的对应金额或日期必须保留在各自动作片段内，不能裁掉否定、对象限定或条件；"
+        "缺少的控制槽交由服务端补全或澄清，模型不得补造。"
         "多个动作不得共享整句，也不得使用重叠片段。只登记预约时不要选择会立即扣款的动作。\n"
         "4. slots 中除 span 外的字段只作未验证线索，不能把模型臆测当成控制事实。\n"
         '输出格式：{"intents":[{"action":"...","confidence":0.0,"evidence":"原文依据",'
@@ -312,7 +353,11 @@ def _system_prompt(actions: tuple[str, ...]) -> str:
     )
 
 
-def _load_httpx_transport(*, api_key: str, endpoint: str, timeout_s: float) -> HttpTransport:
+def _load_httpx_transport(
+    *, api_key: str, endpoint: str, timeout_s: float, observer: CallObserver | None = None,
+    limiter: NonBlockingLimiter | None = None, task_id: str | None = None,
+    prompt_version: str | None = None,
+) -> HttpTransport:
     """懒加载可选依赖 httpx；未安装则降级为 `LlmUnavailableError`（H9）。"""
     try:
         module = importlib.import_module("httpx")
@@ -322,16 +367,39 @@ def _load_httpx_transport(*, api_key: str, endpoint: str, timeout_s: float) -> H
     client = factory.Client(timeout=timeout_s)
 
     def transport(request: str) -> str:
+        lease = limiter.try_acquire() if limiter is not None else None
+        if limiter is not None and lease is None:
+            raise LlmUnavailableError("LLM 调用失败（concurrency_limit）")
         payload = json.loads(request)
-        response = client.post(
-            endpoint,
-            json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout_s,
-        )
+        started_at = perf_counter()
+        status: int | None = None
+        response_text: str | None = None
+        error: BaseException | None = None
+        try:
+            response = client.post(
+                endpoint,
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=timeout_s,
+            )
+            status = response.status_code
+            response_text = response.text
+        except BaseException as caught:
+            error = caught
+            raise
+        finally:
+            emit_http_observation(
+                observer, role="planner", started_at=started_at,
+                http_status=status, response_text=response_text, error=error,
+                model=payload.get("model") if isinstance(payload, dict) else None,
+                task_id=task_id, prompt_version=prompt_version,
+                attempt_no=1, channel="llm-strict",
+            )
+            if lease is not None:
+                lease.release()
         if response.status_code != 200:
             raise LlmUnavailableError(f"LLM 返回状态 {response.status_code}")
-        return _extract_content(response.text)
+        return _extract_content(response_text)
 
     return transport
 
@@ -344,7 +412,7 @@ def _extract_content(raw: str) -> str:
     try:
         envelope = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise LlmUnavailableError(f"LLM 响应不是合法 JSON：{error}") from error
+        raise LlmUnavailableError("LLM 响应不是合法 JSON（format_error）") from error
     if not isinstance(envelope, dict):
         raise LlmUnavailableError("LLM 响应必须是 JSON 对象")
     choices = envelope.get("choices")
@@ -366,7 +434,7 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise LlmUnavailableError(f"LLM 响应不是合法 JSON：{error}") from error
+        raise LlmUnavailableError("LLM 响应不是合法 JSON（format_error）") from error
     if not isinstance(payload, dict):
         raise LlmUnavailableError("LLM 响应必须是 JSON 对象")
     items = payload.get("intents")
@@ -392,16 +460,16 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
                 evidence=str(item.get("evidence", "")),
             )
         )
-    return IntentProposal(intents=tuple(intents), raw=utterance)
+    return IntentProposal(intents=tuple(intents), raw=utterance, channel="llm-strict")
 
 
 def _confidence(value: object) -> float:
     try:
         confidence = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError) as error:
-        raise LlmUnavailableError(f"confidence 非法：{value!r}") from error
+        raise LlmUnavailableError("confidence 非法（format_error）") from error
     if not 0.0 <= confidence <= 1.0:
-        raise LlmUnavailableError(f"confidence 越界：{confidence}")
+        raise LlmUnavailableError("confidence 越界（format_error）")
     return confidence
 
 
@@ -427,6 +495,7 @@ class FallbackIntentModel:
             proposal = self._primary.propose(utterance, context)
         except LlmUnavailableError:
             self._degraded = True
-            return self._fallback.propose(utterance, context)
+            result = self._fallback.propose(utterance, context)
+            return IntentProposal(result.intents, result.raw, channel="template_fallback")
         self._degraded = False
         return proposal

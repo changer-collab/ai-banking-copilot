@@ -169,7 +169,14 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
   未设置 Key / 未安装 `httpx` / 调用失败时，自动回落**确定性模板通道**（能力子集，非等价实现，H9）。
 - `AIB_DISABLE_LLM=1` 可**强制只用模板通道**（现场演示求稳时使用）。
 - Key 只从环境变量读取；**不写入仓库、不写日志**。
-- Reviewer 默认 `AIB_REVIEW_CHANNEL=bypass`，只作模板旁路诊断；设为 `llm-strict` 并同时设置 `AIB_REVIEW_REQUIRED=1` 才要求真实审查通过。端点与模型沿用 `AI_BASE_URL` / `AI_MODEL`，密钥沿用上述环境变量；严格审查失败的写动作转人工，查询仍受既有绿色规则约束。
+- Reviewer 默认 `AIB_REVIEW_CHANNEL=bypass`，只作模板旁路诊断；显式设置 `llm-strict` 即强制真实审查通过，不能用 `AIB_REVIEW_REQUIRED=0` 绕过。`AIB_DISABLE_LLM=1` 强制模板与旁路诊断。
+- 配置统一由 `ModelConfig` 解析。Planner/Reviewer 默认超时分别为 20/180 秒，可用 `AI_TIMEOUT_S` 和 `AI_PLANNER_TIMEOUT_S` / `AI_REVIEWER_TIMEOUT_S` 覆盖；模型可分别用 `AI_PLANNER_MODEL` / `AI_REVIEWER_MODEL` 指定。每次提案每角色一次尝试、不自动重试，共享 `AI_MAX_CONCURRENCY` 非阻塞预算。任务视图显示实际通道、模板回退、HTTP 次数和供应商 usage。
+
+### 强验证与会话恢复
+
+- `AIB_VERIFICATION_MODE=demo` 默认使用明确标记的演示码；`external` 使用通用 HTTP JSON 投递，需设置 `AIB_VERIFICATION_ENDPOINT`、`AIB_VERIFICATION_TOKEN`、`AIB_VERIFICATION_TARGET` 与独立 `AIB_VERIFICATION_KEY`。`AIB_VERIFICATION_STRICT=1` 禁止 demo；未配置或投递失败不降级。external 响应省略验证码。
+- 验证挑战仅持久保存 HMAC 摘要，绑定用户、会话、执行和冻结计划，300 秒内一次性使用；真实第二信道尚未联调，不宣称短信、人脸或 U 盾已接入。
+- 默认 SQLite 快照支持单进程、单 worker 的服务重启恢复，`GET /api/session` 只读恢复状态。写节点执行前后设检查点；重启后未完成任务须重新确认，旧 active 挑战失效。回执与审计缺口明确阻止后续执行及回退，不能用新提交覆盖待核对记录。当前页面对话列表仍为临时记录，刷新后的自动找回属于后续 APP 通道工作。
 
 ## 执行一致性（2026-10-16）
 
@@ -190,8 +197,8 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 ```
 
 命令先创建不覆盖的 `.bak` 备份再追加迁移事件；错误锚、损坏 / 混存链或备份失败不追加。
-迁移表示运维接收历史，不能追溯证明旧 SHA 未遭改写。当前仍为逐节点事务、内存会话与演示验证码；
-审计和业务库之间没有 outbox，默认同目录密钥、日志截断检测与密钥轮换的限制仍在。
+迁移表示运维接收历史，不能追溯证明旧 SHA 未遭改写。当前仍为逐节点事务，业务库与审计没有事务 outbox；
+恢复检查点能检测崩溃缺口，审计缺失仍需人工核对。默认同目录密钥、日志截断检测与密钥轮换的限制仍在。
 
 ## 测试
 

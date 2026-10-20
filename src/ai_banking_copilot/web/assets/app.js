@@ -74,8 +74,15 @@ const state = {
   busy: false,
   notice: "",
   resultCount: 0,
+  task: null,
+  response: null,
+  taskCount: 0,
+  pendingStart: null,
+  requestLabel: "",
+  operationUnknown: false,
   insights: [],
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
+  model: null,
 };
 
 function el(id) {
@@ -124,25 +131,34 @@ function stripNo(line) {
 /* 会话标识（P2-7 · README 裁决 #27）：**每个页面实例一个新会话**。
    「新开页面 / 刷新 = 新会话」是本演示的恢复语义——裁决 #27 把触发 3/4/5 的熔断降为**会话级**
    （只让本会话转人工接管，不再锁死全局），因此需要这次隔离才能真正生效。 */
-const SESSION_ID = (() => {
+function newSessionId() {
   try {
     if (window.crypto && crypto.randomUUID) return "web-" + crypto.randomUUID();
   } catch (_) {
     /* 降级到时间戳 + 随机串（老浏览器 / 非安全上下文） */
   }
   return "web-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
-})();
+}
+let SESSION_ID = newSessionId();
 
 async function post(path, body) {
   if (state.offline || (typeof navigator !== "undefined" && navigator.onLine === false)) {
     throw new Error("当前离线，已禁用需要在线确认的操作");
   }
+  state.requestLabel = {
+    "/api/submit": "正在请求生成办理计划…", "/api/clarify": "正在提交补充信息…",
+    "/api/due": "正在读取到期待办…", "/api/verify/request": "正在申请强验证…",
+    "/api/confirm": "正在请求执行，请等待服务端回执…", "/api/interrupt": "正在请求中断…",
+    "/api/resume": "正在请求恢复并核对执行结果…", "/api/reverse": "正在请求回退已执行步骤…",
+  }[path] || "正在请求服务端…";
+  showRequestStatus();
   const payload = Object.assign({ session_id: SESSION_ID }, body || {});
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  state.operationUnknown = false;
   return { status: response.status, data: await response.json() };
 }
 
@@ -235,6 +251,12 @@ function selectedObjects() {
   return selected;
 }
 
+function clearObjectSelections() {
+  Object.keys(OBJECT_OPTIONS).forEach((slot) => {
+    el(`select-${slot}`).value = "";
+  });
+}
+
 async function refreshAfterExecution() {
   try {
     await refreshOptions();
@@ -247,6 +269,7 @@ function action(handler) {
   return async () => {
     if (state.busy) return;
     state.busy = true;
+    const dangerous = ["onInterrupt", "onResume", "onReverse"].includes(handler.name);
     setButtons();
     try {
       await handler();
@@ -254,12 +277,20 @@ function action(handler) {
       if (String(error).includes("fetch") || String(error).includes("离线")) {
         setOfflineState(true);
       }
-      state.phase = "failed";
-      state.notice = interceptHtml("请求未能完成", "请检查网络后重新查询业务状态。", false);
+      if (dangerous) {
+        state.operationUnknown = true;
+        state.notice = interceptHtml("请求结果未知", "未收到服务端回执。请先查看服务端状态或导出人工接管包，不要重复提交该操作。", false);
+      } else {
+        state.phase = state.card ? (state.verification ? "strong-verify" : "awaiting_confirm") : "failed";
+        state.notice = interceptHtml("请求未能完成", "未收到服务端结果，请先核对当前办理。执行请求可用同一计划再次确认核对；不要重复创建相同资金操作。", false);
+      }
+      state.notice += '<button class="btn" id="btn-refresh-session" type="button">读取服务端状态</button>';
       renderStage();
       timelineAdd("请求未能完成，请重新查询业务状态。", "stop");
     } finally {
       state.busy = false;
+      state.requestLabel = "";
+      showRequestStatus();
       setButtons();
     }
   };
@@ -425,27 +456,178 @@ function takeoverHtml(pack) {
 
 /* ---------------- 渲染装配 ---------------- */
 
+/* 只重绘最新回复；历史记录保存真实 DOM 快照，不再带授权控件。 */
 function renderStage() {
-  const stage = el("stage");
-  if (state.card) {
-    stage.innerHTML = voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice;
+  if (!state.response) return;
+  const code = el("vcode") ? el("vcode").value : "";
+  state.response.innerHTML = state.card
+    ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
+    : (state.panel || "") + state.notice;
+  state.response.innerHTML += modelMetadataHtml();
+  if (el("vcode")) el("vcode").value = code;
+  if (state.task) state.task.appendChild(el("task-actions"));
+  showRequestStatus();
+}
+
+function showRequestStatus() {
+  let status = el("request-status");
+  if (!state.requestLabel || !state.task) {
+    if (status) status.remove();
     return;
   }
-  stage.innerHTML = (state.panel || "") + state.notice;
+  if (!status) {
+    status = document.createElement("p");
+    status.id = "request-status";
+    status.className = "request-status";
+    status.setAttribute("role", "status");
+    state.task.appendChild(status);
+  }
+  status.textContent = state.requestLabel;
+}
+
+function showModelMetadata(metadata) {
+  state.model = metadata || null;
+}
+
+function modelMetadataHtml() {
+  const metadata = state.model;
+  if (!metadata) return "";
+  const channels = {
+    "template": "确定性模板", "bypass": "旁路诊断", "llm-strict": "真实模型严格通道",
+    "template_fallback": "模板回退（真实模型不可用）", "injected": "测试注入通道",
+  };
+  const name = (channel) => channels[channel] || "未调用";
+  const tokens = metadata.usage && metadata.usage.total_tokens;
+  return `<p class="muted">意图：${esc(name(metadata.planner_channel))} · 审查：${esc(name(metadata.reviewer_channel))}
+    <br />本任务真实 HTTP ${esc(String(metadata.http_attempts || 0))} 次 · 供应商 tokens ${esc(tokens == null ? "未提供" : String(tokens))}</p>`;
+}
+
+function appendMessage(role, text) {
+  const message = document.createElement("div");
+  message.className = `chat-message chat-message--${role}`;
+  const by = document.createElement("span");
+  by.className = "message-by";
+  by.textContent = role === "user" ? "您" : "银行副驾";
+  const body = document.createElement("div");
+  body.className = "message-body";
+  if (text) body.textContent = text;
+  message.appendChild(by);
+  message.appendChild(body);
+  state.task.appendChild(message);
+  return body;
+}
+
+function makeReadOnly(root) {
+  root.querySelectorAll("input,select,textarea,button").forEach((control) => {
+    const text = document.createElement("span");
+    text.className = "history-value";
+    text.textContent = control.tagName === "SELECT"
+      ? (control.selectedOptions[0] ? control.selectedOptions[0].textContent : "未选择")
+      : control.tagName === "BUTTON" ? "" : control.value || "未填写";
+    control.replaceWith(text);
+  });
+  [root, ...root.querySelectorAll("*")].forEach((node) => {
+    ["id", "for", "data-slot", "data-preset", "aria-controls"].forEach((name) => node.removeAttribute(name));
+  });
+}
+
+function advanceResponse(answer) {
+  if (state.response) makeReadOnly(state.response);
+  if (answer) appendMessage("user", answer);
+  state.response = appendMessage("assistant");
+  state.response.id = "active-response";
+  state.panel = "";
+  state.notice = "";
+}
+
+function archiveTask(abandoned = false) {
+  if (!state.task) return;
+  el("actions-parking").appendChild(el("task-actions"));
+  if (abandoned) {
+    const note = document.createElement("p");
+    note.className = "archive-note";
+    note.textContent = "本次办理已结束：放弃未执行部分，已执行结果保留；此处为只读记录。";
+    state.task.appendChild(note);
+  }
+  makeReadOnly(state.task);
+  state.task.classList.add("chat-task--archived");
+  state.task = null;
+  state.response = null;
+}
+
+function hasUnfinishedTask() {
+  return Boolean(state.task && !["idle", "done", "failed", "blocked", "reversed", "taken_over"].includes(state.phase));
+}
+
+function requestStart(start) {
+  if (hasUnfinishedTask()) {
+    state.pendingStart = start;
+    el("task-guard-title").textContent = hasUnfinishedTask() ? "当前办理尚未结束" : "请先核对当前办理结果";
+    el("task-guard").hidden = false;
+    el("btn-continue-task").focus();
+    return false;
+  }
+  return true;
+}
+
+function beginTask(text, selected = {}) {
+  archiveTask();
+  reset(true);
+  SESSION_ID = newSessionId();
+  const welcome = el("conversation-welcome");
+  if (welcome) welcome.hidden = true;
+  const task = document.createElement("section");
+  task.className = "chat-task";
+  task.dataset.session = SESSION_ID;
+  task.setAttribute("aria-label", `办理 ${++state.taskCount}：${text}`);
+  state.task = task;
+  el("stage").appendChild(task);
+  const record = document.createElement("button");
+  record.type = "button";
+  record.className = "conversation-record";
+  record.textContent = text;
+  record.addEventListener("click", () => task.scrollIntoView({ behavior: "smooth", block: "start" }));
+  if (state.taskCount === 1) el("conversation-list").innerHTML = "";
+  el("conversation-list").prepend(record);
+  appendMessage("user", text);
+  if (Object.keys(selected).length) {
+    const objects = Object.keys(selected).map((slot) => {
+      const node = el(`select-${slot}`);
+      return node.selectedOptions[0] ? node.selectedOptions[0].textContent : selected[slot];
+    });
+    appendMessage("user", `本次办理对象：${objects.join("；")}`);
+  }
+  clearObjectSelections();
+  advanceResponse();
+  task.appendChild(el("task-actions"));
+  setMobileDrawer("scenes", false);
+}
+
+async function startFreshConversation() {
+  if (!requestStart(startFreshConversation)) return;
+  archiveTask();
+  reset(false);
+  SESSION_ID = newSessionId();
+  clearObjectSelections();
+  el("utterance").focus();
+  setMobileDrawer("scenes", false);
 }
 
 /* 强验证挑战面板：验证码由服务端下发，一次性 + TTL；演示环境直接展示以便现场输入 */
 function verifyHtml() {
   const v = state.verification || {};
+  const delivery = v.mode === "demo"
+    ? `演示模式未发送真实短信，演示码：<span class="mono">${esc(v.code || "—")}</span>`
+    : `验证提供方已接受投递，请从配置的第二信道读取验证码。`;
   return `<div class="takeover" style="margin-top: var(--s-4)">
     <div class="muted">强验证 · 红色级别须通过服务端挑战后方可执行</div>
     <p class="muted" style="font-size: var(--fs-small); margin: var(--s-3) 0">
-      已向 <span class="mono">${esc(v.target || "—")}</span> 下发验证码
+      验证目标 <span class="mono">${esc(v.target || "—")}</span>
       （渠道 ${esc(v.channel || "—")}，${esc(String(v.expires_in_s || "—"))} 秒内有效，一次性）。
-      <br />演示环境未接入真实短信网关，验证码在此直接展示：
-      <span class="mono">${esc(v.code || "—")}</span>
+      <br />${delivery}
     </p>
     <input class="textarea" id="vcode" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码" />
+    <button class="btn" id="btn-reverify" type="button">重新申请</button>
   </div>`;
 }
 
@@ -462,9 +644,11 @@ function setButtons() {
   const offline = state.offline || (typeof navigator !== "undefined" && navigator.onLine === false);
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
+  const operationUnknown = state.operationUnknown;
   el("btn-submit").disabled = offline || busy || !state.options;
   el("btn-due").disabled = offline || busy || !state.options;
   el("btn-reset").disabled = busy;
+  el("task-actions").hidden = !state.task || (!state.card && state.phase !== "blocked");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     el(`select-${slot}`).disabled = offline || busy || !state.options;
   });
@@ -476,10 +660,10 @@ function setButtons() {
     : redPending
       ? "申请强验证"
       : "确认并执行";
-  el("btn-confirm").disabled = offline || !(awaiting || strongPhase) || busy;
-  el("btn-interrupt").disabled = offline || state.busy || !(state.phase === "executing" || awaiting);
-  el("btn-resume").disabled = offline || busy || state.phase !== "interrupted";
-  el("btn-reverse").disabled = offline || busy || state.phase === "reversed" || state.stepStates.filter((s) => s === "done").length === 0;
+  el("btn-confirm").disabled = operationUnknown || offline || !(awaiting || strongPhase) || busy;
+  el("btn-interrupt").disabled = operationUnknown || offline || state.busy || !(state.phase === "executing" || awaiting);
+  el("btn-resume").disabled = operationUnknown || offline || busy || !state.card || state.phase !== "interrupted";
+  el("btn-reverse").disabled = operationUnknown || offline || busy || state.phase === "reversed" || !state.card || state.card.level === "GREEN" || state.stepStates.filter((s) => s === "done").length === 0;
   el("btn-takeover").disabled = offline || busy || state.phase === "idle";
 }
 
@@ -495,7 +679,9 @@ function reset(keepUtterance) {
   state.clarifications = [];
   state.notice = "";
   state.resultCount = 0;
-  if (!keepUtterance) el("utterance").value = "转给李娜 500 元";
+  state.operationUnknown = false;
+  state.model = null;
+  if (!keepUtterance) el("utterance").value = "";
   renderStage();
   renderChain();
   timelineReset();
@@ -508,7 +694,7 @@ function renderPresets() {
   ).join("");
   ["quick-scenes", "presets"].forEach((id) => {
     const container = el(id);
-    if (container) container.innerHTML = html;
+    if (container) container.innerHTML = id === "presets" ? PRESETS.slice(0, 4).map((text) => `<button class="btn" data-preset="${esc(text)}">${esc(text)}</button>`).join("") : html;
   });
 }
 
@@ -516,6 +702,7 @@ function renderPresets() {
 
 /* 把一次提交（/api/submit 或 /api/clarify）的结果落到界面：两条路径共用同一处理 */
 async function applySubmission(data) {
+  showModelMetadata(data.model);
   if (data.state === "awaiting_confirm" && data.card) {
     state.card = data.card;
     state.decision = data.decision || null;
@@ -564,15 +751,20 @@ function clarifyHtml() {
   </div>`;
 }
 
+function baseSlot(slot) {
+  return slot.replace(/^intent_\d+_/, "");
+}
+
 function clarifyPrompt(ask) {
-  if (MONEY_SLOTS.has(ask.slot)) return `请填写${SLOT_LABELS[ask.slot]}（元）。`;
-  if (ask.slot === "period") return "请选择扣费周期。";
+  const slot = baseSlot(ask.slot);
+  if (MONEY_SLOTS.has(slot)) return `${ask.prompt}（金额单位：元）`;
+  if (slot === "period") return "请选择扣费周期。";
   return ask.prompt;
 }
 
 function clarifyControl(ask) {
-  const slot = ask.slot;
-  const attrs = `class="input" id="ask-${esc(slot)}" data-slot="${esc(slot)}" required`;
+  const slot = baseSlot(ask.slot);
+  const attrs = `class="input" id="ask-${esc(ask.slot)}" data-slot="${esc(ask.slot)}" required`;
   if (OBJECT_OPTIONS[slot]) return `<select ${attrs}>${optionsHtml(slot)}</select>`;
   if (slot === "period") {
     return `<select ${attrs}><option value="">请选择扣费周期</option>` +
@@ -589,28 +781,44 @@ function clarifyControl(ask) {
 
 async function onClarify() {
   const answers = {};
-  const inputs = Array.from(document.querySelectorAll("[data-slot]"));
+  const inputs = Array.from(state.response.querySelectorAll("[data-slot]"));
   if (!inputs.every((node) => node.reportValidity())) return;
   inputs.forEach((node) => {
     const value = (node.value || "").trim();
-    if (value) answers[node.dataset.slot] = MONEY_SLOTS.has(node.dataset.slot) ? `${value}元` : value;
+    if (value) answers[node.dataset.slot] = MONEY_SLOTS.has(baseSlot(node.dataset.slot)) ? `${value}元` : value;
   });
+  const answerText = inputs.map((node) => {
+    const value = node.tagName === "SELECT" && node.selectedOptions[0] ? node.selectedOptions[0].textContent : node.value;
+    const slot = baseSlot(node.dataset.slot);
+    return `${SLOT_LABELS[slot] || "补充信息"}：${value}${MONEY_SLOTS.has(slot) ? " 元" : ""}`;
+  }).join("；");
   const result = await post("/api/clarify", { answers });
   if (result.status !== 200) {
+    state.notice = interceptHtml("补充被拒绝", result.data.detail || "当前无待澄清指令", false);
+    renderStage();
     timelineAdd(`补充被拒绝：${result.data.detail || "当前无待澄清指令"}`, "stop");
     return;
   }
   timelineAdd(`已补充并继续：${Object.keys(answers).map((slot) => SLOT_LABELS[slot] || "所需信息").join("、") || "（未新增）"}`, "live");
+  advanceResponse(answerText);
   await applySubmission(result.data);
   setButtons();
 }
 
 async function onSubmit() {
-  reset(true);
-  const text = el("utterance").value;
+  const text = el("utterance").value.trim();
+  if (!text) { el("utterance").focus(); return; }
+  const selected = selectedObjects();
+  const start = () => submitTask(text, selected);
+  if (!requestStart(start)) return;
+  await start();
+}
+
+async function submitTask(text, selected) {
+  beginTask(text, selected);
+  el("utterance").value = "";
   state.phase = "submitting";
-  setButtons();
-  const result = await post("/api/submit", { utterance: text, selected: selectedObjects() });
+  const result = await post("/api/submit", { utterance: text, selected });
   timelineAdd(`提交：${text}`, "live");
   if (result.status !== 200) {
     state.phase = "failed";
@@ -619,29 +827,35 @@ async function onSubmit() {
     return;
   }
   await applySubmission(result.data);
-  setButtons();
 }
 
 async function onDue() {
-  reset(true);
-  const result = await post("/api/due", {});
-  if (result.status !== 200) {
-    state.phase = "failed";
-    state.notice = interceptHtml("待办检查未完成", result.data.detail || "请稍后重试", false);
-    renderStage();
-    return;
-  }
-  timelineAdd("已检查到期待办，需确认后才会执行。", "live");
-  await applySubmission(result.data);
+  const start = async () => {
+    beginTask("检查到期待办");
+    const result = await post("/api/due", {});
+    if (result.status !== 200) {
+      state.phase = "failed";
+      state.notice = interceptHtml("待办检查未完成", result.data.detail || "请稍后重试", false);
+      renderStage();
+      return;
+    }
+    timelineAdd("已检查到期待办，需确认后才会执行。", "live");
+    await applySubmission(result.data);
+  };
+  if (!requestStart(start)) return;
+  await start();
 }
 
 /* 申请服务端强验证挑战（红色卡）：验证码一次性 + 有 TTL，与当前冻结计划绑定 */
 async function requestVerification() {
   const result = await post("/api/verify/request", {});
   if (result.status !== 200) {
+    state.notice = interceptHtml("强验证申请被拒绝", result.data.detail || "当前计划卡无需强验证", false);
+    renderStage();
     timelineAdd(`强验证申请被拒绝：${result.data.detail || "当前计划卡无需强验证"}`, "stop");
     return;
   }
+  state.notice = "";
   state.verification = result.data;
   state.phase = "strong-verify";
   renderStage();
@@ -700,6 +914,7 @@ function billAdviceHtml(items) {
 }
 
 function applyExecution(data) {
+  showModelMetadata(data.model);
   if (data.card) state.card = data.card;
   if (data.decision) state.decision = data.decision;
   if (data.state === "awaiting_confirm") state.verification = null;
@@ -727,10 +942,13 @@ function applyExecution(data) {
 async function onInterrupt() {
   const result = await post("/api/interrupt", {});
   if (result.status !== 200) {
+    state.notice = interceptHtml("中断被拒绝", result.data.detail || "当前状态不可中断", false);
+    renderStage();
     timelineAdd(`中断被拒绝：${result.data.detail || "当前状态不可中断"}`, "stop");
     return;
   }
   state.phase = "interrupted";
+  state.notice = `<div class="takeover"><p>${esc(result.data.message || "已中断：已执行节点保留、未执行节点挂起")}</p></div>`;
   timelineAdd("用户中断：已执行节点保留、未执行节点挂起", "warn");
   renderStage();
   setButtons();
@@ -739,6 +957,7 @@ async function onInterrupt() {
 async function onResume() {
   const result = await post("/api/resume", {});
   if (result.status !== 200) {
+    await refreshSession();
     state.notice = interceptHtml("恢复被拒绝", result.data.detail || "当前状态不可恢复", false);
     renderStage();
     timelineAdd(`恢复被拒绝：${result.data.detail || "当前状态不可恢复"}`, "stop");
@@ -746,6 +965,17 @@ async function onResume() {
   }
   applyExecution(result.data);
   await refreshAfterExecution();
+}
+
+async function refreshSession() {
+  const response = await fetch("/api/session?session_id=" + encodeURIComponent(SESSION_ID), { cache: "no-store" });
+  const data = await response.json();
+  if (!response.ok) throw new Error("服务端状态读取失败");
+  state.operationUnknown = false;
+  state.verification = null;
+  applyExecution(data);
+  timelineAdd(data.message || "已读取服务端状态，未执行操作。", "live");
+  setButtons();
 }
 
 async function onReverse() {
@@ -757,10 +987,14 @@ async function onReverse() {
     timelineAdd(`回退被拒绝：${data.detail || "当前状态不可回退"}`, "stop");
     return;
   }
-  state.phase = "reversed";
-  state.notice = `<div class="takeover"><p>${esc(data.message || "已完成回退")}</p></div>`;
+  const reversed = data.state === "reversed";
+  state.phase = reversed ? "reversed" : "failed";
+  if (reversed) state.stepStates = state.stepStates.map((step) => step === "done" ? "rolled" : step);
+  state.notice = reversed
+    ? `<div class="takeover"><p>${esc(data.message || "已完成回退")}</p></div>`
+    : interceptHtml("回退未完成", data.message || "服务端未确认回退完成，请核对已执行结果。", false);
   renderStage();
-  timelineAdd(data.message || "已完成回退", "stop");
+  timelineAdd(data.message || (reversed ? "已完成回退" : "回退未完成"), reversed ? "done" : "stop");
   await refreshAfterExecution();
   setButtons();
 }
@@ -771,11 +1005,14 @@ async function onTakeover() {
     cache: "no-store",
   });
   if (response.status !== 200) {
+    state.notice = interceptHtml("接管包读取失败", "当前状态无接管包，请核对当前办理。", false);
+    renderStage();
     timelineAdd("当前状态无接管包", "warn");
     return;
   }
   const pack = await response.json();
-  el("stage").insertAdjacentHTML("beforeend", takeoverHtml(pack));
+  state.notice += takeoverHtml(pack);
+  renderStage();
   timelineAdd("已导出人工接管包（意图 / 计划 / 命中规则 / 审计 ID）", "warn");
 }
 
@@ -798,7 +1035,27 @@ el("btn-interrupt").addEventListener("click", action(onInterrupt));
 el("btn-resume").addEventListener("click", action(onResume));
 el("btn-reverse").addEventListener("click", action(onReverse));
 el("btn-takeover").addEventListener("click", action(onTakeover));
-el("btn-reset").addEventListener("click", () => reset(false));
+el("btn-reset").addEventListener("click", action(startFreshConversation));
+el("btn-continue-task").addEventListener("click", () => {
+  state.pendingStart = null;
+  el("task-guard").hidden = true;
+  if (state.response) state.response.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+el("btn-end-task").addEventListener("click", action(async () => {
+  const next = state.pendingStart;
+  state.pendingStart = null;
+  el("task-guard").hidden = true;
+  archiveTask(hasUnfinishedTask());
+  reset(true);
+  SESSION_ID = newSessionId();
+  if (next) await next();
+}));
+el("utterance").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!el("btn-submit").disabled) action(onSubmit)();
+  }
+});
 const app = el("app");
 
 function setMobileDrawer(name, open) {
@@ -806,10 +1063,18 @@ function setMobileDrawer(name, open) {
   const other = name === "scenes" ? "trace" : "scenes";
   app.classList.toggle(`is-${name}-open`, open);
   app.classList.remove(`is-${other}-open`);
-  const button = el(`btn-${name}-mobile`);
-  if (button) button.setAttribute("aria-expanded", String(open));
-  const otherButton = el(`btn-${other}-mobile`);
-  if (otherButton) otherButton.setAttribute("aria-expanded", "false");
+  [name, other].forEach((drawerName) => {
+    const isOpen = drawerName === name && open;
+    el(`btn-${drawerName}-mobile`)?.setAttribute("aria-expanded", String(isOpen));
+  });
+  const persistentOnDesktop = window.matchMedia("(min-width: 1021px)").matches;
+  el("conversation-sidebar").setAttribute(
+    "aria-hidden",
+    String(!app.classList.contains("is-scenes-open") && !persistentOnDesktop),
+  );
+  el("trace").setAttribute("aria-hidden", String(!app.classList.contains("is-trace-open")));
+  if (open && name === "scenes") el("btn-reset")?.focus();
+  if (open && name === "trace") el("btn-close-trace")?.focus();
 }
 
 ["scenes", "trace"].forEach((name) => {
@@ -822,11 +1087,28 @@ function setMobileDrawer(name, open) {
     });
   }
 });
-const newButton = el("btn-new");
-if (newButton) newButton.addEventListener("click", () => reset(false));
+setMobileDrawer("scenes", false);
+setMobileDrawer("trace", false);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    const openDrawer = app?.classList.contains("is-scenes-open")
+      ? "scenes"
+      : app?.classList.contains("is-trace-open") ? "trace" : null;
+    if (openDrawer) {
+      setMobileDrawer(openDrawer, false);
+      el(`btn-${openDrawer}-mobile`)?.focus();
+    }
+  }
+});
+el("btn-close-trace").addEventListener("click", () => {
+  setMobileDrawer("trace", false);
+  el("btn-trace-mobile").focus();
+});
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
   if (event.target && event.target.id === "btn-clarify") action(onClarify)();
+  if (event.target && event.target.id === "btn-reverify") action(requestVerification)();
+  if (event.target && event.target.id === "btn-refresh-session") action(refreshSession)();
 });
 
 function readTheme() {
@@ -885,9 +1167,10 @@ window.addEventListener("online", () => {
   refreshOptions().catch(() => {});
   refreshInsights().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
+  if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/assets/sw.js?v=3", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=9", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
