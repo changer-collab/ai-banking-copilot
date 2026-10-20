@@ -1,5 +1,7 @@
 import json
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from ai_banking_copilot.planning.llm import (
@@ -7,6 +9,89 @@ from ai_banking_copilot.planning.llm import (
     LlmUnavailableError,
 )
 from ai_banking_copilot.tools.catalog import build_default_registry
+
+
+@pytest.mark.parametrize(("status", "error", "body", "code"), [
+    (200, None, json.dumps({
+        "usage": {"total_tokens": 7},
+        "choices": [{"message": {"content": '{"intents":[]}'}}],
+    }), None),
+    (200, None, "bad json", None),
+    (503, None, "secret provider error", "http_error"),
+    (None, httpx.ReadTimeout("secret timeout"), None, "timeout"),
+    (None, httpx.ConnectError("secret connection"), None, "transport_error"),
+])
+def test_actual_planner_http_attempt_is_observed(monkeypatch, status, error, body, code):
+    records = []
+    calls = []
+    class Client:
+        def __init__(self, *, timeout):
+            assert timeout == 20.0
+        def post(self, endpoint, *, json, headers, timeout):
+            calls.append(json)
+            assert timeout == 20.0 and headers == {"Authorization": "Bearer local-fake"}
+            if error is not None:
+                raise error
+            return SimpleNamespace(status_code=status, text=body)
+    monkeypatch.setattr(
+        "ai_banking_copilot.planning.llm.importlib.import_module",
+        lambda name: SimpleNamespace(Client=Client),
+    )
+    model = LlmIntentModel(api_key="local-fake", observer=records.append)
+    if error is not None or status != 200 or body == "bad json":
+        with pytest.raises(LlmUnavailableError):
+            model.propose("查余额", {})
+    else:
+        assert model.propose("查余额", {}).intents == ()
+    assert len(calls) == len(records) == 1
+    assert records[0].http_status == status
+    assert records[0].failure_code == code
+    expected_usage = {"total_tokens": 7} if status == 200 and body != "bad json" else None
+    assert records[0].usage == expected_usage
+
+
+def test_planner_injected_transport_and_missing_credentials_emit_nothing(monkeypatch):
+    records = []
+    LlmIntentModel(
+        transport=lambda request: '{"intents":[]}', observer=records.append,
+    ).propose("查余额", {})
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    with pytest.raises(LlmUnavailableError, match="凭据"):
+        LlmIntentModel(observer=records.append).propose("查余额", {})
+    assert records == []
+
+
+@pytest.mark.parametrize("broken_observer", [False, True])
+@pytest.mark.parametrize("post_fails", [False, True])
+def test_planner_observer_does_not_change_transport_outcome(
+    monkeypatch, broken_observer, post_fails,
+):
+    calls = []
+    original_error = httpx.ConnectError("local failure")
+    class Client:
+        def __init__(self, *, timeout):
+            pass
+        def post(self, endpoint, **kwargs):
+            calls.append(kwargs)
+            if post_fails:
+                raise original_error
+            return SimpleNamespace(status_code=200, text=json.dumps({
+                "choices": [{"message": {"content": '{"intents":[]}'}}],
+            }))
+    def broken(record):
+        raise RuntimeError("observer failure")
+    monkeypatch.setattr(
+        "ai_banking_copilot.planning.llm.importlib.import_module",
+        lambda name: SimpleNamespace(Client=Client),
+    )
+    model = LlmIntentModel(api_key="local-fake", observer=broken if broken_observer else None)
+    if post_fails:
+        with pytest.raises(LlmUnavailableError) as caught:
+            model.propose("查余额", {})
+        assert caught.value.__cause__ is original_error
+    else:
+        assert model.propose("查余额", {}).intents == ()
+    assert len(calls) == 1
 
 
 def test_injected_transport_is_used_without_network() -> None:
@@ -122,3 +207,20 @@ def test_request_does_not_invent_semantics_for_custom_allowed_action() -> None:
     messages = requests[0]["messages"]
     assert isinstance(messages, list)
     assert "custom.query：未提供动作说明" in messages[0]["content"]
+
+
+def test_query_instructions_accept_questions_without_amount_date_or_request_verb() -> None:
+    requests: list[dict[str, object]] = []
+
+    def transport(request: str) -> str:
+        requests.append(json.loads(request))
+        return json.dumps({"intents": []})
+
+    utterance = "我花了多少钱"
+    LlmIntentModel(transport=transport).propose(utterance, {})
+    messages = requests[0]["messages"]
+    prompt = messages[0]["content"]
+    assert "查询不要求出现请求词、金额或日期" in prompt
+    assert "缺少的控制槽交由服务端补全或澄清" in prompt
+    assert "用户明确给出的对应金额或日期必须保留" in prompt
+    assert messages[1] == {"role": "user", "content": utterance}

@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Protocol, cast
 
+from ai_banking_copilot.planning.call_observation import provider_usage
+
 
 class ProbeClass(StrEnum):
     CONFIG_MISSING = "config_missing"
@@ -94,17 +96,7 @@ def _default_client_factory(*, timeout: float) -> object:
     return module.Client(timeout=timeout)
 
 
-def _numeric_usage(value: object) -> dict[str, int | float]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {
-        str(key): item
-        for key, item in value.items()
-        if isinstance(key, str) and isinstance(item, (int, float)) and not isinstance(item, bool)
-    }
-
-
-def _extract_response(response: _Response) -> tuple[str, dict[str, int | float]]:
+def _extract_response(response: _Response) -> tuple[str, dict[str, int]]:
     try:
         envelope = json.loads(response.text)
     except (json.JSONDecodeError, TypeError) as error:
@@ -117,7 +109,7 @@ def _extract_response(response: _Response) -> tuple[str, dict[str, int | float]]
     message = choices[0].get("message")
     if not isinstance(message, dict) or not isinstance(message.get("content"), str):
         raise ValueError("响应缺少 choices[0].message.content")
-    return message["content"], _numeric_usage(envelope.get("usage"))
+    return message["content"], dict(provider_usage(response.text) or {})
 
 
 def probe_chat_completion(

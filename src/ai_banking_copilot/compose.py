@@ -20,6 +20,7 @@ from pathlib import Path
 from ai_banking_copilot.gateway.core_bank import CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed_user_profiles
+from ai_banking_copilot.gateway.receipt_store import StoreReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
     init_risk_schema,
@@ -28,25 +29,38 @@ from ai_banking_copilot.gateway.risk_store import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
+from ai_banking_copilot.planning.call_observation import CallObserver
 from ai_banking_copilot.planning.llm import (
-    DEFAULT_LLM_ENDPOINT,
-    DEFAULT_LLM_MODEL,
     FallbackIntentModel,
     IntentModel,
     LlmIntentModel,
     TemplateIntentModel,
 )
-from ai_banking_copilot.planning.reviewer import ReviewChannel, Reviewer, create_reviewer
+from ai_banking_copilot.planning.model_config import DEFAULT_REVIEWER_TIMEOUT_S, ModelConfig
+from ai_banking_copilot.planning.reviewer import (
+    ReviewChannel,
+    Reviewer,
+    StrictPlanReviewer,
+    create_reviewer,
+)
+from ai_banking_copilot.planning.task_observations import TaskObservations
 from ai_banking_copilot.policy.audit import AuditLog, ChainBrokenError
 from ai_banking_copilot.policy.audit_validation import verify_for_service
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.breaker_store import StoreBreakerStateStore, init_breaker_schema
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
+from ai_banking_copilot.policy.verification import (
+    DemoVerificationProvider,
+    ExternalVerificationProvider,
+    VerificationMode,
+    VerificationProvider,
+)
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.insights import InsightService, SQLiteInsightMetadataStore
+from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
 DISABLE_LLM_ENV = "AIB_DISABLE_LLM"
 """置为真值时强制**只用模板通道**（现场演示保稳的可选开关）。"""
@@ -61,53 +75,52 @@ _KEY_ENV_NAMES = ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
 """凭据环境变量（按序取首个非空）：通用 `AI_*` 优先，兼容本仓库历史 `DASHSCOPE_API_KEY`。"""
 
 
-def build_intent_model(env: Mapping[str, str] | None = None) -> IntentModel:
+def build_intent_model(
+    env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
+    observer: CallObserver | None = None,
+) -> IntentModel:
     """装配意图通道：默认"真模型优先 + 失败降级模板"；`AIB_DISABLE_LLM` 真值时只用模板。
 
     端点与模型可经 `AI_BASE_URL`（或 `OPENAI_API_BASE_URL`）/ `AI_MODEL` 覆盖，
     未提供时沿用 `LlmIntentModel` 的默认值。
     """
-    source = os.environ if env is None else env
-    if source.get(DISABLE_LLM_ENV, "").strip().lower() in _DISABLED_VALUES:
+    settings = config if config is not None else ModelConfig.from_env(env)
+    if settings.disable_llm:
         return TemplateIntentModel()
-    api_key = ""
-    for name in _KEY_ENV_NAMES:
-        candidate = source.get(name, "").strip()
-        if candidate:
-            api_key = candidate
-            break
-    endpoint = (
-        source.get("AI_BASE_URL", "").strip()
-        or source.get("OPENAI_API_BASE_URL", "").strip()
-        or DEFAULT_LLM_ENDPOINT
-    )
-    model = source.get("AI_MODEL", "").strip() or DEFAULT_LLM_MODEL
-    return FallbackIntentModel(LlmIntentModel(api_key=api_key, model=model, endpoint=endpoint))
+    return FallbackIntentModel(LlmIntentModel(
+        config=settings, observer=observer, prompt_version="planner-v1",
+    ))
 
 
-def build_reviewer(env: Mapping[str, str] | None = None) -> Reviewer:
+def build_reviewer(
+    env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
+    observer: CallObserver | None = None,
+) -> Reviewer:
     """装配计划后置审查；默认是明确标注的旁路模板诊断。"""
     source = os.environ if env is None else env
+    settings = config if config is not None else ModelConfig.from_env(source)
     mode = source.get(REVIEW_CHANNEL_ENV, ReviewChannel.BYPASS.value).strip().lower()
-    if source.get(DISABLE_LLM_ENV, "").strip().lower() in _DISABLED_VALUES:
+    if settings.disable_llm:
         mode = ReviewChannel.BYPASS.value
-    api_key = ""
-    for name in _KEY_ENV_NAMES:
-        candidate = source.get(name, "").strip()
-        if candidate:
-            api_key = candidate
-            break
-    endpoint = (
-        source.get("AI_BASE_URL", "").strip()
-        or source.get("OPENAI_API_BASE_URL", "").strip()
-        or DEFAULT_LLM_ENDPOINT
+    if mode == ReviewChannel.LLM_STRICT.value and config is not None:
+        return StrictPlanReviewer(config=settings, observer=observer)
+    timeout = settings.reviewer_timeout_s
+    if timeout != DEFAULT_REVIEWER_TIMEOUT_S:
+        return create_reviewer(
+            mode, api_key=settings.api_key, model=settings.reviewer_model,
+            endpoint=settings.endpoint, timeout_s=timeout,
+        )
+    return create_reviewer(
+        mode, api_key=settings.api_key, model=settings.reviewer_model, endpoint=settings.endpoint,
     )
-    model = source.get("AI_MODEL", "").strip() or DEFAULT_LLM_MODEL
-    return create_reviewer(mode, api_key=api_key, model=model, endpoint=endpoint)
 
 
 def reviewer_required(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
+    if source.get(DISABLE_LLM_ENV, "").strip().lower() in _DISABLED_VALUES:
+        return False
+    if source.get(REVIEW_CHANNEL_ENV, "").strip().lower() == ReviewChannel.LLM_STRICT.value:
+        return True
     return source.get(REVIEW_REQUIRED_ENV, "").strip().lower() in _DISABLED_VALUES
 
 
@@ -178,6 +191,30 @@ def build_operator_token(env: Mapping[str, str] | None = None) -> str | None:
     return source.get(OPERATOR_TOKEN_ENV, "").strip() or None
 
 
+def build_verification(
+    db_path: Path, env: Mapping[str, str] | None = None,
+) -> tuple[VerificationProvider, bytes | None, bool]:
+    """强验证密钥独立于审计密钥；external 缺密钥时由申请入口失败关闭。"""
+    source = os.environ if env is None else env
+    mode = VerificationMode(source.get("AIB_VERIFICATION_MODE", "demo").strip().lower())
+    strict = source.get("AIB_VERIFICATION_STRICT", "").strip().lower() in _DISABLED_VALUES
+    key = source.get("AIB_VERIFICATION_KEY", "").strip()
+    if mode is VerificationMode.EXTERNAL:
+        return ExternalVerificationProvider(
+            endpoint=source.get("AIB_VERIFICATION_ENDPOINT", "").strip() or None,
+            token=source.get("AIB_VERIFICATION_TOKEN", "").strip() or None,
+            target=source.get("AIB_VERIFICATION_TARGET", "").strip() or None,
+        ), key.encode() if key else None, strict
+    if not key and not strict:
+        key_path = db_path.with_suffix(".verification.key")
+        if key_path.is_file():
+            key = key_path.read_text(encoding="utf-8").strip()
+        else:
+            key = secrets.token_hex(32)
+            key_path.write_text(key, encoding="utf-8")
+    return DemoVerificationProvider(), key.encode() if key else None, strict
+
+
 def build_deps(
     db_path: Path, env: Mapping[str, str] | None = None, *, resources: ExitStack | None = None
 ) -> AppDeps:
@@ -192,6 +229,7 @@ def build_deps(
     seed_user_profiles(writer)
     init_transfer_schema(writer)
     init_breaker_schema(writer)
+    init_session_schema(writer)
     writer.close()
 
     read_store = Store(db_path, StoreMode.READ_ONLY)
@@ -207,7 +245,13 @@ def build_deps(
     if resources is not None:
         resources.callback(core_store.close)
     core_bank = CoreBank(core_store)
+    session_store = Store(db_path, StoreMode.READ_WRITE)
+    if resources is not None:
+        resources.callback(session_store.close)
     source = os.environ if env is None else env
+    verification_provider, verification_key, verification_strict = build_verification(db_path, env)
+    model_config = ModelConfig.from_env(source)
+    model_observations = TaskObservations()
     insight_path = Path(
         source.get(INSIGHT_DB_ENV, "").strip()
         or db_path.with_name(f"{db_path.stem}-insights.db")
@@ -225,7 +269,7 @@ def build_deps(
             store.close()
 
     return AppDeps(
-        intent_model=build_intent_model(env),
+        intent_model=build_intent_model(env, config=model_config, observer=model_observations),
         registry=registry,
         gateway=gateway,
         pep=Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS),
@@ -235,7 +279,13 @@ def build_deps(
         risk=StoreRiskAssessmentSource(read_store),
         reversal=ReversalService(core_bank),
         operator_token=build_operator_token(env),
-        reviewer=build_reviewer(env),
+        reviewer=build_reviewer(env, config=model_config, observer=model_observations),
         reviewer_required=reviewer_required(env),
         insights=InsightService(read_gateway_factory, insight_metadata),
+        verification_provider=verification_provider,
+        verification_key=verification_key,
+        verification_strict=verification_strict,
+        session_repository=SQLiteSessionRepository(session_store),
+        receipts=StoreReceiptReader(read_store),
+        model_observations=model_observations,
     )

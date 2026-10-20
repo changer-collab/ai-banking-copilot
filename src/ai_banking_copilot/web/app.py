@@ -22,7 +22,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -30,15 +30,18 @@ from ai_banking_copilot.contracts.authorization import Decision
 from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.receipt_store import ReceiptReader
 from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
+from ai_banking_copilot.planning.task_observations import TaskObservations
 from ai_banking_copilot.policy.audit import KIND_OPERATOR, AuditEvent, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
+from ai_banking_copilot.policy.verification import VerificationProvider
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.insights import InsightService
 from ai_banking_copilot.web.page import INDEX_HTML
@@ -53,6 +56,9 @@ from ai_banking_copilot.web.session import (
     SubmissionView,
     TakeoverPackage,
 )
+from ai_banking_copilot.web.session_manager import SessionManager
+from ai_banking_copilot.web.session_repository import SessionPersistenceError, SessionRepository
+from ai_banking_copilot.web.session_snapshot import SessionSnapshotError
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,12 @@ class AppDeps:
     """是否把 Reviewer 结果接入执行前状态机；旁路模式只审计诊断。"""
     insights: InsightService | None = None
     """只读主动洞察服务；元数据存储与银行事实连接由组合根隔离装配。"""
+    verification_provider: VerificationProvider | None = None
+    verification_key: bytes | None = None
+    verification_strict: bool = False
+    session_repository: SessionRepository | None = None
+    receipts: ReceiptReader | None = None
+    model_observations: TaskObservations | None = None
 
 
 DEFAULT_SESSION_ID = "default"
@@ -168,14 +180,31 @@ def create_app(deps: AppDeps) -> FastAPI:
         StaticFiles(directory=str(Path(__file__).parent / "assets")),
         name="assets",
     )
-    sessions: dict[str, Session] = {}
+    manager = SessionManager(
+        deps.session_repository,
+        factory=lambda _user, session_id, lock: Session(
+            deps, session_id=session_id, shared_lock=lock,
+        ),
+        restore=lambda snapshot, lock: Session.restore(deps, snapshot, lock),
+    )
+
+    @app.exception_handler(SessionPersistenceError)
+    @app.exception_handler(SessionSnapshotError)
+    async def persistence_error(_request: Request, _error: Exception) -> JSONResponse:
+        return JSONResponse(status_code=409, content={
+            "detail": "会话存储或恢复失败，已暂停；请核对业务回执后重启服务",
+        })
 
     def _session_for(session_id: str) -> Session:
-        session = sessions.get(session_id)
-        if session is None:
-            session = Session(deps)
-            sessions[session_id] = session
-        return session
+        return manager.get(deps.user_id, session_id)
+
+    def _response(session_id: str, payload: dict[str, object]) -> dict[str, object]:
+        return {**payload, "model": _session_for(session_id).model_metadata()}
+
+    @app.get("/api/session")
+    def session_state(session_id: str = DEFAULT_SESSION_ID) -> dict[str, object]:
+        """只恢复与读取状态，不触发计划执行或返回挑战秘密。"""
+        return _response(session_id, _execution_payload(_session_for(session_id).current_view()))
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -257,16 +286,25 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/api/due")
     def due(request: _EmptyRequest) -> dict[str, object]:
         # 到期日只取服务端时钟；客户端不能提前触发未来预约。
-        return _submission_payload(_session_for(request.session_id).check_due())
+        try:
+            return _response(
+                request.session_id,
+                _submission_payload(_session_for(request.session_id).check_due()),
+            )
+        except SessionStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/api/submit")
     def submit(request: _SubmitRequest) -> dict[str, object]:
-        view = _session_for(request.session_id).submit(
-            request.utterance,
-            selected=request.selected,
-            session_anomaly=request.session_anomaly,
-        )
-        return _submission_payload(view)
+        try:
+            view = _session_for(request.session_id).submit(
+                request.utterance,
+                selected=request.selected,
+                session_anomaly=request.session_anomaly,
+            )
+        except SessionStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _response(request.session_id, _submission_payload(view))
 
     @app.post("/api/clarify")
     def clarify(request: _ClarifyRequest) -> dict[str, object]:
@@ -275,25 +313,25 @@ def create_app(deps: AppDeps) -> FastAPI:
             view = _session_for(request.session_id).clarify(request.answers)
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        return _submission_payload(view)
+        return _response(request.session_id, _submission_payload(view))
 
     @app.post("/api/verify/request")
     def request_verification(request: _EmptyRequest) -> dict[str, object]:
-        """下发红色卡的强验证挑战。
-
-        **演示声明**：未接入真实短信 / 人脸 / U 盾渠道，验证码随响应回显以便现场输入；
-        校验为服务端一次性 + TTL + 与冻结计划绑定，接入真实渠道只需替换下发一步。
-        """
+        """申请与会话及冻结计划绑定的一次性强验证挑战。"""
         try:
             prompt = _session_for(request.session_id).request_verification()
         except (SessionStateError, StrongVerificationRequiredError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        return {
+        result: dict[str, object] = {
+            "mode": prompt.mode,
+            "status": prompt.status,
             "channel": prompt.channel,
             "target": prompt.target,
-            "code": prompt.code,
             "expires_in_s": prompt.expires_in_s,
         }
+        if prompt.mode == "demo":
+            result["code"] = prompt.code
+        return result
 
     @app.post("/api/confirm")
     def confirm(request: _ConfirmRequest) -> dict[str, object]:
@@ -311,7 +349,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             StalePlanError,
         ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        return _execution_payload(view)
+        return _response(request.session_id, _execution_payload(view))
 
     @app.post("/api/interrupt")
     def interrupt(request: _EmptyRequest) -> dict[str, object]:
@@ -327,7 +365,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             view = _session_for(request.session_id).resume()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        return _execution_payload(view)
+        return _response(request.session_id, _execution_payload(view))
 
     @app.post("/api/reverse")
     def reverse(request: _EmptyRequest) -> dict[str, object]:
@@ -372,24 +410,25 @@ def create_app(deps: AppDeps) -> FastAPI:
         if not reason:
             raise HTTPException(status_code=400, detail="必须填写解锁理由")
 
-        before_state = deps.breaker.state().value
-        before_triggers = [trigger.value for trigger in deps.breaker.triggers()]
-        deps.breaker.unlock()
-        deps.audit.append(
-            AuditEvent(
-                event_id=f"{KIND_OPERATOR}:breaker-unlock:{secrets.token_hex(8)}",
-                kind=KIND_OPERATOR,
-                payload={
-                    "action": "breaker-unlock",
-                    "reason": reason,
-                    "scope": "global",
-                    "state_before": before_state,
-                    "triggers_before": before_triggers,
-                    "state_after": deps.breaker.state().value,
-                },
-                prev_hash="",
+        with manager.lock:
+            before_state = deps.breaker.state().value
+            before_triggers = [trigger.value for trigger in deps.breaker.triggers()]
+            deps.breaker.unlock()
+            deps.audit.append(
+                AuditEvent(
+                    event_id=f"{KIND_OPERATOR}:breaker-unlock:{secrets.token_hex(8)}",
+                    kind=KIND_OPERATOR,
+                    payload={
+                        "action": "breaker-unlock",
+                        "reason": reason,
+                        "scope": "global",
+                        "state_before": before_state,
+                        "triggers_before": before_triggers,
+                        "state_after": deps.breaker.state().value,
+                    },
+                    prev_hash="",
+                )
             )
-        )
         return {
             "action": "breaker-unlock",
             "reason": reason,

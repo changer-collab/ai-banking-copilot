@@ -162,13 +162,23 @@ class BillsHandler(ScenarioHandler):
         if account_txn:
             year, month = _period(intents)
             start, end = _month_range(year, month)
-            for index, record in enumerate(gateway.accounts_of(DEMO_USER_ID), start=1):
+            account_ids: list[str] = []
+            for intent in account_txn:
+                if "account" in intent.slots or "account_id" in intent.slots:
+                    account_ids.append(as_str(
+                        trusted_slot(intent, ("account", "account_id"), "account"), "account"
+                    ))
+                else:
+                    account_ids.extend(
+                        record.payload.account_id for record in gateway.accounts_of(DEMO_USER_ID)
+                    )
+            for index, account_id in enumerate(account_ids, start=1):
                 nodes.append(
                     PlanNode(
                         node_id=f"txn{index}",
                         action="account.transactions",
                         params={
-                            "account_id": record.payload.account_id,
+                            "account_id": account_id,
                             "start": start.isoformat(),
                             "end": end.isoformat(),
                         },
@@ -194,9 +204,6 @@ class BillsHandler(ScenarioHandler):
             )
         elif build_bills:
             year, month = _period(intents)
-            summary = category_totals(gateway, DEMO_USER_ID, year, month)
-            category = _chosen_category(intents, summary)
-            base_year, base_month = _previous_month(year, month)
             nodes.append(
                 PlanNode(
                     node_id="n1",
@@ -208,23 +215,27 @@ class BillsHandler(ScenarioHandler):
                     ),
                 )
             )
-            nodes.append(
-                PlanNode(
-                    node_id="n2",
-                    action="bills.category_trend",
-                    params={
-                        "user_id": DEMO_USER_ID,
-                        "category": category,
-                        "base_year": base_year,
-                        "base_month": base_month,
-                    },
-                    intent=IntentRef(
-                        source=AnchorSource.EXPLICIT,
-                        anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
-                    ),
-                    depends_on=("n1",),
+            if any(intent.action == "bills.category_trend" for intent in bills_specific):
+                summary = category_totals(gateway, DEMO_USER_ID, year, month)
+                category = _chosen_category(intents, summary)
+                base_year, base_month = _previous_month(year, month)
+                nodes.append(
+                    PlanNode(
+                        node_id="n2",
+                        action="bills.category_trend",
+                        params={
+                            "user_id": DEMO_USER_ID,
+                            "category": category,
+                            "base_year": base_year,
+                            "base_month": base_month,
+                        },
+                        intent=IntentRef(
+                            source=AnchorSource.EXPLICIT,
+                            anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, "账单分类趋势"),
+                        ),
+                        depends_on=("n1",),
+                    )
                 )
-            )
         plan = Plan(plan_id="bills_yearly" if yearly else "bills_monthly", nodes=tuple(nodes))
         validate_plan(plan)
         return plan

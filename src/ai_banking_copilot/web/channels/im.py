@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.session import Session
+from ai_banking_copilot.web.session_manager import SessionManager
 
 DEFAULT_IM_SESSION_ID = "im-default"
 """缺省 IM 会话标识（每个 `ImChannel` 持有独立 `Session`，互不串扰）。"""
@@ -40,7 +41,14 @@ class ImChannel:
 
     def __init__(self, deps: AppDeps, *, session_id: str = DEFAULT_IM_SESSION_ID) -> None:
         self._session_id = session_id
-        self._session = Session(deps)
+        manager = SessionManager(
+            deps.session_repository,
+            factory=lambda _user, identity, lock: Session(
+                deps, session_id=identity, shared_lock=lock,
+            ),
+            restore=lambda snapshot, lock: Session.restore(deps, snapshot, lock),
+        )
+        self._session = manager.get(deps.user_id, session_id)
 
     @property
     def session_id(self) -> str:

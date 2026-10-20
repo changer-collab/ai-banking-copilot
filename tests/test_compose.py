@@ -13,6 +13,7 @@ from ai_banking_copilot.compose import (
     build_deps,
     build_intent_model,
     build_reviewer,
+    reviewer_required,
 )
 from ai_banking_copilot.planning.llm import (
     DEFAULT_LLM_ENDPOINT,
@@ -101,6 +102,26 @@ def test_disabled_llm_forces_reviewer_bypass_even_when_strict_requested() -> Non
 
 def test_default_reviewer_remains_bypass() -> None:
     assert isinstance(build_reviewer({}), BypassPlanReviewer)
+
+
+def test_strict_channel_always_requires_review_unless_llm_is_disabled() -> None:
+    assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict"}) is True
+    assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", "AIB_REVIEW_REQUIRED": "0"})
+    assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", DISABLE_LLM_ENV: "1"}) is False
+
+
+def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
+    deps = build_deps(tmp_path / "shared.db", env={
+        "AIB_REVIEW_CHANNEL": "llm-strict", "AI_API_KEY": "test-key",
+        "AI_PLANNER_TIMEOUT_S": "12", "AI_REVIEWER_TIMEOUT_S": "90",
+    })
+    assert isinstance(deps.intent_model, FallbackIntentModel)
+    assert deps.reviewer is not None
+    assert deps.intent_model._primary._limiter is deps.reviewer._limiter
+    assert deps.intent_model._primary._timeout_s == 12
+    assert deps.intent_model._primary._prompt_version == "planner-v1"
+    assert deps.reviewer._timeout_s == 90
+    assert deps.reviewer_required is True
 
 
 def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:

@@ -73,6 +73,16 @@ def _actions(utterance: str) -> list[str]:
     return [intent.action for intent in TemplateIntentModel().propose(utterance, {}).intents]
 
 
+@pytest.mark.parametrize("utterance", ["查看分类趋势", "查询账单分类趋势"])
+def test_explicit_bills_category_trend(utterance: str) -> None:
+    assert _actions(utterance) == ["bills.category_trend"]
+
+
+@pytest.mark.parametrize("utterance", ["查看账单", "消费分析", "花了多少钱"])
+def test_ordinary_monthly_does_not_imply_category_trend(utterance: str) -> None:
+    assert _actions(utterance) == ["bills.monthly"]
+
+
 def test_card_unlock_never_swallows_inquiry_verbs() -> None:
     for utterance in (
         "了解我的卡片",

@@ -2,13 +2,16 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from ai_banking_copilot.contracts.plan import validate_plan
+from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import QueryContext, QueryResult
-from ai_banking_copilot.scenarios.base import plan_is_pure_query
+from ai_banking_copilot.scenarios.base import ClarificationRequired, plan_is_pure_query
 from ai_banking_copilot.scenarios.bills import (
     ANOMALY_THRESHOLD_CENTS,
     QUERY_HANDLERS,
@@ -36,13 +39,89 @@ def test_category_totals_come_from_fact_gateway(gateway: FactGateway) -> None:
     assert summary.total_income.cents == 1850000
 
 
-def test_bills_plan_is_a_two_step_pure_query_dag(gateway: FactGateway) -> None:
+def test_monthly_bills_plan_is_a_single_pure_query(gateway: FactGateway) -> None:
     plan = BillsHandler().build([_bills_intent()], gateway)
+    assert [node.action for node in plan.nodes] == ["bills.monthly"]
+    assert plan.nodes[0].node_id == "n1"
+    assert plan.nodes[0].params["month"] == 9
+    assert plan.nodes[0].depends_on == ()
+    assert plan_is_pure_query(plan) is True
+
+
+def test_explicit_trend_plan_keeps_monthly_dependency(gateway: FactGateway) -> None:
+    plan = BillsHandler().build([Intent(action="bills.category_trend", slots={})], gateway)
     assert [node.action for node in plan.nodes] == ["bills.monthly", "bills.category_trend"]
     assert plan.nodes[0].params["month"] == 9
     assert plan.nodes[1].depends_on == ("n1",)
     assert plan.nodes[1].params["category"] == "购物"
+    assert plan.nodes[1].params["base_year"] == 2026
+    assert plan.nodes[1].params["base_month"] == 8
     assert plan_is_pure_query(plan) is True
+
+
+@pytest.mark.parametrize("trend_first", [False, True])
+def test_monthly_and_trend_intents_do_not_duplicate_nodes(
+    gateway: FactGateway, trend_first: bool
+) -> None:
+    intents = [_bills_intent(), Intent(action="bills.category_trend", slots={})]
+    plan = BillsHandler().build(intents[::-1] if trend_first else intents, gateway)
+    assert [node.action for node in plan.nodes] == ["bills.monthly", "bills.category_trend"]
+    assert [node.node_id for node in plan.nodes] == ["n1", "n2"]
+    assert plan.nodes[1].depends_on == ("n1",)
+    validate_plan(plan)
+
+
+def test_monthly_bill_without_expenses_still_builds(gateway: FactGateway) -> None:
+    intent = Intent(
+        action="bills.monthly",
+        slots={"year": Value(2030, Trust.TRUSTED), "month": Value(1, Trust.TRUSTED)},
+    )
+    assert category_totals(gateway, DEMO_USER_ID, 2030, 1).total_expense.cents == 0
+    plan = BillsHandler().build([intent], gateway)
+    assert [node.action for node in plan.nodes] == ["bills.monthly"]
+    assert plan.nodes[0].params == {"user_id": DEMO_USER_ID, "year": 2030, "month": 1}
+
+
+def test_trend_respects_trusted_period_and_category(gateway: FactGateway) -> None:
+    intent = Intent(
+        action="bills.category_trend",
+        slots={
+            "year": Value(2026, Trust.TRUSTED),
+            "month": Value(1, Trust.TRUSTED),
+            "category": Value("餐饮", Trust.TRUSTED),
+        },
+    )
+    plan = BillsHandler().build([intent], gateway)
+    assert plan.nodes[0].params == {"user_id": DEMO_USER_ID, "year": 2026, "month": 1}
+    assert plan.nodes[1].params == {
+        "user_id": DEMO_USER_ID,
+        "category": "餐饮",
+        "base_year": 2025,
+        "base_month": 12,
+    }
+
+
+@pytest.mark.parametrize(
+    ("action", "slot_name"),
+    [
+        ("bills.monthly", "year"),
+        ("bills.monthly", "month"),
+        ("bills.category_trend", "year"),
+        ("bills.category_trend", "month"),
+        ("bills.category_trend", "category"),
+    ],
+)
+def test_bills_rejects_untrusted_control_slots(
+    gateway: FactGateway, action: str, slot_name: str
+) -> None:
+    slots = {
+        "year": Value(2026, Trust.TRUSTED),
+        "month": Value(9, Trust.TRUSTED),
+        "category": Value("餐饮", Trust.TRUSTED),
+    }
+    slots[slot_name] = Value(slots[slot_name].raw, Trust.UNVERIFIED)
+    with pytest.raises(ClarificationRequired, match="拒绝不可信来源"):
+        BillsHandler().build([Intent(action=action, slots=slots)], gateway)
 
 
 def test_category_share_uses_whitelisted_operator(gateway: FactGateway) -> None:
@@ -87,7 +166,51 @@ def test_account_and_bills_mixed_plan_has_unique_ids(gateway: FactGateway) -> No
     assert len(set(ids)) == len(ids)
     validate_plan(plan)
     assert any(node_id.startswith("txn") for node_id in ids)
-    assert {"n1", "n2"}.issubset(set(ids))
+    assert [node.action for node in plan.nodes] == [
+        "account.transactions", "account.transactions", "bills.monthly"
+    ]
+    assert ids == ["txn1", "txn2", "n1"]
+
+
+@pytest.mark.parametrize("slot_name", ["account", "account_id"])
+def test_account_transactions_respects_trusted_account(
+    gateway: FactGateway, slot_name: str
+) -> None:
+    intent = Intent(
+        action="account.transactions",
+        slots={slot_name: Value("acc_savings", Trust.TRUSTED)},
+    )
+    plan = BillsHandler().build([intent], gateway)
+    assert [node.params["account_id"] for node in plan.nodes] == ["acc_savings"]
+    assert [node.node_id for node in plan.nodes] == ["txn1"]
+
+
+def test_account_transactions_keeps_each_intents_account(gateway: FactGateway) -> None:
+    intents = [
+        Intent(
+            action="account.transactions",
+            slots={"account": Value(account_id, Trust.TRUSTED)},
+        )
+        for account_id in ("acc_savings", "acc_current")
+    ]
+    plan = BillsHandler().build(intents, gateway)
+    assert [node.params["account_id"] for node in plan.nodes] == [
+        "acc_savings", "acc_current"
+    ]
+    assert [node.node_id for node in plan.nodes] == ["txn1", "txn2"]
+    validate_plan(plan)
+
+
+@pytest.mark.parametrize("slot_name", ["account", "account_id"])
+def test_account_transactions_rejects_untrusted_account(
+    gateway: FactGateway, slot_name: str
+) -> None:
+    intent = Intent(
+        action="account.transactions",
+        slots={slot_name: Value("acc_savings", Trust.UNVERIFIED)},
+    )
+    with pytest.raises(ClarificationRequired, match="拒绝不可信来源"):
+        BillsHandler().build([intent], gateway)
 
 
 def test_large_transactions_is_out_only_and_in_cents(gateway: FactGateway) -> None:

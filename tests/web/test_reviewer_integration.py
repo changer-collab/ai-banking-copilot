@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import date
 
+import httpx
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Level
@@ -9,7 +10,12 @@ from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed_user_profiles
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
-from ai_banking_copilot.planning.reviewer import ReviewReport, ReviewRequest, ReviewStatus
+from ai_banking_copilot.planning.reviewer import (
+    ReviewReport,
+    ReviewRequest,
+    ReviewStatus,
+    StrictPlanReviewer,
+)
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.web.session import Session, SessionState
 
@@ -44,6 +50,28 @@ def test_required_reviewer_takes_over_write_plan(deps: object) -> None:
     view = Session(configured).submit("转给李娜 500 元", selected={"account": "acc_savings"})
     assert view.state is SessionState.TAKEN_OVER
     assert view.card is not None
+
+
+def test_reviewer_read_timeout_keeps_safe_diagnostics_and_never_writes(
+    deps: object, audit: object, rw_store: object,
+) -> None:
+    def transport(_request: str) -> str:
+        raise httpx.ReadTimeout("do-not-log-provider-secret")
+
+    reviewer = StrictPlanReviewer(transport=transport)
+    before = tuple(tuple(row) for row in rw_store.query("SELECT * FROM accounts"))
+    session = Session(replace(deps, reviewer=reviewer, reviewer_required=True))
+    view = session.submit("转给李娜 500 元", selected={"account": "acc_savings"})
+    assert view.state is SessionState.TAKEN_OVER
+    assert tuple(tuple(row) for row in rw_store.query("SELECT * FROM accounts")) == before
+    assert not rw_store.query("SELECT * FROM transactions WHERE channel='agent'")
+    review_event = next(event for event in audit.events() if "review_status" in event.payload)
+    assert review_event.payload["review_failure"] == "timeout"
+    assert review_event.payload["review_error_type"] == "ReadTimeout"
+    assert review_event.payload["review_http_status"] is None
+    assert review_event.payload["review_timeout_s"] == 180.0
+    assert "do-not-log-provider-secret" not in audit.path.read_text(encoding="utf-8")
+    assert audit.verify_chain()
 
 
 def test_required_reviewer_does_not_change_pure_query_semantics(deps: object) -> None:

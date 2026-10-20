@@ -18,11 +18,11 @@ import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from functools import wraps
 from threading import RLock
-from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar, cast
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
@@ -32,7 +32,7 @@ from ai_banking_copilot.contracts.security import (
 from ai_banking_copilot.contracts.security import (
     detect_injection,
 )
-from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
+from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.preconditions import (
@@ -42,8 +42,13 @@ from ai_banking_copilot.gateway.preconditions import (
 )
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
-from ai_banking_copilot.planning.review_context import referenced_facts
+from ai_banking_copilot.planning.review_context import (
+    bills_review_context,
+    node_review_context,
+    referenced_facts,
+)
 from ai_banking_copilot.planning.reviewer import (
+    DEFAULT_REVIEW_PROMPT_VERSION,
     ReviewerUnavailableError,
     ReviewReport,
     ReviewRequest,
@@ -65,6 +70,7 @@ from ai_banking_copilot.policy.breaker import (
     DEFAULT_POLICY_REJECTION_THRESHOLD,
     HIGH_FREQUENCY_LIMIT,
     HIGH_FREQUENCY_WINDOW,
+    BreakerSnapshot,
     BreakerTrigger,
     CircuitBreaker,
 )
@@ -79,12 +85,29 @@ from ai_banking_copilot.policy.pdp import (
     FLAG_INJECTION_DETECTED,
     evaluate,
 )
-from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError
+from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, manifest_hash
 from ai_banking_copilot.policy.saga import (
     CompensationError,
     ReversalOutcome,
     ReversalState,
     Saga,
+)
+from ai_banking_copilot.policy.session_recovery import (
+    InFlightNode,
+    ReconcileStatus,
+    business_key_for,
+    reconcile,
+)
+from ai_banking_copilot.policy.verification import (
+    ChallengeRecord,
+    ChallengeStatus,
+    DemoVerificationProvider,
+    VerificationBinding,
+    VerificationError,
+    VerificationMode,
+    create_challenge,
+    invalidate_challenge,
+    verify_challenge,
 )
 from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
@@ -106,6 +129,9 @@ from ai_banking_copilot.web.plan_card import (
     PlanCard,
     render_plan_card,
 )
+from ai_banking_copilot.web.session_manager import PROCESS_SESSION_LOCK
+from ai_banking_copilot.web.session_repository import SessionPersistenceError
+from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
 
 if TYPE_CHECKING:
     from ai_banking_copilot.web.app import AppDeps
@@ -121,7 +147,17 @@ def _serialized(
     @wraps(method)
     def wrapped(self: Session, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         with self._lock:
-            return method(self, *args, **kwargs)
+            if self._persistence_failed:
+                raise SessionPersistenceError("session_restart_required")
+            try:
+                result = method(self, *args, **kwargs)
+            except Exception:
+                self._collect_model_observations()
+                self._persist()
+                raise
+            self._collect_model_observations()
+            self._persist()
+            return result
     return wrapped
 
 FABRICATION_MARKERS: tuple[str, ...] = (
@@ -172,34 +208,16 @@ class StrongVerificationRequiredError(RuntimeError):
 VERIFICATION_TTL_S = 300
 """强验证挑战有效期（秒）：过期即失效，必须重新申请。"""
 
-_DEMO_VERIFICATION_TARGET = "138****8888"
-"""演示环境回显用的脱敏接收号码（**未接入真实短信网关**）。"""
-
-
 @dataclass(frozen=True)
 class VerificationPrompt:
-    """一次强验证挑战的下发结果。
-
-    **演示声明**：本仓库未接入真实短信 / 人脸 / U 盾渠道，`code` 随响应回显以便路演现场输入。
-    接入真实下发渠道时只需替换 `Session.request_verification` 的**下发一步**；
-    校验逻辑（一次性 + TTL + 与 `card_id` + `frozen_hash` 绑定）保持不变。
-    """
+    """投递结果；只有明确标识为 demo 的模式可以回显演示码。"""
 
     channel: str
     target: str
-    code: str
+    code: str | None
     expires_in_s: int
-
-
-@dataclass(frozen=True)
-class _Challenge:
-    """服务端持有的强验证挑战：**一次性**、有 TTL、与卡号 + 冻结哈希绑定。"""
-
-    code: str
-    card_id: str
-    frozen_hash: str
-    expires_at: datetime
-    execution_id: str
+    mode: str = "demo"
+    status: str = "delivered"
 
 
 @dataclass(frozen=True)
@@ -303,12 +321,51 @@ class _Pending:
     flags: frozenset[str] = frozenset()
 
 
+class _RestoredBreakerStore:
+    def __init__(self, snapshot: BreakerSnapshot) -> None:
+        self._snapshot = snapshot
+
+    def load(self) -> BreakerSnapshot:
+        return self._snapshot
+
+    def save(self, snapshot: BreakerSnapshot) -> None:
+        self._snapshot = snapshot
+
+
 class Session:
     """单会话编排：`Session(deps)`。"""
 
-    def __init__(self, deps: AppDeps) -> None:
-        self._lock = RLock()
+    _SNAPSHOT_FIELDS = (
+        "message", "pending", "confirmation", "confirmation_history", "takeover",
+        "audit_ids", "exec_results", "completed_node_ids", "pending_node_ids", "challenge",
+        "unverified_results", "quota", "risky_at", "policy_rejections", "reversed_records",
+        "last_utterance", "last_selected", "review_intents", "clarification_keys",
+        "review_report", "in_flight", "recovery_blocked",
+        "planner_channel", "model_calls",
+    )
+
+    def __init__(
+        self, deps: AppDeps, *, session_id: str = "default", shared_lock: RLock | None = None,
+    ) -> None:
+        self._lock = shared_lock if shared_lock is not None else PROCESS_SESSION_LOCK
         self._deps = deps
+        self._session_id = session_id
+        self._revision = 0
+        self._persistence_failed = False
+        self._in_flight: InFlightNode | None = None
+        self._recovery_blocked = False
+        self._confirmation_history: list[ConfirmationRecord] = []
+        self._planner_channel: str | None = None
+        self._model_calls: list[dict[str, object]] = []
+        self._verification_provider = deps.verification_provider or DemoVerificationProvider()
+        verification_key = deps.verification_key
+        if verification_key is None:
+            verification_key = (
+                secrets.token_bytes(32)
+                if getattr(self._verification_provider, "mode", "demo") == "demo"
+                and not deps.verification_strict else b""
+            )
+        self._verification_key: bytes = verification_key
         self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
         self._message = "会话就绪"
@@ -319,7 +376,7 @@ class Session:
         self._exec_results: list[ExecResult] = []
         self._completed_node_ids: list[str] = []
         self._pending_node_ids: list[str] = []
-        self._challenge: _Challenge | None = None
+        self._challenge: ChallengeRecord | None = None
         self._unverified_results: dict[str, ExecResult] = {}
         self._quota: DailyQuota | None = None
         # 熔断触发 3 / 4 的**跨提交**计数（有意不被 `_reset()` 清空：它们是会话级而非单次提交级）
@@ -335,6 +392,141 @@ class Session:
         self._review_intents: list[dict[str, object]] = []
         self._clarification_keys: frozenset[str] = frozenset()
         self._review_report: ReviewReport | None = None
+
+    def snapshot(self) -> SessionSnapshot:
+        payload = {name: getattr(self, f"_{name}") for name in self._SNAPSHOT_FIELDS}
+        payload["pending_node_ids"] = [
+            node_id for node_id in self._pending_node_ids if node_id not in self._completed_node_ids
+        ]
+        payload["session_breaker"] = BreakerSnapshot(
+            self._session_breaker.state(), self._session_breaker.failure_count(),
+            self._session_breaker.triggers(),
+        )
+        return SessionSnapshot(
+            SESSION_SNAPSHOT_VERSION, self._deps.user_id, self._session_id,
+            self._revision, self._execution_id, self._state.value, payload,
+        )
+
+    def _persist(self) -> None:
+        repository = self._deps.session_repository
+        if repository is None:
+            return
+        try:
+            saved = repository.save(self.snapshot(), expected_revision=self._revision or None)
+            self._revision = saved.revision
+        except Exception as error:
+            self._persistence_failed = True
+            self._state = SessionState.INTERRUPTED
+            self._message = "会话保存失败，已暂停；请重启服务后核对业务回执"
+            raise SessionPersistenceError("session_save_failed") from error
+
+    @classmethod
+    def restore(cls, deps: AppDeps, snapshot: SessionSnapshot, shared_lock: RLock) -> Session:
+        if snapshot.user_id != deps.user_id:
+            raise SessionStateError("会话身份不匹配")
+        session = cls(deps, session_id=snapshot.session_id, shared_lock=shared_lock)
+        if set(snapshot.payload) != {*cls._SNAPSHOT_FIELDS, "session_breaker"}:
+            raise SessionStateError("会话快照字段不完整")
+        # 字段白名单固定，codec 已检查类型、taint、哈希及检查点绑定。
+        for name in cls._SNAPSHOT_FIELDS:
+            setattr(session, f"_{name}", snapshot.payload[name])
+        session._revision = snapshot.revision
+        session._execution_id = snapshot.execution_id
+        session._state = SessionState(snapshot.state)
+        breaker = cast(BreakerSnapshot, snapshot.payload["session_breaker"])
+        session._session_breaker = CircuitBreaker(store=_RestoredBreakerStore(breaker))
+        session._invalidate_verification("service_restarted")
+        session._reconcile_after_restart()
+        if session._state not in (SessionState.COMPLETED, SessionState.REVERSED):
+            if session._confirmation is not None:
+                session._confirmation_history.append(session._confirmation)
+                session._confirmation = None
+            if session._pending is not None and session._state in (
+                SessionState.AWAITING_CONFIRM, SessionState.EXECUTING, SessionState.INTERRUPTED,
+            ) and not session._recovery_blocked:
+                session._state = SessionState.AWAITING_CONFIRM
+                session._message = "会话已恢复，已完成步骤保留；请重新确认，红卡需重新强验证"
+        if (deps.reviewer_required and session._pending is not None
+                and session._state in (SessionState.AWAITING_CONFIRM, SessionState.EXECUTING,
+                                       SessionState.INTERRUPTED)
+                and not plan_is_pure_query(session._pending.plan)):
+            report = session._review_report
+            if (report is None or report.status is not ReviewStatus.ALLOW or report.diagnostic_only
+                    or report.failure_code or report.error or report.fallback_reason
+                    or report.execution_id != session._execution_id
+                    or report.cfhash != session._pending.card.frozen_hash
+                    or report.prompt_version != DEFAULT_REVIEW_PROMPT_VERSION):
+                session._enter_takeover("恢复的审查证据不满足当前严格要求", session._pending)
+        session._persist()
+        return session
+
+    def _reconcile_after_restart(self) -> None:
+        node = self._in_flight
+        if node is None:
+            self._recovery_blocked = bool(self._unverified_results)
+            return
+        if self._deps.receipts is None:
+            self._recovery_blocked = True
+            self._state = SessionState.INTERRUPTED
+            self._message = "未配置回执核对，已暂停执行"
+            return
+        result = reconcile(node, self._deps.receipts, self._deps.audit)
+        if result.reason != "audit_chain_invalid" and self._pending is not None:
+            self._audit(KIND_DECISION, {
+                "kind": "recovery_check", "status": result.status.value,
+                "user_id": self._deps.user_id, "session_id": self._session_id,
+                "execution_id": self._execution_id, "node_id": node.node_id,
+                "record_ids": list(result.record_ids),
+            })
+        if result.status is ReconcileStatus.VERIFIED:
+            if node.node_id not in self._completed_node_ids:
+                self._completed_node_ids.append(node.node_id)
+                self._exec_results.append(ExecResult(
+                    status=result.receipt.status if result.receipt else "verified",
+                    record_ids=result.record_ids, message="恢复时已核对原业务回执及审计",
+                ))
+            self._unverified_results.pop(node.node_id, None)
+            self._in_flight = None
+            if self._pending is not None and set(self._completed_node_ids) == set(
+                self._pending.node_ids
+            ):
+                self._state = SessionState.COMPLETED
+                self._message = "恢复核对完成：原计划已执行完成"
+        elif result.status is ReconcileStatus.NOT_COMMITTED:
+            self._in_flight = None
+        else:
+            self._recovery_blocked = True
+            self._state = SessionState.INTERRUPTED
+            self._message = "业务回执或审计证据尚未核对，已暂停；请人工复核"
+            if result.receipt is not None:
+                self._unverified_results[node.node_id] = ExecResult(
+                    status="committed_unverified", record_ids=result.record_ids,
+                    message=self._message,
+                )
+            if result.status is ReconcileStatus.MANUAL_CONFLICT and self._pending is not None:
+                self._enter_takeover(self._message, self._pending)
+
+    def current_view(self) -> ExecutionView:
+        with self._lock:
+            return self._execution_view()
+
+    def _collect_model_observations(self) -> None:
+        if self._deps.model_observations is not None:
+            self._model_calls.extend(self._deps.model_observations.drain(self._execution_id))
+
+    def model_metadata(self) -> dict[str, object]:
+        usage: dict[str, int] = {}
+        for call in self._model_calls:
+            raw_usage = call.get("usage")
+            if isinstance(raw_usage, dict):
+                for key, value in raw_usage.items():
+                    if type(value) is int and value >= 0:
+                        usage[key] = usage.get(key, 0) + value
+        return {
+            "planner_channel": self._planner_channel,
+            "reviewer_channel": self._review_report.channel if self._review_report else None,
+            "http_attempts": len(self._model_calls), "usage": usage,
+        }
 
     def state(self) -> SessionState:
         """当前会话状态。"""
@@ -395,16 +587,16 @@ class Session:
         if invalid is not None:
             return self._refuse(invalid, utterance)
         intents, asks, notes = self._assemble_intents(utterance, selected)
+        if asks:
+            self._state = SessionState.NEEDS_CLARIFICATION
+            self._message = _with_notes(
+                "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+            )
+            return SubmissionView(
+                self._state, self._message, None, None, None,
+                tuple(ask.prompt for ask in asks), clarifications=asks,
+            )
         if not intents:
-            if asks:
-                self._state = SessionState.NEEDS_CLARIFICATION
-                self._message = _with_notes(
-                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
-                )
-                return SubmissionView(
-                    self._state, self._message, None, None, None,
-                    tuple(ask.prompt for ask in asks), clarifications=asks,
-                )
             return self._refuse(
                 _with_notes("未知意图：无法匹配任何场景", notes),
                 utterance,
@@ -428,6 +620,7 @@ class Session:
             utterance,
             asks,
             candidate_actions=tuple(intent.action for intent in intents),
+            accepted_intents=intents,
             session_anomaly=session_anomaly,
             notes=notes,
         )
@@ -468,7 +661,7 @@ class Session:
             "检查到期待办并生成待确认提案",
             (),
             candidate_actions=tuple(node.action for node in plan.nodes),
-            review_sources=handler.review_sources(self._deps.gateway),
+            review_handler=handler,
             review_kind="due_proposal",
         )
 
@@ -507,8 +700,9 @@ class Session:
         candidate_actions: tuple[str, ...] = (),
         session_anomaly: bool = False,
         notes: tuple[str, ...] = (),
-        review_sources: list[dict[str, object]] | None = None,
+        review_handler: PendingHandler | None = None,
         review_kind: str = "user_request",
+        accepted_intents: tuple[Intent, ...] = (),
     ) -> SubmissionView:
         questions = tuple(ask.prompt for ask in asks)
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
@@ -558,40 +752,73 @@ class Session:
         review_error: str | None = None
         reviewer_enforced = self._deps.reviewer_required and not plan_is_pure_query(plan)
         if self._deps.reviewer is not None:
-            request = ReviewRequest(
-                execution_id=self._execution_id,
-                cfhash=card.frozen_hash,
-                prompt_version="reviewer-v1",
-                raw_text=utterance,
-                candidate_actions=candidate_actions,
-                plan=plan,
-                slot_sources={
-                    "request": {
-                        "kind": review_kind, "user_id": self._deps.user_id,
-                        "today": self._deps.today.isoformat(),
-                        "authorization": "pending_confirmation",
-                    },
-                    "intents": self._review_intents,
-                    "facts": review_sources if review_sources is not None else referenced_facts(
-                        self._deps.gateway, self._deps.user_id, self._review_intents
-                    ),
-                },
-                source_spans=(utterance,),
-                plan_summary=(
-                    "到期待办提案：用户只请求检查；须确认计划卡并通过风险分级后才能执行。"
-                    if review_kind == "due_proposal" else "用户提交的待确认计划"
-                ),
-            )
             try:
+                scenario_facts, proposals = (
+                    review_handler.review_context(self._deps.gateway, plan)
+                    if review_handler is not None else ([], {})
+                )
+                bill_facts, bill_proposals = bills_review_context(
+                    self._deps.gateway, self._deps.user_id, accepted_intents,
+                    self._review_intents, plan,
+                )
+                scenario_facts = [*scenario_facts, *bill_facts]
+                proposals = {**proposals, **bill_proposals}
+                facts = referenced_facts(
+                    self._deps.gateway, self._deps.user_id, self._review_intents, plan,
+                )
+                facts = list({
+                    str(fact["record_id"]): fact for fact in (*facts, *scenario_facts)
+                }.values())
+                node_context = node_review_context(
+                    plan, facts, self._review_intents, proposals, review_kind=review_kind,
+                )
+                if any(context["missing_sources"] for context in node_context.values()):
+                    raise ReviewerUnavailableError("审查上下文缺少必要来源，请重新检查或转人工。")
+                request = ReviewRequest(
+                    execution_id=self._execution_id,
+                    cfhash=card.frozen_hash,
+                    raw_text=utterance,
+                    candidate_actions=candidate_actions,
+                    plan=plan,
+                    slot_sources={
+                        "request": {
+                            "kind": review_kind, "user_id": self._deps.user_id,
+                            "today": self._deps.today.isoformat(),
+                            "authorization": "pending_confirmation",
+                        },
+                        "intents": self._review_intents,
+                        "facts": facts,
+                        "node_context": node_context,
+                    },
+                    source_spans=(utterance,),
+                    plan_summary=(
+                        "到期待办提案：用户只请求检查；须确认计划卡并通过风险分级后才能执行。"
+                        if review_kind == "due_proposal" else "用户提交的待确认计划"
+                    ),
+                )
                 self._review_report = self._deps.reviewer.review(request)
-            except ReviewerUnavailableError as error:
-                review_error = str(error)
+            except ReviewerUnavailableError:
+                review_error = "reviewer_unavailable"
                 self._review_report = None
-            except Exception as error:  # noqa: BLE001 - strict channel fail-closed when required
-                review_error = f"{type(error).__name__}: {error}"
+            except Exception:  # noqa: BLE001 - strict channel fail-closed when required
+                review_error = "reviewer_error"
                 self._review_report = None
             if self._review_report is not None:
                 report = self._review_report
+                if reviewer_enforced and report.status is ReviewStatus.ALLOW and (
+                    report.diagnostic_only or report.failure_code is not None
+                    or report.error is not None or report.fallback_reason is not None
+                    or report.execution_id != request.execution_id
+                    or report.cfhash != request.cfhash
+                    or report.prompt_version != request.prompt_version
+                ):
+                    self._enter_takeover("独立审查证据无效，请转人工核对。", pending)
+                    self._audit(KIND_DECISION, {
+                        "execution_id": self._execution_id,
+                        "frozen_hash": card.frozen_hash,
+                        "review_status": "manual", "review_failure": "invalid_review_evidence",
+                    })
+                    return SubmissionView(self._state, self._message, card, decision, plan, ())
                 self._audit(
                     KIND_DECISION,
                     {
@@ -606,6 +833,9 @@ class Session:
                         else None,
                         "review_diagnostic_only": report.diagnostic_only,
                         "review_latency_ms": report.latency_ms,
+                        "review_error_type": report.error_type,
+                        "review_http_status": report.http_status,
+                        "review_timeout_s": report.timeout_s,
                     },
                 )
                 if reviewer_enforced and report.status is ReviewStatus.CLARIFY:
@@ -661,6 +891,13 @@ class Session:
                         "独立审查通道不可用：" + (review_error or "未知错误"), pending
                     )
                     return SubmissionView(self._state, self._message, card, decision, plan, ())
+        if reviewer_enforced and self._deps.reviewer is None:
+            self._enter_takeover("独立审查通道未配置，请转人工处理。", pending)
+            self._audit(KIND_DECISION, {
+                "execution_id": self._execution_id, "frozen_hash": card.frozen_hash,
+                "review_status": "manual", "review_failure": "reviewer_missing",
+            })
+            return SubmissionView(self._state, self._message, card, decision, plan, ())
         if decision.level >= Level.DENY:
             return self._refuse(
                 "命中拒绝规则：" + "，".join(hit_rules), utterance, decision, plan, card
@@ -679,7 +916,13 @@ class Session:
         self, utterance: str, selected: Mapping[str, object] | None,
     ) -> tuple[tuple[Intent, ...], tuple[ClarificationAsk, ...], tuple[str, ...]]:
         """装配意图，并返回**未采纳提示**（低置信度意图不再静默丢弃，必须让用户看得见）。"""
-        proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
+        observations = self._deps.model_observations
+        if observations is None:
+            proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
+        else:
+            with observations.scope(self._execution_id):
+                proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
+        self._planner_channel = proposal.channel or "injected"
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
@@ -728,7 +971,13 @@ class Session:
             spans.append(span)
         if len(candidates) > 1 and not _spans_are_unambiguous(utterance, spans):
             return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
-        contexts = _intent_semantic_contexts(utterance, spans)
+        contexts = _intent_semantic_contexts(
+            utterance, spans,
+            query_indexes=frozenset(
+                index for index, intent in enumerate(candidates)
+                if intent.action in {"account.balance", "account.transactions"}
+            ),
+        )
         if contexts is None:
             return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
         prefix_targets = _unassigned_booking_prefix_targets(utterance, spans, candidates)
@@ -771,13 +1020,21 @@ class Session:
                 _BOOKING_NO_DEBIT_MARKER.sub("不扣款", span)
                 if intent.action == "transfer.book" else span
             )
+            slot_selected = _per_intent_selected(intent.action, intent_selected, self._deps)
+            if (
+                intent.action in {"account.balance", "account.transactions"}
+                and selected is None
+                and re.search(r"(?:这个|那个|这张|那张|该)(?:账户|帐户|银行卡|储蓄卡|卡)", span)
+            ):
+                # 默认账户不能证明指示词所指；显式选择或澄清答案才可绑定对象。
+                slot_selected.pop("account", None)
             fill = fill_control_slots(
                 intent.action,
                 SlotInputs(
                     text=slot_text,
                     today=self._deps.today,
                     payees=payees,
-                    selected=_per_intent_selected(intent.action, intent_selected, self._deps),
+                    selected=slot_selected,
                 ),
             )
             if fill.negated:
@@ -818,6 +1075,25 @@ class Session:
                 key: value for key, value in extras.items()
                 if key not in {SLOT_PARAMS[slot] for slot in local_slots}
             })
+            # 账单可选控制槽走调用方选择，不采纳模型 slots；保持 Value 的信任语义。
+            for slot in ("year", "month", "category"):
+                if slot not in slots:
+                    continue
+                value = slots[slot]
+                if isinstance(value, Slot):
+                    if value.kind is not SlotKind.CONTROL:
+                        continue
+                    value = value.value
+                if isinstance(value, Value):
+                    if value.trust is not Trust.TRUSTED:
+                        continue
+                    value = value.raw
+                review_slots = self._review_intents[-1]["slots"]
+                if isinstance(review_slots, dict):
+                    review_slots[slot] = _review_value(value)
+                sources[slot] = (
+                    "clarification_answer" if slot in self._clarification_keys else "user_selection"
+                )
             slots.setdefault("grant", "explicit")
             slots["span"] = span
             if remark is not None:
@@ -1028,6 +1304,8 @@ class Session:
         红色卡须先经 `request_verification` 取得挑战，再以 `verification_code` 通过闸门。
         """
         pending = self._require_pending()
+        if self._recovery_blocked:
+            raise SessionStateError("业务证据待人工核对，禁止继续执行")
         if self._state is SessionState.COMPLETED:
             if card_id != pending.card.card_id:
                 raise ConfirmationMismatchError("计划卡不匹配")
@@ -1054,7 +1332,7 @@ class Session:
         )
         if PROMPT_STRONG_VERIFY in pending.card.requires and not strong_verified:
             self._assert_strong_verification(
-                pending, verification_code, now=now if now is not None else datetime.now()
+                pending, verification_code, now=now if now is not None else datetime.now(UTC)
             )
             strong_verified = True
         self._confirmation = ConfirmationRecord(
@@ -1080,20 +1358,42 @@ class Session:
             raise SessionStateError("当前状态不允许申请验证码")
         if PROMPT_STRONG_VERIFY not in pending.card.requires:
             raise StrongVerificationRequiredError("当前计划卡无需强验证")
-        moment = now if now is not None else datetime.now()
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        self._challenge = _Challenge(
-            code=code,
-            card_id=pending.card.card_id,
-            frozen_hash=pending.card.frozen_hash,
-            expires_at=moment + timedelta(seconds=VERIFICATION_TTL_S),
-            execution_id=self._execution_id,
+        self._invalidate_verification("replaced")
+        self._verification_audit("requested", pending)
+        try:
+            if self._deps.verification_strict and getattr(
+                self._verification_provider, "mode", "demo"
+            ) != VerificationMode.EXTERNAL:
+                raise VerificationError("delivery_unavailable")
+            challenge, code = create_challenge(
+                self._verification_binding(pending), key=self._verification_key, now=now,
+            )
+            delivery = self._verification_provider.deliver(
+                challenge.binding, challenge.challenge_id, code, challenge.expires_at,
+            )
+            if self._deps.verification_strict and delivery.mode != VerificationMode.EXTERNAL:
+                raise VerificationError("delivery_unavailable")
+        except VerificationError as error:
+            self._challenge = None
+            self._verification_audit("failed", pending, reason=error.reason)
+            raise StrongVerificationRequiredError(
+                "强验证投递失败，请检查服务配置后重新申请"
+            ) from None
+        except Exception:
+            self._challenge = None
+            self._verification_audit("failed", pending, reason="delivery_failed")
+            raise StrongVerificationRequiredError("强验证投递失败，请稍后重新申请") from None
+        self._challenge = replace(challenge, provider_reference=delivery.reference)
+        self._verification_audit(
+            "delivered", pending, mode=delivery.mode.value, channel=delivery.channel,
+            target=delivery.target,
         )
         return VerificationPrompt(
-            channel="sms",
-            target=_DEMO_VERIFICATION_TARGET,
-            code=code,
+            channel=delivery.channel,
+            target=delivery.target,
+            code=delivery.code if delivery.mode is VerificationMode.DEMO else None,
             expires_in_s=VERIFICATION_TTL_S,
+            mode=delivery.mode.value,
         )
 
     def _assert_strong_verification(
@@ -1105,17 +1405,47 @@ class Session:
             raise StrongVerificationRequiredError(
                 "红色（大额 / 不可逆）需强验证：请先申请验证码"
             )
-        if (
-            challenge.card_id != pending.card.card_id
-            or challenge.frozen_hash != pending.card.frozen_hash
-            or challenge.execution_id != self._execution_id
-        ):
-            raise StrongVerificationRequiredError("验证码与当前计划不匹配：请重新申请")
-        if now >= challenge.expires_at:
-            raise StrongVerificationRequiredError("验证码已过期：请重新申请")
-        if not code or not secrets.compare_digest(code, challenge.code):
-            raise StrongVerificationRequiredError("验证码不正确")
-        self._challenge = None
+        try:
+            self._challenge = verify_challenge(
+                challenge, self._verification_binding(pending), code,
+                key=self._verification_key, now=now,
+            )
+        except VerificationError as error:
+            if error.reason == "expired":
+                self._challenge = replace(challenge, status=ChallengeStatus.EXPIRED)
+            self._verification_audit(
+                "expired" if error.reason == "expired" else "failed", pending,
+                reason=error.reason,
+            )
+            message = {
+                "expired": "验证码已过期：请重新申请",
+                "binding_mismatch": "验证码与当前计划不匹配：请重新申请",
+                "inactive": "验证码已失效：请重新申请",
+            }.get(error.reason, "验证码不正确")
+            raise StrongVerificationRequiredError(message) from None
+        self._verification_audit("consumed", pending)
+
+    def _verification_binding(self, pending: _Pending) -> VerificationBinding:
+        return VerificationBinding(
+            self._deps.user_id, self._session_id, self._execution_id,
+            pending.card.card_id, pending.card.frozen_hash,
+        )
+
+    def _verification_audit(self, status: str, pending: _Pending, **details: object) -> None:
+        self._audit(KIND_DECISION, {
+            "kind": "verification", "status": status,
+            "user_id": self._deps.user_id, "session_id": self._session_id,
+            "execution_id": self._execution_id, "card_id": pending.card.card_id,
+            "frozen_hash": pending.card.frozen_hash,
+            "challenge_id": self._challenge.challenge_id if self._challenge else None,
+            **details,
+        })
+
+    def _invalidate_verification(self, reason: str) -> None:
+        if self._challenge is not None and self._challenge.status is ChallengeStatus.ACTIVE:
+            self._challenge = invalidate_challenge(self._challenge)
+            if self._pending is not None:
+                self._verification_audit("replaced", self._pending, reason=reason)
 
     def _require_pending(self) -> _Pending:
         if self._pending is None:
@@ -1166,13 +1496,21 @@ class Session:
                 return self._execution_view()
             node = node_map[node_id]
             self._assert_dependencies_done(node)
+            call = self._to_call(node)
+            request_key = f"{self._execution_id}:{pending.card.frozen_hash}:{node_id}"
+            if not self._deps.registry.get(node.action).is_pure_query:
+                self._in_flight = InFlightNode(
+                    node_id, request_key, business_key_for(call, request_key, self._deps.user_id),
+                    node.action, manifest_hash(call),
+                )
+                # 此检查点失败时绝不能开始业务写入。
+                self._persist()
             try:
-                call = self._to_call(node)
                 result = self._deps.pep.execute(
                     call,
                     pending.decision,
                     pending.plan,
-                    f"{self._execution_id}:{pending.card.frozen_hash}:{node_id}",
+                    request_key,
                     execution=ExecutionContext(
                         execution_id=self._execution_id,
                         frozen_hash=pending.card.frozen_hash,
@@ -1193,6 +1531,7 @@ class Session:
                     ),
                 )
             except WritePreconditionError as error:
+                self._in_flight = None
                 self._refresh_authorization(error.result)
                 return self._execution_view()
             except CommittedWriteError as error:
@@ -1204,6 +1543,7 @@ class Session:
                 self._state = SessionState.INTERRUPTED
                 return self._execution_view()
             except (NotAuthorizedError, GatewayError) as error:
+                self._in_flight = None
                 self._message = f"执行受阻（{node.action}）：{error}"
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
@@ -1213,6 +1553,9 @@ class Session:
             self._exec_results.append(result)
             self._completed_node_ids.append(node_id)
             self._audit_ids.append(self._deps.audit.head())
+            self._in_flight = None
+            # 下一节点必须等待完成结果已落盘。
+            self._persist()
         if len(self._completed_node_ids) == len(pending.node_ids):
             self._state = SessionState.COMPLETED
             self._message = f"计划执行完成（{len(self._completed_node_ids)} 步）"
@@ -1237,7 +1580,7 @@ class Session:
         )
         self._pending = pending
         self._confirmation = None
-        self._challenge = None
+        self._invalidate_verification("plan_changed")
         self._quota = (
             DailyQuota(result.limit_cents, result.accumulated_cents)
             if _plan_has_outflow(pending.plan) else None
@@ -1392,6 +1735,8 @@ class Session:
         if self._state is not SessionState.INTERRUPTED:
             raise SessionStateError(f"当前状态不可恢复：{self._state.value}")
         pending = self._require_pending()
+        if self._recovery_blocked:
+            raise SessionStateError("业务证据待人工核对，禁止继续执行")
         if self._confirmation is None:
             self._state = SessionState.AWAITING_CONFIRM
             self._message = "计划尚未确认，请先确认当前计划卡"
@@ -1439,6 +1784,9 @@ class Session:
         return tuple(advice[:3])
 
     def _reset(self) -> None:
+        if self._recovery_blocked or self._unverified_results:
+            raise SessionStateError("存在待核对业务回执，不能用新计划覆盖")
+        self._invalidate_verification("plan_changed")
         self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
         self._message = "会话已重置"
@@ -1455,6 +1803,11 @@ class Session:
         self._review_report = None
         self._review_intents = []
         self._clarification_keys = frozenset()
+        self._confirmation_history = []
+        self._in_flight = None
+        self._recovery_blocked = False
+        self._planner_channel = None
+        self._model_calls = []
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:
@@ -1626,7 +1979,9 @@ def _spans_are_unambiguous(utterance: str, spans: tuple[str, ...] | list[str]) -
 _INTENT_CLAUSE_BOUNDARY = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 
-def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ...] | None:
+def _intent_semantic_contexts(
+    utterance: str, spans: list[str], *, query_indexes: frozenset[int] = frozenset(),
+) -> tuple[str, ...] | None:
     """从原文恢复完整语义，防止模型裁掉“登记预约”等决定动作性质的前缀。"""
     if len(spans) <= 1:
         # 备注是数据，不参与动作类型选择。
@@ -1637,7 +1992,7 @@ def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ..
         clauses.append((start, boundary.start()))
         start = boundary.end()
     clauses.append((start, len(utterance)))
-    contexts: list[str] = []
+    ranges: list[tuple[int, int]] = []
     used_clauses: set[tuple[int, int]] = set()
     cursor = 0
     for span in spans:
@@ -1651,8 +2006,21 @@ def _intent_semantic_contexts(utterance: str, spans: list[str]) -> tuple[str, ..
             return None
         left, right = matches[0]
         used_clauses.add(matches[0])
-        contexts.append(utterance[left:right].partition("备注")[0])
+        ranges.append((left, right))
         cursor = span_end
+    contexts: list[str] = []
+    for index, (left, right) in enumerate(ranges):
+        if index in query_indexes:
+            # 前后对象限定可以另起短句；相邻已分配动作子句之外的片段仍属待核对范围。
+            left = (
+                next(
+                    start for start, end in clauses
+                    if start >= ranges[index - 1][1] and utterance[start:end].strip()
+                )
+                if index else 0
+            )
+            right = ranges[index + 1][0] if index + 1 < len(ranges) else len(utterance)
+        contexts.append(utterance[left:right].partition("备注")[0])
     return tuple(contexts)
 
 
