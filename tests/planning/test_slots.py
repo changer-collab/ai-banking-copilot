@@ -199,6 +199,7 @@ def test_required_slots_follow_the_catalog_required_control_slots() -> None:
         "bills.yearly",
         "card.list",
         "subscription.list",
+        "subscription.cancel",
         "card.apply_virtual",
         "transfer.book",
         "transfer.create",

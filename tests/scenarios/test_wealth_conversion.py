@@ -14,7 +14,11 @@ def test_converts_record_to_scenario_assessment() -> None:
     )
     converted = to_risk_assessment(record)
     assert converted == RiskAssessment(
-        user_id="u_demo", risk_profile="R3", assessed_on=date(2026, 9, 1), valid_days=365
+        user_id="u_demo",
+        risk_profile="R3",
+        assessed_on=date(2026, 9, 1),
+        valid_days=365,
+        source="seed",
     )
 
 

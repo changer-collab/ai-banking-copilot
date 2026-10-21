@@ -24,9 +24,12 @@
 03 的 PEP handler 注册表**（本层只做声明，不执行）。
 
 **写动作的 `user_id` 控制槽**（README 裁决 #16）：`transfer.create` / `transfer.schedule` /
-`wealth.subscribe` / `wealth.redeem` / `subscription.sign` 一律声明**必填控制槽** `user_id`
-（`SlotKind.CONTROL`、`str`），供 03 的 PEP 写分派取用户身份；会话层与评测链装配 `params`
-时填入 `DEMO_USER_ID`。
+`wealth.subscribe` / `wealth.redeem` / `subscription.sign` / `subscription.cancel` 一律声明
+**必填控制槽** `user_id`（`SlotKind.CONTROL`、`str`），供 03 的 PEP 写分派取用户身份；
+会话层与评测链装配 `params` 时填入 `DEMO_USER_ID`。
+
+`subscription.cancel` 声明 `user_id` 的目的（2026-10-21 安全修复 G-01）：取消订阅必须按
+**订阅 id + 归属用户**双条件命中，身份只取服务端会话注入的控制槽，绝不采信请求体。
 
 **级别归属**：本目录只声明 `RiskClass` 与 `is_pure_query`，**不产出三色级别**（那是 03）。
 官方把「订阅查询」与「订阅取消」并列在黄色区间；本层如实标记 `subscription.list` 为
@@ -56,6 +59,7 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("currency", SlotKind.CONTROL, str, required=False),
             ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
             ParamSpec("schedule_id", SlotKind.CONTROL, str, required=False),
             ParamSpec("executed_on", SlotKind.CONTROL, date, required=False),
@@ -64,7 +68,10 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
         is_pure_query=False,
         reversible=True,
         money_param="amount_cents",
-        description="立即向名册收款人转出资金（备注只入数据槽，永不被解释为指令）",
+        description=(
+            "立即向名册收款人转出资金（备注只入数据槽，永不被解释为指令）；"
+            "currency 为付款账户币种，进入冻结参数、计划哈希与写前复核"
+        ),
     ),
     ToolSpec(
         action="transfer.schedule",
@@ -75,6 +82,7 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("currency", SlotKind.CONTROL, str, required=False),
             ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
             ParamSpec("remark", SlotKind.DATA, str, required=False),
         ),
@@ -83,7 +91,8 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
         money_param="amount_cents",
         description=(
             "定时转账兼容动作：当前调用会立即扣款，并将 booked_on 作为记账日；"
-            "需要登记未来计划且登记时不扣款时，必须使用 transfer.book"
+            "需要登记未来计划且登记时不扣款时，必须使用 transfer.book；"
+            "currency 为付款账户币种，进入冻结参数、计划哈希与写前复核"
         ),
     ),
     ToolSpec(
@@ -95,6 +104,7 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("payee_id", SlotKind.CONTROL, str, slot_name="payee"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec("currency", SlotKind.CONTROL, str, required=False),
             ParamSpec("booked_on", SlotKind.CONTROL, date, slot_name="when"),
             ParamSpec("remark", SlotKind.DATA, str, required=False),
         ),
@@ -103,7 +113,8 @@ _TRANSFER_SPECS: tuple[ToolSpec, ...] = (
         money_param="amount_cents",
         description=(
             "登记未来转账（登记时不扣款；到期由调度派发为 transfer.create）；"
-            "与会立即扣款的 transfer.schedule 明确区分"
+            "与会立即扣款的 transfer.schedule 明确区分；"
+            "currency 为付款账户币种，登记时按账户事实复核"
         ),
     ),
     ToolSpec(
@@ -197,7 +208,10 @@ _WEALTH_SPECS: tuple[ToolSpec, ...] = (
         action="wealth.list",
         risk=RiskClass.READ_ONLY,
         kind=ActionKind.QUERY,
-        params=(),
+        params=(
+            ParamSpec("risk_profile", SlotKind.CONTROL, str, required=False),
+            ParamSpec("risk_source", SlotKind.CONTROL, str, required=False),
+        ),
         is_pure_query=True,
         reversible=True,
         money_param=None,
@@ -325,11 +339,14 @@ _SUBSCRIPTION_SPECS: tuple[ToolSpec, ...] = (
         action="subscription.cancel",
         risk=RiskClass.SMALL_CHANGE,
         kind=ActionKind.CANCEL_OUTFLOW,
-        params=(ParamSpec("subscription_id", SlotKind.CONTROL, str, slot_name="subscription"),),
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+            ParamSpec("subscription_id", SlotKind.CONTROL, str, slot_name="subscription"),
+        ),
         is_pure_query=False,
         reversible=True,
         money_param=None,
-        description="取消订阅（官方黄色；未来流出转为负）",
+        description="取消订阅（官方黄色；未来流出转为负；仅归属用户可取消）",
     ),
     ToolSpec(
         action="subscription.sign",
