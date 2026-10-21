@@ -23,6 +23,7 @@ from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed
 from ai_banking_copilot.gateway.receipt_store import StoreReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
+    StoreRiskAssessmentWriter,
     init_risk_schema,
     seed_risk_assessment,
 )
@@ -59,6 +60,7 @@ from ai_banking_copilot.policy.verification import (
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.web.app import AppDeps
+from ai_banking_copilot.web.bill_narrative import LlmBillNarrator
 from ai_banking_copilot.web.insights import InsightService, SQLiteInsightMetadataStore
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
@@ -70,6 +72,9 @@ _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 REVIEW_CHANNEL_ENV = "AIB_REVIEW_CHANNEL"
 REVIEW_REQUIRED_ENV = "AIB_REVIEW_REQUIRED"
 INSIGHT_DB_ENV = "AIB_INSIGHT_DB"
+
+SESSION_RISK_STRICT_ENV = "AIB_SESSION_RISK_STRICT"
+"""会话风控严格模式（G-03）：置为真值时，缺少可信风控结果即升级核验（fail-closed）。"""
 
 _KEY_ENV_NAMES = ("AI_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
 """凭据环境变量（按序取首个非空）：通用 `AI_*` 优先，兼容本仓库历史 `DASHSCOPE_API_KEY`。"""
@@ -191,6 +196,30 @@ def build_operator_token(env: Mapping[str, str] | None = None) -> str | None:
     return source.get(OPERATOR_TOKEN_ENV, "").strip() or None
 
 
+def build_session_risk_strict(env: Mapping[str, str] | None = None) -> bool:
+    """会话风控严格模式（G-03）。
+
+    演示装配（本地单用户、无设备 / 地点遥测可比对）显式放开；生产装配应置
+    `AIB_SESSION_RISK_STRICT` 为真值，使「无可信风控结果」升级核验而非默认放行。
+    """
+    source = os.environ if env is None else env
+    return source.get(SESSION_RISK_STRICT_ENV, "").strip().lower() in _DISABLED_VALUES
+
+
+def build_bill_narrator(
+    env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
+    observer: CallObserver | None = None,
+) -> LlmBillNarrator | None:
+    """装配账单结论式解释通道：`AIB_DISABLE_LLM` 或无凭据时返回 `None`（确定性降级）。
+
+    识别与金额核算不依赖本通道；装配缺失只会让解释退化为规则文案，并显式标注降级。
+    """
+    settings = config if config is not None else ModelConfig.from_env(env)
+    if settings.disable_llm or not settings.api_key:
+        return None
+    return LlmBillNarrator(config=settings, observer=observer)
+
+
 def build_verification(
     db_path: Path, env: Mapping[str, str] | None = None,
 ) -> tuple[VerificationProvider, bytes | None, bool]:
@@ -248,6 +277,9 @@ def build_deps(
     session_store = Store(db_path, StoreMode.READ_WRITE)
     if resources is not None:
         resources.callback(session_store.close)
+    risk_store = Store(db_path, StoreMode.READ_WRITE)
+    if resources is not None:
+        resources.callback(risk_store.close)
     source = os.environ if env is None else env
     verification_provider, verification_key, verification_strict = build_verification(db_path, env)
     model_config = ModelConfig.from_env(source)
@@ -277,6 +309,7 @@ def build_deps(
         audit=audit,
         user_id=DEMO_USER_ID,
         risk=StoreRiskAssessmentSource(read_store),
+        risk_writer=StoreRiskAssessmentWriter(risk_store),
         reversal=ReversalService(core_bank),
         operator_token=build_operator_token(env),
         reviewer=build_reviewer(env, config=model_config, observer=model_observations),
@@ -288,4 +321,8 @@ def build_deps(
         session_repository=SQLiteSessionRepository(session_store),
         receipts=StoreReceiptReader(read_store),
         model_observations=model_observations,
+        session_risk_strict=build_session_risk_strict(env),
+        bill_narrator=build_bill_narrator(
+            env, config=model_config, observer=model_observations,
+        ),
     )

@@ -11,6 +11,7 @@ from ai_banking_copilot.policy.verification import (
     ChallengeRecord,
     DemoVerificationProvider,
     ExternalVerificationProvider,
+    VerificationAttemptLimiter,
     VerificationBinding,
     VerificationError,
     create_challenge,
@@ -291,3 +292,74 @@ def test_external_successful_json_dict_does_not_require_reference(data: dict[str
     result = provider.deliver(binding(), "c1", "123456", datetime(2026, 10, 20, tzinfo=UTC))
     assert result.mode == "external"
     assert result.reference is None
+
+
+def test_attempt_limiter_backs_off_then_locks_then_recovers() -> None:
+    """失败计数只增不减（换挑战/换会话都不清零），退避逐级拉长，达上限后锁定并自动解锁。"""
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    limiter = VerificationAttemptLimiter(
+        max_failures=3, lockout_seconds=60, backoff_seconds=(0, 10)
+    )
+
+    limiter.check("u-1", now=now)
+    assert limiter.record_failure("u-1", now=now) == 1
+    # 首档退避为 0：合法用户可立即重试一次。
+    limiter.check("u-1", now=now)
+
+    assert limiter.record_failure("u-1", now=now) == 2
+    with pytest.raises(VerificationError, match="^throttled$"):
+        limiter.check("u-1", now=now + timedelta(seconds=9))
+    limiter.check("u-1", now=now + timedelta(seconds=10))
+
+    # 超过退避序列长度时沿用最后一档，且第 3 次失败立即进入锁定（锁定 60 秒）。
+    assert limiter.record_failure("u-1", now=now + timedelta(seconds=10)) == 3
+    with pytest.raises(VerificationError, match="^locked$"):
+        limiter.check("u-1", now=now + timedelta(seconds=10))
+    with pytest.raises(VerificationError, match="^locked$"):
+        limiter.check("u-1", now=now + timedelta(seconds=69))
+    # 锁定期结束 ⇒ 清零重新计数
+    limiter.check("u-1", now=now + timedelta(seconds=70))
+    assert limiter.failures("u-1") == 0
+
+
+def test_attempt_limiter_is_per_user_and_reset_by_server_success() -> None:
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    limiter = VerificationAttemptLimiter(
+        max_failures=2, lockout_seconds=60, backoff_seconds=(0,)
+    )
+    limiter.record_failure("u-1", now=now)
+    limiter.record_failure("u-1", now=now)
+    with pytest.raises(VerificationError, match="^locked$"):
+        limiter.check("u-1", now=now)
+    # 其他用户不受影响
+    limiter.check("u-2", now=now)
+    assert limiter.failures("u-2") == 0
+    limiter.reset("u-1")
+    limiter.check("u-1", now=now)
+    assert limiter.failures("u-1") == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_failures": 0},
+        {"lockout_seconds": 0},
+        {"backoff_seconds": ()},
+        {"backoff_seconds": (-1,)},
+    ],
+)
+def test_attempt_limiter_rejects_invalid_configuration(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        VerificationAttemptLimiter(**kwargs)  # type: ignore[arg-type]
+
+
+def test_attempt_limiter_errors_carry_no_sensitive_detail() -> None:
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    limiter = VerificationAttemptLimiter(
+        max_failures=1, lockout_seconds=60, backoff_seconds=(0,)
+    )
+    limiter.record_failure("u-1", now=now)
+    with pytest.raises(VerificationError) as exc:
+        limiter.check("u-1", now=now)
+    assert exc.value.reason == "locked"
+    assert str(exc.value) == "locked"

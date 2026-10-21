@@ -1,12 +1,14 @@
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
+from ai_banking_copilot.contracts.plan import Plan
 from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.core_bank import CoreBank
 from ai_banking_copilot.gateway.errors import (
     BlockedPayeeError,
     GatewayError,
     InsufficientFundsError,
+    UnknownSubscriptionError,
 )
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
@@ -15,7 +17,7 @@ from ai_banking_copilot.gateway.store import Store
 from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
-from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_plan
+from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, Pep, manifest_plan
 from ai_banking_copilot.tools.registry import (
     ForbiddenParamError,
     ToolCall,
@@ -50,6 +52,26 @@ def _transfer_params(amount_cents: int = 50000) -> dict[str, object]:
         "amount_cents": _trusted(amount_cents),
         "booked_on": _trusted("2026-10-01"),
     }
+
+
+def _execute_confirmed(
+    pep: Pep, call: ToolCall, level: Level, key: str, plan: Plan | None = None,
+) -> ExecResult:
+    """以「用户已确认」的服务端路径执行写动作：先签发一次性凭据，再过 Pre-Tool Hook。
+
+    凭据里的 `strong_verified` 与 `approved_level` 模拟会话层确认后的真实值：
+    `RED` 及以上必须先过强验证，否则写前复核会要求重新授权。
+    """
+    decision = _decision(level)
+    frozen = manifest_plan(call) if plan is None else plan
+    return pep.execute(
+        call, decision, frozen, key,
+        execution=pep.issue_write_grant(
+            call, decision, frozen,
+            approved_level=level,
+            strong_verified=level >= Level.RED,
+        ),
+    )
 
 
 def test_pure_query_executes_and_is_audited(pep: Pep, audit: AuditLog) -> None:
@@ -175,7 +197,7 @@ def test_bills_category_trend_query_reports_base_period(pep: Pep) -> None:
 
 def test_transfer_settles_and_debits_balance(pep: Pep, rw_store: Store) -> None:
     call = ToolCall(action="transfer.create", params=_transfer_params())
-    result = pep.execute(call, _decision(Level.RED), manifest_plan(call), "k1")
+    result = _execute_confirmed(pep, call, Level.RED, "k1")
     assert result.status == "settled"
     assert result.record_ids[0].startswith("transactions:")
     rows = rw_store.query("SELECT balance_cents FROM accounts WHERE account_id = 'acc_savings'")
@@ -186,7 +208,7 @@ def test_write_records_verified_provenance(
     pep: Pep, audit: AuditLog, gateway: FactGateway
 ) -> None:
     call = ToolCall(action="transfer.create", params=_transfer_params())
-    result = pep.execute(call, _decision(Level.RED), manifest_plan(call), "k1")
+    result = _execute_confirmed(pep, call, Level.RED, "k1")
     provenance = audit.events()[0].payload["provenance"]
     assert len(provenance) == 1
     entry = provenance[0]
@@ -197,8 +219,8 @@ def test_write_records_verified_provenance(
 def test_idempotent_replay_returns_same_receipt(pep: Pep, rw_store: Store) -> None:
     call = ToolCall(action="transfer.create", params=_transfer_params())
     frozen = manifest_plan(call)
-    first = pep.execute(call, _decision(Level.RED), frozen, "k1")
-    second = pep.execute(call, _decision(Level.RED), frozen, "k1")
+    first = _execute_confirmed(pep, call, Level.RED, "k1", frozen)
+    second = _execute_confirmed(pep, call, Level.RED, "k1", frozen)
     assert second.record_ids == first.record_ids
     assert "回放" in second.message
     rows = rw_store.query(
@@ -216,11 +238,43 @@ def test_tampered_amount_fails_execution_gate(pep: Pep) -> None:
 
 def test_subscription_cancel_updates_status(pep: Pep, gateway: FactGateway) -> None:
     call = ToolCall(
-        action="subscription.cancel", params={"subscription_id": _trusted("sub_video")}
+        action="subscription.cancel",
+        params={
+            "subscription_id": _trusted("sub_video"),
+            "user_id": _trusted(DEMO_USER_ID),
+        },
     )
-    result = pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "k1")
+    result = _execute_confirmed(pep, call, Level.YELLOW, "k1")
     assert result.status == "cancelled"
+    assert result.external_status == "not_integrated"
+    assert result.previous_status == "active"
     assert gateway.subscription("sub_video").payload.status == "cancelled"
+
+
+def test_subscription_cancel_refuses_another_users_subscription(
+    pep: Pep, rw_store: Store
+) -> None:
+    """G-01：PEP 只透传服务端身份，底层双条件命中失败 ⇒ 拒绝且不改他人记录。"""
+    with rw_store.transaction() as conn:
+        conn.execute("INSERT INTO users VALUES ('u_other', '其他用户', 'R3')")
+        conn.execute(
+            "INSERT INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
+            " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            ("sub_other", "u_other", "他人商户", 1000, "monthly", "2026-10-20", "active"),
+        )
+    call = ToolCall(
+        action="subscription.cancel",
+        params={
+            "subscription_id": _trusted("sub_other"),
+            "user_id": _trusted(DEMO_USER_ID),
+        },
+    )
+    with pytest.raises(UnknownSubscriptionError):
+        _execute_confirmed(pep, call, Level.YELLOW, "k_other")
+    rows = rw_store.query(
+        "SELECT status FROM subscriptions WHERE subscription_id = 'sub_other'"
+    )
+    assert rows[0]["status"] == "active"
 
 
 def test_freeze_then_unfreeze(pep: Pep, gateway: FactGateway) -> None:
@@ -232,11 +286,11 @@ def test_freeze_then_unfreeze(pep: Pep, gateway: FactGateway) -> None:
             "reason": _trusted("生日预算"),
         },
     )
-    held = pep.execute(freeze, _decision(Level.RED), manifest_plan(freeze), "k1")
+    held = _execute_confirmed(pep, freeze, Level.RED, "k1")
     hold_id = held.record_ids[0].split(":", 1)[1]
     assert gateway.hold(hold_id).payload.status == "active"
     unfreeze = ToolCall(action="funds.release", params={"hold_id": _trusted(hold_id)})
-    released = pep.execute(unfreeze, _decision(Level.YELLOW), manifest_plan(unfreeze), "k2")
+    released = _execute_confirmed(pep, unfreeze, Level.YELLOW, "k2")
     assert released.status == "released"
     assert gateway.hold(hold_id).payload.status == "released"
 
@@ -252,7 +306,7 @@ def test_wealth_subscribe_requires_min_amount(pep: Pep) -> None:
         },
     )
     with pytest.raises(GatewayError):
-        pep.execute(call, _decision(Level.RED), manifest_plan(call), "k1")
+        _execute_confirmed(pep, call, Level.RED, "k1")
 
 
 def test_write_failure_records_audit_and_breaker_failure(
@@ -260,7 +314,7 @@ def test_write_failure_records_audit_and_breaker_failure(
 ) -> None:
     call = ToolCall(action="transfer.create", params=_transfer_params(amount_cents=99999999))
     with pytest.raises(InsufficientFundsError):
-        pep.execute(call, _decision(Level.RED), manifest_plan(call), "k1")
+        _execute_confirmed(pep, call, Level.RED, "k1")
     assert breaker.failure_count() == 1
     assert audit.events()[-1].payload["status"] == "failed"
     assert audit.verify_chain() is True
@@ -271,7 +325,7 @@ def test_blocked_payee_failure_is_recorded(pep: Pep, breaker: CircuitBreaker) ->
     params["payee_id"] = _trusted("p_zhaoliu")
     call = ToolCall(action="transfer.create", params=params)
     with pytest.raises(BlockedPayeeError):
-        pep.execute(call, _decision(Level.RED), manifest_plan(call), "k1")
+        _execute_confirmed(pep, call, Level.RED, "k1")
     assert breaker.failure_count() == 1
 
 
@@ -327,7 +381,7 @@ def test_registered_write_action_without_handler_is_rejected(
     pep = Pep(registry, gateway, core_bank, audit, breaker, {}, {})
     call = ToolCall(action="card.lock", params={"card_id": _trusted("card_debit")})
     with pytest.raises(NotAuthorizedError, match="未登记执行处理器"):
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "k1")
+        _execute_confirmed(pep, call, Level.YELLOW, "k1")
     assert breaker.failure_count() == 1
 
 
@@ -349,7 +403,7 @@ def test_registered_query_action_without_handler_is_rejected(
 
 def test_transfer_schedule_reuses_transfer_semantics(pep: Pep, rw_store: Store) -> None:
     call = ToolCall(action="transfer.schedule", params=_transfer_params())
-    result = pep.execute(call, _decision(Level.RED), manifest_plan(call), "k2")
+    result = _execute_confirmed(pep, call, Level.RED, "k2")
     assert result.status == "settled"
     rows = rw_store.query("SELECT COUNT(*) AS n FROM transactions WHERE booked_on = '2026-10-01'")
     assert rows[0]["n"] == 1
@@ -357,11 +411,11 @@ def test_transfer_schedule_reuses_transfer_semantics(pep: Pep, rw_store: Store) 
 
 def test_card_lock_and_unlock_update_status(pep: Pep, gateway: FactGateway) -> None:
     lock = ToolCall(action="card.lock", params={"card_id": _trusted("card_debit")})
-    locked = pep.execute(lock, _decision(Level.YELLOW), manifest_plan(lock), "k3")
+    locked = _execute_confirmed(pep, lock, Level.YELLOW, "k3")
     assert locked.status == "locked"
     assert gateway.card("card_debit").payload.status == "locked"
     unlock = ToolCall(action="card.unlock", params={"card_id": _trusted("card_debit")})
-    unlocked = pep.execute(unlock, _decision(Level.RED), manifest_plan(unlock), "k4")
+    unlocked = _execute_confirmed(pep, unlock, Level.RED, "k4")
     assert unlocked.status == "active"
     assert gateway.card("card_debit").payload.status == "active"
 
@@ -371,7 +425,7 @@ def test_card_apply_virtual_creates_virtual_card(pep: Pep, gateway: FactGateway)
         action="card.apply_virtual",
         params={"user_id": _trusted(DEMO_USER_ID), "daily_limit_cents": _trusted(300000)},
     )
-    result = pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "k5")
+    result = _execute_confirmed(pep, call, Level.YELLOW, "k5")
     assert result.status == "applied"
     card_id = result.record_ids[0].split(":", 1)[1]
     assert gateway.card(card_id).payload.card_type == "virtual"
@@ -383,7 +437,7 @@ def test_card_set_limit_updates_limit(pep: Pep, gateway: FactGateway) -> None:
         action="card.set_limit",
         params={"card_id": _trusted("card_debit"), "daily_limit_cents": _trusted(1500000)},
     )
-    result = pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "k6")
+    result = _execute_confirmed(pep, call, Level.YELLOW, "k6")
     assert result.status == "updated"
     assert gateway.card("card_debit").payload.daily_limit == Money(1500000)
 
@@ -399,7 +453,7 @@ def test_subscription_sign_creates_subscription(pep: Pep, gateway: FactGateway) 
             "next_charge_on": _trusted("2027-03-01"),
         },
     )
-    result = pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "k7")
+    result = _execute_confirmed(pep, call, Level.YELLOW, "k7")
     assert result.status == "signed"
     subscription_id = result.record_ids[0].split(":", 1)[1]
     assert gateway.subscription(subscription_id).payload.merchant == "云盘会员"

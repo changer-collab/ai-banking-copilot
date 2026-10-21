@@ -55,6 +55,9 @@ KIND_REVERSAL = "reversal"
 KIND_OPERATOR = "operator"
 """**运维动作**事件（裁决 #27）：含动作名、理由、动作前后的状态——解锁熔断等降级出口必须留痕。"""
 
+KIND_TOOL_HOOK = "tool_hook"
+"""**Pre-Tool Hook** 事件：写操作被拦截时的工具名、操作类型、计划 ID、拦截原因与确认状态。"""
+
 _REQUIRED_KEYS = ("event_id", "kind", "payload", "prev_hash", "entry_hash")
 
 

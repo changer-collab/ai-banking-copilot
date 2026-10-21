@@ -27,7 +27,11 @@ from ai_banking_copilot.web.session_codec import (
     encode_snapshot,
     encode_value,
 )
-from ai_banking_copilot.web.session_snapshot import SessionSnapshot, SessionSnapshotError
+from ai_banking_copilot.web.session_snapshot import (
+    SESSION_SNAPSHOT_VERSION,
+    SessionSnapshot,
+    SessionSnapshotError,
+)
 
 
 def _snapshot() -> SessionSnapshot:
@@ -39,7 +43,7 @@ def _snapshot() -> SessionSnapshot:
     )
     plan = Plan("p1", (node,))
     return SessionSnapshot(
-        version=1, user_id="u1", session_id="s1", revision=0,
+        version=SESSION_SNAPSHOT_VERSION, user_id="u1", session_id="s1", revision=0,
         execution_id="e1", state="awaiting_confirm",
         payload={
             "plan": plan, "cfhash": cfhash(plan.nodes),

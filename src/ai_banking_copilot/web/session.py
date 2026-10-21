@@ -18,11 +18,11 @@ import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from functools import wraps
 from threading import RLock
-from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, Protocol, TypeVar, cast
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode, strictest
 from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
@@ -74,11 +74,7 @@ from ai_banking_copilot.policy.breaker import (
     BreakerTrigger,
     CircuitBreaker,
 )
-from ai_banking_copilot.policy.execution import (
-    CommittedWriteError,
-    ExecutionContext,
-    assess_plan,
-)
+from ai_banking_copilot.policy.execution import CommittedWriteError, assess_plan
 from ai_banking_copilot.policy.gate import assert_frozen
 from ai_banking_copilot.policy.pdp import (
     FLAG_DEVICE_CHANGE,
@@ -98,6 +94,7 @@ from ai_banking_copilot.policy.session_recovery import (
     business_key_for,
     reconcile,
 )
+from ai_banking_copilot.policy.tool_hook import ToolHookBlocked
 from ai_banking_copilot.policy.verification import (
     ChallengeRecord,
     ChallengeStatus,
@@ -116,13 +113,18 @@ from ai_banking_copilot.scenarios.base import (
     plan_is_pure_query,
 )
 from ai_banking_copilot.scenarios.bill_advice import BillAdvice, build_bill_advice
+from ai_banking_copilot.scenarios.bill_findings import analyze_bill, report_payload
 from ai_banking_copilot.scenarios.pending import PendingHandler
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
     run_scenario,
     select_handler,
 )
-from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS, to_risk_assessment
+from ai_banking_copilot.scenarios.wealth import (
+    FORBIDDEN_HINTS,
+    is_recommendation_request,
+    to_risk_assessment,
+)
 from ai_banking_copilot.tools.registry import ToolCall
 from ai_banking_copilot.web.plan_card import (
     PROMPT_STRONG_VERIFY,
@@ -208,6 +210,38 @@ class StrongVerificationRequiredError(RuntimeError):
 VERIFICATION_TTL_S = 300
 """强验证挑战有效期（秒）：过期即失效，必须重新申请。"""
 
+PLAN_TTL_S = 300
+"""待确认计划有效期（秒，G-02）：由**服务端**写入 `PlanCard.expires_at`，过期不可再确认。"""
+
+MAX_CONFIRM_STEPS = 20
+"""`confirm(steps=...)` 的上界：仅用于「分步执行 / 中断恢复」演示，不得借它改变授权语义。"""
+
+
+class SessionRiskSource(Protocol):
+    """**服务端**可信会话风控信号源（G-03）：认证会话 + 请求行为 + 可信风控结果。
+
+    返回值语义固定为三态：
+    - `True`：确认存在会话异常（设备 / 地点跳变等）；
+    - `False`：确认正常；
+    - `None`：**无可信结果**（信号源不可用 / 判定失败）——调用方必须按安全策略升级，不得据此放行。
+
+    客户端载荷**永远**不得作为本协议的输入或替代实现。
+    """
+
+    def assess(self, *, user_id: str, session_id: str) -> bool | None:
+        """返回当前（用户, 会话）的可信风控结论。"""
+        ...
+
+
+def _naive_moment(moment: datetime | None) -> datetime:
+    """把时刻归一到**本地朴素时间**：会话内时间戳同一时钟域，避免 aware/naive 混比。"""
+    if moment is None:
+        return datetime.now()
+    if moment.tzinfo is None:
+        return moment
+    return moment.astimezone().replace(tzinfo=None)
+
+
 @dataclass(frozen=True)
 class VerificationPrompt:
     """投递结果；只有明确标识为 demo 的模式可以回显演示码。"""
@@ -291,6 +325,12 @@ class ExecutionView:
     bill_advice: tuple[BillAdvice, ...] = ()
     """月账单执行完成后的只读消费建议；不改变计划和授权。"""
     bill_advice_message: str = ""
+    bill_findings: Mapping[str, object] | None = None
+    """账单异常识别结果（确定性引擎，金额可重算）；`None` = 本次未执行月账单或不可用。
+
+    **不含模型文案**：模型解释只在 `GET /api/bills/analysis` 触发，避免每次读会话都调用模型。"""
+    hook_status: str = ""
+    """写操作 Pre-Tool Hook 的拦截状态（`confirmation_required` 等）；空串 = 未被拦截。"""
 
 
 @dataclass(frozen=True)
@@ -366,9 +406,13 @@ class Session:
                 and not deps.verification_strict else b""
             )
         self._verification_key: bytes = verification_key
+        self._verification_limiter = deps.verification_limiter
+        """强验证失败计数（**服务端**维护、按用户共享）：换挑战或换会话都不清零。"""
         self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
         self._message = "会话就绪"
+        self._hook_status = ""
+        """最近一次执行的 Pre-Tool Hook 拦截状态（瞬态，不进会话快照）。"""
         self._pending: _Pending | None = None
         self._confirmation: ConfirmationRecord | None = None
         self._takeover: TakeoverPackage | None = None
@@ -484,6 +528,7 @@ class Session:
                 self._exec_results.append(ExecResult(
                     status=result.receipt.status if result.receipt else "verified",
                     record_ids=result.record_ids, message="恢复时已核对原业务回执及审计",
+                    action=node.action,
                 ))
             self._unverified_results.pop(node.node_id, None)
             self._in_flight = None
@@ -501,7 +546,7 @@ class Session:
             if result.receipt is not None:
                 self._unverified_results[node.node_id] = ExecResult(
                     status="committed_unverified", record_ids=result.record_ids,
-                    message=self._message,
+                    message=self._message, action=node.action,
                 )
             if result.status is ReconcileStatus.MANUAL_CONFLICT and self._pending is not None:
                 self._enter_takeover(self._message, self._pending)
@@ -550,12 +595,11 @@ class Session:
         utterance: str,
         *,
         selected: Mapping[str, object] | None = None,
-        session_anomaly: bool = False,
         now: datetime | None = None,
     ) -> SubmissionView:
         """一次新的用户意图拥有独立执行身份，即使内容完全相同。"""
         return self._submit(
-            utterance, selected=selected, session_anomaly=session_anomaly, now=now,
+            utterance, selected=selected, now=now,
             execution_id=secrets.token_hex(16),
         )
 
@@ -564,15 +608,14 @@ class Session:
         utterance: str,
         *,
         selected: Mapping[str, object] | None = None,
-        session_anomaly: bool = False,
         now: datetime | None = None,
         execution_id: str,
         clarification_keys: frozenset[str] = frozenset(),
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
-        `session_anomaly`：**受信任调用方**上报的会话异常（设备 / 地点跳变）——本层无此信号源，
-        故由调用方按事实传入；命中即按触发 5 熔断，并同时给 PDP 加 `device_change` 标记。
+        会话风控信号（G-03）**只**来自服务端可信源 `AppDeps.session_risk`，本方法不接受任何
+        客户端风控入参。
         """
         self._reset()
         self._execution_id = execution_id
@@ -621,8 +664,8 @@ class Session:
             asks,
             candidate_actions=tuple(intent.action for intent in intents),
             accepted_intents=intents,
-            session_anomaly=session_anomaly,
             notes=notes,
+            now=moment,
         )
 
     @_serialized
@@ -663,6 +706,7 @@ class Session:
             candidate_actions=tuple(node.action for node in plan.nodes),
             review_handler=handler,
             review_kind="due_proposal",
+            now=datetime.now(),
         )
 
     def _invalid_selection(self, selected: Mapping[str, object]) -> str | None:
@@ -698,11 +742,11 @@ class Session:
         asks: tuple[ClarificationAsk, ...],
         *,
         candidate_actions: tuple[str, ...] = (),
-        session_anomaly: bool = False,
         notes: tuple[str, ...] = (),
         review_handler: PendingHandler | None = None,
         review_kind: str = "user_request",
         accepted_intents: tuple[Intent, ...] = (),
+        now: datetime | None = None,
     ) -> SubmissionView:
         questions = tuple(ask.prompt for ask in asks)
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
@@ -722,7 +766,7 @@ class Session:
         plan = outcome.plan
         if outcome.decision is None:
             return self._refuse("场景未产出裁决，安全拒绝", utterance)
-        flags = self._context_flags(utterance, session_anomaly=session_anomaly)
+        flags = self._context_flags(utterance)
         risk = assess_plan(
             plan, registry=self._deps.registry, gateway=self._deps.gateway,
             user_id=self._deps.user_id, today=self._deps.today, flags=flags,
@@ -730,7 +774,9 @@ class Session:
         )
         node_decisions = risk.node_decisions
         decision = risk.decision
-        card = self._render_card(plan, decision)
+        card = self._render_card(
+            plan, decision, now=now if now is not None else datetime.now(),
+        )
         quota = (
             DailyQuota(risk.limit_cents, risk.accumulated_cents)
             if decision.level in (Level.YELLOW, Level.RED) and _plan_has_outflow(plan)
@@ -1122,8 +1168,13 @@ class Session:
             )
         return tuple(intents), tuple(asks), _dropped_notes(dropped)
 
-    def _render_card(self, plan: Plan, decision: Decision) -> PlanCard:
-        card = render_plan_card(plan, decision, self._deps.gateway)
+    def _render_card(
+        self, plan: Plan, decision: Decision, *, now: datetime | None = None,
+    ) -> PlanCard:
+        card = render_plan_card(
+            plan, decision, self._deps.gateway,
+            expires_at=_naive_moment(now) + timedelta(seconds=PLAN_TTL_S),
+        )
         # 相同内容的新提交也不能接受上一轮的确认请求。
         return replace(card, card_id=f"{card.card_id}_{self._execution_id}")
 
@@ -1134,26 +1185,46 @@ class Session:
             user_id=self._deps.user_id, today=self._deps.today, flags=flags,
         ))
 
-    def _context_flags(
-        self, utterance: str, *, session_anomaly: bool = False
-    ) -> frozenset[str]:
+    def _context_flags(self, utterance: str) -> frozenset[str]:
         """上下文异常标记的**唯一生产者**，并同步接线熔断触发 2 / 5（**作用域不同**，裁决 #27）。
 
         - 注入检测命中 → 标记 `injection_detected`（PDP 单向升 `MANUAL`）+ **全局**熔断（触发 2）：
           注入是**系统性**威胁（可能来自任何会话 / 任何入参面），配得上全局拒绝；
-        - 调用方上报会话异常 → 标记 `device_change`（PDP 升黄）+ **会话级**熔断（触发 5）：
-          设备 / 地点跳变是**单个会话**的信号，只惩罚该会话。
+        - 服务端可信风控（G-03）判定会话异常 → 标记 `device_change`（PDP 升黄）+ **会话级**熔断
+          （触发 5）：设备 / 地点跳变是**单个会话**的信号，只惩罚该会话；
+        - **无可信风控结果**（信号源缺失且要求严格，或信号源判定失败）→ 同样按异常升级，
+          **不得默认放行**：宁可多一次人工核验，也不把未知当正常。
         """
         flags: set[str] = set()
         if detect_injection(utterance):
             flags.add(FLAG_INJECTION_DETECTED)
             self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
-        if session_anomaly:
+        anomaly = self._session_risk_anomaly()
+        if anomaly is None:
             flags.add(FLAG_DEVICE_CHANGE)
             self._trip_session(
-                BreakerTrigger.SESSION_ANOMALY, "会话异常：设备 / 地点跳变（调用方上报）"
+                BreakerTrigger.SESSION_ANOMALY, "会话风控无可信结果：升级核验（G-03）"
+            )
+        elif anomaly:
+            flags.add(FLAG_DEVICE_CHANGE)
+            self._trip_session(
+                BreakerTrigger.SESSION_ANOMALY, "会话异常：设备 / 地点跳变（服务端风控）"
             )
         return frozenset(flags)
+
+    def _session_risk_anomaly(self) -> bool | None:
+        """读取**服务端**可信风控结论（G-03）：`True` / `False` / `None`=无可信结果。
+
+        未装配信号源时：严格模式视为「无可信结果」（升级），演示模式视为「无异常信号」；
+        装配了信号源但判定失败（抛错）⇒ 一律视为「无可信结果」，不静默放行。
+        """
+        source = self._deps.session_risk
+        if source is None:
+            return None if self._deps.session_risk_strict else False
+        try:
+            return source.assess(user_id=self._deps.user_id, session_id=self._session_id)
+        except Exception:
+            return None
 
     def _trip_global(self, trigger: BreakerTrigger, detail: str) -> None:
         """**全局**熔断（触发 1 / 2 = 系统性信号）：跨会话、跨 worker；只加严不降级，写审计留痕。"""
@@ -1302,7 +1373,15 @@ class Session:
 
         `steps=None` 执行全部待执行节点；`steps=k` 最多执行 k 个（用于中断/恢复演示）。
         红色卡须先经 `request_verification` 取得挑战，再以 `verification_code` 通过闸门。
+        待确认计划受**服务端** `expires_at` 约束（G-02）：过期即作废，不得继续确认。
         """
+        if steps is not None and (
+            isinstance(steps, bool) or not isinstance(steps, int)
+            or not 1 <= steps <= MAX_CONFIRM_STEPS
+        ):
+            raise SessionStateError(
+                f"steps 必须是 1..{MAX_CONFIRM_STEPS} 的整数（缺省表示执行全部待执行节点）"
+            )
         pending = self._require_pending()
         if self._recovery_blocked:
             raise SessionStateError("业务证据待人工核对，禁止继续执行")
@@ -1315,9 +1394,9 @@ class Session:
         if self._state not in (
             SessionState.AWAITING_CONFIRM,
             SessionState.EXECUTING,
-            SessionState.INTERRUPTED,
         ):
             raise SessionStateError(f"当前状态不允许确认：{self._state.value}")
+        self._assert_not_expired(pending, now=now)
         if card_id != pending.card.card_id:
             raise ConfirmationMismatchError(
                 f"计划卡不匹配：收到 {card_id}｜待确认 {pending.card.card_id}"
@@ -1356,8 +1435,11 @@ class Session:
         pending = self._require_pending()
         if self._state is not SessionState.AWAITING_CONFIRM:
             raise SessionStateError("当前状态不允许申请验证码")
+        self._assert_not_expired(pending, now=now)
         if PROMPT_STRONG_VERIFY not in pending.card.requires:
             raise StrongVerificationRequiredError("当前计划卡无需强验证")
+        moment = now if now is not None else datetime.now(UTC)
+        self._assert_verification_allowed(pending, now=moment)
         self._invalidate_verification("replaced")
         self._verification_audit("requested", pending)
         try:
@@ -1396,6 +1478,22 @@ class Session:
             mode=delivery.mode.value,
         )
 
+    def _assert_verification_allowed(self, pending: _Pending, *, now: datetime) -> None:
+        """失败次数闸门：锁定期 / 退避中拒绝，且**不比较**验证码。
+
+        计数按用户保存在服务端（`AppDeps.verification_limiter`），所以重新申请验证码、
+        轮换挑战、过期或更换会话都不能把失败次数清零。
+        """
+        try:
+            self._verification_limiter.check(self._deps.user_id, now=now)
+        except VerificationError as error:
+            self._verification_audit("throttled", pending, reason=error.reason)
+            message = (
+                "验证码错误次数过多，请稍后再试"
+                if error.reason == "locked" else "验证码尝试过于频繁，请稍后再试"
+            )
+            raise StrongVerificationRequiredError(message) from None
+
     def _assert_strong_verification(
         self, pending: _Pending, code: str | None, *, now: datetime
     ) -> None:
@@ -1405,6 +1503,7 @@ class Session:
             raise StrongVerificationRequiredError(
                 "红色（大额 / 不可逆）需强验证：请先申请验证码"
             )
+        self._assert_verification_allowed(pending, now=now)
         try:
             self._challenge = verify_challenge(
                 challenge, self._verification_binding(pending), code,
@@ -1413,9 +1512,13 @@ class Session:
         except VerificationError as error:
             if error.reason == "expired":
                 self._challenge = replace(challenge, status=ChallengeStatus.EXPIRED)
+            failures = (
+                self._verification_limiter.record_failure(self._deps.user_id, now=now)
+                if error.reason == "invalid_code" else None
+            )
             self._verification_audit(
                 "expired" if error.reason == "expired" else "failed", pending,
-                reason=error.reason,
+                reason=error.reason, attempts=failures,
             )
             message = {
                 "expired": "验证码已过期：请重新申请",
@@ -1423,6 +1526,7 @@ class Session:
                 "inactive": "验证码已失效：请重新申请",
             }.get(error.reason, "验证码不正确")
             raise StrongVerificationRequiredError(message) from None
+        self._verification_limiter.reset(self._deps.user_id)
         self._verification_audit("consumed", pending)
 
     def _verification_binding(self, pending: _Pending) -> VerificationBinding:
@@ -1446,6 +1550,36 @@ class Session:
             self._challenge = invalidate_challenge(self._challenge)
             if self._pending is not None:
                 self._verification_audit("replaced", self._pending, reason=reason)
+
+    def _assert_not_expired(self, pending: _Pending, *, now: datetime | None) -> None:
+        """服务端有效期闸门（G-02）：过期 ⇒ 计划作废、状态落 `BLOCKED`，且不得再执行。
+
+        「作废」是**服务端终态转换**：清空待确认计划、绑定确认与待执行节点，并让未使用的强验证
+        挑战失效；客户端无法把它改回待确认状态，只能重新提交（重新走裁决与冻结）。
+        """
+        expires_at = pending.card.expires_at
+        if expires_at is None:
+            raise SessionStateError("待确认计划缺少服务端有效期：拒绝执行，请重新提交")
+        if _naive_moment(now) < expires_at:
+            return
+        self._invalidate_verification("plan_expired")
+        self._audit(KIND_DECISION, {
+            "kind": "plan_expired",
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "card_id": pending.card.card_id,
+            "frozen_hash": pending.card.frozen_hash,
+            "expires_at": expires_at.isoformat(),
+            "state_before": self._state.value,
+        })
+        self._pending = None
+        self._confirmation = None
+        self._pending_node_ids = []
+        self._quota = None
+        self._state = SessionState.BLOCKED
+        self._message = "计划已过期：原计划不可再执行，请重新提交"
+        raise SessionStateError(self._message)
 
     def _require_pending(self) -> _Pending:
         if self._pending is None:
@@ -1489,6 +1623,7 @@ class Session:
         if steps is not None:
             remaining = remaining[:steps]
         self._state = SessionState.EXECUTING
+        self._hook_status = ""
         for node_id in remaining:
             self._require_confirmation(pending)
             if self._breaker_blocks(pending):
@@ -1498,7 +1633,8 @@ class Session:
             self._assert_dependencies_done(node)
             call = self._to_call(node)
             request_key = f"{self._execution_id}:{pending.card.frozen_hash}:{node_id}"
-            if not self._deps.registry.get(node.action).is_pure_query:
+            is_query = self._deps.registry.get(node.action).is_pure_query
+            if not is_query:
                 self._in_flight = InFlightNode(
                     node_id, request_key, business_key_for(call, request_key, self._deps.user_id),
                     node.action, manifest_hash(call),
@@ -1506,38 +1642,53 @@ class Session:
                 # 此检查点失败时绝不能开始业务写入。
                 self._persist()
             try:
+                # 写操作必须携带**确认后**由服务端签发的一次性凭据（Pre-Tool Hook 强制）。
+                execution = None if is_query else self._deps.pep.issue_write_grant(
+                    call,
+                    pending.decision,
+                    pending.plan,
+                    user_id=self._deps.user_id,
+                    session_id=self._session_id,
+                    execution_id=self._execution_id,
+                    approved_level=confirmation.approved_level,
+                    strong_verified=confirmation.strong_verified,
+                    today=self._deps.today,
+                    completed_records=tuple(
+                        record_id
+                        for item in self._exec_results
+                        for record_id in item.record_ids
+                    ) + tuple(
+                        record_id
+                        for item in self._unverified_results.values()
+                        for record_id in item.record_ids
+                    ),
+                    flags=pending.flags,
+                )
                 result = self._deps.pep.execute(
                     call,
                     pending.decision,
                     pending.plan,
                     request_key,
-                    execution=ExecutionContext(
-                        execution_id=self._execution_id,
-                        frozen_hash=pending.card.frozen_hash,
-                        user_id=self._deps.user_id,
-                        today=self._deps.today,
-                        approved_level=confirmation.approved_level,
-                        strong_verified=confirmation.strong_verified,
-                        completed_records=tuple(
-                            record_id
-                            for item in self._exec_results
-                            for record_id in item.record_ids
-                        ) + tuple(
-                            record_id
-                            for item in self._unverified_results.values()
-                            for record_id in item.record_ids
-                        ),
-                        flags=pending.flags,
-                    ),
+                    execution=execution,
                 )
             except WritePreconditionError as error:
                 self._in_flight = None
                 self._refresh_authorization(error.result)
                 return self._execution_view()
+            except ToolHookBlocked as error:
+                # 统一写操作 Hook 拦截：业务写服务从未被调用，如实回报状态，不得谎报成功。
+                self._in_flight = None
+                self._hook_status = error.status.value
+                self._message = f"写操作被安全策略拦截（{node.action}）：{error.reason}"
+                self._state = (
+                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+                )
+                return self._execution_view()
             except CommittedWriteError as error:
                 self._unverified_results[node_id] = ExecResult(
                     status="committed_unverified", record_ids=error.receipt.record_ids,
                     message=f"业务已提交，后续核验或审计未完成：{error}",
+                    action=node.action,
                 )
                 self._message = "业务已提交，核验或审计未完成；已暂停后续步骤，可恢复核对回执"
                 self._state = SessionState.INTERRUPTED
@@ -1737,6 +1888,7 @@ class Session:
         pending = self._require_pending()
         if self._recovery_blocked:
             raise SessionStateError("业务证据待人工核对，禁止继续执行")
+        self._assert_not_expired(pending, now=None)
         if self._confirmation is None:
             self._state = SessionState.AWAITING_CONFIRM
             self._message = "计划尚未确认，请先确认当前计划卡"
@@ -1744,16 +1896,50 @@ class Session:
         self._require_confirmation(pending)
         return self._execute(steps=None)
 
+    @_serialized
+    def reject(self) -> SessionView:
+        """用户**主动放弃**当前待确认计划（G-02 的显式拒绝入口）。
+
+        服务端把计划置为作废终态：清空待确认计划 / 绑定确认 / 待执行节点，并失效未使用的强验证
+        挑战。之后同一 `card_id` 的确认、恢复与验证码申请一律失败，只能重新提交。
+        """
+        pending = self._require_pending()
+        if self._state not in (SessionState.AWAITING_CONFIRM, SessionState.INTERRUPTED):
+            raise SessionStateError(f"当前状态不可放弃：{self._state.value}")
+        self._invalidate_verification("plan_rejected")
+        self._audit(KIND_DECISION, {
+            "kind": "plan_rejected",
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "card_id": pending.card.card_id,
+            "frozen_hash": pending.card.frozen_hash,
+            "state_before": self._state.value,
+        })
+        self._pending = None
+        self._confirmation = None
+        self._pending_node_ids = []
+        self._quota = None
+        self._state = SessionState.IDLE
+        self._message = "已放弃当前计划：原计划作废，如仍需办理请重新提交"
+        return SessionView(self._state, self._message)
+
     def _execution_view(self) -> ExecutionView:
         frozen_hash = self._pending.card.frozen_hash if self._pending is not None else ""
         results = (*self._exec_results, *self._unverified_results.values())
         bill_advice: tuple[BillAdvice, ...] = ()
         bill_advice_message = ""
+        bill_findings: Mapping[str, object] | None = None
         try:
             bill_advice = self._completed_bill_advice()
         except Exception:
             # 只隔离附加建议：存储或计算失败不能掩盖已完成的业务回执。
             bill_advice_message = "消费建议暂不可用，请稍后重新分析账单。"
+        try:
+            bill_findings = self._completed_bill_findings()
+        except Exception:
+            # 识别失败同样只影响附加信息，不影响业务回执与账期事实。
+            bill_findings = None
         return ExecutionView(
             state=self._state,
             message=self._message,
@@ -1767,6 +1953,8 @@ class Session:
             decision=self._pending.decision if self._pending is not None else None,
             bill_advice=bill_advice,
             bill_advice_message=bill_advice_message,
+            bill_findings=bill_findings,
+            hook_status=self._hook_status,
         )
 
     def _completed_bill_advice(self) -> tuple[BillAdvice, ...]:
@@ -1782,6 +1970,20 @@ class Session:
                     as_of=self._deps.today,
                 ))
         return tuple(advice[:3])
+
+    def _completed_bill_findings(self) -> Mapping[str, object] | None:
+        """执行完成的月账单附带确定性识别结果；只读，不调用模型。"""
+        if self._state is not SessionState.COMPLETED or self._pending is None:
+            return None
+        for node in self._pending.plan.nodes:
+            if node.action == "bills.monthly" and node.node_id in self._completed_node_ids:
+                report = analyze_bill(
+                    self._deps.gateway, self._deps.user_id,
+                    int(str(node.params["year"])), int(str(node.params["month"])),
+                    as_of=self._deps.today,
+                )
+                return report_payload(report)
+        return None
 
     def _reset(self) -> None:
         if self._recovery_blocked or self._unverified_results:
@@ -1905,16 +2107,28 @@ def _per_intent_selected(
 
 
 def _inject_assessment(action: str, slots: dict[str, object], deps: AppDeps) -> None:
-    """受信任注入风险测评事实（**仅** `wealth.subscribe`）。
+    """受信任注入风险测评事实：`wealth.subscribe`（申购闸门）与推荐模式的 `wealth.list`。
+
+    `wealth.list` 只在**推荐 / 比较**意图下注入，普通目录查询保持无测评依赖；
+    未测评 / 过期时**不注入**，由场景层 `recommendation_profile` 硬拒绝（绝不默认等级）。
 
     **不包 `Value`**：场景层 `_assessment` 以 `isinstance(raw, RiskAssessment)` 判定，
     包装会导致其静默失效并退化为"未测评"拒绝。
     """
-    if action != "wealth.subscribe" or deps.risk is None:
+    if deps.risk is None:
+        return
+    if action != "wealth.subscribe" and not (
+        action == "wealth.list" and is_recommendation_request(_span_text(slots))
+    ):
         return
     assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
     if assessment is not None:
         slots["assessment"] = assessment
+
+
+def _span_text(slots: Mapping[str, object]) -> str:
+    span = slots.get("span")
+    return span if isinstance(span, str) else ""
 
 
 _TRANSFER_ACTIONS = frozenset(

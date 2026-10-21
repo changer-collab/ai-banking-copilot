@@ -293,7 +293,11 @@ def test_book_transfer_executes_with_verified_provenance(tmp_path: Path) -> None
         },
     )
     decision = Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
-    result = pep.execute(call, decision, manifest_plan(call), "bk1")
+    frozen = manifest_plan(call)
+    result = pep.execute(
+        call, decision, frozen, "bk1",
+        execution=pep.issue_write_grant(call, decision, frozen, approved_level=Level.YELLOW),
+    )
     assert result.status == "scheduled"
     assert result.record_ids[0].startswith("scheduled_transfers:")
     reader.close()

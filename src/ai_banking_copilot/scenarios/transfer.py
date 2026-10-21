@@ -21,6 +21,7 @@ from ai_banking_copilot.contracts.plan import (
     validate_plan,
 )
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
+from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.resolvers import Candidate, parse_amount, resolve_payees
@@ -99,10 +100,12 @@ def build_money_node(
     """构造一个资金流出节点（转账 / 定时转账）；供 `transfer` 与 `cross` 复用。"""
     detail = f"资金流出：{intent.evidence or intent.action}"
     anchor_id = grant_anchor(ledger, source, detail)
+    account_id = as_str(trusted_slot(intent, ("account", "account_id"), "account"), "account")
     params: dict[str, object] = {
-        "account_id": as_str(trusted_slot(intent, ("account", "account_id"), "account"), "account"),
+        "account_id": account_id,
         "payee_id": resolve_payee(intent, gateway),
         "amount_cents": resolve_amount_cents(intent, ledger, anchor_id).cents,
+        "currency": resolve_currency(intent, gateway, account_id),
         "booked_on": optional_date(intent, ("when", "booked_on"), DEFAULT_BOOKING_DATE).isoformat(),
     }
     remark = intent.slots.get("remark")
@@ -185,6 +188,42 @@ def resolve_amount_cents(intent: Intent, ledger: AnchorLedger, parent_anchor_id:
     return _amount_from(intent)
 
 
+def _account_currency(gateway: FactGateway, account_id: str) -> str:
+    """读取付款账户币种（规范化）；账户不存在即澄清（不猜、不默认）。"""
+    try:
+        return gateway.account(account_id).payload.currency.strip().upper()
+    except GatewayNotFoundError:
+        raise ClarificationRequired("account", f"付款账户不存在：{account_id}") from None
+
+
+def resolve_currency(intent: Intent, gateway: FactGateway, account_id: str) -> str:
+    """绑定**付款账户币种**：以账户事实为准，显式币种必须与账户一致。
+
+    缺失或冲突一律澄清（`ClarificationRequired`），**不产出可执行计划**：
+    币种因此进入节点参数 → 计划哈希 / 计划卡展示 / PEP 写前复核。
+    """
+    stored = _account_currency(gateway, account_id)
+    raw = None
+    for key in ("currency", "currency_code"):
+        if key in intent.slots:
+            raw = intent.slots[key]
+            break
+    if raw is not None:
+        requested = as_str(require_trusted(raw, "currency"), "currency").strip().upper()
+        if not stored or requested != stored:
+            raise ClarificationRequired(
+                "currency",
+                f"付款账户 {account_id} 的币种为 {stored or '未知'}，"
+                f"不能按 {requested or '未指定'} 转出",
+            )
+        return requested
+    if not stored:
+        raise ClarificationRequired(
+            "currency", f"付款账户 {account_id} 缺少币种信息，请明确转账币种"
+        )
+    return stored
+
+
 def optional_date(intent: Intent, keys: Sequence[str], default: date) -> date:
     """可选时间控制槽；缺失时用基准记账日（保证评测可复现）。"""
     for key in keys:
@@ -249,23 +288,38 @@ def due_transfer_plan(
       （其唯一来源是 01 的 `DEFAULT_BOOKING_DATE`）；
     - 登记项**登记时不扣款**：真正扣款由装配出的 `transfer.create` 走既有链路完成。
     """
-    items = tuple(
-        ScheduledItem(
-            key=record.payload.schedule_id,
-            due_on=record.payload.booked_on,
-            action=_DUE_ACTION,
-            params={
-                "account_id": record.payload.account_id,
-                "payee_id": record.payload.payee_id,
-                "amount_cents": record.payload.amount.cents,
-                "booked_on": record.payload.booked_on.isoformat(),
-                "schedule_id": record.payload.schedule_id,
-                "executed_on": as_of.isoformat(),
-            },
+    items: list[ScheduledItem] = []
+    for record in gateway.scheduled_transfers_of(user_id, status="scheduled"):
+        currency = _account_currency(gateway, record.payload.account_id)
+        if not currency:
+            raise ClarificationRequired(
+                "currency",
+                f"付款账户 {record.payload.account_id} 缺少币种信息，无法派发到期转账",
+            )
+        items.append(
+            ScheduledItem(
+                key=record.payload.schedule_id,
+                due_on=record.payload.booked_on,
+                action=_DUE_ACTION,
+                params={
+                    "account_id": record.payload.account_id,
+                    "payee_id": record.payload.payee_id,
+                    "amount_cents": record.payload.amount.cents,
+                    "currency": currency,
+                    "booked_on": record.payload.booked_on.isoformat(),
+                    "schedule_id": record.payload.schedule_id,
+                    "executed_on": as_of.isoformat(),
+                },
+            )
         )
-        for record in gateway.scheduled_transfers_of(user_id, status="scheduled")
-    )
-    return plan_due(items, as_of=as_of, ledger=AnchorLedger(), node_prefix="due")
+    return plan_due(tuple(items), as_of=as_of, ledger=AnchorLedger(), node_prefix="due")
+
+
+def _optional_currency(params: dict[str, object]) -> str | None:
+    """取可选币种控制槽；缺省交给核心银行按付款账户事实绑定，空串即拒绝。"""
+    if "currency" not in params:
+        return None
+    return require_str(params, "currency")
 
 
 def _transfer_handler(context: WriteContext) -> WriteReceipt:
@@ -275,6 +329,7 @@ def _transfer_handler(context: WriteContext) -> WriteReceipt:
         account_id=require_str(context.params, "account_id"),
         payee_id=require_str(context.params, "payee_id"),
         amount=Money(money_cents(context.params, context.spec)),
+        currency=_optional_currency(context.params),
         idempotency_key=context.idempotency_key,
         before_write=context.before_write,
         booked_on=require_date(context.params, "booked_on"),
@@ -308,6 +363,7 @@ def _book_transfer_handler(context: WriteContext) -> WriteReceipt:
         account_id=require_str(context.params, "account_id"),
         payee_id=require_str(context.params, "payee_id"),
         amount=Money(money_cents(context.params, context.spec)),
+        currency=_optional_currency(context.params),
         booked_on=require_date(context.params, "booked_on"),
         remark="" if remark is None else str(remark),
         idempotency_key=context.idempotency_key,

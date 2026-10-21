@@ -36,6 +36,10 @@ class BlockedPayeeError(CoreBankError):
     """收款对象处于 blocked 吸收态（PRD §5.2）。"""
 
 
+class CurrencyMismatchError(CoreBankError):
+    """付款账户缺少币种，或请求币种与付款账户事实不一致：拒绝写前复核。"""
+
+
 class IdempotencyConflictError(CoreBankError):
     """同一幂等键被用于不同动作。"""
 

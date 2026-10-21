@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -6,9 +7,12 @@ from ai_banking_copilot.contracts.authorization import Level
 from ai_banking_copilot.contracts.plan import cfhash
 from ai_banking_copilot.gateway.store import Store
 from ai_banking_copilot.policy.gate import StalePlanError
+from ai_banking_copilot.policy.verification import VerificationAttemptLimiter
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.plan_card import PlanCard
 from ai_banking_copilot.web.session import (
+    MAX_CONFIRM_STEPS,
+    PLAN_TTL_S,
     VERIFICATION_TTL_S,
     ConfirmationMismatchError,
     Session,
@@ -170,3 +174,197 @@ def test_idempotent_replay_does_not_double_write(deps: AppDeps, rw_store: Store)
         "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
     )
     assert rows[0]["n"] == 1
+
+
+def test_expired_plan_cannot_be_confirmed(deps: AppDeps, rw_store: Store) -> None:
+    """G-02：服务端 `expires_at` 到期 ⇒ 确认失败、计划作废，且不产生任何写入。"""
+    session = Session(deps)
+    base = datetime(2026, 10, 1, 9, 0, 0)
+    view = session.submit("转给李娜 500 元", now=base)
+    card = view.card
+    assert card is not None
+    assert card.expires_at == base + timedelta(seconds=PLAN_TTL_S)
+    with pytest.raises(SessionStateError, match="计划已过期"):
+        session.confirm(
+            card.card_id,
+            frozen_hash=card.frozen_hash,
+            now=base + timedelta(seconds=PLAN_TTL_S + 1),
+        )
+    assert session.state() is SessionState.BLOCKED
+    # 终态由服务端控制：过期后无法用同一张卡「复活」
+    with pytest.raises(SessionStateError):
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+
+def test_interrupted_plan_cannot_be_confirmed(deps: AppDeps) -> None:
+    """G-02：`INTERRUPTED` 不是待确认状态，必须走恢复而不能直接确认。"""
+    session, card = _awaiting(deps)
+    session.interrupt()
+    with pytest.raises(SessionStateError, match="当前状态不允许确认"):
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+
+
+def test_rejected_plan_cannot_be_confirmed(deps: AppDeps) -> None:
+    """G-02：拒绝即作废，原计划与原卡片不得再执行。"""
+    session, card = _awaiting(deps)
+    rejected = session.reject()
+    assert rejected.state is SessionState.IDLE
+    with pytest.raises(SessionStateError, match="尚无已裁决计划"):
+        session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+
+
+def test_changing_the_transaction_parameters_invalidates_the_previous_confirmation(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """G-02：改参后重新裁决，旧卡（旧执行身份）不得再被确认。"""
+    session = Session(deps)
+    first = session.submit("转给李娜 500 元")
+    assert first.card is not None
+    second = session.submit("转给李娜 800 元")
+    assert second.card is not None
+    with pytest.raises(ConfirmationMismatchError, match="计划卡不匹配"):
+        session.confirm(first.card.card_id, frozen_hash=first.card.frozen_hash)
+    done = session.confirm(second.card.card_id, frozen_hash=second.card.frozen_hash)
+    assert done.state is SessionState.COMPLETED
+    rows = rw_store.query("SELECT balance_cents FROM accounts WHERE account_id = 'acc_savings'")
+    assert rows[0]["balance_cents"] == 12843000 - 80000
+
+
+def _limited_deps(
+    deps: AppDeps, *, max_failures: int, backoff: tuple[int, ...] = (0,)
+) -> AppDeps:
+    """换上可预测阈值的限流器（状态仍在服务端 `AppDeps` 上，按用户共享）。"""
+    return replace(
+        deps,
+        verification_limiter=VerificationAttemptLimiter(
+            max_failures=max_failures, lockout_seconds=120, backoff_seconds=backoff
+        ),
+    )
+
+
+def _wrong_code(code: str) -> str:
+    return "000000" if code != "000000" else "111111"
+
+
+def test_failed_codes_accumulate_across_challenge_rotation(deps: AppDeps) -> None:
+    """重新申请（轮换挑战）不得重置失败次数——否则可无限重试。"""
+    deps = _limited_deps(deps, max_failures=3)
+    session, card = _red_card(deps)
+    first = session.request_verification()
+    with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=_wrong_code(first.code)
+        )
+    assert deps.verification_limiter.failures(deps.user_id) == 1
+
+    second = session.request_verification()
+    while second.code == first.code:  # 极低概率撞码：再申请一次
+        second = session.request_verification()
+    with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=_wrong_code(second.code)
+        )
+    assert deps.verification_limiter.failures(deps.user_id) == 2
+    # 用当前挑战的正确码仍可完成（未达上限，合法用户不被卡死）。
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=second.code
+    )
+    assert done.state is SessionState.COMPLETED
+    assert deps.verification_limiter.failures(deps.user_id) == 0
+
+
+def test_locked_out_user_is_rejected_even_with_the_correct_code(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """达到失败上限后进入锁定期：正确码也不再被比较，且不产生任何写入。"""
+    deps = _limited_deps(deps, max_failures=2)
+    session, card = _red_card(deps)
+    prompt = session.request_verification()
+    wrong = _wrong_code(prompt.code)
+    for _ in range(2):
+        with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+            session.confirm(card.card_id, frozen_hash=card.frozen_hash, verification_code=wrong)
+    assert deps.verification_limiter.failures(deps.user_id) == 2
+
+    with pytest.raises(StrongVerificationRequiredError, match="次数过多"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+    # 锁定期内重新申请验证码同样被拒（换挑战不解除锁定）。
+    with pytest.raises(StrongVerificationRequiredError, match="次数过多"):
+        session.request_verification()
+    assert session.state() is SessionState.AWAITING_CONFIRM
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+
+def test_failed_codes_are_not_reset_by_switching_session(deps: AppDeps) -> None:
+    """`session_id` 由客户端提供：换会话不得把同一用户的失败次数清零。"""
+    deps = _limited_deps(deps, max_failures=2)
+    first_session, card = _red_card(deps)
+    prompt = first_session.request_verification()
+    wrong = _wrong_code(prompt.code)
+    for _ in range(2):
+        with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+            first_session.confirm(
+                card.card_id, frozen_hash=card.frozen_hash, verification_code=wrong
+            )
+
+    other_session = Session(deps, session_id="session-b")
+    view = other_session.submit("转给李娜 1500 元")
+    assert view.card is not None and view.card.level is Level.RED
+    assert other_session._session_id != first_session._session_id
+    # 换会话后申请验证码同样被拒：失败计数按用户、不按会话。
+    with pytest.raises(StrongVerificationRequiredError, match="次数过多"):
+        other_session.request_verification()
+    assert deps.verification_limiter.failures(deps.user_id) == 2
+
+
+@pytest.mark.parametrize("bad", [0, -1, MAX_CONFIRM_STEPS + 1, 1.5, True, "2"])
+def test_confirm_rejects_out_of_range_steps(deps: AppDeps, bad: object) -> None:
+    """`steps` 边界：拒绝 0 / 负数 / 超大值 / 浮点 / 布尔 / 数字字符串。"""
+    session, card = _awaiting(deps)
+    with pytest.raises(SessionStateError, match="steps 必须是"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, steps=bad  # type: ignore[arg-type]
+        )
+    # 校验先于 `_require_pending`，不消耗任何状态：随后正常确认仍可执行。
+    done = session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+    assert done.state is SessionState.COMPLETED
+
+
+def test_confirm_accepts_the_upper_bound_for_steps(deps: AppDeps) -> None:
+    """合法上界不改变业务行为：执行全部待执行节点。"""
+    session = Session(deps)
+    view = session.submit("查看账单，再查看分类趋势")
+    assert view.card is not None
+    done = session.confirm(
+        view.card.card_id, frozen_hash=view.card.frozen_hash, steps=MAX_CONFIRM_STEPS
+    )
+    assert done.state is SessionState.COMPLETED
+    assert len(done.exec_results) == 2
+
+
+def test_changing_the_payer_account_currency_invalidates_the_previous_confirmation(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """任务 6：付款账户币种变化 ⇒ 冻结参数变化 ⇒ 旧卡（旧 frozen_hash）不得再被确认。"""
+    session = Session(deps)
+    first = session.submit("转给李娜 500 元")
+    assert first.card is not None
+    with rw_store.transaction() as conn:
+        conn.execute("UPDATE accounts SET currency = 'USD' WHERE account_id = 'acc_savings'")
+    second = session.submit("转给李娜 500 元")
+    assert second.card is not None
+    assert second.card.frozen_hash != first.card.frozen_hash
+    assert "（USD）" in second.card.lines[0]
+    with pytest.raises(ConfirmationMismatchError, match="计划卡不匹配"):
+        session.confirm(first.card.card_id, frozen_hash=first.card.frozen_hash)
+    done = session.confirm(second.card.card_id, frozen_hash=second.card.frozen_hash)
+    assert done.state is SessionState.COMPLETED

@@ -11,12 +11,17 @@
   `_assert_member(call, plan)` 承担——`call` 必须属于**已确认的冻结计划**。确认后控制槽参数
   被改 ⇒ 不再是计划成员 ⇒ `StalePlanError`（防 TOCTOU / 越权节点）。
 - **熔断只加严**：熔断打开时锁定非纯查询操作，**纯查询不受影响**。
+- **写操作 Pre-Tool Hook**（`policy.tool_hook`）：节点级执行门之后、写处理器派发之前，
+  写动作必须携带**服务端签发的一次性授权凭据**（`Pep.issue_write_grant`，仅确认后的
+  `Session._execute` 调用）。缺凭据 / 凭据过期 / 参数或计划被改 / 会话不符 ⇒ 拒绝，
+  业务写服务**从未被调用**。只读动作不受影响。
 - 本模块是**写操作的唯一通道**；`policy/` 之外不得直接调用 `CoreBank`。
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -51,6 +56,12 @@ from ai_banking_copilot.policy.execution import (
     assess_plan,
 )
 from ai_banking_copilot.policy.gate import StalePlanError
+from ai_banking_copilot.policy.tool_hook import (
+    GrantLedger,
+    HookStatus,
+    PreToolHook,
+    operation_of,
+)
 from ai_banking_copilot.tools.registry import ForbiddenParamError, ToolCall, ToolRegistry, ToolSpec
 
 PEP_ANCHOR_ID = "pep-execution-gate"
@@ -125,11 +136,21 @@ class NotAuthorizedError(RuntimeError):
 
 @dataclass(frozen=True)
 class ExecResult:
-    """一次执行的结果（`message` 内含审计 ID，对齐 §9.1 的可机读 schema）。"""
+    """一次执行的结果（`message` 内含审计 ID，对齐 §9.1 的可机读 schema）。
+
+    `external_status` / `previous_status` 由回执透传（G-04）：只描述**外部系统**是否真的执行，
+    本地库变更不得被表述为"商户已取消"。
+    """
 
     status: str
     record_ids: tuple[str, ...]
     message: str
+    external_status: str = ""
+    previous_status: str | None = None
+    action: str = ""
+    """本次执行对应的工具动作（如 `subscription.cancel`），供渠道层区分动作语义。"""
+    effect_ids: tuple[str, ...] = ()
+    """回执的副作用 ID；重复执行（如重复取消）必须为空，渠道层据此证明无新副作用。"""
 
 
 def manifest_node(call: ToolCall) -> PlanNode:
@@ -211,6 +232,7 @@ class Pep:
         self._breaker = breaker
         self._write_handlers = dict(write_handlers)
         self._query_handlers = dict(query_handlers)
+        self._hook = PreToolHook(ledger=GrantLedger(), audit=audit)
 
     def handled_actions(self) -> frozenset[str]:
         """PEP 实际**持有处理器**的动作集 = 已登记读处理器 ∪ 已登记写处理器。
@@ -260,6 +282,64 @@ class Pep:
         return self._execute_write(
             call, resolved, spec, decision, frozen_hash, idempotency_key,
             plan, execution,
+        )
+
+    def issue_write_grant(
+        self,
+        call: ToolCall,
+        decision: Decision,
+        plan: Plan,
+        *,
+        user_id: str = DEMO_USER_ID,
+        session_id: str = "",
+        execution_id: str = "",
+        approved_level: Level | None = None,
+        strong_verified: bool = False,
+        today: date = DEFAULT_BOOKING_DATE,
+        completed_records: tuple[str, ...] = (),
+        flags: frozenset[str] = frozenset(),
+    ) -> ExecutionContext:
+        """在**用户确认之后**签发一次性写授权凭据，返回可供 `execute` 使用的执行上下文。
+
+        唯一合法调用方是服务端确认链（`Session._execute` 在 `_require_confirmation` 之后
+        逐节点签发）。模型输出、前端请求体与 IM 消息都构造不出 `WriteGrant`，因此
+        无法伪造「已确认 / 已认证 / 已通过强验证」。只读动作不签发凭据。
+        """
+        if not isinstance(decision, Decision):
+            raise NotAuthorizedError("PEP 无裁决不发凭据：缺少 Decision")
+        if decision.level >= Level.MANUAL:
+            raise NotAuthorizedError(f"裁决级别不足，不签发写授权：{decision.level.name}")
+        spec = self._registry.get(call.action)
+        if spec.is_pure_query:
+            raise NotAuthorizedError(f"只读动作不需要写授权凭据：{call.action}")
+        self._assert_taint(spec, call)
+        resolved = self._registry.validate_params(call)
+        self._assert_member(call.action, resolved, plan)
+        bound_execution_id = execution_id or f"grant:{secrets.token_hex(8)}"
+        bound_level = decision.level if approved_level is None else approved_level
+        plan_hash = _plan_hash(plan)
+        grant = self._hook.ledger.issue(
+            session_id=session_id,
+            execution_id=bound_execution_id,
+            user_id=user_id,
+            plan_id=plan.plan_id,
+            plan_hash=plan_hash,
+            action=call.action,
+            member=_member_key(call.action, resolved),
+            approved_level=bound_level,
+            strong_verified=strong_verified,
+        )
+        return ExecutionContext(
+            execution_id=bound_execution_id,
+            frozen_hash=plan_hash,
+            user_id=user_id,
+            today=today,
+            approved_level=bound_level,
+            strong_verified=strong_verified,
+            completed_records=completed_records,
+            flags=flags,
+            session_id=session_id,
+            grant_id=grant.grant_id,
         )
 
     def _assert_member(self, action: str, resolved: dict[str, object], plan: Plan) -> None:
@@ -322,18 +402,33 @@ class Pep:
         plan: Plan,
         execution: ExecutionContext | None,
     ) -> ExecResult:
-        """写路径：幂等执行 → 执行后出处校验 → 熔断联动 → 审计落链。"""
+        """写路径：**Pre-Tool Hook** → 幂等执行 → 执行后出处校验 → 熔断联动 → 审计落链。
+
+        Hook 在**业务写服务之前**执行：缺凭据 / 凭据过期 / 参数或计划被改 / 用户或会话不符
+        一律拒绝，写处理器**从未被调用**。凭据只能由 `issue_write_grant` 在确认后签发。
+        """
+        plan_hash = _plan_hash(plan)
         if execution is None:
-            # 仅兼容可信程序化调用；Decision 是授权上限，不代表 Web/IM 验证码证据。
-            execution = ExecutionContext(
-                execution_id=idempotency_key,
-                frozen_hash=_plan_hash(plan),
-                user_id=str(params.get("user_id", DEMO_USER_ID)),
-                today=DEFAULT_BOOKING_DATE,
-                approved_level=decision.level,
-                strong_verified=decision.level >= Level.RED,
+            self._breaker.record_failure()
+            raise self._hook.block(
+                spec,
+                status=HookStatus.CONFIRMATION_REQUIRED,
+                reason="写操作缺少服务端签发的确认凭据，禁止直接执行",
+                plan_id=plan.plan_id,
+                plan_hash=plan_hash,
             )
-        if (not execution.execution_id or execution.frozen_hash != _plan_hash(plan)
+        self._hook.authorize(
+            spec,
+            member=_member_key(call.action, params),
+            plan_id=plan.plan_id,
+            plan_hash=plan_hash,
+            approved_level=decision.level,
+            grant_id=execution.grant_id,
+            user_id=execution.user_id,
+            session_id=execution.session_id,
+            execution_id=execution.execution_id,
+        )
+        if (not execution.execution_id or execution.frozen_hash != plan_hash
                 or ("user_id" in params and execution.user_id != params["user_id"])):
             raise StalePlanError("执行上下文与冻结计划或用户不匹配")
 
@@ -391,6 +486,9 @@ class Pep:
                 record_ids=(),
                 provenance=(),
                 detail=str(error),
+                op_type=operation_of(spec),
+                plan_id=plan.plan_id,
+                grant_id=execution.grant_id,
             )
             raise
         try:
@@ -406,6 +504,12 @@ class Pep:
                 record_ids=receipt.record_ids,
                 provenance=provenance,
                 detail=f"{receipt.action}{suffix}",
+                external_status=receipt.external_status,
+                previous_status=receipt.previous_status,
+                effect_ids=receipt.effect_ids,
+                op_type=operation_of(spec),
+                plan_id=plan.plan_id,
+                grant_id=execution.grant_id,
             )
         except Exception as error:
             raise CommittedWriteError(receipt, error) from error
@@ -468,6 +572,12 @@ class Pep:
         record_ids: tuple[str, ...],
         provenance: tuple[tuple[str, str], ...],
         detail: str,
+        external_status: str = "",
+        previous_status: str | None = None,
+        effect_ids: tuple[str, ...] = (),
+        op_type: str = "",
+        plan_id: str = "",
+        grant_id: str = "",
     ) -> ExecResult:
         event_hash = self._audit.append(
             AuditEvent(
@@ -486,6 +596,11 @@ class Pep:
                         for record_id, content_hash in provenance
                     ],
                     "detail": detail,
+                    "external_status": external_status,
+                    "previous_status": previous_status,
+                    "op_type": op_type,
+                    "plan_id": plan_id,
+                    "grant_id": grant_id,
                 },
                 prev_hash="",
             )
@@ -494,6 +609,10 @@ class Pep:
             status=status,
             record_ids=record_ids,
             message=f"{detail}｜审计ID {event_hash[:16]}",
+            external_status=external_status,
+            previous_status=previous_status,
+            action=call.action,
+            effect_ids=effect_ids,
         )
 
 

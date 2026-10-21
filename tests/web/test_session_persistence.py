@@ -11,11 +11,11 @@ from ai_banking_copilot.web.session_repository import (
     SQLiteSessionRepository,
     init_session_schema,
 )
-from ai_banking_copilot.web.session_snapshot import SessionSnapshot
+from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
 
 
 def _snap(revision: int = 0) -> SessionSnapshot:
-    return SessionSnapshot(1, "u1", "s1", revision, "e1", "idle", {"x": 1})
+    return SessionSnapshot(SESSION_SNAPSHOT_VERSION, "u1", "s1", revision, "e1", "idle", {"x": 1})
 
 
 def test_repository_cas_and_restart(tmp_path) -> None:

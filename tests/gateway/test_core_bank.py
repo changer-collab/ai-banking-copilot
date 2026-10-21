@@ -6,10 +6,13 @@ from ai_banking_copilot.gateway.core_bank import CoreBank
 from ai_banking_copilot.gateway.errors import (
     BlockedPayeeError,
     CoreBankError,
+    CurrencyMismatchError,
     IdempotencyConflictError,
     InsufficientFundsError,
+    UnknownAccountError,
     UnknownCardError,
     UnknownProductError,
+    UnknownSubscriptionError,
 )
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
@@ -106,10 +109,51 @@ def test_transfer_to_blocked_payee_is_rejected(rw_store: Store) -> None:
 
 def test_cancel_subscription_marks_status_cancelled(rw_store: Store) -> None:
     bank = CoreBank(rw_store)
-    receipt = bank.cancel_subscription(subscription_id="sub_video", idempotency_key="k4")
+    receipt = bank.cancel_subscription(
+        subscription_id="sub_video", user_id=DEMO_USER_ID, idempotency_key="k4",
+    )
     assert receipt.status == "cancelled"
+    assert receipt.external_status == "not_integrated"
+    assert receipt.previous_status == "active"
     rows = rw_store.query("SELECT status FROM subscriptions WHERE subscription_id = 'sub_video'")
     assert rows[0]["status"] == "cancelled"
+
+
+def test_cancel_subscription_refuses_another_users_subscription(rw_store: Store) -> None:
+    """G-01：`subscription_id` 命中但归属他人 ⇒ 按「订阅不存在」拒绝，且**不改**记录。"""
+    with rw_store.transaction() as conn:
+        conn.execute("INSERT INTO users VALUES ('u_other', '其他用户', 'R3')")
+        conn.execute(
+            "INSERT INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
+            " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            ("sub_other", "u_other", "他人商户", 1000, "monthly", "2026-10-20", "active"),
+        )
+    bank = CoreBank(rw_store)
+    with pytest.raises(UnknownSubscriptionError):
+        bank.cancel_subscription(
+            subscription_id="sub_other", user_id=DEMO_USER_ID, idempotency_key="k_other",
+        )
+    rows = rw_store.query(
+        "SELECT status FROM subscriptions WHERE subscription_id = 'sub_other'"
+    )
+    assert rows[0]["status"] == "active"
+
+
+def test_cancel_subscription_repeat_is_idempotent_without_new_effects(rw_store: Store) -> None:
+    """G-01：重复取消不产生新副作用（第二次 `already_cancelled` 且无 effect）。"""
+    bank = CoreBank(rw_store)
+    first = bank.cancel_subscription(
+        subscription_id="sub_video", user_id=DEMO_USER_ID, idempotency_key="k_first",
+    )
+    second = bank.cancel_subscription(
+        subscription_id="sub_video", user_id=DEMO_USER_ID, idempotency_key="k_second",
+    )
+    assert first.status == "cancelled"
+    assert first.effect_ids
+    assert second.status == "already_cancelled"
+    assert second.effect_ids == ()
+    assert second.previous_status == "cancelled"
+    assert second.external_status == "not_integrated"
 
 
 def test_freeze_then_unfreeze_restores_balance(rw_store: Store) -> None:
@@ -310,3 +354,130 @@ def test_sign_subscription_unknown_user_is_rejected(rw_store: Store) -> None:
             idempotency_key="s5",
         )
     assert rw_store.query("SELECT COUNT(*) AS n FROM write_receipts")[0]["n"] == 0
+
+
+def _txn_count(store: Store) -> int:
+    """仅统计**本次**由 Agent 写入的转账流水（种子数据自带历史流水）。"""
+    rows = store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    return int(rows[0]["n"])
+
+
+def test_transfer_rejects_currency_conflicting_with_payer_account(rw_store: Store) -> None:
+    """写前币种复核：请求币种必须以付款账户事实为准（fail-closed）。"""
+    bank = CoreBank(rw_store)
+    with pytest.raises(CurrencyMismatchError):
+        bank.transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_savings",
+            payee_id="p_lina",
+            amount=Money(50000),
+            currency="USD",
+            idempotency_key="cur1",
+            booked_on=date(2026, 10, 1),
+        )
+    assert _balance(rw_store, "acc_savings") == Money(12843000)
+    assert _txn_count(rw_store) == 0
+
+
+def test_transfer_rejects_account_without_currency(rw_store: Store) -> None:
+    with rw_store.transaction() as conn:
+        conn.execute("UPDATE accounts SET currency = '' WHERE account_id = 'acc_savings'")
+    with pytest.raises(CurrencyMismatchError):
+        CoreBank(rw_store).transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_savings",
+            payee_id="p_lina",
+            amount=Money(50000),
+            idempotency_key="cur2",
+            booked_on=date(2026, 10, 1),
+        )
+    assert _balance(rw_store, "acc_savings") == Money(12843000)
+
+
+def test_transfer_accepts_matching_currency_case_insensitively(rw_store: Store) -> None:
+    receipt = CoreBank(rw_store).transfer(
+        user_id=DEMO_USER_ID,
+        account_id="acc_savings",
+        payee_id="p_lina",
+        amount=Money(50000),
+        currency="cny",
+        idempotency_key="cur3",
+        booked_on=date(2026, 10, 1),
+    )
+    assert receipt.status == "settled"
+
+
+def test_transfer_refuses_another_users_account(rw_store: Store) -> None:
+    """无权限账户：`account_id` 归属他人 ⇒ 按「账户不存在」拒绝，不扣款。"""
+    with rw_store.transaction() as conn:
+        conn.execute("INSERT INTO users VALUES ('u_other', '其他用户', 'R3')")
+        conn.execute(
+            "INSERT INTO accounts(account_id, user_id, kind, balance_cents, currency)"
+            " VALUES('acc_other', 'u_other', 'savings', 100000, 'CNY')"
+        )
+    with pytest.raises(UnknownAccountError):
+        CoreBank(rw_store).transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_other",
+            payee_id="p_lina",
+            amount=Money(100),
+            idempotency_key="own1",
+            booked_on=date(2026, 10, 1),
+        )
+    assert _txn_count(rw_store) == 0
+
+
+def test_frozen_funds_make_the_account_untransferable(rw_store: Store) -> None:
+    """冻结：`holds` 占用可用余额 ⇒ 转账因余额不足失败，不会**超发**。"""
+    bank = CoreBank(rw_store)
+    bank.freeze_funds(
+        account_id="acc_savings",
+        amount=Money(12843000),
+        reason="司法冻结",
+        idempotency_key="hold1",
+    )
+    with pytest.raises(InsufficientFundsError):
+        bank.transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_savings",
+            payee_id="p_lina",
+            amount=Money(100),
+            idempotency_key="hold2",
+            booked_on=date(2026, 10, 1),
+        )
+    assert _txn_count(rw_store) == 0
+    holds = rw_store.query("SELECT status FROM holds")
+    assert [row["status"] for row in holds] == ["active"]
+
+
+def test_duplicate_transfer_submission_adds_no_ledger_row(rw_store: Store) -> None:
+    bank = CoreBank(rw_store)
+    for _ in range(2):
+        bank.transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_savings",
+            payee_id="p_lina",
+            amount=Money(50000),
+            idempotency_key="dup1",
+            booked_on=date(2026, 10, 1),
+        )
+    assert _txn_count(rw_store) == 1
+    assert _balance(rw_store, "acc_savings") == Money(12843000 - 50000)
+
+
+def test_book_transfer_rejects_currency_conflict_without_scheduling(rw_store: Store) -> None:
+    with pytest.raises(CurrencyMismatchError):
+        CoreBank(rw_store).book_transfer(
+            user_id=DEMO_USER_ID,
+            account_id="acc_savings",
+            payee_id="p_lina",
+            amount=Money(10000),
+            booked_on=date(2026, 10, 1),
+            remark="",
+            idempotency_key="book_cur",
+            currency="EUR",
+        )
+    assert rw_store.query("SELECT COUNT(*) AS n FROM write_receipts")[0]["n"] == 0
+

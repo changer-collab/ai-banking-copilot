@@ -17,21 +17,21 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from ai_banking_copilot.contracts.authorization import Decision
 from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.receipt_store import ReceiptReader
-from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource
+from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource, RiskAssessmentWriter
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
@@ -41,15 +41,39 @@ from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
-from ai_banking_copilot.policy.verification import VerificationProvider
+from ai_banking_copilot.policy.verification import (
+    VerificationAttemptLimiter,
+    VerificationProvider,
+)
+from ai_banking_copilot.scenarios.bill_findings import (
+    BillNarrator,
+    analyze_bill,
+    narrate_bill_findings,
+    report_payload,
+)
+from ai_banking_copilot.scenarios.subscriptions import (
+    CANCEL_STATE_EXTERNAL_CONFIRMED,
+    CANCEL_STATE_LABELS,
+    EXTERNAL_CANCEL_NOT_INTEGRATED,
+    SUBSCRIPTION_CANCEL_BOUNDARY,
+    cancel_state_from_receipt,
+    insights_payload,
+    subscription_report,
+)
+from ai_banking_copilot.scenarios.wealth import (
+    AssessmentState,
+    to_risk_assessment,
+)
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.insights import InsightService
 from ai_banking_copilot.web.page import INDEX_HTML
 from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
 from ai_banking_copilot.web.session import (
+    MAX_CONFIRM_STEPS,
     ConfirmationMismatchError,
     ExecutionView,
     Session,
+    SessionRiskSource,
     SessionStateError,
     SessionView,
     StrongVerificationRequiredError,
@@ -77,6 +101,11 @@ class AppDeps:
     user_id: str = DEMO_USER_ID
     today: date = DEFAULT_BOOKING_DATE
     risk: RiskAssessmentSource | None = None
+    risk_writer: RiskAssessmentWriter | None = None
+    """风险测评**录入通道**（只写用户自助录入，`source='user_input'`）。
+
+    `None ⇒ POST /api/risk-assessment` 一律 404：不得把 seed 演示数据当成真实测评。
+    读路径仍走 `risk`，写路径与读路径分离，理财推荐只消费读路径事实。"""
     reversal: ReversalService | None = None
     """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
     operator_token: str | None = None
@@ -92,30 +121,59 @@ class AppDeps:
     verification_provider: VerificationProvider | None = None
     verification_key: bytes | None = None
     verification_strict: bool = False
+    verification_limiter: VerificationAttemptLimiter = field(
+        default_factory=VerificationAttemptLimiter
+    )
+    """强验证失败计数与退避（**进程内、按用户**）：同一 `AppDeps` 下的多个会话共享计数，
+    因此换 `session_id` 不能重置失败次数。多 worker / 多实例各自独立计数，不是全局限流。"""
     session_repository: SessionRepository | None = None
     receipts: ReceiptReader | None = None
     model_observations: TaskObservations | None = None
+    session_risk: SessionRiskSource | None = None
+    """**服务端**可信会话风控信号源（G-03）：`True` 异常 / `False` 正常 / `None` 无可信结果。
+
+    **绝不**从请求体读取风控标记；所有渠道（API / Hook / IM）经同一 `Session` 取同一信号。
+    未装配时按 `session_risk_strict` 处理（严格 ⇒ 升级核验，绝不默认放行）。"""
+    session_risk_strict: bool = True
+    """严格风控模式（G-03）：未装配可信信号源时视为「无可信结果」并升级核验。
+
+    **默认失败关闭**：任何未显式装配 `session_risk` 的渠道（API / Hook / IM）都不会因
+    缺失风控结论而放行。演示装配（`compose.build_deps`，本地单用户、无设备 / 地点遥测）
+    通过 `AIB_SESSION_RISK_STRICT` 显式放开；生产装配应保持开启或提供真实信号源。"""
+    bill_narrator: BillNarrator | None = None
+    """账单结论式解释的模型通道；`None ⇒ 使用确定性文案并显式标注降级`。
+
+    模型只解释 `scenarios.bill_findings` 已核实的识别结果，**不参与金额计算**；
+    识别引擎与金额核算在装配缺失时仍完整可用（可测试、可重算）。"""
 
 
 DEFAULT_SESSION_ID = "default"
 """缺省会话标识：请求体未带 `session_id` 时用它，保持既有单会话行为不变（多会话隔离的兜底）。"""
 
+RISK_SOURCE_LABELS = {
+    "seed": "演示 seed 数据（非真实测评）",
+    "user_input": "用户自助录入",
+}
+"""测评来源标注：`seed` 必须显式说明不是真实测评。"""
+
 
 class _SubmitRequest(BaseModel):
     utterance: str
     selected: dict[str, object] | None = None
-    session_anomaly: bool = False
-    """会话异常（设备 / 地点跳变）。**生产环境应由渠道风控判定后注入，不得直接取自客户端载荷**；
-    演示渠道无风控模块，故开放该字段以便现场演示熔断触发 5。"""
     session_id: str = DEFAULT_SESSION_ID
-    """会话标识：不同取值对应**相互隔离**的会话（各自 pending / 状态机独立）。"""
+    """会话标识：不同取值对应**相互隔离**的会话（各自 pending / 状态机独立）。
+
+    **不接受** `session_anomaly` 一类风控入参（G-03）：风控结论只能由服务端可信源
+    `AppDeps.session_risk` 生成，请求体里的同名字段一律无效果。
+    """
 
 
 class _ConfirmRequest(BaseModel):
     card_id: str
     frozen_hash: str
     verification_code: str | None = None
-    steps: int | None = None
+    steps: StrictInt | None = Field(default=None, ge=1, le=MAX_CONFIRM_STEPS)
+    """分步执行上界：只接受真正的整数（拒绝 `"2"`、`2.0`、`true`、负数、0 与超大值）。"""
     session_id: str = DEFAULT_SESSION_ID
 
 
@@ -143,6 +201,12 @@ class _BudgetRequest(BaseModel):
 
     budget_cents: int | None = None
     month: str | None = None
+
+
+class _RiskAssessmentRequest(BaseModel):
+    """用户自助录入的风险等级；**身份只取服务端 `deps.user_id`**，不接受请求体用户 id。"""
+
+    risk_profile: str
 
 
 def create_app(deps: AppDeps) -> FastAPI:
@@ -243,6 +307,76 @@ def create_app(deps: AppDeps) -> FastAPI:
                  "label": f"{record.payload.reason} · 冻结 {record.payload.amount.yuan} 元"}
                 for record in gateway.active_holds_of(user_id)
             ],
+            "subscription_details": insights_payload(
+                subscription_report(gateway, user_id, as_of=deps.today)
+            ),
+            "subscription_capabilities": {
+                "external_cancel_status": EXTERNAL_CANCEL_NOT_INTEGRATED,
+                "external_cancel_integrated": False,
+                "can_request_external_cancel": False,
+                "can_local_cancel": True,
+                "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
+                "states": [
+                    {"state": state, "label": label}
+                    for state, label in CANCEL_STATE_LABELS.items()
+                ],
+            },
+        }
+
+    @app.get("/api/risk-assessment")
+    def risk_assessment_state() -> dict[str, object]:
+        """当前已认证用户的测评状态（只读）；未测评 / 过期如实返回，绝不默认等级。"""
+        return _risk_payload(deps)
+
+    @app.post("/api/risk-assessment")
+    def save_risk_assessment(request: _RiskAssessmentRequest) -> dict[str, object]:
+        """用户自助录入风险等级（真实测评入口，`source='user_input'`）。
+
+        - **身份**只取服务端 `deps.user_id`，请求体不能指定他人；
+        - 日期取服务端 `deps.today`，客户端不能把过期测评"刷新"成有效；
+        - 只写测评事实，不触碰任何理财交易；录入后推荐仍走同一读路径与服务端硬筛选。
+        """
+        writer = deps.risk_writer
+        if writer is None:
+            raise HTTPException(status_code=404, detail="风险测评录入未装配")
+        try:
+            writer.save(deps.user_id, request.risk_profile.strip().upper(), deps.today)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"state": "updated", "assessment": _risk_payload(deps)}
+
+    @app.get("/api/bills/analysis")
+    def bill_analysis(year: int | None = None, month: int | None = None) -> dict[str, object]:
+        """只读账单异常识别 + 结论式解释；不写事实、不产生执行授权。
+
+        缺省账期为服务端时钟的上一个月；金额全部来自确定性识别引擎并按分返回，
+        模型只补充文字解释（失败时 `narrative.degraded=true`，不得当作成功分析）。
+        """
+        target = deps.today.replace(day=1) - timedelta(days=1)
+        target_year = target.year if year is None else year
+        target_month = target.month if month is None else month
+        if not 2000 <= target_year <= 2100 or not 1 <= target_month <= 12:
+            raise HTTPException(status_code=400, detail="账期非法，需为 2000-2100 年与 1-12 月")
+        report = analyze_bill(
+            deps.gateway, deps.user_id, target_year, target_month, as_of=deps.today,
+        )
+        narrative = narrate_bill_findings(report, deps.bill_narrator)
+        return {
+            **report_payload(report),
+            "narrative": {
+                "summary": narrative.summary,
+                "findings": [
+                    {
+                        "finding_id": item.finding_id,
+                        "explanation": item.explanation,
+                        "suggestion": item.suggestion,
+                    }
+                    for item in narrative.findings
+                ],
+                "degraded": narrative.degraded,
+                "degrade_reason": narrative.degrade_reason,
+                "channel": narrative.channel,
+            },
         }
 
     @app.get("/api/insights")
@@ -300,7 +434,6 @@ def create_app(deps: AppDeps) -> FastAPI:
             view = _session_for(request.session_id).submit(
                 request.utterance,
                 selected=request.selected,
-                session_anomaly=request.session_anomaly,
             )
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -350,6 +483,15 @@ def create_app(deps: AppDeps) -> FastAPI:
         ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _response(request.session_id, _execution_payload(view))
+
+    @app.post("/api/reject")
+    def reject(request: _EmptyRequest) -> dict[str, object]:
+        """**放弃当前待确认计划**（G-02）：服务端置作废终态，原计划与已发验证码一并失效。"""
+        try:
+            view = _session_for(request.session_id).reject()
+        except SessionStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _session_payload(view)
 
     @app.post("/api/interrupt")
     def interrupt(request: _EmptyRequest) -> dict[str, object]:
@@ -440,6 +582,32 @@ def create_app(deps: AppDeps) -> FastAPI:
     return app
 
 
+def _risk_payload(deps: AppDeps) -> dict[str, object]:
+    """测评状态回显：`state` / 等级 / 日期 / 来源全部如实给出（不做乐观默认）。"""
+    source = deps.risk
+    if source is None:
+        raise HTTPException(status_code=404, detail="风险测评服务未装配")
+    assessment = to_risk_assessment(source.assessment_for(deps.user_id))
+    if assessment is None:
+        return {
+            "state": AssessmentState.UNASSESSED.value,
+            "risk_profile": None,
+            "assessed_on": None,
+            "expires_on": None,
+            "source": None,
+            "source_label": None,
+        }
+    expires_on = assessment.assessed_on + timedelta(days=assessment.valid_days)
+    return {
+        "state": assessment.state_on(deps.today).value,
+        "risk_profile": assessment.risk_profile,
+        "assessed_on": assessment.assessed_on.isoformat(),
+        "expires_on": expires_on.isoformat(),
+        "source": assessment.source or None,
+        "source_label": RISK_SOURCE_LABELS.get(assessment.source),
+    }
+
+
 def _submission_payload(view: SubmissionView) -> dict[str, object]:
     card = _card_payload(view.card)
     if card is not None and view.quota is not None:
@@ -458,6 +626,32 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "card": card,
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
+    }
+
+
+def _subscription_cancel_payload(view: ExecutionView) -> dict[str, object] | None:
+    """订阅取消的**操作状态**（与"取消指引/打开第三方页面"明确区分）。
+
+    只有回执明确带 `confirmed_by_merchant` 才可能标记为商户确认；本项目当前没有真实
+    商户取消接口，因此本地执行只会落在"本地已取消（商户未确认）"。
+    """
+    results = [item for item in view.exec_results if item.action == "subscription.cancel"]
+    if not results:
+        return None
+    last = results[-1]
+    state = cancel_state_from_receipt(
+        status=last.status, external_status=last.external_status
+    )
+    return {
+        "state": state,
+        "label": CANCEL_STATE_LABELS[state],
+        "external_status": last.external_status or EXTERNAL_CANCEL_NOT_INTEGRATED,
+        "external_confirmed": state == CANCEL_STATE_EXTERNAL_CONFIRMED,
+        "previous_status": last.previous_status,
+        "message": last.message,
+        "record_ids": list(last.record_ids),
+        "effect_ids": list(last.effect_ids),
+        "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
     }
 
 
@@ -491,14 +685,20 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
             for item in view.bill_advice
         ],
         "bill_advice_message": view.bill_advice_message,
+        "bill_findings": view.bill_findings,
+        "hook_status": view.hook_status,
         "results": [
             {
+                "action": result.action,
                 "status": result.status,
                 "message": result.message,
                 "record_ids": list(result.record_ids),
+                "external_status": result.external_status,
+                "previous_status": result.previous_status,
             }
             for result in view.exec_results
         ],
+        "subscription_cancel": _subscription_cancel_payload(view),
     }
 
 
@@ -538,6 +738,7 @@ def _card_payload(card: PlanCard | None) -> dict[str, object] | None:
         "level": card.level.name,
         "lines": list(card.lines),
         "requires": list(card.requires),
+        "expires_at": card.expires_at.isoformat() if card.expires_at is not None else None,
     }
 
 

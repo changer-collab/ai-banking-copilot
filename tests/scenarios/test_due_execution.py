@@ -80,8 +80,20 @@ def test_due_execution_and_replay_pass_through_pep_with_provenance(tmp_path: Pat
             audit, CircuitBreaker(), WRITE_HANDLERS, QUERY_HANDLERS,
         )
         decision = Decision(level=Level.YELLOW, reasons=(ReasonCode.STATE_CHANGE_SMALL,))
-        first = pep.execute(call, decision, Plan(plan_id="first", nodes=(node,)), "first-key")
-        second = pep.execute(call, decision, Plan(plan_id="second", nodes=(node,)), "second-key")
+        first_plan = Plan(plan_id="first", nodes=(node,))
+        second_plan = Plan(plan_id="second", nodes=(node,))
+        first = pep.execute(
+            call, decision, first_plan, "first-key",
+            execution=pep.issue_write_grant(
+                call, decision, first_plan, approved_level=Level.YELLOW,
+            ),
+        )
+        second = pep.execute(
+            call, decision, second_plan, "second-key",
+            execution=pep.issue_write_grant(
+                call, decision, second_plan, approved_level=Level.YELLOW,
+            ),
+        )
         assert first.status == second.status == "settled"
         assert first.record_ids == second.record_ids
         assert len(audit.events()[0].payload["provenance"]) == 2

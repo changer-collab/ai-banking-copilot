@@ -179,7 +179,7 @@ def _build_test_registry() -> ToolRegistry:
         _spec(
             "subscription.cancel",
             RiskClass.SMALL_CHANGE,
-            (_param("subscription_id", str),),
+            (_param("user_id", str), _param("subscription_id", str)),
             pure=False,
         ),
         _spec(
