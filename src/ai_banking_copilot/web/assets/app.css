@@ -371,6 +371,18 @@ body {
   animation: pulse 2.4s var(--ease-out) infinite;
 }
 
+/* 浮章：盖章浮在凭证之上，**不占排版位**——凭证内容多时用它压住行高。
+   定位相对最近的定位祖先（`.voucher` 为 position: relative）。 */
+.seal--float {
+  position: absolute;
+  top: var(--s-4);
+  right: var(--s-4);
+  width: 84px;
+  height: 84px;
+  z-index: 2;
+}
+.seal--float .seal__level { font-size: 21px; }
+
 /* 步骤（DAG） ------------------------------------------------------------- */
 .steps {
   margin: 0;
@@ -981,6 +993,191 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
+}
+
+/* 账单分析：结论在前，图表在后 ------------------------------------------- */
+.bill {
+  margin-top: var(--s-4);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-card);
+  background: var(--voucher);
+  padding: var(--s-4);
+  display: grid;
+  gap: var(--s-4);
+}
+
+.bill__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px dashed var(--rule-strong);
+}
+
+.bill__head h3 {
+  margin: 0;
+  font-size: var(--fs-h2);
+}
+
+.bill__block {
+  display: grid;
+  gap: var(--s-3);
+}
+
+.bill__block h4 {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-2);
+}
+
+.bill__verdict {
+  margin: 0;
+  padding: var(--s-3);
+  border-left: 3px solid var(--blue-500);
+  border-radius: var(--r-control);
+  background: var(--blue-050);
+  font-size: var(--fs-h2);
+  line-height: 1.6;
+}
+
+.bill__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s-3);
+}
+
+.bill__metric {
+  display: grid;
+  gap: 4px;
+  padding: var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  background: var(--voucher-alt);
+}
+
+.bill__metric span {
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+}
+
+.bill__metric b {
+  font-size: var(--fs-h2);
+  font-variant-numeric: tabular-nums;
+}
+
+.bill__finding {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  background: var(--voucher-alt);
+}
+
+.bill__finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.bill__finding p {
+  margin: 0;
+  line-height: 1.65;
+}
+
+.bill__evidence ul,
+.bill__actions {
+  margin: var(--s-2) 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  font-size: var(--fs-small);
+}
+
+.bill__note {
+  margin: 0;
+  font-size: var(--fs-small);
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+.bill__limits {
+  font-size: var(--fs-small);
+  color: var(--ink-2);
+}
+
+.bill__limits summary {
+  cursor: pointer;
+  color: var(--ink-2);
+}
+
+.bill__limits ul {
+  margin: var(--s-2) 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  color: var(--ink-3);
+}
+
+.bill__bar {
+  display: grid;
+  grid-template-columns: minmax(64px, 120px) minmax(0, 1fr) minmax(120px, auto);
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-small);
+}
+
+.bill__bar-track {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--rule);
+  overflow: hidden;
+}
+
+.bill__bar-track i {
+  display: block;
+  height: 100%;
+  background: var(--blue-500);
+}
+
+.bill__days {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 96px;
+  padding-top: var(--s-2);
+  overflow-x: auto;
+}
+
+.bill__day {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px;
+  flex: 1 0 18px;
+  height: 100%;
+}
+
+.bill__day i {
+  display: block;
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--blue-300);
+}
+
+.bill__day span {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+@media (max-width: 560px) {
+  .bill { padding: var(--s-3); }
+  .bill__bar { grid-template-columns: minmax(0, 1fr) minmax(120px, auto); }
+  .bill__bar-track { grid-column: 1 / -1; order: 3; }
 }
 
 /* 技术详情：机器标识（动作标识 / 哈希 / 记录号 / 审计 ID）**默认收起**——

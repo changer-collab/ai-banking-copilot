@@ -185,6 +185,7 @@ async function refreshOptions() {
   if (!response.ok) throw new Error("无法读取可选对象");
   state.options = await response.json();
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
+  renderSubscriptionDetails(state.options);
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
     select.innerHTML = optionsHtml(slot, select.value);
@@ -229,6 +230,101 @@ function renderInsights(data) {
       ${refs ? `<details><summary>来源（${(item.source_refs || []).length}）</summary><ul>${refs}</ul></details>` : "<p class=\"muted\">暂无来源记录（预算尚未设置）。</p>"}
     </article>`;
   }).join("");
+}
+
+function subscriptionStatusLabel(status) {
+  return { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
+}
+
+function confidenceLabel(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? `${Math.round(num * 100)}%` : "—";
+}
+
+function subscriptionNoticesHtml(item) {
+  const notices = item.notices || [];
+  if (!notices.length) return "";
+  return `<ul class="muted">${notices.map((notice) =>
+    `<li>${esc(notice.message)}</li>`).join("")}</ul>`;
+}
+
+function subscriptionEvidenceHtml(item) {
+  const evidence = item.evidence || [];
+  if (!evidence.length) return '<p class="muted">无可核对流水。</p>';
+  return `<details><summary>对应交易（${evidence.length}）</summary><ul>` +
+    evidence.map((txn) =>
+      `<li><span class="mono">${esc(txn.booked_on)} · ${yuan(Math.abs(txn.amount_cents))}</span>` +
+      ` <span class="tech">${esc(txn.record_id)} · ${esc(txn.content_hash)}</span></li>`
+    ).join("") + "</ul></details>";
+}
+
+function subscriptionItemHtml(item) {
+  const next = item.next_charge_on
+    ? `${esc(item.next_charge_on)}（${item.next_charge_is_prediction ? "预测值" : "登记值"}）`
+    : "—";
+  const external = item.external_cancel_status === "not_integrated"
+    ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
+  return `<article class="takeover">
+    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status))}</span>
+      <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span></div>
+    <p>扣费 ${yuan(item.amount_cents)} · ${esc(item.currency)} · ${esc(item.cycle_label)}扣费</p>
+    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次预计 ${next}</p>
+    <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
+    ${subscriptionNoticesHtml(item)}
+    <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
+    <p><span class="muted">取消路径：</span>${esc(item.cancel_path)}</p>
+    <p class="muted">外部取消接口：${external}</p>
+    ${subscriptionEvidenceHtml(item)}
+  </article>`;
+}
+
+function renderSubscriptionDetails(options) {
+  const panel = el("subscription-panel");
+  if (!panel) return;
+  const details = options && options.subscription_details;
+  const caps = options && options.subscription_capabilities;
+  const status = el("subscription-status");
+  const list = el("subscription-list");
+  const boundary = el("subscription-boundary");
+  if (!details) {
+    status.textContent = "订阅识别服务尚未接入。";
+    list.innerHTML = "";
+    boundary.hidden = true;
+    return;
+  }
+  status.textContent = `数据来源：${details.data_source} · 业务日 ${details.as_of}`;
+  if (caps && caps.boundary) {
+    boundary.hidden = false;
+    boundary.textContent = `能力边界：${caps.boundary}`;
+  }
+  const insights = details.insights || [];
+  list.innerHTML = insights.length
+    ? insights.map(subscriptionItemHtml).join("")
+    : '<p class="muted">未识别到订阅。</p>';
+  const notes = details.notes || [];
+  if (notes.length) {
+    list.innerHTML += `<details><summary>识别说明</summary><ul class="muted">${
+      notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul></details>`;
+  }
+}
+
+function renderSubscriptionCancel(cancel) {
+  const box = el("subscription-cancel-result");
+  if (!box) return;
+  if (!cancel) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  const previous = cancel.previous_status
+    ? ` · 操作前状态 ${esc(cancel.previous_status)}` : "";
+  const confirmed = cancel.external_confirmed ? "商户已确认" : "商户未确认";
+  box.innerHTML = `<div class="takeover">
+    <p><b>取消操作状态：${esc(cancel.label)}</b></p>
+    <p class="muted">外部状态：${esc(cancel.external_status)} · ${confirmed}${previous}</p>
+    <p class="muted">${esc(cancel.boundary)}</p>
+  </div>`;
 }
 
 async function refreshInsights() {
@@ -663,6 +759,7 @@ function setButtons() {
   el("btn-confirm").disabled = operationUnknown || offline || !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = operationUnknown || offline || state.busy || !(state.phase === "executing" || awaiting);
   el("btn-resume").disabled = operationUnknown || offline || busy || !state.card || state.phase !== "interrupted";
+  el("btn-reject").disabled = operationUnknown || offline || busy || !state.card || !(awaiting || state.phase === "interrupted");
   el("btn-reverse").disabled = operationUnknown || offline || busy || state.phase === "reversed" || !state.card || state.card.level === "GREEN" || state.stepStates.filter((s) => s === "done").length === 0;
   el("btn-takeover").disabled = offline || busy || state.phase === "idle";
 }
@@ -888,6 +985,210 @@ async function onConfirm() {
   await refreshAfterExecution();
 }
 
+const BILL_KIND_LABELS = {
+  "duplicate-charge": "疑似重复扣费",
+  "price-change": "商户价格变化",
+  "hidden-fee": "未登记扣费",
+  "recurring-subscription": "周期性订阅",
+  "abnormal-spend": "异常消费",
+};
+
+const BILL_STATUS_LABELS = {
+  confirmed: "已确认",
+  suspected: "疑似",
+  normal: "正常（仅提醒）",
+};
+
+const BILL_SAVING_LABELS = {
+  confirmed: "已确定节省",
+  potential: "潜在节省（估算）",
+  none: "不计入节省",
+};
+
+function billVerdict(summary) {
+  const total = Number(summary.transaction_count) || 0;
+  const confirmed = Number(summary.confirmed_count) || 0;
+  const suspected = Number(summary.suspected_count) || 0;
+  const normal = Number(summary.normal_count) || 0;
+  if (!total) return "本期没有支出流水，无法给出消费结论。";
+  if (!confirmed && !suspected) {
+    return normal
+      ? `本期 ${total} 笔支出，识别到 ${normal} 项正常提醒，未发现已确认或疑似问题；未发现不等于不存在。`
+      : `本期 ${total} 笔支出未命中识别规则；未发现不等于不存在。`;
+  }
+  const parts = [];
+  if (confirmed) parts.push(`${confirmed} 项已确认问题`);
+  if (suspected) parts.push(`${suspected} 项疑似问题`);
+  return `本期共 ${total} 笔支出，发现 ${parts.join("、")}，请按下方证据逐条核对。`;
+}
+
+function billConclusionHtml(payload) {
+  const summary = payload.summary;
+  const total = Number(summary.transaction_count) || 0;
+  const expense = Number(summary.expense_total_cents) || 0;
+  const confirmedSaving = Number(payload.confirmed_saving_cents) || 0;
+  const potentialSaving = Number(payload.potential_saving_cents) || 0;
+  const demo = payload.data_source_is_demo === true;
+  const value = (text) => total ? text : "—";
+  return `<section class="bill__block">
+    <p class="bill__verdict">${esc(billVerdict(summary))}</p>
+    <div class="bill__metrics">
+      <div class="bill__metric"><span>已确认问题</span><b>${value(`${Number(summary.confirmed_count) || 0} 项`)}</b></div>
+      <div class="bill__metric"><span>疑似问题</span><b>${value(`${Number(summary.suspected_count) || 0} 项`)}</b></div>
+      <div class="bill__metric"><span>可核实的确定节省</span><b>${value(yuan(confirmedSaving))}</b></div>
+      <div class="bill__metric"><span>潜在节省（估算）</span><b>${value(yuan(potentialSaving))}</b></div>
+    </div>
+    <p class="bill__note">数据覆盖：${esc(payload.period)} 共 ${total} 笔支出，合计 ${yuan(expense)}；历史回看 ${Number(summary.lookback_months) || 0} 个月，分析截至 ${esc(payload.as_of)}。</p>
+    <p class="bill__note">${total
+      ? `确定节省只统计可核实为已发生的金额，当前为 ${yuan(confirmedSaving)}；潜在节省是识别口径下的估算上限，尚未实现，不能当作已到账金额。`
+      : "本期没有支出流水，节省金额与异常数量均无法计算。"}</p>
+    <details class="bill__limits" open>
+      <summary>数据来源与分析局限</summary>
+      <p>数据来源：${esc(payload.data_source)}${demo ? "（演示数据，非真实账单）" : ""}</p>
+      <ul>${(payload.notes || []).map((note) => `<li>${esc(note)}</li>`).join("")}</ul>
+    </details>
+  </section>`;
+}
+
+function billEvidenceHtml(evidence) {
+  if (!evidence.length) {
+    return '<p class="bill__note">没有可回读的交易明细，不能据此确认问题。</p>';
+  }
+  return `<details class="bill__evidence"><summary>对应交易明细（${evidence.length}）</summary><ul>` +
+    evidence.map((txn) =>
+      `<li>${esc(txn.booked_on)} · ${esc(txn.merchant_label)} · 支出 <b>${yuan(Math.abs(Number(txn.amount_cents) || 0))}</b>` +
+      ` <span class="tech mono">${esc(txn.txn_id)} · ${esc(txn.record_id)} · ${esc(txn.content_hash)}</span></li>`
+    ).join("") + "</ul></details>";
+}
+
+function billFindingHtml(item) {
+  const status = BILL_STATUS_LABELS[item.status] || "未知状态";
+  const saving = (item.saving_allocations || []).reduce(
+    (sum, row) => sum + (Number(row.amount_cents) || 0), 0,
+  );
+  return `<article class="bill__finding">
+    <div class="bill__finding-head">
+      <b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>
+      <span class="chip">${esc(status)}</span>
+      <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span>
+    </div>
+    <p>${esc(item.detail || "")}</p>
+    ${billEvidenceHtml(Array.isArray(item.evidence) ? item.evidence : [])}
+    <p>影响金额：<b>${yuan(Number(item.impact_cents) || 0)}</b>
+      <span class="muted">（计算口径：${esc(item.impact_basis || "未提供")}）</span></p>
+    <p class="bill__note">估算假设：${esc(item.assumption || "—")}</p>
+    <p class="bill__note">本项计入：${esc(BILL_SAVING_LABELS[item.saving_basis] || "未提供")}${
+      saving > 0 ? ` · ${yuan(saving)}` : ""
+    }</p>
+    <p><span class="muted">建议：</span>${esc(item.suggestion || "请核对交易明细后自行决定。")}</p>
+  </article>`;
+}
+
+function billAdviceItemHtml(item) {
+  const refs = (item.source_refs || []).map((source) => {
+    const recordId = String(source.record_id || "");
+    const label = recordId.startsWith("bills:")
+      ? `月度账单（${recordId.split(":").pop()}）`
+      : recordId.startsWith("subscriptions:")
+        ? "订阅记录"
+        : recordId.startsWith("transactions:") ? "交易流水" : "事实记录";
+    return `<li>${esc(label)} <span class="tech mono">记录编号：${esc(recordId)} · 内容校验：${esc(source.content_hash || "—")}</span></li>`;
+  }).join("");
+  return `<li><b>${esc(item.title)}</b>
+    <span class="muted">（账期 ${esc(item.period)}）</span>：${esc(item.suggestion)}
+    <details><summary>事实依据与来源（${(item.source_refs || []).length}）</summary>
+      <p>${esc(item.evidence)}</p>${refs ? `<ul>${refs}</ul>` : ""}
+    </details>
+  </li>`;
+}
+
+function billActionsHtml(findings, advice, adviceMessage, hasSubscription) {
+  const items = findings.map((item) =>
+    `<li><b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>：${esc(item.suggestion || "请核对交易明细后自行决定。")}</li>`
+  );
+  const adviceItems = (Array.isArray(advice) ? advice : []).map(billAdviceItemHtml);
+  return `<section class="bill__block">
+    <h4>行动建议</h4>
+    ${items.length || adviceItems.length
+      ? `<ul class="bill__actions">${items.join("")}${adviceItems.join("")}</ul>`
+      : '<p class="muted">本期没有可执行行动；请以核心结论与数据局限为准。</p>'}
+    ${adviceMessage ? `<p class="muted">${esc(adviceMessage)}</p>` : ""}
+    ${hasSubscription
+      ? '<div class="btn-row"><button class="btn btn--ghost" type="button" data-action="open-subscriptions">查看订阅记录与取消口径</button></div>'
+      : ""}
+    <p class="bill__note">可执行范围：以上按钮只打开只读订阅面板，不会改变订阅状态。商户退款、投诉、代扣协议变更与商户侧取消尚未接入，本页不提供执行按钮，也不会把未接入的操作显示为成功。</p>
+    ${hasSubscription
+      ? '<p class="bill__note">如需取消订阅，请在对话中说明「取消订阅」：系统会生成计划卡，取消只更新本地订阅状态，商户侧是否停止扣费以商户结果为准。</p>'
+      : ""}
+  </section>`;
+}
+
+function billChartsHtml(transactions) {
+  if (!transactions.length) {
+    return `<section class="bill__block"><h4>统计图表（辅助）</h4>
+      <p class="muted">本期无支出流水，无法绘制分类占比或消费分布。</p></section>`;
+  }
+  const byCategory = new Map();
+  const byDay = new Map();
+  transactions.forEach((item) => {
+    const cents = Math.abs(Number(item.amount_cents) || 0);
+    byCategory.set(item.category, (byCategory.get(item.category) || 0) + cents);
+    byDay.set(item.booked_on, (byDay.get(item.booked_on) || 0) + cents);
+  });
+  const total = [...byCategory.values()].reduce((sum, value) => sum + value, 0) || 1;
+  const categories = [...byCategory.entries()].sort((a, b) => b[1] - a[1]);
+  const days = [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const peak = Math.max(...days.map(([, value]) => value), 1);
+  return `<section class="bill__block">
+    <h4>统计图表（辅助）</h4>
+    <p class="bill__note">图表只按本期交易明细汇总，用于辅助理解，不参与结论或金额判定。</p>
+    <p><b>分类占比</b></p>
+    ${categories.map(([category, cents]) => {
+      const share = Math.round(cents / total * 1000) / 10;
+      return `<div class="bill__bar">
+        <span>${esc(category)}</span>
+        <span class="bill__bar-track"><i style="width:${Math.max(share, 1)}%"></i></span>
+        <span class="mono">${yuan(cents)} · ${share}%</span>
+      </div>`;
+    }).join("")}
+    <p><b>消费分布（按日）</b></p>
+    <div class="bill__days">${days.map(([day, cents]) =>
+      `<div class="bill__day" title="${esc(day)} · ${yuan(cents)}">
+        <i style="height:${Math.max(Math.round(cents / peak * 100), 2)}%"></i>
+        <span>${Number(day.slice(8, 10))}日</span>
+      </div>`).join("")}</div>
+    <p class="bill__note">多期趋势未展示：当前账单接口只返回本期交易明细，缺少可核实的跨期序列。</p>
+  </section>`;
+}
+
+function billAnalysisHtml(payload, advice, adviceMessage) {
+  if (!payload || !payload.summary) return "";
+  const findings = Array.isArray(payload.findings) ? payload.findings : [];
+  const transactions = Array.isArray(payload.transactions) ? payload.transactions : [];
+  const problems = findings.filter((item) => item.status !== "normal");
+  const hasSubscription = findings.some((item) => item.kind === "recurring-subscription")
+    || (Array.isArray(advice) && advice.some((item) => item.kind === "subscription-review"));
+  return `<section class="bill">
+    <div class="bill__head">
+      <h3>账单分析结论</h3>
+      <span class="chip">账期 ${esc(payload.period)}</span>
+      ${payload.data_source_is_demo ? '<span class="chip">演示数据</span>' : ""}
+    </div>
+    ${billConclusionHtml(payload)}
+    <section class="bill__block">
+      <h4>问题与证据${problems.length ? `（${problems.length}）` : ""}</h4>
+      ${findings.length > problems.length
+        ? `<p class="muted">其余 ${findings.length - problems.length} 项为正常提醒（仅记录，不计入问题与节省）。</p>`
+        : ""}
+      ${findings.length
+        ? findings.map(billFindingHtml).join("")
+        : '<p class="muted">本期未命中识别规则；未发现不等于不存在，请结合下方数据局限理解。</p>'}
+    </section>
+    ${billActionsHtml(findings, advice, adviceMessage, hasSubscription)}
+    ${billChartsHtml(transactions)}
+  </section>`;
+}
+
 function billAdviceHtml(items) {
   const advice = Array.isArray(items) ? items.slice(0, 3) : [];
   if (!advice.length) return "";
@@ -913,26 +1214,40 @@ function billAdviceHtml(items) {
   </section>`;
 }
 
+function resultMessage(item) {
+  const message = String(item.message || "");
+  if (item.external_status === "not_integrated") {
+    const previous = item.previous_status ? `操作前状态：${item.previous_status}；` : "";
+    return `${message}（仅本地模拟：尚未连接商户取消接口，${previous}外部商户未取消）`;
+  }
+  return message;
+}
+
 function applyExecution(data) {
   showModelMetadata(data.model);
   if (data.card) state.card = data.card;
   if (data.decision) state.decision = data.decision;
   if (data.state === "awaiting_confirm") state.verification = null;
+  renderSubscriptionCancel(data.subscription_cancel);
   const results = data.results || [];
   results.forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
     if (index < state.resultCount) return;
     if (item.record_ids && item.record_ids.length) chainAdd("已执行", item.record_ids[0]);
-    timelineAdd(item.message, "done");
+    timelineAdd(resultMessage(item), "done");
   });
   state.resultCount = results.length;
   state.phase = data.state === "completed" ? "done" : data.state;
   const complete = data.state === "completed";
+  const billHtml = complete
+    ? billAnalysisHtml(data.bill_findings, data.bill_advice, data.bill_advice_message)
+    : "";
+  const adviceFallback = billAdviceHtml(data.bill_advice) +
+    (data.bill_advice_message ? `<p class="muted">${esc(data.bill_advice_message)}</p>` : "");
   state.notice = complete
     ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
-      results.map((item) => `<p>${esc(item.message)}</p>`).join("") + `</div>` +
-      billAdviceHtml(data.bill_advice) +
-      (data.bill_advice_message ? `<p class="muted">${esc(data.bill_advice_message)}</p>` : "")
+      results.map((item) => `<p>${esc(resultMessage(item))}</p>`).join("") + `</div>` +
+      (billHtml || adviceFallback)
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
   renderStage();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
@@ -965,6 +1280,26 @@ async function onResume() {
   }
   applyExecution(result.data);
   await refreshAfterExecution();
+}
+
+async function onReject() {
+  const result = await post("/api/reject", {});
+  if (result.status !== 200) {
+    await refreshSession();
+    state.notice = interceptHtml("放弃被拒绝", result.data.detail || "当前状态不可放弃", false);
+    renderStage();
+    timelineAdd(`放弃被拒绝：${result.data.detail || "当前状态不可放弃"}`, "stop");
+    return;
+  }
+  state.card = null;
+  state.decision = null;
+  state.stepStates = [];
+  state.verification = null;
+  state.phase = "idle";
+  state.notice = `<div class="takeover"><p>${esc(result.data.message || "已放弃当前计划：原计划作废")}</p></div>`;
+  timelineAdd("已放弃当前计划：原计划与已发验证码一并作废", "warn");
+  renderStage();
+  setButtons();
 }
 
 async function refreshSession() {
@@ -1033,6 +1368,7 @@ el("btn-due").addEventListener("click", action(onDue));
 el("btn-confirm").addEventListener("click", action(onConfirm));
 el("btn-interrupt").addEventListener("click", action(onInterrupt));
 el("btn-resume").addEventListener("click", action(onResume));
+el("btn-reject").addEventListener("click", action(onReject));
 el("btn-reverse").addEventListener("click", action(onReverse));
 el("btn-takeover").addEventListener("click", action(onTakeover));
 el("btn-reset").addEventListener("click", action(startFreshConversation));
@@ -1106,6 +1442,14 @@ el("btn-close-trace").addEventListener("click", () => {
 });
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const trigger = target ? target.closest("[data-action]") : null;
+  if (trigger && trigger.dataset.action === "open-subscriptions") {
+    setMobileDrawer("trace", true);
+    const panel = el("subscription-panel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   if (event.target && event.target.id === "btn-clarify") action(onClarify)();
   if (event.target && event.target.id === "btn-reverify") action(requestVerification)();
   if (event.target && event.target.id === "btn-refresh-session") action(refreshSession)();
@@ -1170,7 +1514,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=9", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=10", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

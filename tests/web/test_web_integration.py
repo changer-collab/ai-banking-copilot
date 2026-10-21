@@ -122,18 +122,30 @@ def test_high_frequency_risky_submissions_trip_the_session_breaker(deps: AppDeps
         session.submit("转给李娜 100 元", now=base + timedelta(seconds=index))
     view = session.submit("转给李娜 100 元", now=base + timedelta(seconds=HIGH_FREQUENCY_LIMIT))
     assert view.card is not None
-    assert session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash).state is (
-        SessionState.TAKEN_OVER
-    )
+    assert session.confirm(
+        view.card.card_id,
+        frozen_hash=view.card.frozen_hash,
+        now=base + timedelta(seconds=HIGH_FREQUENCY_LIMIT),
+    ).state is SessionState.TAKEN_OVER
     assert deps.breaker.is_open() is False
+
+
+class _AnomalousRisk:
+    """服务端可信风控源桩：固定返回"存在会话异常"。"""
+
+    def assess(self, *, user_id: str, session_id: str) -> bool | None:
+        return True
 
 
 def test_session_anomaly_trips_the_session_breaker_and_raises_the_policy_flag(
     deps: AppDeps,
 ) -> None:
-    """触发 5（裁决 #27）：会话异常 ⇒ **本会话**熔断 + PDP 升黄（`device_change`）。"""
-    session = Session(deps)
-    view = session.submit("转给李娜 100 元", session_anomaly=True)
+    """触发 5（裁决 #27）+ G-03：会话异常 ⇒ **本会话**熔断 + PDP 升黄（`device_change`）。
+
+    信号只能来自服务端可信源（`AppDeps.session_risk`），客户端请求体无权提供。
+    """
+    session = Session(replace(deps, session_risk=_AnomalousRisk()))
+    view = session.submit("转给李娜 100 元")
     assert BreakerTrigger.SESSION_ANOMALY not in deps.breaker.triggers()
     assert view.decision is not None
     assert "MANUAL_REVIEW" in [reason.value for reason in view.decision.reasons]
@@ -143,7 +155,7 @@ def test_session_anomaly_trips_the_session_breaker_and_raises_the_policy_flag(
         SessionState.TAKEN_OVER
     )
     # 其他会话完全不受影响（设备 / 地点跳变是单会话信号）
-    other = Session(deps)
+    other = Session(replace(deps, session_risk=_AnomalousRisk()))
     assert other.submit("转给李娜 100 元").card is not None
 
 

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import Decision, Level
@@ -79,6 +79,8 @@ class PlanCard:
     level: Level
     lines: tuple[str, ...]
     requires: tuple[str, ...]
+    expires_at: datetime | None = None
+    """服务端下发的过期时刻（G-02）：过期后原计划不得再被确认；`None` = 未设置。"""
 
     def __post_init__(self) -> None:
         if not self.card_id:
@@ -103,8 +105,14 @@ class PolishRejectedError(ValueError):
     """润色试图改变动作 / 对象 / 时间三元组或行数：拒绝并保留确定性模板。"""
 
 
-def render_plan_card(plan: Plan, decision: Decision, gateway: FactGateway) -> PlanCard:
-    """用确定性模板渲染计划卡（输入 = 已裁决 DAG + 事实网关数值）。"""
+def render_plan_card(
+    plan: Plan, decision: Decision, gateway: FactGateway, *,
+    expires_at: datetime | None = None,
+) -> PlanCard:
+    """用确定性模板渲染计划卡（输入 = 已裁决 DAG + 事实网关数值）。
+
+    `expires_at` 由**服务端**在生成计划卡时写入，不进入冻结哈希（卡片元数据）。
+    """
     validate_plan(plan)
     frozen_hash = cfhash(plan.nodes)
     triples = plan_triples(plan, gateway)
@@ -119,6 +127,7 @@ def render_plan_card(plan: Plan, decision: Decision, gateway: FactGateway) -> Pl
         level=decision.level,
         lines=lines,
         requires=_requires_for_level(decision.level),
+        expires_at=expires_at,
     )
 
 
@@ -183,6 +192,10 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
             return f"{merchant} · {period}"
         return merchant
     if node.action == "wealth.list":
+        risk_profile = _str_param(node, "risk_profile")
+        if risk_profile is not None:
+            labels = wealth.candidate_labels(gateway, risk_profile)
+            return f"理财产品（{risk_profile} 适配）：{'；'.join(labels)}"
         return f"理财产品：{'；'.join(wealth.product_comparison(gateway))}"
     if node.action == "subscription.list":
         user_id = _str_param(node, "user_id")
@@ -272,7 +285,9 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
 def _amount_label(node: PlanNode) -> str:
     cents = node.params.get("amount_cents")
     if isinstance(cents, int) and not isinstance(cents, bool):
-        return f" 金额 {Money(cents).yuan} 元"
+        currency = _str_param(node, "currency")
+        suffix = f"（{currency.upper()}）" if currency is not None else ""
+        return f" 金额 {Money(cents).yuan} 元{suffix}"
     limit = node.params.get("daily_limit_cents")
     if isinstance(limit, int) and not isinstance(limit, bool):
         return f" 额度 {Money(limit).yuan} 元"

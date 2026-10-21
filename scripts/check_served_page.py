@@ -39,9 +39,9 @@ def run(base: str) -> list[str]:
     session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
-    css = _get(base, "/assets/app.css?v=5")
+    css = _get(base, "/assets/app.css?v=6")
     workspace_css = _get(base, "/assets/workspace.css?v=4")
-    js = _get(base, "/assets/app.js?v=13")
+    js = _get(base, "/assets/app.js?v=15")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -62,9 +62,9 @@ def run(base: str) -> list[str]:
             and 'aria-controls="trace"' in html
         ),
         "page: 资源 ?v": (
-            "/assets/app.css?v=5" in html
+            "/assets/app.css?v=6" in html
             and "/assets/workspace.css?v=4" in html
-            and "/assets/app.js?v=13" in html
+            and "/assets/app.js?v=15" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,

@@ -1,13 +1,13 @@
-/* 静态壳 v9：金融 API 始终在线读取，绝不进入 Cache Storage。 */
-const CACHE_NAME = "aib-static-shell-v9";
+/* 静态壳 v10：金融 API 始终在线读取，绝不进入 Cache Storage。 */
+const CACHE_NAME = "aib-static-shell-v10";
 const STATIC_ASSETS = [
   "/",
   "/assets/manifest.json?v=1",
   "/assets/icon.svg?v=1",
   "/assets/tokens.css?v=2",
-  "/assets/app.css?v=5",
-"/assets/workspace.css?v=4",
-"/assets/app.js?v=13",
+  "/assets/app.css?v=6",
+  "/assets/workspace.css?v=4",
+  "/assets/app.js?v=15",
 ];
 
 self.addEventListener("install", (event) => {
