@@ -131,8 +131,8 @@ def _apply_os_limits(limits: Mapping[str, int | float]) -> None:
         return
     if resource is None or not hasattr(resource, "setrlimit"):
         raise SandboxUnavailable("POSIX rlimit 不可用，拒绝执行沙箱代码")
-    cpu_s = int(cast(int | float, limits["cpu_s"]))
-    memory = int(cast(int | float, limits["memory_mb"])) * 1024 * 1024
+    cpu_s = int(limits["cpu_s"])
+    memory = int(limits["memory_mb"]) * 1024 * 1024
     try:
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_s, cpu_s))
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))

@@ -192,7 +192,7 @@ def _locked_file(path: Path) -> Iterator[BinaryIO]:
     with path.open("r+b") as handle:
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
+            msvcrt = cast(Any, import_module("msvcrt"))
 
             msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
         else:
@@ -204,7 +204,7 @@ def _locked_file(path: Path) -> Iterator[BinaryIO]:
         finally:
             handle.seek(0)
             if os.name == "nt":
-                import msvcrt
+                msvcrt = cast(Any, import_module("msvcrt"))
 
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             else:

@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 
 import ai_banking_copilot
 from ai_banking_copilot.gateway.errors import (
@@ -595,7 +596,11 @@ def _spawn_windows(
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # `WinDLL` is only exposed by ctypes on Windows; use getattr so the
+    # module still type-checks on the Linux CI runner while this branch is
+    # unreachable there.
+    win_dll = cast(Any, ctypes).WinDLL
+    kernel32 = win_dll("kernel32", use_last_error=True)
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
     kernel32.SetInformationJobObject.argtypes = [
@@ -627,7 +632,7 @@ def _spawn_windows(
             text=True,
             encoding="utf-8",
             errors="replace",
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=cast(Any, subprocess).CREATE_NEW_PROCESS_GROUP,
         )
         if not kernel32.AssignProcessToJobObject(job, process._handle):  # type: ignore[attr-defined]
             process.kill()
