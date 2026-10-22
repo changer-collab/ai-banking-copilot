@@ -131,6 +131,7 @@ def deps(
         user_id=DEMO_USER_ID,
         today=DEFAULT_BOOKING_DATE,
         risk=risk,
+        session_risk_strict=False,
     )
 
 

@@ -29,6 +29,10 @@ class ExecutionContext:
     strong_verified: bool = False
     completed_records: tuple[str, ...] = ()
     flags: frozenset[str] = frozenset()
+    session_id: str = ""
+    """发起执行的会话（写操作凭据绑定项；空串表示未经会话层确认）。"""
+    grant_id: str = ""
+    """服务端签发的一次性写授权凭据（见 `policy.tool_hook`）；空串 = 无确认，写操作必被拦截。"""
 
 
 @dataclass(frozen=True)

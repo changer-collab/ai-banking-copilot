@@ -851,11 +851,14 @@ def _load_http_transport(
                         headers={"Authorization": f"Bearer {api_key}"},
                         timeout=timeout_s,
                     )
-                    http_status = response.status_code
-                    if http_status != 200:
+                    # `http_status` 需保留给 finally 的观测上报（可能从未赋值）；
+                    # 故用局部 `status` 承载响应码，避免把 `int | None` 传给要求 `int` 的异常。
+                    status = response.status_code
+                    http_status = status
+                    if status != 200:
                         if observer is not None:
                             response_text = cast(str, response.text)
-                        raise _HTTPStatusError(http_status)
+                        raise _HTTPStatusError(status)
                     response_text = cast(str, response.text)
                     return response_text
         except BaseException as error:

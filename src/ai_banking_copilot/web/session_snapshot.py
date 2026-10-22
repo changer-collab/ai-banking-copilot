@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SESSION_SNAPSHOT_VERSION = 1
+SESSION_SNAPSHOT_VERSION = 2
+"""快照结构版本：2 起计划卡带服务端 `expires_at`（G-02），旧快照 fail-closed 拒绝。"""
 
 
 class SessionSnapshotError(ValueError):

@@ -21,7 +21,7 @@ from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditLog
 from ai_banking_copilot.policy.breaker import BreakerTrigger, CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError, assert_frozen
 from ai_banking_copilot.policy.pdp import ObjectState, PolicyRequest, evaluate, evaluate_plan
-from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep, manifest_plan
+from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, Pep, manifest_plan
 from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.tools.registry import ToolCall
 
@@ -58,6 +58,20 @@ def _transfer_params(amount_cents: int = 50000) -> dict[str, object]:
         "amount_cents": _trusted(amount_cents),
         "booked_on": _trusted("2026-10-01"),
     }
+
+
+def _execute_confirmed(pep: Pep, call: ToolCall, level: Level, key: str) -> ExecResult:
+    """以「用户已确认」的服务端路径执行写动作（签发一次性凭据后再过 Pre-Tool Hook）。"""
+    decision = _decision(level)
+    plan = manifest_plan(call)
+    return pep.execute(
+        call, decision, plan, key,
+        execution=pep.issue_write_grant(
+            call, decision, plan,
+            approved_level=level,
+            strong_verified=level >= Level.RED,
+        ),
+    )
 
 
 def _node_params(amount_cents: int = 50000) -> dict[str, object]:
@@ -172,9 +186,7 @@ def test_end_to_end_query_then_transfer_with_intact_audit_chain(
     query_call = ToolCall(action="account.balance", params=_query_params())
     query_result = pep.execute(query_call, _decision(Level.GREEN), manifest_plan(query_call), "q1")
     transfer_call = ToolCall(action="transfer.create", params=_transfer_params())
-    transfer_result = pep.execute(
-        transfer_call, _decision(Level.RED), manifest_plan(transfer_call), "t1"
-    )
+    transfer_result = _execute_confirmed(pep, transfer_call, Level.RED, "t1")
     assert query_result.status == "queried"
     assert transfer_result.status == "settled"
     assert [event.kind for event in audit.events()] == [KIND_EXECUTION, KIND_EXECUTION]
@@ -197,10 +209,7 @@ def test_breaker_opens_on_rejections_and_only_unlock_restores(
     with pytest.raises(NotAuthorizedError, match="熔断"):
         pep.execute(blocked_call, _decision(Level.RED), manifest_plan(blocked_call), "t1")
     breaker.unlock()
-    assert (
-        pep.execute(blocked_call, _decision(Level.RED), manifest_plan(blocked_call), "t2").status
-        == "settled"
-    )
+    assert _execute_confirmed(pep, blocked_call, Level.RED, "t2").status == "settled"
 
 
 def test_reversal_race_never_claims_cancelled() -> None:

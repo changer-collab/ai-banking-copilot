@@ -12,9 +12,18 @@ import secrets
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from threading import Lock
 from typing import Any, Protocol, runtime_checkable
 
 DEFAULT_TTL_SECONDS = 300
+DEFAULT_MAX_FAILURES = 5
+"""同一用户允许的连续验证码错误次数上限；达到后进入锁定期。"""
+
+DEFAULT_LOCKOUT_SECONDS = 300
+"""达到失败上限后的锁定时长（秒）：与挑战 TTL 同量级，避免长时锁死合法用户。"""
+
+DEFAULT_BACKOFF_SECONDS: tuple[int, ...] = (0, 5, 15, 60)
+"""第 n 次失败后要求的**最短**重试间隔（秒）；超出序列长度按最后一档。"""
 
 
 class VerificationMode(StrEnum):
@@ -71,6 +80,8 @@ class VerificationError(RuntimeError):
             "invalid_code",
             "delivery_unavailable",
             "delivery_failed",
+            "throttled",
+            "locked",
         }
     )
 
@@ -78,6 +89,86 @@ class VerificationError(RuntimeError):
         safe_reason = reason if reason in self._REASONS else "verification_failed"
         self.reason = safe_reason
         super().__init__(safe_reason)
+
+
+@dataclass(slots=True)
+class _AttemptState:
+    failures: int = 0
+    retry_at: datetime | None = None
+    locked_until: datetime | None = None
+
+
+class VerificationAttemptLimiter:
+    """按用户统计强验证失败次数并施加退避（**进程内**，不是分布式限流）。
+
+    作用域是**用户**而不是挑战或会话：重新申请验证码、更换 `session_id`、挑战过期或被替换
+    都不会清零计数，因此无法靠「换一个挑战」无限重置失败次数。
+
+    局限（不得外推）：状态只在本进程内存里——多 worker / 多实例各自独立计数，进程重启后
+    清零；需要跨实例一致时必须外部化（本次不引入）。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_failures: int = DEFAULT_MAX_FAILURES,
+        lockout_seconds: int = DEFAULT_LOCKOUT_SECONDS,
+        backoff_seconds: tuple[int, ...] = DEFAULT_BACKOFF_SECONDS,
+    ) -> None:
+        if max_failures < 1:
+            raise ValueError("max_failures 必须为正数")
+        if lockout_seconds <= 0:
+            raise ValueError("lockout_seconds 必须为正数")
+        if not backoff_seconds or any(item < 0 for item in backoff_seconds):
+            raise ValueError("backoff_seconds 必须为非负数序列")
+        self._max_failures = max_failures
+        self._lockout = timedelta(seconds=lockout_seconds)
+        self._backoff = tuple(timedelta(seconds=item) for item in backoff_seconds)
+        self._states: dict[str, _AttemptState] = {}
+        self._lock = Lock()
+
+    def check(self, user_id: str, *, now: datetime) -> None:
+        """比较验证码**之前**调用：锁定期或退避中直接拒绝，不做摘要计算。"""
+        moment = _as_utc(now)
+        with self._lock:
+            state = self._states.get(user_id)
+            if state is None:
+                return
+            if state.locked_until is not None:
+                if moment < state.locked_until:
+                    raise VerificationError("locked")
+                # 锁定期已过：开启新一轮计数，旧失败次数不再累积。
+                self._states.pop(user_id, None)
+                return
+            if state.retry_at is not None and moment < state.retry_at:
+                raise VerificationError("throttled")
+            state.retry_at = None
+
+    def record_failure(self, user_id: str, *, now: datetime) -> int:
+        """记一次验证码错误，返回累计失败次数；达到上限时同时开启锁定期。"""
+        moment = _as_utc(now)
+        with self._lock:
+            state = self._states.setdefault(user_id, _AttemptState())
+            state.failures += 1
+            if state.failures >= self._max_failures:
+                state.locked_until = moment + self._lockout
+                state.retry_at = None
+            else:
+                index = min(state.failures - 1, len(self._backoff) - 1)
+                delay = self._backoff[index]
+                state.retry_at = moment + delay if delay else None
+            return state.failures
+
+    def reset(self, user_id: str) -> None:
+        """验证成功后清零；只有服务端确认的正确码会走到这里。"""
+        with self._lock:
+            self._states.pop(user_id, None)
+
+    def failures(self, user_id: str) -> int:
+        """当前累计失败次数（供审计与测试核对，不对外暴露验证信息）。"""
+        with self._lock:
+            state = self._states.get(user_id)
+            return 0 if state is None else state.failures
 
 
 @runtime_checkable
@@ -306,10 +397,14 @@ def _mask_reference(reference: str) -> str:
 __all__ = [
     "ChallengeRecord",
     "ChallengeStatus",
+    "DEFAULT_BACKOFF_SECONDS",
+    "DEFAULT_LOCKOUT_SECONDS",
+    "DEFAULT_MAX_FAILURES",
     "DEFAULT_TTL_SECONDS",
     "DemoVerificationProvider",
     "DeliveryResult",
     "ExternalVerificationProvider",
+    "VerificationAttemptLimiter",
     "VerificationBinding",
     "VerificationError",
     "VerificationMode",

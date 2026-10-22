@@ -20,7 +20,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <title>AI 银行副驾 · 对话办理</title>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
-<link rel="stylesheet" href="/assets/app.css?v=5" />
+<link rel="stylesheet" href="/assets/app.css?v=6" />
 <link rel="stylesheet" href="/assets/workspace.css?v=4" />
 </head>
 <body>
@@ -94,6 +94,7 @@ INDEX_HTML = """<!DOCTYPE html>
           <details class="task-more"><summary>更多办理操作</summary><div class="btn-row">
             <button class="btn" id="btn-interrupt" type="button" disabled>中断</button>
             <button class="btn" id="btn-resume" type="button" disabled>恢复</button>
+            <button class="btn btn--ghost" id="btn-reject" type="button" disabled>放弃计划</button>
             <button class="btn btn--danger" id="btn-reverse" type="button" disabled>回退已执行步骤</button>
             <button class="btn btn--ghost" id="btn-takeover" type="button" disabled>查看人工接管包</button>
           </div></details>
@@ -130,6 +131,14 @@ INDEX_HTML = """<!DOCTYPE html>
         <p class="panel__title">主动洞察</p>
         <p class="muted" id="insights-status">正在读取站内洞察…</p>
         <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
+      </div>
+
+      <div class="panel" id="subscription-panel">
+        <p class="panel__title">订阅识别与取消状态</p>
+        <p class="muted" id="subscription-status">正在读取订阅识别结果…</p>
+        <p class="muted" id="subscription-boundary" hidden></p>
+        <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
+        <div id="subscription-cancel-result" hidden></div>
       </div>
 
       <div class="panel">
@@ -173,7 +182,7 @@ INDEX_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<script src="/assets/app.js?v=13"></script>
+<script src="/assets/app.js?v=15"></script>
 </body>
 </html>
 """

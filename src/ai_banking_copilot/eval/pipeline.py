@@ -53,9 +53,11 @@ from ai_banking_copilot.policy.pdp import (
     evaluate_plan,
 )
 from ai_banking_copilot.policy.pep import NotAuthorizedError, Pep
+from ai_banking_copilot.policy.tool_hook import ToolHookBlocked
 from ai_banking_copilot.scenarios.authorization import node_policy_request
 from ai_banking_copilot.scenarios.base import (
     ScenarioRefused,
+    intent_text,
     plan_is_pure_query,
     plan_net_effect,
 )
@@ -67,7 +69,11 @@ from ai_banking_copilot.scenarios.registry import (
     run_scenario,
     select_handler,
 )
-from ai_banking_copilot.scenarios.wealth import FORBIDDEN_HINTS, to_risk_assessment
+from ai_banking_copilot.scenarios.wealth import (
+    FORBIDDEN_HINTS,
+    is_recommendation_request,
+    to_risk_assessment,
+)
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ParamSpec, ToolCall, ToolRegistry, ToolSpec
 
@@ -312,6 +318,9 @@ def _execute(
     `ForbiddenParamError` / `UnknownActionError`），或 PEP 拒绝（`NotAuthorizedError` /
     `StalePlanError`，含节点级成员资格校验失败），一律**如实记为 `unsupported`**，
     不静默通过、不影响决策级评测判定。
+
+    写操作 Pre-Tool Hook 同样适用于评测链：离线回放**没有用户确认**，因此不签发写授权凭据，
+    写动作一律记为 `unsupported`（`ToolHookBlocked`）——**不得**为评测方便绕过 Hook。
     """
     if decision.level >= Level.MANUAL:
         return _SKIPPED_STATUS
@@ -321,7 +330,7 @@ def _execute(
     try:
         call = ToolCall(action=node.action, params=_tool_params(spec, node))
         result = pep.execute(call, decision, plan, f"{case_id}:{node.node_id}")
-    except (NotAuthorizedError, StalePlanError):
+    except (NotAuthorizedError, StalePlanError, ToolHookBlocked):
         return _UNSUPPORTED_STATUS
     except GatewayError as error:
         return f"failed:{type(error).__name__}"
@@ -407,13 +416,16 @@ _YIELD_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝以收益
 def _inject_assessment(
     intents: tuple[Intent, ...], risk: RiskAssessmentSource
 ) -> tuple[Intent, ...]:
-    """受信任注入风险测评事实（**仅** `wealth.subscribe`；不包 `Value`）。"""
+    """受信任注入风险测评事实（`wealth.subscribe` 与推荐模式的 `wealth.list`；不包 `Value`）。"""
     assessment = to_risk_assessment(risk.assessment_for(DEMO_USER_ID))
     if assessment is None:
         return intents
     injected: list[Intent] = []
     for intent in intents:
-        if intent.action != "wealth.subscribe":
+        needs = intent.action == "wealth.subscribe" or (
+            intent.action == "wealth.list" and is_recommendation_request(intent_text(intent))
+        )
+        if not needs:
             injected.append(intent)
             continue
         slots = dict(intent.slots)

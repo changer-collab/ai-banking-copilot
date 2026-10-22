@@ -71,7 +71,7 @@ class PendingHandler:
                         key: "scheduled_transfer" for key in (
                             "schedule_id", "account_id", "payee_id", "amount_cents", "booked_on",
                         )
-                    } | {"executed_on": "request.today"},
+                    } | {"executed_on": "request.today", "currency": "account_currency"},
                 }
                 if record is None:
                     missing.append("scheduled_transfer")

@@ -19,6 +19,7 @@ from threading import RLock
 from ai_banking_copilot.gateway.errors import (
     BlockedPayeeError,
     CoreBankError,
+    CurrencyMismatchError,
     IdempotencyConflictError,
     InsufficientFundsError,
     NotReversibleError,
@@ -46,10 +47,18 @@ from ai_banking_copilot.gateway.transfer_store import (
 # 演示与评测的基准记账日（固定值，保证评测可复现）
 DEFAULT_BOOKING_DATE = date(2026, 10, 1)
 
+EXTERNAL_STATUS_NOT_INTEGRATED = "not_integrated"
+"""外部商户系统回执状态：本演示**没有**接入任何商户/支付系统，只做本地库变更。"""
+
 
 @dataclass(frozen=True)
 class WriteReceipt:
-    """一次写操作的确定性回执。`replayed=True` 表示本次是幂等回放。"""
+    """一次写操作的确定性回执。`replayed=True` 表示本次是幂等回放。
+
+    `external_status` 只描述**外部系统**的执行范围（G-04 如实告知）：
+    空串表示该动作不涉及外部系统；`not_integrated` 表示只完成本地状态变更、商户侧未接通。
+    `previous_status` 记录本次变更前的对象状态，供回执与 UI 呈现"操作前后"。
+    """
 
     idempotency_key: str
     action: str
@@ -57,11 +66,29 @@ class WriteReceipt:
     record_ids: tuple[str, ...]
     effect_ids: tuple[str, ...]
     replayed: bool = False
+    external_status: str = ""
+    previous_status: str | None = None
 
 
 def _effect_id(kind: str, action: str, idempotency_key: str) -> str:
     digest = sha256_hex(f"{action}:{idempotency_key}")[:16]
     return f"{kind}_{digest}"
+
+
+def _assert_account_currency(
+    account_id: str, stored: object, requested: str | None
+) -> None:
+    """写前币种复核：账户币种必须存在，请求币种必须以账户事实为准（fail-closed）。"""
+    expected = "" if stored is None else str(stored).strip().upper()
+    if not expected:
+        raise CurrencyMismatchError(f"付款账户 {account_id} 缺少币种信息，拒绝执行")
+    if requested is None:
+        return
+    wanted = requested.strip().upper()
+    if not wanted or wanted != expected:
+        raise CurrencyMismatchError(
+            f"付款账户 {account_id} 的币种为 {expected}，与请求币种 {requested} 不一致"
+        )
 
 
 class CoreBank:
@@ -83,6 +110,7 @@ class CoreBank:
         amount: Money,
         idempotency_key: str,
         booked_on: date,
+        currency: str | None = None,
         schedule_id: str | None = None,
         executed_on: date | None = None,
         before_write: BeforeWrite | None = None,
@@ -123,11 +151,13 @@ class CoreBank:
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             account = conn.execute(
-                "SELECT balance_cents FROM accounts WHERE account_id = ? AND user_id = ?",
+                "SELECT balance_cents, currency FROM accounts"
+                " WHERE account_id = ? AND user_id = ?",
                 (account_id, user_id),
             ).fetchone()
             if account is None:
                 raise UnknownAccountError(account_id)
+            _assert_account_currency(account_id, account["currency"], currency)
             if int(account["balance_cents"]) < amount.cents:
                 raise InsufficientFundsError(
                     f"余额不足：需要 {amount.cents} 分，可用 {int(account['balance_cents'])} 分"
@@ -177,25 +207,48 @@ class CoreBank:
         )
 
     def cancel_subscription(
-        self, *, subscription_id: str, idempotency_key: str,
+        self, *, subscription_id: str, user_id: str, idempotency_key: str,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
+        """取消订阅：**订阅 id + 归属用户**双条件命中，仅改本地库，不接商户系统。
+
+        归属校验（G-01）：`user_id` 必须来自服务端可信执行上下文；查不到
+        `(subscription_id, user_id)` 一律按"订阅不存在"处理，不区分他人订阅。
+        重复取消（状态已是 `cancelled`）返回 `already_cancelled` 且**不产生新 effect**。
+        """
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             row = conn.execute(
-                "SELECT status FROM subscriptions WHERE subscription_id = ?", (subscription_id,)
+                "SELECT status FROM subscriptions WHERE subscription_id = ? AND user_id = ?",
+                (subscription_id, user_id),
             ).fetchone()
             if row is None:
                 raise UnknownSubscriptionError(subscription_id)
-            conn.execute(
-                "UPDATE subscriptions SET status = 'cancelled' WHERE subscription_id = ?",
-                (subscription_id,),
-            )
+            previous_status = str(row["status"])
+            if previous_status == "cancelled":
+                return WriteReceipt(
+                    idempotency_key=idempotency_key,
+                    action="cancel_subscription",
+                    status="already_cancelled",
+                    record_ids=(f"subscriptions:{subscription_id}",),
+                    effect_ids=(),
+                    external_status=EXTERNAL_STATUS_NOT_INTEGRATED,
+                    previous_status=previous_status,
+                )
+            changed = conn.execute(
+                "UPDATE subscriptions SET status = 'cancelled' "
+                "WHERE subscription_id = ? AND user_id = ?",
+                (subscription_id, user_id),
+            ).rowcount
+            if changed != 1:
+                raise UnknownSubscriptionError(subscription_id)
             return WriteReceipt(
                 idempotency_key=idempotency_key,
                 action="cancel_subscription",
                 status="cancelled",
                 record_ids=(f"subscriptions:{subscription_id}",),
                 effect_ids=(f"subscription_cancel_{subscription_id}",),
+                external_status=EXTERNAL_STATUS_NOT_INTEGRATED,
+                previous_status=previous_status,
             )
 
         return self._run_once("cancel_subscription", idempotency_key, body,
@@ -555,6 +608,7 @@ class CoreBank:
         booked_on: date,
         remark: str,
         idempotency_key: str,
+        currency: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """**登记**一笔未来转账（P2-6；登记时**不扣款**）。
@@ -568,11 +622,12 @@ class CoreBank:
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
             account = conn.execute(
-                "SELECT account_id FROM accounts WHERE account_id = ? AND user_id = ?",
+                "SELECT account_id, currency FROM accounts WHERE account_id = ? AND user_id = ?",
                 (account_id, user_id),
             ).fetchone()
             if account is None:
                 raise UnknownAccountError(account_id)
+            _assert_account_currency(account_id, account["currency"], currency)
             payee = conn.execute(
                 "SELECT blocked FROM payees WHERE payee_id = ? AND user_id = ?",
                 (payee_id, user_id),
@@ -781,6 +836,10 @@ class CoreBank:
             record_ids=tuple(str(item) for item in data["record_ids"]),
             effect_ids=tuple(str(item) for item in data["effect_ids"]),
             replayed=True,
+            external_status=str(data.get("external_status", "")),
+            previous_status=(
+                str(data["previous_status"]) if data.get("previous_status") is not None else None
+            ),
         )
 
     def _store_receipt(self, conn: sqlite3.Connection, receipt: WriteReceipt) -> None:
@@ -790,6 +849,8 @@ class CoreBank:
             "status": receipt.status,
             "record_ids": list(receipt.record_ids),
             "effect_ids": list(receipt.effect_ids),
+            "external_status": receipt.external_status,
+            "previous_status": receipt.previous_status,
         }
         conn.execute(
             "INSERT INTO write_receipts(idempotency_key, action, receipt_json) VALUES(?, ?, ?)",

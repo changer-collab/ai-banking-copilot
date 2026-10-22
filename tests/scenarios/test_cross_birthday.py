@@ -101,11 +101,15 @@ def test_birthday_order_executes_and_verifies_provenance(
             "occasion_id": Value(node.params["occasion_id"], Trust.TRUSTED),
         },
     )
+    decision = Decision(level=Level.RED, reasons=(ReasonCode.AMOUNT_OVER_DAILY_LIMIT,))
     result = pep.execute(
         call,
-        Decision(level=Level.RED, reasons=(ReasonCode.AMOUNT_OVER_DAILY_LIMIT,)),
+        decision,
         plan,
         "birthday:order1",
+        execution=pep.issue_write_grant(
+            call, decision, plan, approved_level=Level.RED, strong_verified=True,
+        ),
     )
     assert result.status == "placed"
     order_id = result.record_ids[0].split(":", 1)[1]

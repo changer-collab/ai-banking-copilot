@@ -112,6 +112,11 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"定时|定转|预约转"), "transfer.schedule", "命中『定时转账』模板"),
     (re.compile(r"转账|转给|汇款|打款"), "transfer.create", "命中『转账』模板"),
     (re.compile(r"赎回|卖出理财"), "wealth.redeem", "命中『赎回』模板"),
+    (
+        re.compile(r"推荐|哪只|哪款|适合我|买哪个|选哪个|比较.{0,8}(产品|理财)"),
+        "wealth.list",
+        "命中『理财推荐 / 比较』模板（只读，服务端硬筛选）",
+    ),
     (re.compile(r"申购|买理财|理财.*买"), "wealth.subscribe", "命中『理财申购』模板"),
     (
         re.compile(r"理财产品|产品对比|产品列表|理财列表|有哪些产品|看看理财"),
@@ -356,7 +361,8 @@ def _system_prompt(actions: tuple[str, ...]) -> str:
 def _load_httpx_transport(
     *, api_key: str, endpoint: str, timeout_s: float, observer: CallObserver | None = None,
     limiter: NonBlockingLimiter | None = None, task_id: str | None = None,
-    prompt_version: str | None = None,
+    prompt_version: str | None = None, role: str = "planner",
+    channel: str = "llm-strict",
 ) -> HttpTransport:
     """懒加载可选依赖 httpx；未安装则降级为 `LlmUnavailableError`（H9）。"""
     try:
@@ -389,11 +395,11 @@ def _load_httpx_transport(
             raise
         finally:
             emit_http_observation(
-                observer, role="planner", started_at=started_at,
+                observer, role=role, started_at=started_at,
                 http_status=status, response_text=response_text, error=error,
                 model=payload.get("model") if isinstance(payload, dict) else None,
                 task_id=task_id, prompt_version=prompt_version,
-                attempt_no=1, channel="llm-strict",
+                attempt_no=1, channel=channel,
             )
             if lease is not None:
                 lease.release()

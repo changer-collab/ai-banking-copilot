@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
@@ -57,6 +59,21 @@ def test_card_lines_carry_action_object_amount_and_time(gateway: FactGateway) ->
     assert "9021" in line
     assert "500.00" in line
     assert "2026-10-01" in line
+
+
+def test_card_shows_currency_and_binds_it_into_the_card_identity(
+    gateway: FactGateway,
+) -> None:
+    """任务 6：币种进入确认展示与 `card_id` / `frozen_hash`，改币种即换卡。"""
+    base = _plan().nodes[0]
+    cny = Plan(plan_id="p1", nodes=(replace(base, params={**base.params, "currency": "CNY"}),))
+    usd = Plan(plan_id="p1", nodes=(replace(base, params={**base.params, "currency": "USD"}),))
+    card_cny = render_plan_card(cny, _decision(), gateway)
+    card_usd = render_plan_card(usd, _decision(), gateway)
+    assert "（CNY）" in card_cny.lines[0]
+    assert "（USD）" in card_usd.lines[0]
+    assert card_cny.frozen_hash != card_usd.frozen_hash
+    assert card_cny.card_id != card_usd.card_id
 
 
 def test_card_never_leaks_data_slot_text(gateway: FactGateway) -> None:

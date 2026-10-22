@@ -7,7 +7,7 @@ from threading import Barrier
 import pytest
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
-from ai_banking_copilot.contracts.plan import Plan, cfhash
+from ai_banking_copilot.contracts.plan import Plan
 from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
 from ai_banking_copilot.gateway.errors import GatewayError
@@ -19,7 +19,7 @@ from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.breaker_store import init_breaker_schema
 from ai_banking_copilot.policy.execution import CommittedWriteError, ExecutionContext, assess_plan
-from ai_banking_copilot.policy.pep import Pep, manifest_plan
+from ai_banking_copilot.policy.pep import ExecResult, Pep, manifest_plan
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolCall, ToolRegistry
@@ -39,15 +39,49 @@ def _decision(level: Level) -> Decision:
     return Decision(level, (ReasonCode.STATE_CHANGE_SMALL,))
 
 
+def _grant(
+    pep: Pep,
+    call: ToolCall,
+    level: Level,
+    *,
+    today: date = DEFAULT_BOOKING_DATE,
+    execution_id: str = "",
+    plan: Plan | None = None,
+) -> ExecutionContext:
+    """签发一次性写凭据（模拟会话层确认后的真实路径）。
+
+    `RED` 及以上视为已过强验证，否则写前复核会要求重新授权。
+    """
+    decision = _decision(level)
+    frozen = manifest_plan(call) if plan is None else plan
+    return pep.issue_write_grant(
+        call,
+        decision,
+        frozen,
+        approved_level=level,
+        strong_verified=level >= Level.RED,
+        today=today,
+        execution_id=execution_id,
+    )
+
+
+def _run(pep: Pep, call: ToolCall, level: Level, key: str) -> ExecResult:
+    """以已确认路径执行写动作（凭据逐次签发、消费一次）。"""
+    return pep.execute(
+        call, _decision(level), manifest_plan(call), key,
+        execution=_grant(pep, call, level),
+    )
+
+
 def test_two_yellow_confirmations_serialize_at_write(
     pep: Pep, gateway: FactGateway,
 ) -> None:
     first = _call(60_000)
     second = _call(70_000)
-    pep.execute(first, _decision(Level.YELLOW), manifest_plan(first), "first-yellow")
+    _run(pep, first, Level.YELLOW, "first-yellow")
     before = gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents
     with pytest.raises(WritePreconditionError) as error:
-        pep.execute(second, _decision(Level.YELLOW), manifest_plan(second), "second-yellow")
+        _run(pep, second, Level.YELLOW, "second-yellow")
     assert error.value.result.status is PreconditionStatus.REAUTHORIZE
     assert error.value.result.level == Level.RED
     assert error.value.result.accumulated_cents == 130_000
@@ -59,9 +93,9 @@ def test_legacy_non_default_day_uses_actual_booking_day(
 ) -> None:
     booking_day = date(2026, 10, 2)
     first, second = _call(60_000, booking_day), _call(70_000, booking_day)
-    pep.execute(first, _decision(Level.YELLOW), manifest_plan(first), "next-day-a")
+    _run(pep, first, Level.YELLOW, "next-day-a")
     with pytest.raises(WritePreconditionError) as error:
-        pep.execute(second, _decision(Level.YELLOW), manifest_plan(second), "next-day-b")
+        _run(pep, second, Level.YELLOW, "next-day-b")
     assert error.value.result.status is PreconditionStatus.REAUTHORIZE
     assert error.value.result.accumulated_cents == 130_000
     assert gateway.daily_transfer_total(DEMO_USER_ID, booking_day).cents == 60_000
@@ -72,12 +106,11 @@ def test_explicit_execution_clock_cannot_override_booking_day(
 ) -> None:
     booking_day = date(2026, 10, 2)
     first = _call(60_000, booking_day)
-    pep.execute(first, _decision(Level.YELLOW), manifest_plan(first), "explicit-first")
+    _run(pep, first, Level.YELLOW, "explicit-first")
     call = _call(70_000, booking_day)
     plan = manifest_plan(call)
-    execution = ExecutionContext(
-        "wrong-day", cfhash(plan.nodes), DEMO_USER_ID,
-        DEFAULT_BOOKING_DATE, Level.YELLOW,
+    execution = _grant(
+        pep, call, Level.YELLOW, today=DEFAULT_BOOKING_DATE, execution_id="wrong-day"
     )
     with pytest.raises(WritePreconditionError) as error:
         pep.execute(call, _decision(Level.YELLOW), plan, "wrong-day", execution=execution)
@@ -92,13 +125,16 @@ def test_multi_day_plan_checks_each_actual_booking_day(
     first = _call(20_000, date(2026, 10, 2))
     second = _call(20_000, date(2026, 10, 3))
     prior = _call(90_000, date(2026, 10, 3))
-    pep.execute(prior, _decision(Level.YELLOW), manifest_plan(prior), "multi-prior")
+    _run(pep, prior, Level.YELLOW, "multi-prior")
     plan = Plan("multi-day", (
         replace(manifest_plan(first).nodes[0], node_id="a"),
         replace(manifest_plan(second).nodes[0], node_id="b"),
     ))
     with pytest.raises(WritePreconditionError) as error:
-        pep.execute(first, _decision(Level.YELLOW), plan, "multi-day-a")
+        pep.execute(
+            first, _decision(Level.YELLOW), plan, "multi-day-a",
+            execution=_grant(pep, first, Level.YELLOW, plan=plan),
+        )
     assert error.value.result.status is PreconditionStatus.REAUTHORIZE
     assert error.value.result.accumulated_cents == 130_000
     assert gateway.daily_transfer_total(DEMO_USER_ID, date(2026, 10, 2)).cents == 0
@@ -109,7 +145,7 @@ def test_due_transfer_uses_execution_day_for_risk(
 ) -> None:
     execution_day = date(2026, 10, 2)
     prior = _call(60_000, execution_day)
-    pep.execute(prior, _decision(Level.YELLOW), manifest_plan(prior), "due-prior")
+    _run(pep, prior, Level.YELLOW, "due-prior")
     due = replace(manifest_plan(_call(70_000)).nodes[0], params={
         "account_id": "acc_savings", "payee_id": "p_lina",
         "amount_cents": 70_000,
@@ -130,7 +166,7 @@ def test_legacy_yellow_unlock_requires_red_without_write(
     call = ToolCall("card.unlock", {"card_id": Value("card_debit", Trust.TRUSTED)})
     before = gateway.card("card_debit").payload.status
     with pytest.raises(WritePreconditionError) as error:
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "legacy-yellow-unlock")
+        _run(pep, call, Level.YELLOW, "legacy-yellow-unlock")
     assert error.value.result.status is PreconditionStatus.REAUTHORIZE
     assert error.value.result.level == Level.RED
     assert gateway.card("card_debit").payload.status == before
@@ -165,12 +201,9 @@ def test_plan_positive_outflow_and_completed_transfer_are_counted_once(
     )
     assert initial.decision.level is Level.RED
     assert initial.accumulated_cents == 130_000
-    execution = ExecutionContext(
-        "same-execution", cfhash(plan.nodes), DEMO_USER_ID,
-        date(2026, 10, 1), Level.RED, strong_verified=True,
-    )
     receipt = pep.execute(
-        first, _decision(Level.RED), plan, "same-execution:a", execution=execution
+        first, _decision(Level.RED), plan, "same-execution:a",
+        execution=_grant(pep, first, Level.RED, plan=plan, execution_id="same-execution"),
     )
     remaining = assess_plan(
         plan, registry=registry, gateway=gateway, user_id=DEMO_USER_ID,
@@ -196,7 +229,7 @@ def test_independent_connections_cannot_both_spend_on_old_yellow(
             call = _call(cents)
             barrier.wait(timeout=5)
             try:
-                executor.execute(call, _decision(Level.YELLOW), manifest_plan(call), label)
+                _run(executor, call, Level.YELLOW, label)
                 return "committed"
             except WritePreconditionError as error:
                 assert error.result.status is PreconditionStatus.REAUTHORIZE
@@ -225,11 +258,11 @@ def test_post_commit_failure_carries_replayable_receipt(
 
     monkeypatch.setattr(pep, "_verify_receipt", fail_verify)
     with pytest.raises(CommittedWriteError) as error:
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "post-commit")
+        _run(pep, call, Level.YELLOW, "post-commit")
     assert error.value.receipt.idempotency_key == "post-commit"
     assert gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents == before + 20_000
     with pytest.raises(CommittedWriteError) as replay:
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "post-commit")
+        _run(pep, call, Level.YELLOW, "post-commit")
     assert replay.value.receipt.replayed is True
     assert gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents == before + 20_000
 
@@ -247,10 +280,16 @@ def test_post_commit_replay_survives_payee_becoming_blocked(
     with monkeypatch.context() as patch:
         patch.setattr(pep, "_verify_receipt", fail_verify)
         with pytest.raises(CommittedWriteError) as error:
-            pep.execute(call, _decision(Level.YELLOW), plan, "committed-blocked")
+            pep.execute(
+                call, _decision(Level.YELLOW), plan, "committed-blocked",
+                execution=_grant(pep, call, Level.YELLOW, plan=plan),
+            )
     with rw_store.transaction() as conn:
         conn.execute("UPDATE payees SET blocked = 1 WHERE payee_id = 'p_lina'")
-    replay = pep.execute(call, _decision(Level.YELLOW), plan, "committed-blocked")
+    replay = pep.execute(
+        call, _decision(Level.YELLOW), plan, "committed-blocked",
+        execution=_grant(pep, call, Level.YELLOW, plan=plan),
+    )
     assert replay.record_ids == error.value.receipt.record_ids
     assert "幂等回放" in replay.message
     assert gateway.account("acc_savings").payload.balance.cents == before - 20_000
@@ -269,7 +308,7 @@ def test_transaction_reads_authoritative_global_breaker(
     call = _call(20_000)
     before = gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents
     with pytest.raises(WritePreconditionError) as error:
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "breaker-open")
+        _run(pep, call, Level.YELLOW, "breaker-open")
     assert error.value.result.status is PreconditionStatus.TAKEOVER
     assert error.value.result.reasons
     assert gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents == before

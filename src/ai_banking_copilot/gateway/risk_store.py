@@ -2,7 +2,9 @@
 
 口径（`docs/plans/README.md:183`「各自独立的表/文件」）：
 - `risk_assessments` 是**唯一运行期判定源**；`users.risk_profile` 仅 legacy，运行期不再读取；
-- 写只发生在 `seed_risk_assessment`（幂等 `INSERT OR IGNORE`），运行期只读；
+- `source` 区分事实来源：`seed` = 演示播种（**不是真实测评**）、`user_input` = 用户自助录入；
+- 运行期只读走 `RiskAssessmentSource`；真实录入/更新走写连接上的
+  `save_risk_assessment`（`source='user_input'`），由 `RiskAssessmentWriter` 协议暴露；
 - 每条事实带出处：`Record` + `verify_risk`（**回读重算哈希**，比哈希而非比文本）。
 """
 
@@ -23,13 +25,18 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
     user_id      TEXT PRIMARY KEY REFERENCES users(user_id),
     risk_profile TEXT NOT NULL CHECK (risk_profile IN ('R1', 'R2', 'R3', 'R4', 'R5')),
     assessed_on  TEXT NOT NULL,
-    valid_days   INTEGER NOT NULL CHECK (valid_days > 0)
+    valid_days   INTEGER NOT NULL CHECK (valid_days > 0),
+    source       TEXT NOT NULL DEFAULT 'seed'
 );
 """
 """风险测评表（独立 DDL；不并入 01 的 `SCHEMA_SQL`）。"""
 
+_RISK_PROFILES = ("R1", "R2", "R3", "R4", "R5")
 _TABLE = "risk_assessments"
 _DEMO_ASSESSED_ON = (DEFAULT_BOOKING_DATE - timedelta(days=30)).isoformat()
+
+SOURCE_SEED = "seed"
+SOURCE_USER_INPUT = "user_input"
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,7 @@ class RiskAssessmentRecord:
     risk_profile: str
     assessed_on: date
     valid_days: int
+    source: str = SOURCE_SEED
 
 
 @runtime_checkable
@@ -48,6 +56,15 @@ class RiskAssessmentSource(Protocol):
 
     def assessment_for(self, user_id: str) -> object | None:
         """按用户取测评事实快照；缺测评返回 `None`（调用方据此 fail-closed）。"""
+        ...
+
+
+@runtime_checkable
+class RiskAssessmentWriter(Protocol):
+    """风险测评**写入**协议：仅用户自助录入，永不写 `seed` 来源。"""
+
+    def save(self, user_id: str, risk_profile: str, assessed_on: date) -> None:
+        """保存/更新一次用户录入的测评（覆盖同一用户的旧事实）。"""
         ...
 
 
@@ -62,10 +79,25 @@ class StoreRiskAssessmentSource:
         return None if record is None else record.payload
 
 
+class StoreRiskAssessmentWriter:
+    """`RiskAssessmentWriter` 的默认实现：写连接上 UPSERT 用户录入事实。"""
+
+    def __init__(self, store: Store) -> None:
+        self._store = store
+
+    def save(self, user_id: str, risk_profile: str, assessed_on: date) -> None:
+        save_risk_assessment(self._store, user_id, risk_profile, assessed_on)
+
+
 def init_risk_schema(store: Store) -> None:
-    """建风险测评表（幂等；既有库自动补表）。"""
+    """建风险测评表（幂等；既有库自动补表与补 `source` 列）。"""
     with store.transaction() as conn:
         conn.executescript(RISK_SCHEMA_SQL)
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({_TABLE})")}
+        if "source" not in columns:
+            conn.execute(
+                f"ALTER TABLE {_TABLE} ADD COLUMN source TEXT NOT NULL DEFAULT '{SOURCE_SEED}'"
+            )
 
 
 def seed_risk_assessment(store: Store) -> None:
@@ -73,15 +105,40 @@ def seed_risk_assessment(store: Store) -> None:
     with store.transaction() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO risk_assessments(user_id, risk_profile, assessed_on,"
-            " valid_days) VALUES(?, ?, ?, ?)",
-            (DEMO_USER_ID, "R3", _DEMO_ASSESSED_ON, 365),
+            " valid_days, source) VALUES(?, ?, ?, ?, ?)",
+            (DEMO_USER_ID, "R3", _DEMO_ASSESSED_ON, 365, SOURCE_SEED),
+        )
+
+
+def save_risk_assessment(
+    store: Store,
+    user_id: str,
+    risk_profile: str,
+    assessed_on: date,
+    valid_days: int = 365,
+) -> None:
+    """保存/更新用户自助录入的测评事实（`source='user_input'`）。"""
+    if risk_profile not in _RISK_PROFILES:
+        raise ValueError(f"风险等级无效：{risk_profile}")
+    if valid_days <= 0:
+        raise ValueError(f"有效期必须为正整数天数：{valid_days}")
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO risk_assessments(user_id, risk_profile, assessed_on, valid_days, source)"
+            " VALUES(?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id) DO UPDATE SET"
+            " risk_profile = excluded.risk_profile,"
+            " assessed_on = excluded.assessed_on,"
+            " valid_days = excluded.valid_days,"
+            " source = excluded.source",
+            (user_id, risk_profile, assessed_on.isoformat(), valid_days, SOURCE_USER_INPUT),
         )
 
 
 def risk_assessment(store: Store, user_id: str) -> Record[RiskAssessmentRecord] | None:
     """按用户读取测评事实（缺行→`None`；只读）。"""
     rows = store.query(
-        "SELECT user_id, risk_profile, assessed_on, valid_days FROM risk_assessments"
+        "SELECT user_id, risk_profile, assessed_on, valid_days, source FROM risk_assessments"
         " WHERE user_id = ?",
         (user_id,),
     )
@@ -93,6 +150,7 @@ def risk_assessment(store: Store, user_id: str) -> Record[RiskAssessmentRecord] 
         risk_profile=str(row["risk_profile"]),
         assessed_on=date.fromisoformat(str(row["assessed_on"])),
         valid_days=int(row["valid_days"]),
+        source=str(row["source"]),
     )
     return Record(
         record_id=f"{_TABLE}:{user_id}",

@@ -11,6 +11,7 @@ from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
+    StoreRiskAssessmentWriter,
     init_risk_schema,
     seed_risk_assessment,
 )
@@ -65,6 +66,12 @@ def risk(db_path: Path) -> Iterator[StoreRiskAssessmentSource]:
 
 
 @pytest.fixture
+def risk_writer(rw_store: Store) -> StoreRiskAssessmentWriter:
+    """风险测评**录入通道**（写连接；`source='user_input'`）。"""
+    return StoreRiskAssessmentWriter(rw_store)
+
+
+@pytest.fixture
 def core_bank(rw_store: Store) -> CoreBank:
     """模拟核心银行写原语（与 rw_store 共用同一连接）。"""
     return CoreBank(rw_store)
@@ -108,6 +115,7 @@ def deps(
     breaker: CircuitBreaker,
     audit: AuditLog,
     risk: StoreRiskAssessmentSource,
+    risk_writer: StoreRiskAssessmentWriter,
     core_bank: CoreBank,
 ) -> AppDeps:
     """渠道层依赖装配（默认 LLM-off：模板通道）。"""
@@ -121,7 +129,9 @@ def deps(
         user_id=DEMO_USER_ID,
         today=DEFAULT_BOOKING_DATE,
         risk=risk,
+        risk_writer=risk_writer,
         reversal=ReversalService(core_bank),
+        session_risk_strict=False,
     )
 
 
