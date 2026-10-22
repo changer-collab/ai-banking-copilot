@@ -10,7 +10,7 @@ from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
-from ai_banking_copilot.policy.audit import AuditLog
+from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
@@ -96,7 +96,9 @@ def test_due_execution_and_replay_pass_through_pep_with_provenance(tmp_path: Pat
         )
         assert first.status == second.status == "settled"
         assert first.record_ids == second.record_ids
-        assert len(audit.events()[0].payload["provenance"]) == 2
+        execution_events = [event for event in audit.events() if event.kind == KIND_EXECUTION]
+        assert len(execution_events) == 2
+        assert len(execution_events[0].payload["provenance"]) == 2
         assert "幂等回放" in second.message
         assert gateway.scheduled_transfer(schedule_id).payload.status == "completed"
         assert due_transfer_plan(gateway, date(2026, 10, 1)) == ()

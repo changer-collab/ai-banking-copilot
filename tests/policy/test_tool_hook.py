@@ -35,12 +35,17 @@ from ai_banking_copilot.policy.tool_hook import (
     ToolHookBlocked,
     classify,
 )
+from ai_banking_copilot.policy.verification import HmacStrongVerificationProofVerifier
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.registry import (
     ParamValidationError,
     ToolCall,
     ToolRegistry,
     ToolSpec,
+)
+from tests.policy.verification_support import (
+    TEST_VERIFICATION_KEY,
+    issue_policy_write_grant,
 )
 
 
@@ -80,7 +85,16 @@ def pep(
     writes: WriteSpy,
 ) -> Pep:
     """与生产同构的 PEP，只把写处理器换成带计数的一层。"""
-    return Pep(registry, gateway, core_bank, audit, breaker, writes.handlers(), QUERY_HANDLERS)
+    return Pep(
+        registry,
+        gateway,
+        core_bank,
+        audit,
+        breaker,
+        writes.handlers(),
+        QUERY_HANDLERS,
+        strong_verification=HmacStrongVerificationProofVerifier(TEST_VERIFICATION_KEY),
+    )
 
 
 def _trusted(value: object) -> Value[object]:
@@ -120,13 +134,26 @@ def _subscribe_call(amount_cents: int = 100) -> ToolCall:
 def _confirm(pep: Pep, call: ToolCall, level: Level, **kwargs: object) -> ExecutionContext:
     """模拟「用户在会话里确认后」的服务端签发（真实路径见 `web/session.py::_execute`）。"""
     plan = manifest_plan(call)
-    return pep.issue_write_grant(
+    user_id = str(kwargs.pop("user_id", DEMO_USER_ID))
+    session_id = str(kwargs.pop("session_id", "session-a"))
+    execution_id = str(kwargs.pop("execution_id", "attempt-1"))
+    today = kwargs.pop("today", DEFAULT_BOOKING_DATE)
+    completed_records = kwargs.pop("completed_records", ())
+    flags = kwargs.pop("flags", frozenset())
+    if kwargs:
+        raise AssertionError(f"unsupported test grant arguments: {sorted(kwargs)}")
+    return issue_policy_write_grant(
+        pep,
         call,
         _decision(level),
         plan,
+        user_id=user_id,
+        session_id=session_id,
+        execution_id=execution_id,
         approved_level=level,
-        strong_verified=level >= Level.RED,
-        **kwargs,  # type: ignore[arg-type]
+        today=today,  # type: ignore[arg-type]
+        completed_records=completed_records,  # type: ignore[arg-type]
+        flags=flags,  # type: ignore[arg-type]
     )
 
 
@@ -152,7 +179,11 @@ def _grant(
         action=action,
         member=member,
         approved_level=approved_level,
-        strong_verified=True,
+        strong_verified=False,
+        verification_proof=None,
+        today=DEFAULT_BOOKING_DATE,
+        completed_records=(),
+        flags=frozenset(),
     ).grant_id
 
 
@@ -199,9 +230,45 @@ def test_direct_transfer_is_blocked_before_the_write_service(
     assert payloads[0]["tool_class"] == ToolClass.FINANCIAL_WRITE.value
     assert payloads[0]["plan_id"] == plan.plan_id
     assert payloads[0]["confirmation_state"] == HookStatus.CONFIRMATION_REQUIRED.value
+    assert payloads[0]["reject_reason"] == "write_grant_confirmation_required"
     assert payloads[0]["result"] == "blocked"
     assert "amount_cents" not in payloads[0]
     assert audit.verify_chain() is True
+
+
+def test_hook_rejections_accumulate_in_the_shared_breaker(
+    pep: Pep, breaker: CircuitBreaker, writes: WriteSpy,
+) -> None:
+    call = _transfer_call()
+    plan = manifest_plan(call)
+    for index in range(3):
+        with pytest.raises(ToolHookBlocked):
+            pep.execute(call, _decision(Level.RED), plan, f"missing-grant-{index}")
+    assert breaker.is_open() is True
+    assert breaker.failure_count() == 3
+    assert writes.actions == []
+
+
+def test_hook_audit_failure_keeps_rejection_type_and_blocks_writes(
+    pep: Pep,
+    audit: AuditLog,
+    breaker: CircuitBreaker,
+    writes: WriteSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_audit(*args: object, **kwargs: object) -> str:
+        raise OSError("sensitive audit failure")
+
+    monkeypatch.setattr(audit, "append", fail_audit)
+    call = _transfer_call()
+
+    with pytest.raises(ToolHookBlocked) as error:
+        pep.execute(call, _decision(Level.RED), manifest_plan(call), "audit-failure")
+
+    assert breaker.failure_count() == 1
+    assert writes.actions == []
+    assert "sensitive audit failure" not in str(error.value)
+    assert any("写操作仍被拦截" in note for note in error.value.__notes__)
 
 
 # 2. 模型直接请求申购：写服务未被调用
@@ -289,7 +356,9 @@ def test_hand_built_context_without_a_grant_cannot_execute(pep: Pep, writes: Wri
     assert writes.actions == []
 
 
-def test_made_up_grant_id_cannot_execute(pep: Pep, writes: WriteSpy) -> None:
+def test_made_up_grant_id_cannot_execute(
+    pep: Pep, writes: WriteSpy, breaker: CircuitBreaker,
+) -> None:
     call = _transfer_call()
     plan = manifest_plan(call)
     forged = ExecutionContext(
@@ -307,6 +376,29 @@ def test_made_up_grant_id_cannot_execute(pep: Pep, writes: WriteSpy) -> None:
 
     assert error.value.status is HookStatus.CONFIRMATION_REQUIRED
     assert writes.actions == []
+    assert breaker.failure_count() == 1
+
+
+def test_mutated_execution_approval_fields_do_not_authorize_write(
+    pep: Pep, writes: WriteSpy, breaker: CircuitBreaker,
+) -> None:
+    call = _transfer_call()
+    plan = manifest_plan(call)
+    issued = pep.issue_write_grant(
+        call,
+        _decision(Level.RED),
+        plan,
+        approved_level=Level.YELLOW,
+        strong_verified=False,
+    )
+    forged_context = replace(issued, approved_level=Level.RED, strong_verified=True)
+
+    with pytest.raises(ToolHookBlocked) as error:
+        pep.execute(call, _decision(Level.RED), plan, "forged-approval", execution=forged_context)
+
+    assert error.value.status is HookStatus.AUTHORIZATION_REQUIRED
+    assert writes.actions == []
+    assert breaker.failure_count() == 1
 
 
 def test_incomplete_params_are_rejected_before_a_grant_exists(pep: Pep, writes: WriteSpy) -> None:
@@ -336,7 +428,9 @@ def test_changing_the_amount_after_confirmation_invalidates_the_grant(
     assert gateway.account("acc_savings").payload.balance.cents == before
 
 
-def test_grant_bound_to_another_session_is_rejected(pep: Pep, writes: WriteSpy) -> None:
+def test_grant_bound_to_another_session_is_rejected(
+    pep: Pep, writes: WriteSpy, breaker: CircuitBreaker,
+) -> None:
     call = _transfer_call()
     plan = manifest_plan(call)
     grant = _confirm(pep, call, Level.RED, session_id="session-a")
@@ -347,6 +441,7 @@ def test_grant_bound_to_another_session_is_rejected(pep: Pep, writes: WriteSpy) 
 
     assert error.value.status is HookStatus.AUTHORIZATION_REQUIRED
     assert writes.actions == []
+    assert breaker.failure_count() == 1
 
 
 # 6. 拒绝 / 过期 / 中断后不能执行
@@ -366,10 +461,12 @@ def test_grant_is_bound_to_one_execution_attempt(pep: Pep, writes: WriteSpy) -> 
     assert writes.actions == []
 
 
-def test_expired_grant_is_rejected(registry: ToolRegistry, audit: AuditLog) -> None:
+def test_expired_grant_is_rejected(
+    registry: ToolRegistry, audit: AuditLog, breaker: CircuitBreaker,
+) -> None:
     now = [1000.0]
     ledger = GrantLedger(ttl_seconds=30.0, clock=lambda: now[0])
-    hook = PreToolHook(ledger=ledger, audit=audit)
+    hook = PreToolHook(ledger=ledger, audit=audit, breaker=breaker)
     grant_id = _grant(ledger)
 
     now[0] += 31.0
@@ -378,6 +475,7 @@ def test_expired_grant_is_rejected(registry: ToolRegistry, audit: AuditLog) -> N
 
     assert error.value.status is HookStatus.EXPIRED
     assert _hook_payloads(audit)[-1]["confirmation_state"] == HookStatus.EXPIRED.value
+    assert breaker.failure_count() == 1
 
 
 # 7. 其他入口无法绕过：任何写动作都必须过同一道 Hook
@@ -438,6 +536,18 @@ def test_grant_is_single_use(registry: ToolRegistry, audit: AuditLog) -> None:
         _authorize(hook, spec, grant_id)
 
     assert error.value.status is HookStatus.CONFIRMATION_REQUIRED
+
+
+def test_replayed_grant_counts_as_a_breaker_failure(
+    registry: ToolRegistry, audit: AuditLog, breaker: CircuitBreaker,
+) -> None:
+    hook = PreToolHook(ledger=GrantLedger(), audit=audit, breaker=breaker)
+    spec = registry.get("transfer.create")
+    grant_id = _grant(hook.ledger)
+    assert _authorize(hook, spec, grant_id) is not None
+    with pytest.raises(ToolHookBlocked):
+        _authorize(hook, spec, grant_id)
+    assert breaker.failure_count() == 1
 
 
 def test_repeated_confirmed_call_replays_instead_of_writing_twice(

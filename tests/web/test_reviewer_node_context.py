@@ -54,7 +54,7 @@ def test_due_nodes_link_independent_facts_and_rule_without_authorizing(
     view = Session(replace(deps, reviewer=reviewer, reviewer_required=True)).check_due()
     assert view.state is SessionState.AWAITING_CONFIRM
     request = reviewer.requests[0]
-    assert request.prompt_version == "reviewer-v3"
+    assert request.prompt_version == "reviewer-v4"
     facts = {fact["record_id"]: fact for fact in request.slot_sources["facts"]}
     assert "accounts:acc_savings" in facts
     assert "payees:p_lina" in facts

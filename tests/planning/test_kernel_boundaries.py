@@ -101,7 +101,13 @@ def test_fallback_model_degrades_when_primary_is_unavailable() -> None:
 
 def test_fallback_model_stays_healthy_when_primary_works() -> None:
     def _transport(request: str) -> str:
-        return json.dumps({"intents": [{"action": "bills.monthly", "confidence": 0.7}]})
+        return json.dumps({
+            "intents": [{
+                "action": "bills.monthly",
+                "confidence": 0.7,
+                "slots": {"span": "看下账单"},
+            }]
+        })
 
     model = FallbackIntentModel(LlmIntentModel(transport=_transport))
     proposal = model.propose("看下账单", {})

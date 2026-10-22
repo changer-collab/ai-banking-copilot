@@ -9,11 +9,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import Lock
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
+from urllib.parse import urlsplit
+
+_T = TypeVar("_T")
 
 DEFAULT_TTL_SECONDS = 300
 DEFAULT_MAX_FAILURES = 5
@@ -58,6 +62,70 @@ class ChallengeRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class StrongVerificationProof:
+    """服务端签发的强验证证明，只能由验证密钥签名。"""
+
+    binding: VerificationBinding
+    challenge_id: str
+    signature: str
+
+
+@runtime_checkable
+class StrongVerificationProofVerifier(Protocol):
+    def verify(
+        self,
+        proof: StrongVerificationProof,
+        *,
+        user_id: str,
+        session_id: str,
+        execution_id: str,
+        card_id: str,
+        plan_hash: str,
+    ) -> bool:
+        """验证签名及其对当前写授权上下文的绑定。"""
+
+
+class HmacStrongVerificationProofVerifier:
+    """用服务端强验证密钥签发并验证执行期证明。"""
+
+    def __init__(self, key: bytes) -> None:
+        _validate_key(key)
+        self._key = key
+
+    def issue(self, consumed_challenge: ChallengeRecord) -> StrongVerificationProof:
+        if consumed_challenge.status is not ChallengeStatus.CONSUMED:
+            raise VerificationError("inactive")
+        if not consumed_challenge.challenge_id:
+            raise VerificationError("unknown_challenge")
+        return StrongVerificationProof(
+            binding=consumed_challenge.binding,
+            challenge_id=consumed_challenge.challenge_id,
+            signature=_proof_signature(
+                self._key, consumed_challenge.challenge_id, consumed_challenge.binding,
+            ),
+        )
+
+    def verify(
+        self,
+        proof: StrongVerificationProof,
+        *,
+        user_id: str,
+        session_id: str,
+        execution_id: str,
+        card_id: str,
+        plan_hash: str,
+    ) -> bool:
+        expected_binding = VerificationBinding(
+            user_id, session_id, execution_id, card_id, plan_hash,
+        )
+        if (not isinstance(proof, StrongVerificationProof)
+                or proof.binding != expected_binding or not proof.challenge_id):
+            return False
+        expected = _proof_signature(self._key, proof.challenge_id, proof.binding)
+        return hmac.compare_digest(expected, proof.signature)
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryResult:
     mode: VerificationMode
     channel: str
@@ -98,14 +166,258 @@ class _AttemptState:
     locked_until: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class VerificationAttemptSnapshot:
+    """可持久化的按用户验证码失败状态。"""
+
+    failures: int
+    retry_at: datetime | None = None
+    locked_until: datetime | None = None
+
+
+@runtime_checkable
+class VerificationAttemptStateStore(Protocol):
+    """验证码失败计数的持久化接缝。"""
+
+    def load(self, user_id: str) -> VerificationAttemptSnapshot | None:
+        ...
+
+    def save(self, user_id: str, snapshot: VerificationAttemptSnapshot) -> None:
+        ...
+
+    def delete(self, user_id: str) -> None:
+        ...
+
+    def delete_expired(self, user_id: str, *, now: datetime) -> None:
+        ...
+
+    def record_failure(
+        self,
+        user_id: str,
+        *,
+        now: datetime,
+        max_failures: int,
+        lockout_seconds: int,
+        backoff_seconds: tuple[int, ...],
+    ) -> VerificationAttemptSnapshot:
+        ...
+
+    def verify_attempt(
+        self,
+        user_id: str,
+        *,
+        now: datetime,
+        compare: Callable[[], _T],
+        max_failures: int,
+        lockout_seconds: int,
+        backoff_seconds: tuple[int, ...],
+    ) -> _T:
+        """在同一用户级事务内检查限制、比较验证码并记录错码。"""
+        ...
+
+
+VERIFICATION_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS verification_attempt_state (
+    user_id      TEXT PRIMARY KEY,
+    failures     INTEGER NOT NULL CHECK (failures >= 0),
+    retry_at     TEXT,
+    locked_until TEXT
+);
+"""
+
+
+def init_verification_schema(store: Any) -> None:
+    """在独立表中初始化验证码失败计数，不修改核心银行 schema。"""
+    with store.transaction() as conn:
+        conn.executescript(VERIFICATION_SCHEMA_SQL)
+
+
+class StoreVerificationAttemptStateStore:
+    """基于 gateway Store 的 SQLite 计数存储，供多实例共享失败状态。"""
+
+    def __init__(self, store: Any) -> None:
+        if not callable(getattr(store, "query", None)) or not callable(
+            getattr(store, "transaction", None)
+        ):
+            raise TypeError("store 必须提供 query/transaction")
+        self._store = store
+        init_verification_schema(store)
+
+    def load(self, user_id: str) -> VerificationAttemptSnapshot | None:
+        rows = self._store.query(
+            "SELECT failures, retry_at, locked_until "
+            "FROM verification_attempt_state WHERE user_id = ?",
+            (user_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return VerificationAttemptSnapshot(
+            failures=int(row["failures"]),
+            retry_at=_parse_timestamp(row["retry_at"]),
+            locked_until=_parse_timestamp(row["locked_until"]),
+        )
+
+    def save(self, user_id: str, snapshot: VerificationAttemptSnapshot) -> None:
+        if snapshot.failures < 0:
+            raise ValueError("failures 不能为负")
+        with self._store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO verification_attempt_state "
+                "(user_id, failures, retry_at, locked_until) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET failures=excluded.failures, "
+                "retry_at=excluded.retry_at, locked_until=excluded.locked_until",
+                (
+                    user_id,
+                    snapshot.failures,
+                    _format_timestamp(snapshot.retry_at),
+                    _format_timestamp(snapshot.locked_until),
+                ),
+            )
+
+    def delete(self, user_id: str) -> None:
+        with self._store.transaction() as conn:
+            conn.execute("DELETE FROM verification_attempt_state WHERE user_id = ?", (user_id,))
+
+    def delete_expired(self, user_id: str, *, now: datetime) -> None:
+        with self._store.transaction() as conn:
+            conn.execute(
+                "DELETE FROM verification_attempt_state "
+                "WHERE user_id = ? AND locked_until IS NOT NULL AND locked_until <= ?",
+                (user_id, _format_timestamp(now)),
+            )
+
+    def record_failure(
+        self,
+        user_id: str,
+        *,
+        now: datetime,
+        max_failures: int,
+        lockout_seconds: int,
+        backoff_seconds: tuple[int, ...],
+    ) -> VerificationAttemptSnapshot:
+        """以 SQLite 写锁串行化跨 worker 的失败更新。"""
+        moment = _as_utc(now)
+        with self._store.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT failures, retry_at, locked_until "
+                "FROM verification_attempt_state WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            state = (
+                _AttemptState()
+                if row is None
+                else _AttemptState(
+                    int(row["failures"]),
+                    _parse_timestamp(row["retry_at"]),
+                    _parse_timestamp(row["locked_until"]),
+                )
+            )
+            state.failures += 1
+            if state.failures >= max_failures:
+                state.locked_until = moment + timedelta(seconds=lockout_seconds)
+                state.retry_at = None
+            else:
+                index = min(state.failures - 1, len(backoff_seconds) - 1)
+                delay = timedelta(seconds=backoff_seconds[index])
+                state.retry_at = moment + delay if delay else None
+            conn.execute(
+                "INSERT INTO verification_attempt_state "
+                "(user_id, failures, retry_at, locked_until) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET failures=excluded.failures, "
+                "retry_at=excluded.retry_at, locked_until=excluded.locked_until",
+                (
+                    user_id,
+                    state.failures,
+                    _format_timestamp(state.retry_at),
+                    _format_timestamp(state.locked_until),
+                ),
+            )
+            return VerificationAttemptSnapshot(state.failures, state.retry_at, state.locked_until)
+
+    def verify_attempt(
+        self,
+        user_id: str,
+        *,
+        now: datetime,
+        compare: Callable[[], _T],
+        max_failures: int,
+        lockout_seconds: int,
+        backoff_seconds: tuple[int, ...],
+    ) -> _T:
+        """SQLite 写事务串行化检查、比较与错码计数，避免多 worker 超过锁定门槛。"""
+        moment = _as_utc(now)
+        result: _T | None = None
+        failed_code: VerificationError | None = None
+        with self._store.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT failures, retry_at, locked_until "
+                "FROM verification_attempt_state WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            state = (
+                _AttemptState()
+                if row is None
+                else _AttemptState(
+                    int(row["failures"]),
+                    _parse_timestamp(row["retry_at"]),
+                    _parse_timestamp(row["locked_until"]),
+                )
+            )
+            if state.locked_until is not None:
+                if moment < state.locked_until:
+                    raise VerificationError("locked")
+                conn.execute(
+                    "DELETE FROM verification_attempt_state WHERE user_id = ?", (user_id,)
+                )
+                state = _AttemptState()
+            elif state.retry_at is not None and moment < state.retry_at:
+                raise VerificationError("throttled")
+
+            try:
+                result = compare()
+            except VerificationError as error:
+                if error.reason != "invalid_code":
+                    raise
+                failed_code = error
+                state.failures += 1
+                if state.failures >= max_failures:
+                    state.locked_until = moment + timedelta(seconds=lockout_seconds)
+                    state.retry_at = None
+                else:
+                    index = min(state.failures - 1, len(backoff_seconds) - 1)
+                    delay = timedelta(seconds=backoff_seconds[index])
+                    state.retry_at = moment + delay if delay else None
+                conn.execute(
+                    "INSERT INTO verification_attempt_state "
+                    "(user_id, failures, retry_at, locked_until) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET failures=excluded.failures, "
+                    "retry_at=excluded.retry_at, locked_until=excluded.locked_until",
+                    (
+                        user_id,
+                        state.failures,
+                        _format_timestamp(state.retry_at),
+                        _format_timestamp(state.locked_until),
+                    ),
+                )
+        if failed_code is not None:
+            raise failed_code
+        return cast(_T, result)
+
+
+# Short alias for callers that do not use the project's Store naming.
+SQLiteVerificationAttemptStateStore = StoreVerificationAttemptStateStore
+
+
 class VerificationAttemptLimiter:
-    """按用户统计强验证失败次数并施加退避（**进程内**，不是分布式限流）。
+    """按用户统计强验证失败次数并施加退避。
 
     作用域是**用户**而不是挑战或会话：重新申请验证码、更换 `session_id`、挑战过期或被替换
     都不会清零计数，因此无法靠「换一个挑战」无限重置失败次数。
 
-    局限（不得外推）：状态只在本进程内存里——多 worker / 多实例各自独立计数，进程重启后
-    清零；需要跨实例一致时必须外部化（本次不引入）。
+    默认仍为进程内状态；注入 ``store`` 后由 SQLite 等外部存储共享，覆盖多 worker / 重启。
     """
 
     def __init__(
@@ -114,6 +426,7 @@ class VerificationAttemptLimiter:
         max_failures: int = DEFAULT_MAX_FAILURES,
         lockout_seconds: int = DEFAULT_LOCKOUT_SECONDS,
         backoff_seconds: tuple[int, ...] = DEFAULT_BACKOFF_SECONDS,
+        store: VerificationAttemptStateStore | Any | None = None,
     ) -> None:
         if max_failures < 1:
             raise ValueError("max_failures 必须为正数")
@@ -126,48 +439,128 @@ class VerificationAttemptLimiter:
         self._backoff = tuple(timedelta(seconds=item) for item in backoff_seconds)
         self._states: dict[str, _AttemptState] = {}
         self._lock = Lock()
+        if store is not None and not isinstance(store, VerificationAttemptStateStore):
+            store = StoreVerificationAttemptStateStore(store)
+        self._store = store
+
+    def _load(self, user_id: str) -> _AttemptState | None:
+        if self._store is None:
+            return self._states.get(user_id)
+        snapshot = self._store.load(user_id)
+        if snapshot is None:
+            self._states.pop(user_id, None)
+            return None
+        state = _AttemptState(snapshot.failures, snapshot.retry_at, snapshot.locked_until)
+        self._states[user_id] = state
+        return state
+
+    def _save(self, user_id: str, state: _AttemptState) -> None:
+        if self._store is not None:
+            self._store.save(
+                user_id,
+                VerificationAttemptSnapshot(state.failures, state.retry_at, state.locked_until),
+            )
 
     def check(self, user_id: str, *, now: datetime) -> None:
         """比较验证码**之前**调用：锁定期或退避中直接拒绝，不做摘要计算。"""
         moment = _as_utc(now)
         with self._lock:
-            state = self._states.get(user_id)
-            if state is None:
-                return
-            if state.locked_until is not None:
-                if moment < state.locked_until:
-                    raise VerificationError("locked")
-                # 锁定期已过：开启新一轮计数，旧失败次数不再累积。
-                self._states.pop(user_id, None)
-                return
-            if state.retry_at is not None and moment < state.retry_at:
-                raise VerificationError("throttled")
-            state.retry_at = None
+            self._check_locked(user_id, moment)
+
+    def _check_locked(self, user_id: str, moment: datetime) -> None:
+        state = self._load(user_id)
+        if state is None:
+            return
+        if state.locked_until is not None:
+            if moment < state.locked_until:
+                raise VerificationError("locked")
+            self._states.pop(user_id, None)
+            if self._store is not None:
+                clear_expired = getattr(self._store, "delete_expired", None)
+                if callable(clear_expired):
+                    clear_expired(user_id, now=moment)
+                else:
+                    self._store.delete(user_id)
+            return
+        if state.retry_at is not None and moment < state.retry_at:
+            raise VerificationError("throttled")
+
+    def verify_attempt(
+        self,
+        user_id: str,
+        *,
+        now: datetime,
+        compare: Callable[[], _T],
+    ) -> _T:
+        """原子检查退避、执行验证码比较，错码时在锁内计数。"""
+        moment = _as_utc(now)
+        with self._lock:
+            if self._store is not None:
+                return self._store.verify_attempt(
+                    user_id,
+                    now=moment,
+                    compare=compare,
+                    max_failures=self._max_failures,
+                    lockout_seconds=int(self._lockout.total_seconds()),
+                    backoff_seconds=tuple(
+                        int(item.total_seconds()) for item in self._backoff
+                    ),
+                )
+            self._check_locked(user_id, moment)
+            try:
+                return compare()
+            except VerificationError as error:
+                if error.reason == "invalid_code":
+                    self._record_failure_locked(user_id, moment)
+                raise
 
     def record_failure(self, user_id: str, *, now: datetime) -> int:
         """记一次验证码错误，返回累计失败次数；达到上限时同时开启锁定期。"""
         moment = _as_utc(now)
         with self._lock:
-            state = self._states.setdefault(user_id, _AttemptState())
-            state.failures += 1
-            if state.failures >= self._max_failures:
-                state.locked_until = moment + self._lockout
-                state.retry_at = None
-            else:
-                index = min(state.failures - 1, len(self._backoff) - 1)
-                delay = self._backoff[index]
-                state.retry_at = moment + delay if delay else None
-            return state.failures
+            return self._record_failure_locked(user_id, moment)
+
+    def _record_failure_locked(self, user_id: str, moment: datetime) -> int:
+        if self._store is not None:
+            atomic = getattr(self._store, "record_failure", None)
+            if callable(atomic):
+                snapshot = cast(VerificationAttemptSnapshot, atomic(
+                    user_id,
+                    now=moment,
+                    max_failures=self._max_failures,
+                    lockout_seconds=int(self._lockout.total_seconds()),
+                    backoff_seconds=tuple(int(item.total_seconds()) for item in self._backoff),
+                ))
+                self._states[user_id] = _AttemptState(
+                    snapshot.failures, snapshot.retry_at, snapshot.locked_until
+                )
+                return snapshot.failures
+        state = self._load(user_id)
+        if state is None:
+            state = _AttemptState()
+            self._states[user_id] = state
+        state.failures += 1
+        if state.failures >= self._max_failures:
+            state.locked_until = moment + self._lockout
+            state.retry_at = None
+        else:
+            index = min(state.failures - 1, len(self._backoff) - 1)
+            delay = self._backoff[index]
+            state.retry_at = moment + delay if delay else None
+        self._save(user_id, state)
+        return state.failures
 
     def reset(self, user_id: str) -> None:
         """验证成功后清零；只有服务端确认的正确码会走到这里。"""
         with self._lock:
             self._states.pop(user_id, None)
+            if self._store is not None:
+                self._store.delete(user_id)
 
     def failures(self, user_id: str) -> int:
         """当前累计失败次数（供审计与测试核对，不对外暴露验证信息）。"""
         with self._lock:
-            state = self._states.get(user_id)
+            state = self._load(user_id)
             return 0 if state is None else state.failures
 
 
@@ -243,7 +636,10 @@ class ExternalVerificationProvider:
         code: str,
         expires_at: datetime,
     ) -> DeliveryResult:
-        if not self.endpoint or not self.token or not self.target:
+        if (
+            not self.endpoint or not self.token or not self.target
+            or not _is_https_endpoint(self.endpoint)
+        ):
             raise VerificationError("delivery_unavailable")
         payload: dict[str, object] = {
             "challenge_id": challenge_id,
@@ -352,6 +748,21 @@ def verify_challenge(
     return replace(record, status=ChallengeStatus.CONSUMED)
 
 
+def _proof_signature(key: bytes, challenge_id: str, binding: VerificationBinding) -> str:
+    message = "\x1f".join(
+        (
+            "strong-verification-proof-v1",
+            challenge_id,
+            binding.user_id,
+            binding.session_id,
+            binding.execution_id,
+            binding.card_id,
+            binding.frozen_hash,
+        )
+    ).encode("utf-8")
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
+
+
 def invalidate_challenge(record: ChallengeRecord) -> ChallengeRecord:
     """使挑战失效，供重新申请或会话重置调用。"""
     if record.status != ChallengeStatus.ACTIVE:
@@ -383,6 +794,21 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _format_timestamp(value: datetime | None) -> str | None:
+    return None if value is None else _as_utc(value).isoformat()
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise VerificationError("verification_failed")
+    try:
+        return _as_utc(datetime.fromisoformat(value))
+    except ValueError:
+        raise VerificationError("verification_failed") from None
+
+
 def _mask_target(target: str) -> str:
     if len(target) <= 4:
         return "*" * len(target)
@@ -392,6 +818,14 @@ def _mask_target(target: str) -> str:
 def _mask_reference(reference: str) -> str:
     # Provider 可能把收件人或正文当作引用返回；只返回不可逆的关联标签。
     return f"ref:{hashlib.sha256(reference.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _is_https_endpoint(endpoint: str) -> bool:
+    try:
+        parsed = urlsplit(endpoint)
+        return parsed.scheme.lower() == "https" and parsed.hostname is not None
+    except ValueError:
+        return False
 
 
 __all__ = [
@@ -404,12 +838,20 @@ __all__ = [
     "DemoVerificationProvider",
     "DeliveryResult",
     "ExternalVerificationProvider",
+    "HmacStrongVerificationProofVerifier",
+    "SQLiteVerificationAttemptStateStore",
+    "StoreVerificationAttemptStateStore",
     "VerificationAttemptLimiter",
+    "VerificationAttemptSnapshot",
+    "VerificationAttemptStateStore",
     "VerificationBinding",
     "VerificationError",
     "VerificationMode",
     "VerificationProvider",
+    "StrongVerificationProof",
+    "StrongVerificationProofVerifier",
     "create_challenge",
     "invalidate_challenge",
+    "init_verification_schema",
     "verify_challenge",
 ]

@@ -30,6 +30,7 @@ from ai_banking_copilot.gateway.risk_store import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
+from ai_banking_copilot.planning.analysis_codegen import AnalysisTask, generate_analysis_code
 from ai_banking_copilot.planning.call_observation import CallObserver
 from ai_banking_copilot.planning.llm import (
     FallbackIntentModel,
@@ -54,8 +55,12 @@ from ai_banking_copilot.policy.reversal import ReversalService
 from ai_banking_copilot.policy.verification import (
     DemoVerificationProvider,
     ExternalVerificationProvider,
+    HmacStrongVerificationProofVerifier,
+    StoreVerificationAttemptStateStore,
+    VerificationAttemptLimiter,
     VerificationMode,
     VerificationProvider,
+    init_verification_schema,
 )
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
@@ -282,7 +287,18 @@ def build_deps(
         resources.callback(risk_store.close)
     source = os.environ if env is None else env
     verification_provider, verification_key, verification_strict = build_verification(db_path, env)
+    verification_store = Store(db_path, StoreMode.READ_WRITE)
+    init_verification_schema(verification_store)
+    if resources is not None:
+        resources.callback(verification_store.close)
+    verification_limiter = VerificationAttemptLimiter(
+        store=StoreVerificationAttemptStateStore(verification_store)
+    )
     model_config = ModelConfig.from_env(source)
+
+    def analysis_code_generator(task: str, fields: tuple[str, ...]) -> str:
+        return generate_analysis_code(AnalysisTask(task), fields, config=model_config)
+
     model_observations = TaskObservations()
     insight_path = Path(
         source.get(INSIGHT_DB_ENV, "").strip()
@@ -304,7 +320,14 @@ def build_deps(
         intent_model=build_intent_model(env, config=model_config, observer=model_observations),
         registry=registry,
         gateway=gateway,
-        pep=Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS),
+        pep=Pep(
+            registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS,
+            strong_verification=(
+                HmacStrongVerificationProofVerifier(verification_key)
+                if verification_key else None
+            ),
+            analysis_code_generator=analysis_code_generator,
+        ),
         breaker=breaker,
         audit=audit,
         user_id=DEMO_USER_ID,
@@ -318,6 +341,7 @@ def build_deps(
         verification_provider=verification_provider,
         verification_key=verification_key,
         verification_strict=verification_strict,
+        verification_limiter=verification_limiter,
         session_repository=SQLiteSessionRepository(session_store),
         receipts=StoreReceiptReader(read_store),
         model_observations=model_observations,

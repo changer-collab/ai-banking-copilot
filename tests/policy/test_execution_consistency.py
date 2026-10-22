@@ -23,6 +23,7 @@ from ai_banking_copilot.policy.pep import ExecResult, Pep, manifest_plan
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolCall, ToolRegistry
+from tests.policy.verification_support import issue_policy_write_grant
 
 
 def _call(cents: int, booked_on: date = DEFAULT_BOOKING_DATE) -> ToolCall:
@@ -54,14 +55,16 @@ def _grant(
     """
     decision = _decision(level)
     frozen = manifest_plan(call) if plan is None else plan
-    return pep.issue_write_grant(
+    return issue_policy_write_grant(
+        pep,
         call,
         decision,
         frozen,
+        user_id=DEMO_USER_ID,
+        session_id=f"execution-consistency:{execution_id or id(call)}",
+        execution_id=execution_id or f"execution-consistency:{id(call)}",
         approved_level=level,
-        strong_verified=level >= Level.RED,
         today=today,
-        execution_id=execution_id,
     )
 
 

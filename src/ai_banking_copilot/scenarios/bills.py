@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import calendar
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
 
@@ -21,16 +22,24 @@ from ai_banking_copilot.contracts.plan import (
     validate_plan,
 )
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
-from ai_banking_copilot.gateway.errors import OperatorError
+from ai_banking_copilot.gateway.errors import OperatorError, SandboxError
 from ai_banking_copilot.gateway.facts import FactGateway, Record
 from ai_banking_copilot.gateway.models import BillSummary, Money, Transaction
 from ai_banking_copilot.gateway.operators import DerivedValue, run_operator
 from ai_banking_copilot.gateway.sandbox import (
+    SandboxMonitor,
+    SandboxMonitorSink,
     SandboxRequest,
     SandboxResult,
+    run_generated_analysis,
     run_in_sandbox,
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
+from ai_banking_copilot.planning.analysis_codegen import (
+    AnalysisCodeGenerationError,
+    AnalysisTask,
+    generate_analysis_code,
+)
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import (
@@ -387,42 +396,97 @@ def _yearly_bill(context: QueryContext) -> QueryResult:
     last_year = tuple(
         context.gateway.monthly_bill(user_id, year - 1, month) for month in months
     )
-    expense = _annual_sum(this_year, lambda bill: bill.total_expense.cents)
-    income = _annual_sum(this_year, lambda bill: bill.total_income.cents)
-    last_expense = _annual_sum(last_year, lambda bill: bill.total_expense.cents)
+    records = (*this_year, *last_year)
+    sandbox_events: list[dict[str, object]] = []
+    monitor_sink = context.sandbox_monitor
+    last_fact_count = sum(
+        item.txn_count for record in last_year for item in record.payload.by_category
+    )
+    try:
+        expense = _annual_sum(
+            this_year,
+            lambda bill: bill.total_expense.cents,
+            use="current_year_expense",
+            events=sandbox_events,
+            monitor_sink=monitor_sink,
+            code_generator=context.analysis_code_generator,
+        )
+        income = _annual_sum(
+            this_year,
+            lambda bill: bill.total_income.cents,
+            use="current_year_income",
+            events=sandbox_events,
+            monitor_sink=monitor_sink,
+            code_generator=context.analysis_code_generator,
+        )
+        last_expense = _annual_sum(
+            last_year,
+            lambda bill: bill.total_expense.cents,
+            use="prior_year_expense",
+            events=sandbox_events,
+            monitor_sink=monitor_sink,
+            code_generator=context.analysis_code_generator,
+        )
+        yoy: SandboxResult | None = None
+        yoy_failed = False
+        if last_fact_count:
+            try:
+                yoy = _run_bill_analysis(
+                    AnalysisTask.YOY,
+                    {
+                        "current": [
+                            {
+                                "record_id": record.record_id,
+                                "value": str(record.payload.total_expense.cents),
+                            }
+                            for record in this_year
+                        ],
+                        "prior": [
+                            {
+                                "record_id": record.record_id,
+                                "value": str(record.payload.total_expense.cents),
+                            }
+                            for record in last_year
+                        ],
+                    },
+                    use="year_over_year",
+                    events=sandbox_events,
+                    monitor_sink=monitor_sink,
+                    code_generator=context.analysis_code_generator,
+                )
+            except OperatorError:
+                # 既有算子会对上年同期支出为零拒绝除法。
+                yoy_failed = True
+    except (AnalysisCodeGenerationError, SandboxError):
+        return QueryResult(
+            record_ids=tuple(item.record_id for item in records),
+            provenance=tuple((item.record_id, item.content_hash) for item in records),
+            detail="年度账单分析沙箱拒绝或无法执行；本次未生成年度数值。",
+            sandbox_events=tuple(sandbox_events),
+        )
+
     detail = (
         f"{year} 年 1–{end_month} 月支出 {expense.yuan} 元 / 收入 {income.yuan} 元"
         f"（{len(this_year)} 个月度账单事实，同期同比口径）"
     )
-    last_fact_count = sum(
-        item.txn_count for record in last_year for item in record.payload.by_category
-    )
     if last_fact_count == 0:
         detail += f"；上年同期（{year - 1} 年 1–{end_month} 月）无可比数据，同比不可判"
+    elif yoy_failed:
+        detail += (
+            f"；上年同期（{year - 1} 年 1–{end_month} 月）支出合计为 0，"
+            "白名单算子拒绝除以零，同比不可判"
+        )
     else:
-        try:
-            yoy = run_operator(
-                "yoy",
-                (
-                    (f"bills:{user_id}:{year:04d}-YTD", Decimal(expense.cents)),
-                    (f"bills:{user_id}:{year - 1:04d}-YTD", Decimal(last_expense.cents)),
-                ),
-            )
-        except OperatorError:
-            detail += (
-                f"；上年同期（{year - 1} 年 1–{end_month} 月）支出合计为 0，"
-                "白名单算子拒绝除以零，同比不可判"
-            )
-        else:
-            detail += (
-                f"；较去年同期（上年同期支出 {last_expense.yuan} 元）"
-                f"{_signed_percent(yoy.value)}"
-            )
-    records = (*this_year, *last_year)
+        assert yoy is not None
+        detail += (
+            f"；较去年同期（上年同期支出 {last_expense.yuan} 元）"
+            f"{_signed_percent(yoy.value)}"
+        )
     return QueryResult(
         record_ids=tuple(item.record_id for item in records),
         provenance=tuple((item.record_id, item.content_hash) for item in records),
         detail=detail,
+        sandbox_events=tuple(sandbox_events),
     )
 
 
@@ -433,14 +497,83 @@ def _signed_percent(ratio: Decimal) -> str:
 
 
 def _annual_sum(
-    records: tuple[Record[BillSummary], ...], pick: Callable[[BillSummary], int]
+    records: tuple[Record[BillSummary], ...],
+    pick: Callable[[BillSummary], int],
+    *,
+    use: str,
+    events: list[dict[str, object]],
+    monitor_sink: SandboxMonitorSink | None = None,
+    code_generator: Callable[[str, tuple[str, ...]], str] | None = None,
 ) -> Money:
-    """年度合计：派生数字只走白名单算子，输出携带全部来源 `record_id`。"""
-    derived = run_operator(
-        "sum",
-        tuple((record.record_id, Decimal(pick(record.payload))) for record in records),
+    """年度合计：由受限分析代码执行白名单算子并携带全部出处。"""
+    derived = _run_bill_analysis(
+        AnalysisTask.SUM,
+        {
+            "facts": [
+                {"record_id": record.record_id, "value": str(pick(record.payload))}
+                for record in records
+            ]
+        },
+        use=use,
+        events=events,
+        monitor_sink=monitor_sink,
+        code_generator=code_generator,
     )
     return Money(int(derived.value))
+
+
+def _run_bill_analysis(
+    task: AnalysisTask,
+    snapshot: Mapping[str, object],
+    *,
+    use: str,
+    events: list[dict[str, object]],
+    monitor_sink: SandboxMonitorSink | None = None,
+    code_generator: Callable[[str, tuple[str, ...]], str] | None = None,
+) -> SandboxResult:
+    """只把任务/字段名交给生成器；事实快照仅传入父进程校验后的沙箱请求。"""
+    captured_monitors: list[SandboxMonitor] = []
+
+    def capture(monitor: SandboxMonitor) -> None:
+        captured_monitors.append(monitor)
+        if monitor_sink is not None:
+            monitor_sink(monitor)
+
+    try:
+        code = (
+            code_generator(task.value, tuple(snapshot))
+            if code_generator is not None
+            else generate_analysis_code(task, tuple(snapshot))
+        )
+        result = run_generated_analysis(code, snapshot, monitor_sink=capture)
+    except Exception as error:
+        monitor = getattr(error, "monitor", None)
+        if isinstance(monitor, Mapping):
+            event = dict(monitor)
+        elif captured_monitors:
+            event = asdict(captured_monitors[-1])
+        else:
+            event = {}
+        if event:
+            event.update({"task": task.value, "use": use, "result": None})
+            event["failure"] = type(error).__name__
+            events.append(event)
+        raise
+    if result.monitor is not None:
+        event = asdict(result.monitor)
+        event.update(
+            {
+                "task": task.value,
+                "use": use,
+                "result": {
+                    "operator": result.operator,
+                    "value": str(result.value),
+                    "sources": list(result.sources),
+                },
+            }
+        )
+        events.append(event)
+    return result
 
 
 QUERY_HANDLERS: Mapping[str, QueryHandler] = {

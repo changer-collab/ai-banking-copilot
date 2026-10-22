@@ -24,7 +24,7 @@ import json
 import secrets
 import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 
 from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
@@ -37,7 +37,7 @@ from ai_banking_copilot.contracts.plan import (
 )
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank, WriteReceipt
-from ai_banking_copilot.gateway.errors import GatewayError
+from ai_banking_copilot.gateway.errors import GatewayError, SandboxError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.hashing import canonical_json
 from ai_banking_copilot.gateway.preconditions import (
@@ -46,10 +46,17 @@ from ai_banking_copilot.gateway.preconditions import (
     PreconditionStatus,
     WritePreconditionError,
 )
+from ai_banking_copilot.gateway.sandbox import SandboxMonitor, SandboxMonitorSink
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.gateway.transaction_facts import TransactionFacts
-from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditEvent, AuditLog
-from ai_banking_copilot.policy.breaker import CircuitBreaker
+from ai_banking_copilot.policy.audit import (
+    KIND_BREAKER,
+    KIND_DECISION,
+    KIND_EXECUTION,
+    AuditEvent,
+    AuditLog,
+)
+from ai_banking_copilot.policy.breaker import BreakerTrigger, CircuitBreaker
 from ai_banking_copilot.policy.execution import (
     CommittedWriteError,
     ExecutionContext,
@@ -62,7 +69,18 @@ from ai_banking_copilot.policy.tool_hook import (
     PreToolHook,
     operation_of,
 )
-from ai_banking_copilot.tools.registry import ForbiddenParamError, ToolCall, ToolRegistry, ToolSpec
+from ai_banking_copilot.policy.verification import (
+    StrongVerificationProof,
+    StrongVerificationProofVerifier,
+)
+from ai_banking_copilot.tools.registry import (
+    ForbiddenParamError,
+    ParamValidationError,
+    ToolCall,
+    ToolRegistry,
+    ToolSpec,
+    UnknownActionError,
+)
 
 PEP_ANCHOR_ID = "pep-execution-gate"
 """执行门节点的规范锚点 id：让"确认时冻结"与"执行时复核"算出同一哈希。"""
@@ -105,6 +123,8 @@ class QueryContext:
     gateway: FactGateway
     params: dict[str, object]
     spec: ToolSpec
+    sandbox_monitor: SandboxMonitorSink | None = None
+    analysis_code_generator: Callable[[str, tuple[str, ...]], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +137,8 @@ class QueryResult:
     record_ids: tuple[str, ...]
     provenance: tuple[tuple[str, str], ...]
     detail: str
+    status: str = "queried"
+    sandbox_events: tuple[Mapping[str, object], ...] = ()
 
 
 QueryHandler = Callable[[QueryContext], QueryResult]
@@ -224,6 +246,9 @@ class Pep:
         breaker: CircuitBreaker,
         write_handlers: Mapping[str, WriteHandler],
         query_handlers: Mapping[str, QueryHandler],
+        *,
+        strong_verification: StrongVerificationProofVerifier | None = None,
+        analysis_code_generator: Callable[[str, tuple[str, ...]], str] | None = None,
     ) -> None:
         self._registry = registry
         self._gateway = gateway
@@ -232,7 +257,49 @@ class Pep:
         self._breaker = breaker
         self._write_handlers = dict(write_handlers)
         self._query_handlers = dict(query_handlers)
-        self._hook = PreToolHook(ledger=GrantLedger(), audit=audit)
+        self._strong_verification = strong_verification
+        self._analysis_code_generator = analysis_code_generator
+        self._hook = PreToolHook(
+            ledger=GrantLedger(),
+            audit=audit,
+            breaker=breaker,
+            failure_recorder=self._record_breaker_failure,
+        )
+
+    def _record_breaker_failure(
+        self,
+        action: str,
+        reason: str,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
+    ) -> None:
+        trigger = BreakerTrigger.CONSECUTIVE_AUTH_FAILURES
+        was_open = self._breaker.is_open()
+        self._breaker.record_failure()
+        if was_open or not self._breaker.is_open():
+            return
+        try:
+            self._audit.append(
+                AuditEvent(
+                    event_id=f"breaker:pep:{secrets.token_hex(8)}",
+                    kind=KIND_BREAKER,
+                    payload={
+                        "trigger": trigger.value,
+                        "detail": "PEP 失败计数达到全局熔断阈值",
+                        "scope": "global",
+                        "state": self._breaker.state().value,
+                        "action": action,
+                        "reject_reason": reason,
+                        "user_id": user_id if isinstance(user_id, str) else "",
+                        "session_id": session_id if isinstance(session_id, str) else "",
+                        "execution_id": execution_id if isinstance(execution_id, str) else "",
+                    },
+                    prev_hash="",
+                )
+            )
+        except Exception:
+            raise NotAuthorizedError("熔断事件审计不可用，拒绝执行") from None
 
     def handled_actions(self) -> frozenset[str]:
         """PEP 实际**持有处理器**的动作集 = 已登记读处理器 ∪ 已登记写处理器。
@@ -254,34 +321,114 @@ class Pep:
         idempotency_key: str,
         *,
         execution: ExecutionContext | None = None,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
     ) -> ExecResult:
         """执行一次已裁决的工具调用。任一前置条件不满足即 fail-closed。
 
         `plan` = **已确认的冻结计划**：节点级执行门据此校验「本次调用属于该计划」，
         与调用方在确认阶段做的计划级 `assert_frozen` 叠加（防 TOCTOU / 越权节点）。
         """
+        audit_identity = {
+            "user_id": execution.user_id if execution is not None else user_id,
+            "session_id": execution.session_id if execution is not None else session_id,
+            "execution_id": execution.execution_id if execution is not None else execution_id,
+        }
         if not isinstance(decision, Decision):
-            raise NotAuthorizedError("PEP 无裁决不执行：缺少 Decision")
+            rejection = NotAuthorizedError("PEP 无裁决不执行：缺少 Decision")
+            self._record_rejection(
+                call, None, plan, execution, "missing_decision", rejection,
+                **audit_identity,
+            )
+            raise rejection
         if decision.level >= Level.MANUAL:
-            self._breaker.record_failure()
-            raise NotAuthorizedError(f"裁决级别不足，不允许执行：{decision.level.name}")
-        spec = self._registry.get(call.action)
+            self._record_breaker_failure(
+                call.action, "decision_requires_manual", **audit_identity,
+            )
+            rejection = NotAuthorizedError(f"裁决级别不足，不允许执行：{decision.level.name}")
+            self._record_rejection(
+                call, decision, plan, execution, "decision_requires_manual", rejection,
+                **audit_identity,
+            )
+            raise rejection
+        try:
+            spec = self._registry.get(call.action)
+        except UnknownActionError as unknown_error:
+            self._record_rejection(
+                call, decision, plan, execution, "unknown_action", unknown_error,
+                **audit_identity,
+            )
+            raise
         if decision.level is Level.GREEN and not spec.is_pure_query:
-            self._breaker.record_failure()
-            raise NotAuthorizedError("绿色只允许纯查询：拒绝执行资金 / 状态变更")
+            self._record_breaker_failure(call.action, "green_write_forbidden", **audit_identity)
+            rejection = NotAuthorizedError("绿色只允许纯查询：拒绝执行资金 / 状态变更")
+            self._record_rejection(
+                call, decision, plan, execution, "green_write_forbidden", rejection,
+                **audit_identity,
+            )
+            raise rejection
         if self._breaker.is_open() and not spec.is_pure_query:
-            raise NotAuthorizedError("熔断打开：高风险操作被临时锁定（纯查询不受影响）")
-        self._assert_taint(spec, call)
-        resolved = self._registry.validate_params(call)
-        self._assert_member(call.action, resolved, plan)
+            rejection = NotAuthorizedError("熔断打开：高风险操作被临时锁定（纯查询不受影响）")
+            self._record_rejection(
+                call, decision, plan, execution, "breaker_open", rejection, **audit_identity,
+            )
+            raise rejection
+        try:
+            self._assert_taint(spec, call, **audit_identity)
+        except ForbiddenParamError as taint_error:
+            self._record_rejection(
+                call, decision, plan, execution, "untrusted_control_value", taint_error,
+                **audit_identity,
+            )
+            raise
+        try:
+            resolved = self._registry.validate_params(call)
+        except ForbiddenParamError as taint_error:
+            self._record_breaker_failure(
+                call.action, "untrusted_control_value", **audit_identity,
+            )
+            self._record_rejection(
+                call, decision, plan, execution, "untrusted_control_value", taint_error,
+                **audit_identity,
+            )
+            raise
+        except ParamValidationError as parameter_error:
+            self._record_breaker_failure(call.action, "invalid_parameters", **audit_identity)
+            self._record_rejection(
+                call, decision, plan, execution, "invalid_parameters", parameter_error,
+                **audit_identity,
+            )
+            raise
+        try:
+            self._assert_member(call.action, resolved, plan, **audit_identity)
+        except StalePlanError as member_error:
+            reason = (
+                "missing_confirmed_plan"
+                if not isinstance(plan, Plan) or not plan.nodes
+                else "plan_member_mismatch"
+            )
+            self._record_rejection(
+                call, decision, plan, execution, reason, member_error, **audit_identity,
+            )
+            raise
         frozen_hash = manifest_hash(call)
         if spec.is_pure_query:
-            return self._execute_query(
-                call, spec, resolved, decision, frozen_hash, idempotency_key
-            )
+            try:
+                return self._execute_query(
+                    call, spec, resolved, decision, frozen_hash, idempotency_key,
+                    _plan_hash(plan),
+                    **audit_identity,
+                )
+            except NotAuthorizedError as query_error:
+                self._record_rejection(
+                    call, decision, plan, execution, "query_handler_unavailable", query_error,
+                    **audit_identity,
+                )
+                raise
         return self._execute_write(
             call, resolved, spec, decision, frozen_hash, idempotency_key,
-            plan, execution,
+            plan, execution, **audit_identity,
         )
 
     def issue_write_grant(
@@ -294,6 +441,8 @@ class Pep:
         session_id: str = "",
         execution_id: str = "",
         approved_level: Level | None = None,
+        verification_proof: StrongVerificationProof | None = None,
+        card_id: str = "",
         strong_verified: bool = False,
         today: date = DEFAULT_BOOKING_DATE,
         completed_records: tuple[str, ...] = (),
@@ -312,12 +461,44 @@ class Pep:
         spec = self._registry.get(call.action)
         if spec.is_pure_query:
             raise NotAuthorizedError(f"只读动作不需要写授权凭据：{call.action}")
-        self._assert_taint(spec, call)
-        resolved = self._registry.validate_params(call)
-        self._assert_member(call.action, resolved, plan)
         bound_execution_id = execution_id or f"grant:{secrets.token_hex(8)}"
+        self._assert_taint(
+            spec,
+            call,
+            user_id=user_id,
+            session_id=session_id,
+            execution_id=bound_execution_id,
+        )
+        resolved = self._registry.validate_params(call)
+        self._assert_member(
+            call.action,
+            resolved,
+            plan,
+            user_id=user_id,
+            session_id=session_id,
+            execution_id=bound_execution_id,
+        )
         bound_level = decision.level if approved_level is None else approved_level
+        if bound_level > decision.level:
+            raise NotAuthorizedError("确认级别不能高于当前授权裁决")
         plan_hash = _plan_hash(plan)
+        verification_is_valid = bool(
+            verification_proof is not None
+            and self._strong_verification is not None
+            and self._strong_verification.verify(
+                verification_proof,
+                user_id=user_id,
+                session_id=session_id,
+                execution_id=bound_execution_id,
+                card_id=card_id,
+                plan_hash=plan_hash,
+            )
+        )
+        if bound_level >= Level.RED and not verification_is_valid:
+            raise NotAuthorizedError("红色写授权必须具有绑定当前计划的强验证证明")
+        # `strong_verified` remains accepted for source compatibility, but a
+        # caller-provided boolean never constitutes verification evidence.
+        del strong_verified
         grant = self._hook.ledger.issue(
             session_id=session_id,
             execution_id=bound_execution_id,
@@ -327,22 +508,35 @@ class Pep:
             action=call.action,
             member=_member_key(call.action, resolved),
             approved_level=bound_level,
-            strong_verified=strong_verified,
+            strong_verified=verification_is_valid,
+            verification_proof=verification_proof if verification_is_valid else None,
+            today=today,
+            completed_records=tuple(completed_records),
+            flags=frozenset(flags),
         )
         return ExecutionContext(
-            execution_id=bound_execution_id,
-            frozen_hash=plan_hash,
-            user_id=user_id,
-            today=today,
-            approved_level=bound_level,
-            strong_verified=strong_verified,
-            completed_records=completed_records,
-            flags=flags,
-            session_id=session_id,
+            execution_id=grant.execution_id,
+            frozen_hash=grant.plan_hash,
+            user_id=grant.user_id,
+            today=grant.today,
+            approved_level=grant.approved_level,
+            strong_verified=grant.strong_verified,
+            completed_records=grant.completed_records,
+            flags=grant.flags,
+            session_id=grant.session_id,
             grant_id=grant.grant_id,
         )
 
-    def _assert_member(self, action: str, resolved: dict[str, object], plan: Plan) -> None:
+    def _assert_member(
+        self,
+        action: str,
+        resolved: dict[str, object],
+        plan: Plan,
+        *,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
+    ) -> None:
         """执行门（**节点级**成员资格）：本次调用必须属于**已确认的冻结计划**。
 
         判据：计划中存在节点与本次调用的 `action` 相同，且**归一化参数逐字相等**。
@@ -353,12 +547,16 @@ class Pep:
         不参与比对——它来自 `AppDeps.user_id`、不是用户输入，且按设计不进 `PlanNode.params`。
         """
         if not isinstance(plan, Plan) or not plan.nodes:
-            self._breaker.record_failure()
+            self._record_breaker_failure(
+                action, "missing_confirmed_plan", user_id, session_id, execution_id,
+            )
             raise StalePlanError("执行门拒绝：缺少已确认的冻结计划")
         probe = _member_key(action, resolved)
         if any(_member_key(node.action, node.params) == probe for node in plan.nodes):
             return
-        self._breaker.record_failure()
+        self._record_breaker_failure(
+            action, "plan_member_mismatch", user_id, session_id, execution_id,
+        )
         raise StalePlanError(f"执行门拒绝：{action} 不属于已确认计划（节点成员资格校验失败）")
 
     def _execute_query(
@@ -369,6 +567,11 @@ class Pep:
         decision: Decision,
         frozen_hash: str,
         idempotency_key: str,
+        plan_hash: str,
+        *,
+        user_id: str,
+        session_id: str,
+        execution_id: str,
     ) -> ExecResult:
         """读路径：按动作查 **读 handler 注册表**并执行（handler 由场景模块自带、组合根汇入）。
 
@@ -377,18 +580,80 @@ class Pep:
         """
         handler = self._query_handlers.get(call.action)
         if handler is None:
-            self._breaker.record_failure()
+            self._record_breaker_failure(
+                call.action, "query_handler_unavailable", user_id, session_id, execution_id,
+            )
             raise NotAuthorizedError(f"未登记查询处理器：{call.action}")
-        result = handler(QueryContext(gateway=self._gateway, params=params, spec=spec))
+
+        def persist_sandbox_monitor(monitor: SandboxMonitor) -> None:
+            monitor_payload = asdict(monitor)
+            try:
+                self._audit.append(
+                    AuditEvent(
+                        event_id=(
+                            f"sandbox:{call.action}:{idempotency_key}:"
+                            f"{secrets.token_hex(8)}"
+                        ),
+                        kind=KIND_EXECUTION,
+                        payload={
+                            "event_type": "sandbox_execution",
+                            "phase": "query_sandbox",
+                            "action": call.action,
+                            "status": monitor.status,
+                            "frozen_hash": frozen_hash,
+                            "plan_hash": plan_hash,
+                            "idempotency_key": idempotency_key,
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "sandbox_monitor": monitor_payload,
+                        },
+                        prev_hash="",
+                    )
+                )
+            except Exception:
+                raise NotAuthorizedError(
+                    "隔离执行审计不可用，拒绝使用沙箱结果"
+                ) from None
+
+        sandbox_events: tuple[Mapping[str, object], ...] = ()
+        try:
+            result = handler(
+                QueryContext(
+                    gateway=self._gateway,
+                    params=params,
+                    spec=spec,
+                    sandbox_monitor=persist_sandbox_monitor,
+                    analysis_code_generator=self._analysis_code_generator,
+                )
+            )
+        except SandboxError as sandbox_error:
+            # A failed analysis must never turn into generated or partial facts.
+            # Return a stable, audited refusal so the channel does not emit a 500.
+            monitor = getattr(sandbox_error, "monitor", None)
+            if isinstance(monitor, Mapping):
+                sandbox_events = (monitor,)
+            result = QueryResult(
+                record_ids=(),
+                provenance=(),
+                detail="查询安全沙箱暂不可用，未返回查询结果",
+                status="query_refused",
+                sandbox_events=sandbox_events,
+            )
         return self._finish(
             call,
             decision,
             frozen_hash,
             idempotency_key,
-            status="queried",
+            status=result.status,
             record_ids=result.record_ids,
             provenance=result.provenance,
             detail=result.detail,
+            plan_hash=plan_hash,
+            user_id=user_id,
+            session_id=session_id,
+            execution_id=execution_id,
+            sandbox_events=result.sandbox_events,
         )
 
     def _execute_write(
@@ -401,6 +666,10 @@ class Pep:
         idempotency_key: str,
         plan: Plan,
         execution: ExecutionContext | None,
+        *,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
     ) -> ExecResult:
         """写路径：**Pre-Tool Hook** → 幂等执行 → 执行后出处校验 → 熔断联动 → 审计落链。
 
@@ -409,15 +678,17 @@ class Pep:
         """
         plan_hash = _plan_hash(plan)
         if execution is None:
-            self._breaker.record_failure()
             raise self._hook.block(
                 spec,
                 status=HookStatus.CONFIRMATION_REQUIRED,
                 reason="写操作缺少服务端签发的确认凭据，禁止直接执行",
                 plan_id=plan.plan_id,
                 plan_hash=plan_hash,
+                user_id=user_id,
+                session_id=session_id,
+                execution_id=execution_id,
             )
-        self._hook.authorize(
+        grant = self._hook.authorize(
             spec,
             member=_member_key(call.action, params),
             plan_id=plan.plan_id,
@@ -428,11 +699,50 @@ class Pep:
             session_id=execution.session_id,
             execution_id=execution.execution_id,
         )
+        if grant is None:
+            self._record_breaker_failure(
+                call.action,
+                "write_grant_missing",
+                execution.user_id,
+                execution.session_id,
+                execution.execution_id,
+            )
+            rejection = NotAuthorizedError("写操作授权凭据缺失")
+            self._record_rejection(
+                call, decision, plan, execution, "write_grant_missing", rejection,
+            )
+            raise rejection
         if (not execution.execution_id or execution.frozen_hash != plan_hash
                 or ("user_id" in params and execution.user_id != params["user_id"])):
-            raise StalePlanError("执行上下文与冻结计划或用户不匹配")
+            self._record_breaker_failure(
+                call.action,
+                "execution_context_mismatch",
+                execution.user_id,
+                execution.session_id,
+                execution.execution_id,
+            )
+            stale_rejection = StalePlanError("执行上下文与冻结计划或用户不匹配")
+            self._record_rejection(
+                call, decision, plan, execution, "execution_context_mismatch", stale_rejection,
+            )
+            raise stale_rejection
 
-        active_execution = execution
+        # Authorization state comes only from the server-issued grant.  The
+        # ExecutionContext is request/session data and may be forged or
+        # mutated after confirmation.
+        active_execution = ExecutionContext(
+            execution_id=grant.execution_id,
+            frozen_hash=grant.plan_hash,
+            user_id=grant.user_id,
+            today=grant.today,
+            approved_level=grant.approved_level,
+            strong_verified=grant.strong_verified,
+            completed_records=grant.completed_records,
+            flags=grant.flags,
+            session_id=grant.session_id,
+            grant_id=grant.grant_id,
+        )
+        self._record_write_start(call, decision, plan, active_execution, idempotency_key)
 
         def before_write(conn: sqlite3.Connection) -> PreconditionResult:
             facts = TransactionFacts(conn)
@@ -468,15 +778,47 @@ class Pep:
             )
 
         try:
-            receipt = self._dispatch_write(call, params, spec, idempotency_key, before_write)
-        except NotAuthorizedError:
-            self._breaker.record_failure()
+            authorized_params = {**params, "user_id": grant.user_id}
+            receipt = self._dispatch_write(
+                call, authorized_params, spec, idempotency_key, before_write,
+            )
+        except NotAuthorizedError as error:
+            self._record_breaker_failure(
+                call.action,
+                "write_handler_rejected",
+                active_execution.user_id,
+                active_execution.session_id,
+                active_execution.execution_id,
+            )
+            self._record_rejection(
+                call, decision, plan, active_execution, "write_handler_rejected", error,
+            )
             raise
-        except WritePreconditionError:
-            self._breaker.record_failure()
+        except WritePreconditionError as error:
+            self._record_breaker_failure(
+                call.action,
+                f"write_precondition_{error.result.status.value}",
+                active_execution.user_id,
+                active_execution.session_id,
+                active_execution.execution_id,
+            )
+            self._record_rejection(
+                call,
+                decision,
+                plan,
+                active_execution,
+                f"write_precondition_{error.result.status.value}",
+                error,
+            )
             raise
         except GatewayError as error:
-            self._breaker.record_failure()
+            self._record_breaker_failure(
+                call.action,
+                "gateway_write_failed",
+                active_execution.user_id,
+                active_execution.session_id,
+                active_execution.execution_id,
+            )
             self._finish(
                 call,
                 decision,
@@ -488,7 +830,11 @@ class Pep:
                 detail=str(error),
                 op_type=operation_of(spec),
                 plan_id=plan.plan_id,
-                grant_id=execution.grant_id,
+                grant_id=grant.grant_id,
+                plan_hash=grant.plan_hash,
+                user_id=grant.user_id,
+                session_id=grant.session_id,
+                execution_id=grant.execution_id,
             )
             raise
         try:
@@ -509,7 +855,11 @@ class Pep:
                 effect_ids=receipt.effect_ids,
                 op_type=operation_of(spec),
                 plan_id=plan.plan_id,
-                grant_id=execution.grant_id,
+                grant_id=grant.grant_id,
+                plan_hash=grant.plan_hash,
+                user_id=grant.user_id,
+                session_id=grant.session_id,
+                execution_id=grant.execution_id,
             )
         except Exception as error:
             raise CommittedWriteError(receipt, error) from error
@@ -551,15 +901,131 @@ class Pep:
             results.append((record_id, content_hash))
         return tuple(results)
 
-    def _assert_taint(self, spec: ToolSpec, call: ToolCall) -> None:
+    def _assert_taint(
+        self,
+        spec: ToolSpec,
+        call: ToolCall,
+        *,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
+    ) -> None:
         """控制槽拒绝 `unverified` 值：PEP 侧再兜一道 schema 防线（H3）。"""
         for param in spec.params:
             if param.slot is not SlotKind.CONTROL:
                 continue
             value = call.params.get(param.name)
             if isinstance(value, Value) and value.trust is Trust.UNVERIFIED:
-                self._breaker.record_failure()
+                self._record_breaker_failure(
+                    call.action,
+                    "untrusted_control_value",
+                    user_id,
+                    session_id,
+                    execution_id,
+                )
                 raise ForbiddenParamError(f"控制槽 {param.name} 拒绝 unverified 值")
+
+    def _record_rejection(
+        self,
+        call: ToolCall,
+        decision: Decision | None,
+        plan: Plan | None,
+        execution: ExecutionContext | None,
+        reason: str,
+        rejection: Exception,
+        *,
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
+    ) -> None:
+        """记录 PEP 前置拒绝；只落稳定码和关联身份，不落异常文本或参数。"""
+        plan_id = plan.plan_id if isinstance(plan, Plan) else ""
+        plan_hash = ""
+        if isinstance(plan, Plan):
+            try:
+                plan_hash = _plan_hash(plan)
+            except Exception:
+                # A malformed plan is still a rejection worth recording.
+                pass
+
+        def identity(value: object) -> str:
+            return value if isinstance(value, str) else ""
+
+        execution_id = identity(execution.execution_id if execution is not None else execution_id)
+        session_id = identity(execution.session_id if execution is not None else session_id)
+        user_id = identity(execution.user_id if execution is not None else user_id)
+        grant_id = identity(execution.grant_id) if execution is not None else ""
+        execution_hash = identity(execution.frozen_hash) if execution is not None else ""
+        payload: dict[str, object] = {
+            "event_type": "pep_rejection",
+            "phase": "pep_execute",
+            "status": "rejected",
+            "reject_reason": reason,
+            "action": identity(call.action),
+            "level": decision.level.name if decision is not None else "",
+            "reasons": (
+                [item.value for item in decision.reasons] if decision is not None else []
+            ),
+            "plan_id": plan_id,
+            "plan_hash": plan_hash,
+            "frozen_hash": execution_hash or plan_hash,
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "grant_id": grant_id,
+        }
+        try:
+            self._audit.append(
+                AuditEvent(
+                    event_id=f"pep-reject:{identity(call.action)}:{secrets.token_hex(8)}",
+                    kind=KIND_DECISION,
+                    payload=payload,
+                    prev_hash="",
+                )
+            )
+        except Exception:
+            # The request remains rejected even if its audit write fails. Keep the
+            # original rejection type so callers cannot mistake a logging error
+            # for a different authorization outcome.
+            rejection.add_note("PEP 拒绝事件未能写入审计链；请求仍被拒绝。")
+
+    def _record_write_start(
+        self,
+        call: ToolCall,
+        decision: Decision,
+        plan: Plan,
+        execution: ExecutionContext,
+        idempotency_key: str,
+    ) -> None:
+        """在写 handler 前持久记录已验证授权，保证审计不可用时没有副作用。"""
+        try:
+            self._audit.append(
+                AuditEvent(
+                    event_id=f"write-start:{secrets.token_hex(8)}",
+                    kind=KIND_DECISION,
+                    payload={
+                        "event_type": "write_execution_started",
+                        "phase": "pre_dispatch",
+                        "action": call.action,
+                        "status": "started",
+                        "level": decision.level.name,
+                        "reasons": [reason.value for reason in decision.reasons],
+                        "approved_level": execution.approved_level.name,
+                        "strong_verified": execution.strong_verified,
+                        "plan_id": plan.plan_id,
+                        "plan_hash": execution.frozen_hash,
+                        "frozen_hash": manifest_hash(call),
+                        "idempotency_key": idempotency_key,
+                        "execution_id": execution.execution_id,
+                        "session_id": execution.session_id,
+                        "user_id": execution.user_id,
+                        "grant_id": execution.grant_id,
+                    },
+                    prev_hash="",
+                )
+            )
+        except Exception:
+            raise NotAuthorizedError("写操作审计不可用，拒绝执行") from None
 
     def _finish(
         self,
@@ -578,30 +1044,42 @@ class Pep:
         op_type: str = "",
         plan_id: str = "",
         grant_id: str = "",
+        plan_hash: str = "",
+        user_id: str = "",
+        session_id: str = "",
+        execution_id: str = "",
+        sandbox_events: tuple[Mapping[str, object], ...] = (),
     ) -> ExecResult:
+        payload: dict[str, object] = {
+            "action": call.action,
+            "level": decision.level.name,
+            "reasons": [reason.value for reason in decision.reasons],
+            "frozen_hash": frozen_hash,
+            "plan_hash": plan_hash,
+            "idempotency_key": idempotency_key,
+            "status": status,
+            "record_ids": list(record_ids),
+            "provenance": [
+                {"record_id": record_id, "content_hash": content_hash}
+                for record_id, content_hash in provenance
+            ],
+            "detail": detail,
+            "external_status": external_status,
+            "previous_status": previous_status,
+            "op_type": op_type,
+            "plan_id": plan_id,
+            "grant_id": grant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "execution_id": execution_id,
+        }
+        if sandbox_events:
+            payload["sandbox_events"] = [dict(event) for event in sandbox_events]
         event_hash = self._audit.append(
             AuditEvent(
                 event_id=f"{call.action}:{idempotency_key}",
                 kind=KIND_EXECUTION,
-                payload={
-                    "action": call.action,
-                    "level": decision.level.name,
-                    "reasons": [reason.value for reason in decision.reasons],
-                    "frozen_hash": frozen_hash,
-                    "idempotency_key": idempotency_key,
-                    "status": status,
-                    "record_ids": list(record_ids),
-                    "provenance": [
-                        {"record_id": record_id, "content_hash": content_hash}
-                        for record_id, content_hash in provenance
-                    ],
-                    "detail": detail,
-                    "external_status": external_status,
-                    "previous_status": previous_status,
-                    "op_type": op_type,
-                    "plan_id": plan_id,
-                    "grant_id": grant_id,
-                },
+                payload=payload,
                 prev_hash="",
             )
         )

@@ -660,17 +660,19 @@ def _abnormal_findings(
 
 # --------------------------------------------------------------------------- 模型叙事
 
-_FORBIDDEN_TEXT = re.compile(r"[0-9０-９¥￥$%％元]")
-_FORBIDDEN_CLAIMS = (
-    re.compile(r"已(?:经)?(?:退款|追回|赔付|解决|取消|多扣|重复扣|确认)"),
-    re.compile(r"确认(?:是|为)|确认为|必然|一定是"),
-    re.compile(r"百分之"),
-)
-_TXN_TOKEN = re.compile(r"txn_[0-9A-Za-z_]+")
+# 模型只选择标识符；含事实的文本由服务端根据确定性 Finding 渲染，不靠关键词过滤。
+NARRATIVE_SUMMARY_ID = "findings_overview"
+_NARRATIVE_SUMMARY_IDS = frozenset({NARRATIVE_SUMMARY_ID})
 
 
 class NarrativeRejectedError(ValueError):
     """模型叙事未通过证据与结构校验。"""
+
+    code = "invalid_narrative"
+    message = "模型输出未通过证据校验"
+
+    def __init__(self) -> None:
+        super().__init__(self.message)
 
 
 @dataclass(frozen=True)
@@ -698,42 +700,100 @@ class BillNarrator(Protocol):
         ...
 
 
+def narrative_choice_ids(finding: Finding) -> dict[str, tuple[str, ...]]:
+    """返回该 Finding 可用的结构化解释 / 建议 ID。
+
+    ID 中包含类型与状态，复制其他 Finding 的选项会因事实不匹配而被拒绝。
+    """
+    prefix = f"{finding.kind.replace('-', '_')}_{finding.status}"
+    return {
+        "explanation": (f"{prefix}_evidence", f"{prefix}_context"),
+        "suggestion": (f"{prefix}_review",),
+    }
+
+
 def validate_narrative(
     report: BillFindingsReport, payload: Mapping[str, object]
 ) -> tuple[NarrativeFinding, ...]:
-    """校验模型输出：只允许解释已存在的 finding，且不得新增任何数值断言。"""
-    summary = payload.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise NarrativeRejectedError("缺少 summary")
-    _check_text(summary, report)
+    """校验结构化选择，并由服务端渲染所有事实文本。
+
+    仅接受 ``summary_id`` / ``explanation_id`` / ``suggestion_id``；自由文本与旧别名
+    均拒绝，并进入确定性降级。
+    """
+    _reject_extra_keys(payload, {"summary_id", "findings"})
+    summary_id = _choice_value(payload, "summary")
+    if summary_id not in _NARRATIVE_SUMMARY_IDS:
+        raise NarrativeRejectedError()
 
     raw_items = payload.get("findings")
     if not isinstance(raw_items, list):
-        raise NarrativeRejectedError("缺少 findings 数组")
+        raise NarrativeRejectedError()
     expected = list(report.finding_ids)
+    by_id = {finding.finding_id: finding for finding in report.findings}
     seen: list[str] = []
     results: list[NarrativeFinding] = []
     for item in raw_items:
         if not isinstance(item, dict):
-            raise NarrativeRejectedError("findings 元素必须是对象")
+            raise NarrativeRejectedError()
+        _reject_extra_keys(item, {"finding_id", "explanation_id", "suggestion_id"})
         finding_id = item.get("finding_id")
-        explanation = item.get("explanation")
-        suggestion = item.get("suggestion")
         if not isinstance(finding_id, str) or finding_id not in expected:
-            raise NarrativeRejectedError(f"未知 finding_id：{finding_id}")
+            raise NarrativeRejectedError()
         if finding_id in seen:
-            raise NarrativeRejectedError(f"finding_id 重复：{finding_id}")
-        if not isinstance(explanation, str) or not explanation.strip():
-            raise NarrativeRejectedError(f"缺少解释：{finding_id}")
-        if not isinstance(suggestion, str) or not suggestion.strip():
-            raise NarrativeRejectedError(f"缺少建议：{finding_id}")
-        _check_text(explanation, report)
-        _check_text(suggestion, report)
+            raise NarrativeRejectedError()
+        finding = by_id[finding_id]
+        explanation_id = _choice_value(item, "explanation")
+        suggestion_id = _choice_value(item, "suggestion")
+        choices = narrative_choice_ids(finding)
         seen.append(finding_id)
-        results.append(NarrativeFinding(finding_id, explanation.strip(), suggestion.strip()))
+        if explanation_id not in choices["explanation"]:
+            raise NarrativeRejectedError()
+        if suggestion_id not in choices["suggestion"]:
+            raise NarrativeRejectedError()
+        results.append(
+            NarrativeFinding(
+                finding_id,
+                _render_explanation(finding, explanation_id),
+                _render_suggestion(finding, suggestion_id),
+            )
+        )
     if sorted(seen) != sorted(expected):
-        raise NarrativeRejectedError("findings 与识别结果不一一对应")
+        raise NarrativeRejectedError()
     return tuple(results)
+
+
+def _choice_value(payload: Mapping[str, object], field: str) -> str:
+    """读取已登记 ID；旧字段别名与自由文本均拒绝。"""
+    key = f"{field}_id"
+    if key not in payload:
+        raise NarrativeRejectedError()
+    value = payload[key]
+    if not isinstance(value, str) or not value.strip():
+        raise NarrativeRejectedError()
+    return value.strip()
+
+
+def _reject_extra_keys(payload: Mapping[str, object], allowed: set[str]) -> None:
+    extras = set(payload).difference(allowed)
+    if extras:
+        raise NarrativeRejectedError()
+
+
+def _render_explanation(finding: Finding, choice_id: str) -> str:
+    """使用已核实的 Finding 渲染解释，不使用模型文本。"""
+    choices = narrative_choice_ids(finding)["explanation"]
+    if choice_id == choices[0]:
+        return finding.detail
+    if choice_id == choices[1]:
+        return f"{finding.detail}{finding.assumption}"
+    raise NarrativeRejectedError()
+
+
+def _render_suggestion(finding: Finding, choice_id: str) -> str:
+    """使用已核实的 Finding 渲染建议，不使用模型文本。"""
+    if choice_id in narrative_choice_ids(finding)["suggestion"]:
+        return finding.suggestion
+    raise NarrativeRejectedError()
 
 
 def narrate_bill_findings(
@@ -752,14 +812,14 @@ def narrate_bill_findings(
         return _fallback_narrative(report, "未装配账单解释模型")
     try:
         payload = narrator.narrate(report)
-    except Exception as error:  # 模型通道任何异常都必须降级，不得伪装成功
-        return _fallback_narrative(report, f"模型调用失败（{type(error).__name__}）")
+    except Exception:  # 模型通道任何异常都必须降级，不得伪装成功
+        return _fallback_narrative(report, "模型调用失败（narrative_unavailable）")
     try:
         findings = validate_narrative(report, payload)
-    except NarrativeRejectedError as error:
-        return _fallback_narrative(report, f"模型输出未通过证据校验（{error}）")
-    summary = payload.get("summary")
-    assert isinstance(summary, str)
+    except NarrativeRejectedError:
+        reason = f"{NarrativeRejectedError.message}（{NarrativeRejectedError.code}）"
+        return _fallback_narrative(report, reason)
+    summary = _render_summary(report)
     return BillNarrative(
         summary=summary.strip(),
         findings=findings,
@@ -779,11 +839,7 @@ def _fallback_narrative(report: BillFindingsReport, reason: str) -> BillNarrativ
         )
         for finding in report.findings
     )
-    summary = (
-        f"{report.period} 共 {len(report.transactions)} 笔支出，识别出 {len(findings)} 条需核对项；"
-        f"已确定节省 {Money(report.confirmed_saving_cents).yuan} 元，"
-        f"潜在节省 {Money(report.potential_saving_cents).yuan} 元（估算上限，未实现）。"
-    )
+    summary = _render_summary(report)
     return BillNarrative(
         summary=summary,
         findings=findings,
@@ -793,18 +849,14 @@ def _fallback_narrative(report: BillFindingsReport, reason: str) -> BillNarrativ
     )
 
 
-def _check_text(text: str, report: BillFindingsReport) -> None:
-    """模型文本不得含数值/货币/百分比，也不得断言问题已被确认或已处理。"""
-    if _FORBIDDEN_TEXT.search(text):
-        raise NarrativeRejectedError("模型文本包含数值或货币符号")
-    for pattern in _FORBIDDEN_CLAIMS:
-        if pattern.search(text):
-            raise NarrativeRejectedError("模型文本断言了未经核实的状态")
-    allowed = {txn_id for finding in report.findings for txn_id in finding.txn_ids}
-    allowed.update(item.txn_id for item in report.transactions)
-    for token in _TXN_TOKEN.findall(text):
-        if token not in allowed:
-            raise NarrativeRejectedError(f"模型文本引用了账单外的交易：{token}")
+def _render_summary(report: BillFindingsReport) -> str:
+    """根据报告事实与确定性汇总渲染整体结论。"""
+    return (
+        f"{report.period} 共 {len(report.transactions)} 笔支出，"
+        f"识别出 {len(report.findings)} 条需核对项；"
+        f"已确定节省 {Money(report.confirmed_saving_cents).yuan} 元，"
+        f"潜在节省 {Money(report.potential_saving_cents).yuan} 元（估算上限，未实现）。"
+    )
 
 
 # --------------------------------------------------------------------------- 工具

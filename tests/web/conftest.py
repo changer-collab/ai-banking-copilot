@@ -22,10 +22,13 @@ from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
+from ai_banking_copilot.policy.verification import HmacStrongVerificationProofVerifier
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.app import AppDeps
+
+_TEST_VERIFICATION_KEY = b"web-test-verification-key"
 
 
 @pytest.fixture
@@ -104,7 +107,10 @@ def pep(
     breaker: CircuitBreaker,
 ) -> Pep:
     """策略执行点：本层唯一的执行通道。"""
-    return Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS)
+    return Pep(
+        registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS,
+        strong_verification=HmacStrongVerificationProofVerifier(_TEST_VERIFICATION_KEY),
+    )
 
 
 @pytest.fixture
@@ -127,6 +133,7 @@ def deps(
         breaker=breaker,
         audit=audit,
         user_id=DEMO_USER_ID,
+        verification_key=_TEST_VERIFICATION_KEY,
         today=DEFAULT_BOOKING_DATE,
         risk=risk,
         risk_writer=risk_writer,

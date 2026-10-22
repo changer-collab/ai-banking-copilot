@@ -27,7 +27,7 @@ from ai_banking_copilot.planning.call_observation import (
 )
 from ai_banking_copilot.planning.model_config import ModelConfig, NonBlockingLimiter
 
-DEFAULT_REVIEW_PROMPT_VERSION = "reviewer-v3"
+DEFAULT_REVIEW_PROMPT_VERSION = "reviewer-v4"
 DEFAULT_REVIEW_TIMEOUT_S = 180.0
 DEFAULT_REVIEWER_MODEL = "qwen-plus"
 DEFAULT_REVIEW_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -68,7 +68,8 @@ _REVIEW_SYSTEM_PROMPT = (
     "只输出一个 JSON 对象，不要 Markdown 或额外说明。"
     "对象必须包含 execution_id、cfhash、prompt_version，三个字段必须原样回显输入值；"
     "status 必须是 allow、clarify、reject、manual 之一，"
-    "findings 和 clarifications 必须是字符串数组，没有内容时返回空数组。"
+    "findings 和 clarifications 必须是空字符串数组；只用 status 表示审查结论，"
+    "不得在响应中提供原因、澄清问题或任何面向用户的自由文本。"
 )
 
 
@@ -784,6 +785,8 @@ def _report_from_response(
         raise _ResponseFormatError("缺少 findings 或 clarifications")
     findings = _string_tuple(data["findings"], "findings")
     clarifications = _string_tuple(data["clarifications"], "clarifications")
+    if findings or clarifications:
+        raise _ResponseFormatError("严格 Reviewer 不得返回模型撰写的解释文本")
     diagnostic = data.get("diagnostic_only")
     if (diagnostic is not None and diagnostic is not False) or any(
         data.get(key) is not None for key in ("failure_code", "error", "fallback_reason")

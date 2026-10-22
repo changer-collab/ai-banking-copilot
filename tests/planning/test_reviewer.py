@@ -264,6 +264,27 @@ def test_strict_reviewer_rejects_malformed_response_as_manual() -> None:
     assert report.failure_code is ReviewerFailure.FORMAT_ERROR
 
 
+@pytest.mark.parametrize("field", ["findings", "clarifications"])
+def test_strict_reviewer_rejects_model_authored_explanations(field: str) -> None:
+    request = _request()
+    claim = "账户余额 0 元，退款已到账"
+    data = {
+        "execution_id": request.execution_id,
+        "cfhash": request.cfhash,
+        "prompt_version": request.prompt_version,
+        "status": "clarify",
+        "findings": [],
+        "clarifications": [],
+    }
+    data[field] = [claim]
+
+    report = StrictPlanReviewer(transport=lambda _raw: json.dumps(data)).review(request)
+
+    assert report.status is ReviewStatus.MANUAL
+    assert report.failure_code is ReviewerFailure.FORMAT_ERROR
+    assert claim not in repr(report)
+
+
 @pytest.mark.parametrize("change", ["findings", "clarifications", "diagnostic", "failure"])
 def test_strict_allow_requires_complete_clean_report(change: str) -> None:
     request = _request()
@@ -370,7 +391,7 @@ def test_chat_review_distinguishes_known_unverified_payee_from_ambiguity() -> No
     review_request = ReviewRequest(
         execution_id="identity-boundary", plan=plan, cfhash=cfhash(plan.nodes),
     )
-    assert review_request.prompt_version == "reviewer-v3"
+    assert review_request.prompt_version == "reviewer-v4"
 
 
 def test_chat_review_keeps_identity_conditions_and_object_conflicts_reviewable() -> None:

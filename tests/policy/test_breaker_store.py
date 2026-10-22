@@ -1,5 +1,8 @@
 """熔断状态持久化（P1-3 残留）：跨重启 / 跨 worker 可见，且不削弱「只加严不降级」。"""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from ai_banking_copilot.gateway.store import SCHEMA_SQL, Store
@@ -67,6 +70,45 @@ def test_remote_trip_is_seen_by_another_instance(rw_store: Store) -> None:
     assert worker_b.is_open() is False
     worker_a.lock()
     assert worker_b.is_open() is True
+
+
+def test_ordinary_stale_save_cannot_close_an_open_breaker(rw_store: Store) -> None:
+    store = _store(rw_store)
+    stale = CircuitBreaker(store=store)
+    CircuitBreaker(store=store).trip(BreakerTrigger.INJECTION_DETECTED)
+
+    store.save(BreakerSnapshot(BreakerState.CLOSED))
+
+    assert stale.is_open() is True
+    assert CircuitBreaker(store=store).triggers() == (BreakerTrigger.INJECTION_DETECTED,)
+
+
+def test_concurrent_failure_updates_are_atomic_across_connections(db_path) -> None:
+    setup = Store(db_path)
+    init_breaker_schema(setup)
+    setup.close()
+    count = 12
+    barrier = Barrier(count)
+
+    def record_failure() -> None:
+        store = Store(db_path)
+        try:
+            breaker = CircuitBreaker(threshold=count + 1, store=_store(store))
+            barrier.wait()
+            breaker.record_failure()
+        finally:
+            store.close()
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        futures = [pool.submit(record_failure) for _ in range(count)]
+        for future in futures:
+            future.result()
+
+    check = Store(db_path)
+    try:
+        assert CircuitBreaker(store=_store(check)).failure_count() == count
+    finally:
+        check.close()
 
 
 def test_unlock_is_the_only_downgrade_exit_and_it_propagates(rw_store: Store) -> None:

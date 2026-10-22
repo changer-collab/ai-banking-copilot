@@ -458,6 +458,11 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
         raw_slots = item.get("slots")
         if isinstance(raw_slots, dict):
             slots = {str(key): value for key, value in raw_slots.items()}
+        span = slots.get("span")
+        if not isinstance(span, str) or not span.strip() or span not in utterance:
+            raise LlmUnavailableError(
+                "LLM intent 缺少可回指原文的 slots.span（span_error）"
+            )
         intents.append(
             Intent(
                 action=action,

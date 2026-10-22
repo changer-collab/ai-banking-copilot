@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -9,7 +10,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from ai_banking_copilot.scenarios.bill_findings import BillFindingsReport
+from ai_banking_copilot.scenarios.bill_findings import (
+    NARRATIVE_SUMMARY_ID,
+    BillFindingsReport,
+    narrative_choice_ids,
+)
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 _TABLES = ("accounts", "transactions", "subscriptions", "write_receipts")
@@ -52,14 +57,14 @@ class _Narrator:
         if self._override is not None:
             return self._override
         return {
-            "summary": "本期账单存在需要核对的扣费项，建议逐条核对商户与用途。",
+            "summary_id": NARRATIVE_SUMMARY_ID,
             "findings": [
                 {
-                    "finding_id": finding_id,
-                    "explanation": "该笔扣费与历史常态不一致，具体金额以账单明细为准。",
-                    "suggestion": "核对商户与用途，如有疑问联系银行处理。",
+                    "finding_id": finding.finding_id,
+                    "explanation_id": narrative_choice_ids(finding)["explanation"][0],
+                    "suggestion_id": narrative_choice_ids(finding)["suggestion"][0],
                 }
-                for finding_id in report.finding_ids
+                for finding in report.findings
             ],
         }
 
@@ -167,6 +172,25 @@ def test_narrative_with_invented_amount_or_transaction_is_rejected(deps: AppDeps
     body = client.get("/api/bills/analysis").json()
     assert body["narrative"]["degraded"] is True
     assert "证据校验" in body["narrative"]["degrade_reason"]
+
+
+def test_malicious_narrative_id_is_not_returned_by_api(deps: AppDeps) -> None:
+    claim = "账户余额0元，退款已到账"
+    narrator = _Narrator(override={
+        "summary_id": claim,
+        "findings": [],
+    })
+    client = TestClient(create_app(replace(deps, bill_narrator=narrator)))
+
+    response = client.get("/api/bills/analysis")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["narrative"]["degraded"] is True
+    assert body["narrative"]["degrade_reason"] == (
+        "模型输出未通过证据校验（invalid_narrative）"
+    )
+    assert claim not in json.dumps(body, ensure_ascii=False)
 
 
 def test_completed_bill_attaches_findings_and_other_intents_do_not(deps: AppDeps) -> None:

@@ -1,12 +1,12 @@
 """账单结论式分析的模型通道：只解释已核实的 `Finding`，不产事实、不算金额。
 
-链路位置：`scenarios.bill_findings.analyze_bill`（确定性识别）→ 本模块（模型解释）
-→ `scenarios.bill_findings.validate_narrative`（结构 + 证据校验）→ 失败则确定性降级。
+链路位置：`scenarios.bill_findings.analyze_bill`（确定性识别）→ 本模块（选择受限选项）
+→ `scenarios.bill_findings.validate_narrative`（ID + 事实匹配校验并服务端渲染）→ 失败则确定性降级。
 
 约束：
-- 输入只含已回读的交易明细与 Finding 证据，不含原始商户备注；
-- 输出必须逐条对应既有 `finding_id`，不得新增交易、金额或确认状态；
-- 本模块**不修改**报告里的任何金额，模型只生成文字。
+- 发给模型的输入只含已登记选择 ID，不含账户、金额、实体或交易结果事实；
+- 输出必须逐条对应既有 `finding_id`，并且只选择服务端登记的解释/建议 ID；
+- 本模块**不修改**报告里的任何金额，金额、实体和结果均由服务端渲染。
 """
 
 from __future__ import annotations
@@ -24,24 +24,26 @@ from ai_banking_copilot.planning.llm import (
     _load_httpx_transport,
 )
 from ai_banking_copilot.planning.model_config import ModelConfig, NonBlockingLimiter
-from ai_banking_copilot.scenarios.bill_findings import BillFindingsReport
+from ai_banking_copilot.scenarios.bill_findings import (
+    NARRATIVE_SUMMARY_ID,
+    BillFindingsReport,
+    narrative_choice_ids,
+)
 
-NARRATIVE_PROMPT_VERSION = "bill-narrative-v1"
+NARRATIVE_PROMPT_VERSION = "bill-narrative-v2"
 NARRATIVE_TASK_ID = "bill-narrative"
 
 _SYSTEM_PROMPT = (
-    "你是银行账单解读助手。输入是已经由确定性规则核实的账单明细与识别结果，"
-    "你只负责解释原因、归纳问题、说明影响并给出可执行建议。\n"
+    "你是银行账单解读助手。输入包含确定性识别结果对应的结构化选择列表，"
+    "你只负责从输入给出的登记选项中选择解释与建议。\n"
     "硬性规则：\n"
     "1. 只能解释输入中已有的 finding_id，每个 finding_id 恰好输出一条，不得新增或遗漏。\n"
-    "2. 不得新增交易、交易编号、金额、比例或任何数字；金额与结论一律以输入为准，"
-    "需要提及时用「金额」「差额」等词指代，不得写出具体数值或货币单位。\n"
-    "3. status 为 suspected 的项必须表述为「需要核对 / 可能」，不得写成已经确认的问题；"
-    "status 为 normal 的项只能说明其属于已知正常扣费。\n"
-    "4. 不得声称已经退款、追回、取消、解决或确认扣费错误；不得给出成功率、节省比例等量化承诺。\n"
+    "2. 只能输出输入中列出的 summary_id、explanation_id、suggestion_id，禁止输出自由文本。\n"
+    "3. 不得新增交易、交易编号、金额、实体、比例、结果或任何数字；这些内容由服务端渲染。\n"
+    "4. 不得声称已经退款、追回、取消、解决或确认扣费错误。\n"
     "5. 只输出 JSON，不输出解释性前缀或代码块。\n"
-    '输出格式：{"summary":"整体结论","findings":[{"finding_id":"...",'
-    '"explanation":"原因与影响","suggestion":"具体可执行建议"}]}。'
+    '输出格式：{"summary_id":"findings_overview","findings":[{"finding_id":"...",'
+    '"explanation_id":"...","suggestion_id":"..."}]}。'
 )
 
 
@@ -129,48 +131,14 @@ class LlmBillNarrator:
 
 
 def _user_payload(report: BillFindingsReport) -> str:
-    """整理后的输入：账期、数据来源、明细摘要与 Finding 证据（不含原始备注）。"""
+    """只发送标识符与允许选项；模型不接收事实数据。"""
     return json.dumps(
         {
-            "period": report.period,
-            "as_of": report.as_of.isoformat(),
-            "data_source": report.data_source,
-            "data_source_is_demo": True,
-            "confirmed_saving_cents": report.confirmed_saving_cents,
-            "potential_saving_cents": report.potential_saving_cents,
-            "notes": list(report.notes),
-            "transactions": [
-                {
-                    "txn_id": item.txn_id,
-                    "booked_on": item.booked_on.isoformat(),
-                    "amount_cents": item.amount_cents,
-                    "category": item.category,
-                    "merchant_label": item.merchant_label,
-                }
-                for item in report.transactions
-            ],
+            "summary_id": NARRATIVE_SUMMARY_ID,
             "findings": [
                 {
                     "finding_id": finding.finding_id,
-                    "kind": finding.kind,
-                    "status": finding.status,
-                    "confidence": str(finding.confidence),
-                    "txn_ids": list(finding.txn_ids),
-                    "impact_cents": finding.impact_cents,
-                    "impact_basis": finding.impact_basis,
-                    "saving_basis": finding.saving_basis,
-                    "assumption": finding.assumption,
-                    "detail": finding.detail,
-                    "evidence": [
-                        {
-                            "txn_id": item.txn_id,
-                            "record_id": item.record_id,
-                            "booked_on": item.booked_on.isoformat(),
-                            "amount_cents": item.amount_cents,
-                            "merchant_label": item.merchant_label,
-                        }
-                        for item in finding.evidence
-                    ],
+                    "narrative_options": narrative_choice_ids(finding),
                 }
                 for finding in report.findings
             ],

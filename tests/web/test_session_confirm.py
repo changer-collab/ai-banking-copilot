@@ -6,8 +6,21 @@ import pytest
 from ai_banking_copilot.contracts.authorization import Level
 from ai_banking_copilot.contracts.plan import cfhash
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.policy.audit import (
+    KIND_BREAKER,
+    KIND_DECISION,
+    KIND_EXECUTION,
+    AuditEvent,
+)
+from ai_banking_copilot.policy.breaker import BreakerTrigger, CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
-from ai_banking_copilot.policy.verification import VerificationAttemptLimiter
+from ai_banking_copilot.policy.verification import (
+    ChallengeStatus,
+    DeliveryResult,
+    HmacStrongVerificationProofVerifier,
+    VerificationAttemptLimiter,
+    VerificationBinding,
+)
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.plan_card import PlanCard
 from ai_banking_copilot.web.session import (
@@ -60,6 +73,62 @@ def test_confirm_rejects_a_wrong_card_id(deps: AppDeps) -> None:
         session.confirm("card_nope", frozen_hash=card.frozen_hash)
 
 
+def test_confirmation_spoof_is_audited_and_opens_global_breaker(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """伪造卡片 / 哈希均拒绝且计入全局连续授权失败。"""
+    session, card = _awaiting(deps)
+    attempts = (
+        ("card-nope", card.frozen_hash, ConfirmationMismatchError),
+        (card.card_id, "0" * 64, StalePlanError),
+        ("card-nope-2", card.frozen_hash, ConfirmationMismatchError),
+    )
+    for supplied_card, supplied_hash, error_type in attempts:
+        with pytest.raises(error_type):
+            session.confirm(supplied_card, frozen_hash=supplied_hash)
+
+    assert deps.breaker.is_open() is True
+    assert BreakerTrigger.CONSECUTIVE_AUTH_FAILURES in deps.breaker.triggers()
+    failed = [
+        event for event in deps.audit.events()
+        if event.payload.get("kind") == "confirmation"
+        and event.payload.get("status") == "failed"
+    ]
+    assert [event.payload["reason"] for event in failed[-3:]] == [
+        "card_mismatch", "hash_mismatch", "card_mismatch"
+    ]
+    for event in failed[-3:]:
+        assert event.payload["user_id"] == deps.user_id
+        assert event.payload["session_id"] == session._session_id
+        assert event.payload["execution_id"] == session._execution_id
+        assert event.payload["card_id"] == card.card_id
+        assert event.payload["frozen_hash"] == card.frozen_hash
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+
+def test_completed_confirmation_replay_keeps_idempotency_but_rejects_spoof(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    session, card = _awaiting(deps)
+    first = session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+    failures = deps.breaker.failure_count()
+
+    with pytest.raises(StalePlanError, match="哈希不匹配"):
+        session.confirm(card.card_id, frozen_hash="0" * 64)
+    assert deps.breaker.failure_count() == failures + 1
+
+    replay = session.confirm(card.card_id, frozen_hash=card.frozen_hash)
+    assert replay.state is SessionState.COMPLETED
+    assert deps.breaker.failure_count() == failures + 1
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == len(first.record_ids)
+
+
 def test_confirm_rejects_when_nothing_submitted(deps: AppDeps) -> None:
     with pytest.raises(SessionStateError):
         Session(deps).confirm("card_x", frozen_hash="0" * 64)
@@ -82,6 +151,349 @@ def test_over_limit_requires_strong_verification(deps: AppDeps) -> None:
         card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
     )
     assert done.state is SessionState.COMPLETED
+
+
+@pytest.mark.parametrize("stale_proof", [False, True])
+def test_failed_consumption_audit_cannot_reuse_the_challenge(
+    deps: AppDeps, rw_store: Store, monkeypatch: pytest.MonkeyPatch, stale_proof: bool
+) -> None:
+    session, card = _red_card(deps)
+    prompt = session.request_verification()
+    if stale_proof:
+        challenge = session._challenge
+        assert challenge is not None
+        session._strong_verification_proof = HmacStrongVerificationProofVerifier(
+            session._verification_key
+        ).issue(replace(
+            challenge, status=ChallengeStatus.CONSUMED,
+            binding=replace(challenge.binding, execution_id="prior-execution"),
+        ))
+    original_append = deps.audit.append
+    failed = True
+
+    def append(event: AuditEvent) -> str:
+        nonlocal failed
+        payload = event.payload
+        if (
+            failed
+            and event.kind == KIND_DECISION
+            and payload.get("kind") == "verification"
+            and payload.get("status") == "consumed"
+        ):
+            failed = False
+            raise RuntimeError("injected consumed audit failure")
+        return original_append(event)
+
+    monkeypatch.setattr(deps.audit, "append", append)
+    with pytest.raises(RuntimeError, match="consumed audit failure"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+    assert session._challenge is not None
+    assert session._challenge.status is ChallengeStatus.CONSUMED
+    assert session._strong_verification_proof is None
+    assert session.confirmation() is None
+
+    with pytest.raises(StrongVerificationRequiredError, match="已失效"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+    fresh = session.request_verification()
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=fresh.code
+    )
+    assert done.state is SessionState.COMPLETED
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 1
+    assert deps.audit.verify_chain() is True
+
+
+def test_delivery_audit_failure_invalidates_the_undisclosed_challenge(
+    deps: AppDeps, rw_store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, card = _red_card(deps)
+    provider = session._verification_provider
+    original_deliver = provider.deliver
+    delivered_codes: list[str] = []
+
+    def deliver(
+        binding: VerificationBinding,
+        challenge_id: str,
+        code: str,
+        expires_at: datetime,
+    ) -> DeliveryResult:
+        result = original_deliver(binding, challenge_id, code, expires_at)
+        delivered_codes.append(code)
+        return result
+
+    original_append = deps.audit.append
+    failed = True
+
+    def append(event: AuditEvent) -> str:
+        nonlocal failed
+        if (
+            failed
+            and event.kind == KIND_DECISION
+            and event.payload.get("kind") == "verification"
+            and event.payload.get("status") == "delivered"
+        ):
+            failed = False
+            raise RuntimeError("injected delivery audit failure")
+        return original_append(event)
+
+    monkeypatch.setattr(provider, "deliver", deliver)
+    monkeypatch.setattr(deps.audit, "append", append)
+    with pytest.raises(RuntimeError, match="delivery audit failure"):
+        session.request_verification()
+    assert delivered_codes
+    assert session._challenge is not None
+    assert session._challenge.status is ChallengeStatus.REPLACED
+    assert session._strong_verification_proof is None
+    with pytest.raises(StrongVerificationRequiredError, match="已失效"):
+        session.confirm(
+            card.card_id,
+            frozen_hash=card.frozen_hash,
+            verification_code=delivered_codes[0],
+        )
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+    fresh = session.request_verification()
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=fresh.code
+    )
+    assert done.state is SessionState.COMPLETED
+    assert deps.audit.verify_chain() is True
+
+
+def test_confirmation_audit_failure_discards_the_cached_proof(
+    deps: AppDeps, rw_store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, card = _red_card(deps)
+    prompt = session.request_verification()
+    original_append = deps.audit.append
+    failed = True
+
+    def append(event: AuditEvent) -> str:
+        nonlocal failed
+        if (
+            failed
+            and event.kind == KIND_DECISION
+            and event.payload.get("kind") == "confirmation"
+        ):
+            failed = False
+            raise RuntimeError("injected confirmation audit failure")
+        return original_append(event)
+
+    monkeypatch.setattr(deps.audit, "append", append)
+    with pytest.raises(RuntimeError, match="confirmation audit failure"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+    assert session._challenge is not None
+    assert session._challenge.status is ChallengeStatus.CONSUMED
+    assert session._strong_verification_proof is None
+    assert session.confirmation() is None
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+    with pytest.raises(StrongVerificationRequiredError, match="已失效"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+
+    fresh = session.request_verification()
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=fresh.code
+    )
+    assert done.state is SessionState.COMPLETED
+    assert deps.audit.verify_chain() is True
+
+
+def test_limiter_reset_failure_keeps_challenge_consumed_without_a_proof(
+    deps: AppDeps, rw_store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, card = _red_card(deps)
+    prompt = session.request_verification()
+    original_reset = deps.verification_limiter.reset
+
+    def fail_reset(user_id: str) -> None:
+        raise RuntimeError("injected limiter reset failure")
+
+    monkeypatch.setattr(deps.verification_limiter, "reset", fail_reset)
+    with pytest.raises(RuntimeError, match="limiter reset failure"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+    assert session._challenge is not None
+    assert session._challenge.status is ChallengeStatus.CONSUMED
+    assert session._strong_verification_proof is None
+    assert session.confirmation() is None
+    with pytest.raises(StrongVerificationRequiredError, match="已失效"):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=prompt.code
+        )
+    rows = rw_store.query(
+        "SELECT COUNT(*) AS n FROM transactions WHERE category = '转账' AND channel = 'agent'"
+    )
+    assert rows[0]["n"] == 0
+
+    monkeypatch.setattr(deps.verification_limiter, "reset", original_reset)
+    fresh = session.request_verification()
+    done = session.confirm(
+        card.card_id, frozen_hash=card.frozen_hash, verification_code=fresh.code
+    )
+    assert done.state is SessionState.COMPLETED
+    assert deps.audit.verify_chain() is True
+
+
+def test_pdp_decision_and_confirmation_audits_share_utc_identity(deps: AppDeps) -> None:
+    session = Session(deps, session_id="audit-session")
+    view = session.submit("转给李娜 500 元")
+    assert view.card is not None
+    decision = next(
+        event for event in deps.audit.events()
+        if event.payload.get("kind") == "authorization_decision"
+    )
+    done = session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash)
+    assert done.state is SessionState.COMPLETED
+    confirmation = next(
+        event for event in deps.audit.events()
+        if event.payload.get("kind") == "confirmation"
+    )
+
+    identity_keys = (
+        "user_id", "session_id", "execution_id", "card_id", "frozen_hash"
+    )
+    assert {key: decision.payload[key] for key in identity_keys} == {
+        "user_id": deps.user_id,
+        "session_id": "audit-session",
+        "execution_id": confirmation.payload["execution_id"],
+        "card_id": view.card.card_id,
+        "frozen_hash": view.card.frozen_hash,
+    }
+    assert {key: confirmation.payload[key] for key in identity_keys} == {
+        key: decision.payload[key] for key in identity_keys
+    }
+    for event in (decision, confirmation):
+        timestamp = datetime.fromisoformat(event.timestamp.replace("Z", "+00:00"))
+        assert timestamp.tzinfo is not None and timestamp.utcoffset() == timedelta(0)
+
+
+def test_confirmed_query_execution_audit_keeps_session_identity(deps: AppDeps) -> None:
+    session = Session(deps, session_id="query-audit-session")
+    view = session.submit("查看账单，再查看分类趋势")
+    assert view.card is not None
+    done = session.confirm(view.card.card_id, frozen_hash=view.card.frozen_hash)
+    assert done.state is SessionState.COMPLETED
+    confirmation = next(
+        event for event in deps.audit.events()
+        if event.payload.get("kind") == "confirmation"
+    )
+    executions = [event for event in deps.audit.events() if event.kind == KIND_EXECUTION]
+    assert len(executions) == 2
+    for event in executions:
+        assert event.payload["user_id"] == deps.user_id
+        assert event.payload["session_id"] == "query-audit-session"
+        assert event.payload["execution_id"] == confirmation.payload["execution_id"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["invalid_code", "binding_mismatch", "inactive", "expired"]
+)
+def test_challenge_authentication_anomalies_trip_global_breaker(
+    deps: AppDeps, failure: str
+) -> None:
+    breaker = CircuitBreaker(threshold=1)
+    configured = replace(
+        deps,
+        breaker=breaker,
+        verification_limiter=VerificationAttemptLimiter(
+            max_failures=10, lockout_seconds=60, backoff_seconds=(0,)
+        ),
+    )
+    session, card = _red_card(configured)
+    base = datetime(2026, 10, 1, 9, 0, 0)
+    prompt = session.request_verification(now=base)
+    code = prompt.code
+    now = base
+    if failure == "invalid_code":
+        code = "000000" if code != "000000" else "111111"
+    elif failure == "binding_mismatch":
+        challenge = session._challenge
+        assert challenge is not None
+        session._challenge = replace(
+            challenge,
+            binding=replace(challenge.binding, user_id="other-user"),
+        )
+    elif failure == "inactive":
+        challenge = session._challenge
+        assert challenge is not None
+        session._challenge = replace(challenge, status=ChallengeStatus.CONSUMED)
+    else:
+        now = base + timedelta(seconds=VERIFICATION_TTL_S + 1)
+
+    with pytest.raises(StrongVerificationRequiredError):
+        session.confirm(
+            card.card_id, frozen_hash=card.frozen_hash, verification_code=code, now=now
+        )
+
+    assert breaker.is_open() is True
+    assert BreakerTrigger.CONSECUTIVE_AUTH_FAILURES in breaker.triggers()
+    breaker_event = next(
+        event for event in deps.audit.events()
+        if event.kind == KIND_BREAKER
+        and event.payload.get("trigger") == BreakerTrigger.CONSECUTIVE_AUTH_FAILURES.value
+    )
+    assert breaker_event.payload["scope"] == "global"
+    verification_event = next(
+        event for event in deps.audit.events()
+        if event.payload.get("kind") == "verification"
+        and event.payload.get("status") in {"failed", "expired"}
+    )
+    assert verification_event.payload["reason"] == failure
+
+
+def test_challenge_failure_retrip_after_unlock_is_audited(deps: AppDeps) -> None:
+    configured = replace(
+        _limited_deps(deps, max_failures=10),
+        breaker=CircuitBreaker(threshold=1),
+    )
+
+    for cycle in range(2):
+        session, card = _red_card(configured)
+        prompt = session.request_verification()
+        with pytest.raises(StrongVerificationRequiredError, match="不正确"):
+            session.confirm(
+                card.card_id,
+                frozen_hash=card.frozen_hash,
+                verification_code=_wrong_code(prompt.code),
+            )
+
+        events = [
+            event for event in configured.audit.events()
+            if event.kind == KIND_BREAKER
+            and event.payload.get("trigger") == BreakerTrigger.CONSECUTIVE_AUTH_FAILURES.value
+        ]
+        assert len(events) == cycle + 1
+        assert events[-1].payload["scope"] == "global"
+        assert events[-1].payload["state"] == "open"
+        assert events[-1].payload["user_id"] == configured.user_id
+        assert events[-1].payload["session_id"] == session._session_id
+
+        if cycle == 0:
+            configured.breaker.unlock()
 
 
 def test_strong_verification_rejects_a_wrong_code_then_accepts_the_right_one(

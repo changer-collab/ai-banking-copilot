@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -100,6 +101,22 @@ def test_log_is_append_only_jsonl(tmp_path: Path) -> None:
     log.append(_event("e2"))
     log.append(_event("e3"))
     assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_parallel_instances_serialize_appends_and_stamp_events(tmp_path: Path) -> None:
+    path = tmp_path / "audit.jsonl"
+
+    def append_one(index: int) -> None:
+        AuditLog(path).append(_event(f"parallel-{index}"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(append_one, range(40)))
+
+    log = AuditLog(path)
+    events = log.events()
+    assert len(events) == 40
+    assert all(event.timestamp.endswith("Z") for event in events)
+    assert log.verify_chain() is True
 
 
 def test_event_requires_id_and_kind() -> None:

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from ai_banking_copilot.planning.llm import (
+    FallbackIntentModel,
     LlmIntentModel,
     LlmUnavailableError,
 )
@@ -100,13 +101,48 @@ def test_injected_transport_is_used_without_network() -> None:
     def _transport(request: str) -> str:
         requests.append(request)
         return json.dumps(
-            {"intents": [{"action": "transfer.create", "confidence": 0.8, "evidence": "转给李娜"}]}
+            {
+                "intents": [{
+                    "action": "transfer.create",
+                    "confidence": 0.8,
+                    "evidence": "转给李娜",
+                    "slots": {"span": "转给李娜 500 元"},
+                }]
+            }
         )
 
     proposal = LlmIntentModel(transport=_transport).propose("转给李娜 500 元", {})
     assert [intent.action for intent in proposal.intents] == ["transfer.create"]
     assert proposal.intents[0].confidence == 0.8
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("slots", [None, {}, {"span": 7}, {"span": "转给王五 500 元"}])
+def test_missing_or_unanchored_llm_span_is_rejected(slots) -> None:
+    def _transport(request: str) -> str:
+        intent = {"action": "transfer.create", "confidence": 0.9}
+        if slots is not None:
+            intent["slots"] = slots
+        return json.dumps({"intents": [intent]})
+
+    with pytest.raises(LlmUnavailableError, match="span"):
+        LlmIntentModel(transport=_transport).propose("转给李娜 500 元", {})
+
+
+def test_invalid_llm_span_uses_only_the_deterministic_template_fallback() -> None:
+    model = FallbackIntentModel(
+        LlmIntentModel(
+            transport=lambda request: json.dumps({
+                "intents": [{"action": "transfer.create", "confidence": 0.9}]
+            })
+        )
+    )
+
+    proposal = model.propose("转给李娜 500 元", {})
+
+    assert proposal.channel == "template_fallback"
+    assert proposal.intents[0].slots["span"] == "转给李娜 500 元"
+    assert model.degraded is True
 
 
 def test_actions_outside_the_whitelist_are_dropped() -> None:

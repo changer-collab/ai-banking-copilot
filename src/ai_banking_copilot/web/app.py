@@ -124,8 +124,8 @@ class AppDeps:
     verification_limiter: VerificationAttemptLimiter = field(
         default_factory=VerificationAttemptLimiter
     )
-    """强验证失败计数与退避（**进程内、按用户**）：同一 `AppDeps` 下的多个会话共享计数，
-    因此换 `session_id` 不能重置失败次数。多 worker / 多实例各自独立计数，不是全局限流。"""
+    """强验证失败计数与退避（按用户）：默认组合根注入 SQLite store，跨 worker 与重启共享；
+    手工构造 `AppDeps` 时默认仍为进程内，同一实例的多个会话共享计数。"""
     session_repository: SessionRepository | None = None
     receipts: ReceiptReader | None = None
     model_observations: TaskObservations | None = None
@@ -555,22 +555,49 @@ def create_app(deps: AppDeps) -> FastAPI:
         with manager.lock:
             before_state = deps.breaker.state().value
             before_triggers = [trigger.value for trigger in deps.breaker.triggers()]
-            deps.breaker.unlock()
-            deps.audit.append(
-                AuditEvent(
-                    event_id=f"{KIND_OPERATOR}:breaker-unlock:{secrets.token_hex(8)}",
-                    kind=KIND_OPERATOR,
-                    payload={
-                        "action": "breaker-unlock",
-                        "reason": reason,
-                        "scope": "global",
-                        "state_before": before_state,
-                        "triggers_before": before_triggers,
-                        "state_after": deps.breaker.state().value,
-                    },
-                    prev_hash="",
+            try:
+                deps.audit.append(
+                    AuditEvent(
+                        event_id=f"{KIND_OPERATOR}:breaker-unlock:{secrets.token_hex(8)}",
+                        kind=KIND_OPERATOR,
+                        payload={
+                            "action": "breaker-unlock",
+                            "reason": reason,
+                            "scope": "global",
+                            "state_before": before_state,
+                            "triggers_before": before_triggers,
+                            "state_after": before_state,
+                            "authorized_state_after": "closed",
+                            "unlock_completed": False,
+                        },
+                        prev_hash="",
+                    )
                 )
-            )
+            except Exception as error:
+                # Keep the shared breaker OPEN until the authorization is durable.
+                raise HTTPException(status_code=503, detail="审计记录失败，熔断保持锁定") from error
+            # The audit append above intentionally runs while the breaker is still OPEN.
+            deps.breaker.unlock()
+            try:
+                deps.audit.append(
+                    AuditEvent(
+                        event_id=f"{KIND_OPERATOR}:breaker-unlock-completed:{secrets.token_hex(8)}",
+                        kind=KIND_OPERATOR,
+                        payload={
+                            "action": "breaker-unlock-completed",
+                            "reason": reason,
+                            "scope": "global",
+                            "state_before": before_state,
+                            "state_after": deps.breaker.state().value,
+                            "authorized_state_after": "closed",
+                            "unlock_completed": True,
+                        },
+                        prev_hash="",
+                    )
+                )
+            except Exception as error:
+                deps.breaker.lock()
+                raise HTTPException(status_code=503, detail="解锁结果未留痕，熔断已回锁") from error
         return {
             "action": "breaker-unlock",
             "reason": reason,
