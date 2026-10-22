@@ -474,7 +474,7 @@ def _fake_model_http(monkeypatch: pytest.MonkeyPatch, *, reviewer_failure: str |
             request = json.loads(payload["messages"][1]["content"])
             content = {key: request[key] for key in ("execution_id", "cfhash", "prompt_version")}
             content.update(status="clarify" if clarify and calls.count(role) == 1 else "allow",
-                           findings=[], clarifications=["请选择账户"] if clarify else [],
+                           findings=[], clarifications=[],
                            usage={"total_tokens": 999999})
             usage = {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
         return httpx.Response(200, json={"choices": [{"message": {

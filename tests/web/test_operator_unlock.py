@@ -5,9 +5,10 @@
 
 from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 
-from ai_banking_copilot.policy.audit import KIND_OPERATOR
+from ai_banking_copilot.policy.audit import KIND_OPERATOR, AuditEvent
 from ai_banking_copilot.policy.breaker import BreakerTrigger
 from ai_banking_copilot.web.app import AppDeps, create_app
 
@@ -60,10 +61,15 @@ def test_unlock_is_the_only_downgrade_exit_and_it_is_audited(deps: AppDeps) -> N
     assert deps.breaker.is_open() is False
 
     operator_events = [event for event in deps.audit.events() if event.kind == KIND_OPERATOR]
-    assert len(operator_events) == 1
-    assert operator_events[0].payload["reason"] == "误报，已人工核实"
-    assert operator_events[0].payload["state_before"] == "open"
-    assert operator_events[0].payload["state_after"] == "closed"
+    assert len(operator_events) == 2
+    pending, completed = operator_events
+    assert pending.payload["reason"] == "误报，已人工核实"
+    assert pending.payload["state_before"] == "open"
+    assert pending.payload["state_after"] == "open"
+    assert pending.payload["authorized_state_after"] == "closed"
+    assert pending.payload["unlock_completed"] is False
+    assert completed.payload["state_after"] == "closed"
+    assert completed.payload["unlock_completed"] is True
     assert deps.audit.verify_chain() is True
 
 
@@ -93,3 +99,41 @@ def test_unlock_restores_writes_end_to_end(deps: AppDeps) -> None:
         },
     ).json()
     assert done["state"] == "completed"
+
+
+def test_unlock_audit_failure_restores_global_lock(
+    deps: AppDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps.breaker.trip(BreakerTrigger.INJECTION_DETECTED)
+
+    def fail_append(_event: object) -> str:
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(deps.audit, "append", fail_append)
+    response = _client(deps, TOKEN).post(
+        PATH, json={"reason": "审计故障演练"}, headers=HEADERS
+    )
+    assert response.status_code == 503
+    assert deps.breaker.is_open() is True
+
+
+def test_unlock_audit_callback_observes_breaker_still_open(
+    deps: AppDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps.breaker.trip(BreakerTrigger.INJECTION_DETECTED)
+    original_append = deps.audit.append
+
+    def observe_append(event: AuditEvent) -> str:
+        payload = event.payload
+        if payload["action"] == "breaker-unlock":
+            assert deps.breaker.is_open() is True
+        else:
+            assert deps.breaker.is_open() is False
+        return original_append(event)
+
+    monkeypatch.setattr(deps.audit, "append", observe_append)
+    response = _client(deps, TOKEN).post(
+        PATH, json={"reason": "审计先行演练"}, headers=HEADERS
+    )
+    assert response.status_code == 200
+    assert deps.breaker.is_open() is False

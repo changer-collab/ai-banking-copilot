@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,10 @@ from ai_banking_copilot.planning.llm import (
 )
 from ai_banking_copilot.planning.reviewer import BypassPlanReviewer, Reviewer
 from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditEvent, ChainBrokenError
+from ai_banking_copilot.policy.verification import (
+    DEFAULT_MAX_FAILURES,
+    VerificationError,
+)
 from ai_banking_copilot.web.app import AppDeps
 
 
@@ -128,6 +134,22 @@ def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:
     deps = build_deps(tmp_path / "copilot.db", env={})
     assert isinstance(deps, AppDeps)
     assert isinstance(deps.intent_model, FallbackIntentModel)
+
+
+def test_build_deps_shares_verification_lockout_across_instances(tmp_path: Path) -> None:
+    db_path = tmp_path / "shared-verification.db"
+    env = {DISABLE_LLM_ENV: "1"}
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    with ExitStack() as resources:
+        first = build_deps(db_path, env=env, resources=resources)
+        second = build_deps(db_path, env=env, resources=resources)
+        for index in range(DEFAULT_MAX_FAILURES):
+            limiter = first.verification_limiter if index % 2 == 0 else second.verification_limiter
+            limiter.record_failure("user-1", now=now)
+
+        with pytest.raises(VerificationError, match="^locked$"):
+            first.verification_limiter.check("user-1", now=now)
+        assert second.verification_limiter.failures("user-1") == DEFAULT_MAX_FAILURES
 
 
 def test_build_audit_log_verifies_the_chain_at_startup(tmp_path: Path) -> None:

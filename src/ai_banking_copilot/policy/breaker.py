@@ -94,8 +94,8 @@ class CircuitBreaker:
     """熔断器：状态只可加严，降级必须显式解锁。
 
     `store` 非空时状态**跨重启 / 跨 worker 可见**（详见 `policy/breaker_store.py`）：
-    构造时装载、每次变更落盘、每次读取先刷新。计数在多写者下是**尽力而为**（后写覆盖），
-    但**状态位与触发项只会聚合、不会静默回退**——`unlock()` 仍是唯一降级出口。
+    构造时装载、每次变更落盘、每次读取先刷新。SQLite 存储下失败计数通过事务原子递增，
+    普通写入不能把 OPEN 覆盖为 CLOSED，`unlock()` 是唯一降级出口。
     """
 
     def __init__(
@@ -118,9 +118,9 @@ class CircuitBreaker:
                 self._adopt(snapshot)
 
     def _adopt(self, snapshot: BreakerSnapshot) -> None:
-        """采纳快照：状态位**跟随存储**（`unlock()` 才能跨实例生效），计数与触发项**只聚合**。"""
+        """采纳权威存储快照；存储端保证只有显式 unlock 可降级。"""
         self._state = snapshot.state
-        self._failures = max(self._failures, snapshot.failures)
+        self._failures = snapshot.failures
         for trigger in snapshot.triggers:
             if trigger not in self._fired:
                 self._fired.append(trigger)
@@ -136,16 +136,20 @@ class CircuitBreaker:
     def _persist(self) -> None:
         if self._store is None:
             return
-        self._store.save(
-            BreakerSnapshot(
-                state=self._state,
-                failures=self._failures,
-                triggers=tuple(self._fired),
-            )
+        snapshot = BreakerSnapshot(
+            state=self._state,
+            failures=self._failures,
+            triggers=tuple(self._fired),
         )
+        self._store.save(snapshot)
 
     def record_failure(self) -> None:
         """记录一次授权失败；连续失败达阈值即按触发 1 熔断。"""
+        atomic = getattr(self._store, "record_failure_atomic", None)
+        if callable(atomic):
+            snapshot = atomic(self._threshold)
+            self._adopt(snapshot)
+            return
         self._refresh()
         self._failures += 1
         if self._failures >= self._threshold:
@@ -180,6 +184,13 @@ class CircuitBreaker:
 
     def unlock(self) -> None:
         """解锁：**唯一**降级出口；调用方必须完成二次确认 + 留痕。"""
+        unlock = getattr(self._store, "unlock", None)
+        if callable(unlock):
+            snapshot = unlock()
+            if isinstance(snapshot, BreakerSnapshot):
+                self._adopt(snapshot)
+                self._failures = 0
+                return
         self._state = BreakerState.CLOSED
         self._failures = 0
         self._persist()

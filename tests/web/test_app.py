@@ -1,8 +1,10 @@
+import json
 from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from ai_banking_copilot.planning.reviewer import StrictPlanReviewer
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 
@@ -55,6 +57,65 @@ def test_injection_takeover_is_visible_over_http(deps: AppDeps) -> None:
     assert package["plan"] is not None
     assert package["audit_ids"]
     assert "MANUAL_REVIEW" in package["hit_rules"]
+
+
+@pytest.mark.parametrize(
+    ("status", "field", "expected_state"),
+    [
+        ("clarify", "clarifications", "taken_over"),
+        ("reject", "findings", "taken_over"),
+    ],
+)
+def test_strict_reviewer_free_text_never_reaches_web_response(
+    deps: AppDeps, status: str, field: str, expected_state: str,
+) -> None:
+    claim = "账户余额 0 元，退款已到账"
+
+    def transport(raw: str) -> dict[str, object]:
+        request = json.loads(raw)
+        return {
+            **{key: request[key] for key in ("execution_id", "cfhash", "prompt_version")},
+            "status": status,
+            "findings": [claim] if field == "findings" else [],
+            "clarifications": [claim] if field == "clarifications" else [],
+        }
+
+    client = _client(replace(
+        deps,
+        reviewer=StrictPlanReviewer(transport=transport),
+        reviewer_required=True,
+    ))
+    response = client.post("/api/submit", json={"utterance": "转给李娜 500 元"})
+
+    assert response.status_code == 200
+    assert response.json()["state"] == expected_state
+    assert claim not in response.text
+    if expected_state == "taken_over":
+        takeover = client.get("/api/takeover")
+        assert takeover.status_code == 200
+        assert claim not in takeover.text
+
+
+def test_strict_reviewer_clarification_uses_server_template(deps: AppDeps) -> None:
+    def transport(raw: str) -> dict[str, object]:
+        request = json.loads(raw)
+        return {
+            **{key: request[key] for key in ("execution_id", "cfhash", "prompt_version")},
+            "status": "clarify",
+            "findings": [],
+            "clarifications": [],
+        }
+
+    client = _client(replace(
+        deps,
+        reviewer=StrictPlanReviewer(transport=transport),
+        reviewer_required=True,
+    ))
+    response = client.post("/api/submit", json={"utterance": "转给李娜 500 元"})
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "needs_clarification"
+    assert response.json()["questions"] == ["请补充或核对计划信息后重新提交。"]
 
 
 def test_unknown_task_returns_a_refusal(deps: AppDeps) -> None:

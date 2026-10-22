@@ -49,10 +49,16 @@ from ai_banking_copilot.planning.review_context import (
 )
 from ai_banking_copilot.planning.reviewer import (
     DEFAULT_REVIEW_PROMPT_VERSION,
+    BypassPlanReviewer,
+    FallbackPlanReviewer,
+    ReviewChannel,
+    ReviewerFailure,
     ReviewerUnavailableError,
     ReviewReport,
     ReviewRequest,
     ReviewStatus,
+    StrictPlanReviewer,
+    TemplatePlanReviewer,
 )
 from ai_banking_copilot.planning.slots import (
     REQUIRED_SLOTS,
@@ -75,7 +81,7 @@ from ai_banking_copilot.policy.breaker import (
     CircuitBreaker,
 )
 from ai_banking_copilot.policy.execution import CommittedWriteError, assess_plan
-from ai_banking_copilot.policy.gate import assert_frozen
+from ai_banking_copilot.policy.gate import StalePlanError, assert_frozen
 from ai_banking_copilot.policy.pdp import (
     FLAG_DEVICE_CHANGE,
     FLAG_INJECTION_DETECTED,
@@ -99,6 +105,8 @@ from ai_banking_copilot.policy.verification import (
     ChallengeRecord,
     ChallengeStatus,
     DemoVerificationProvider,
+    HmacStrongVerificationProofVerifier,
+    StrongVerificationProof,
     VerificationBinding,
     VerificationError,
     VerificationMode,
@@ -406,6 +414,7 @@ class Session:
                 and not deps.verification_strict else b""
             )
         self._verification_key: bytes = verification_key
+        self._strong_verification_proof: StrongVerificationProof | None = None
         self._verification_limiter = deps.verification_limiter
         """强验证失败计数（**服务端**维护、按用户共享）：换挑战或换会话都不清零。"""
         self._execution_id = secrets.token_hex(16)
@@ -490,17 +499,42 @@ class Session:
             ) and not session._recovery_blocked:
                 session._state = SessionState.AWAITING_CONFIRM
                 session._message = "会话已恢复，已完成步骤保留；请重新确认，红卡需重新强验证"
-        if (deps.reviewer_required and session._pending is not None
+        if (session._pending is not None
                 and session._state in (SessionState.AWAITING_CONFIRM, SessionState.EXECUTING,
                                        SessionState.INTERRUPTED)
                 and not plan_is_pure_query(session._pending.plan)):
             report = session._review_report
-            if (report is None or report.status is not ReviewStatus.ALLOW or report.diagnostic_only
-                    or report.failure_code or report.error or report.fallback_reason
-                    or report.execution_id != session._execution_id
+            configured_channel = _configured_reviewer_channel(deps.reviewer)
+            channel_mismatch = (
+                report is not None
+                and (configured_channel is None or report.channel != configured_channel)
+            )
+            invalid_required_evidence = (
+                deps.reviewer_required
+                and (
+                    report is None or report.status is not ReviewStatus.ALLOW
+                    or report.diagnostic_only or report.failure_code or report.error
+                    or report.fallback_reason or report.execution_id != session._execution_id
                     or report.cfhash != session._pending.card.frozen_hash
-                    or report.prompt_version != DEFAULT_REVIEW_PROMPT_VERSION):
-                session._enter_takeover("恢复的审查证据不满足当前严格要求", session._pending)
+                    or report.prompt_version != DEFAULT_REVIEW_PROMPT_VERSION
+                )
+            )
+            if channel_mismatch:
+                assert report is not None
+                session._review_report = replace(
+                    report,
+                    status=ReviewStatus.MANUAL,
+                    findings=(),
+                    clarifications=(),
+                    failure_code=ReviewerFailure.BINDING_MISMATCH,
+                    error="恢复时 Reviewer 通道与当前配置不一致",
+                )
+            if channel_mismatch or invalid_required_evidence:
+                reason = (
+                    "恢复的 Reviewer 通道与当前配置不一致，需重新审查"
+                    if channel_mismatch else "恢复的审查证据不满足当前严格要求"
+                )
+                session._enter_takeover(reason, session._pending)
         session._persist()
         return session
 
@@ -623,6 +657,10 @@ class Session:
         self._last_utterance = utterance
         self._last_selected = dict(selected) if selected is not None else None
         self._clarification_keys = clarification_keys
+        # 注入是提交入口的系统性信号；即使后续在意图装配前被拒绝，也必须触发全局熔断。
+        injection_detected = detect_injection(utterance)
+        if injection_detected:
+            self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
         refusal = _guard_utterance(utterance)
         if refusal is not None:
             return self._refuse(refusal, utterance)
@@ -666,6 +704,7 @@ class Session:
             accepted_intents=intents,
             notes=notes,
             now=moment,
+            injection_already_tripped=injection_detected,
         )
 
     @_serialized
@@ -747,6 +786,7 @@ class Session:
         review_kind: str = "user_request",
         accepted_intents: tuple[Intent, ...] = (),
         now: datetime | None = None,
+        injection_already_tripped: bool = False,
     ) -> SubmissionView:
         questions = tuple(ask.prompt for ask in asks)
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
@@ -766,7 +806,9 @@ class Session:
         plan = outcome.plan
         if outcome.decision is None:
             return self._refuse("场景未产出裁决，安全拒绝", utterance)
-        flags = self._context_flags(utterance)
+        flags = self._context_flags(
+            injection_already_tripped=injection_already_tripped,
+        )
         risk = assess_plan(
             plan, registry=self._deps.registry, gateway=self._deps.gateway,
             user_id=self._deps.user_id, today=self._deps.today, flags=flags,
@@ -774,15 +816,26 @@ class Session:
         )
         node_decisions = risk.node_decisions
         decision = risk.decision
+        hit_rules = tuple(reason.value for reason in decision.reasons)
         card = self._render_card(
             plan, decision, now=now if now is not None else datetime.now(),
         )
+        self._audit(KIND_DECISION, {
+            "kind": "authorization_decision",
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "card_id": card.card_id,
+            "frozen_hash": card.frozen_hash,
+            "decision_level": decision.level.name,
+            "reason_codes": list(hit_rules),
+            "actions": [node.action for node in plan.nodes],
+        })
         quota = (
             DailyQuota(risk.limit_cents, risk.accumulated_cents)
             if decision.level in (Level.YELLOW, Level.RED) and _plan_has_outflow(plan)
             else None
         )
-        hit_rules = tuple(reason.value for reason in decision.reasons)
         pending = _Pending(
             card=card,
             plan=plan,
@@ -885,19 +938,27 @@ class Session:
                     },
                 )
                 if reviewer_enforced and report.status is ReviewStatus.CLARIFY:
+                    review_text = (
+                        report.clarifications or report.findings
+                        if report.channel != ReviewChannel.LLM_STRICT.value
+                        else ()
+                    )
                     if review_kind == "due_proposal":
-                        self._enter_takeover(
-                            "到期待办审查需要重新检查："
-                            + "；".join(report.clarifications or report.findings)
-                            + "。请重新检查待办或转人工处理。",
-                            pending,
+                        reason = (
+                            "到期待办审查需要重新检查：" + "；".join(review_text)
+                            + "。请重新检查待办或转人工处理。"
+                            if review_text
+                            else "到期待办审查要求重新检查，请重新检查待办或转人工处理。"
                         )
+                        self._enter_takeover(reason, pending)
                         return SubmissionView(
                             self._state, self._message, card, decision, plan, ()
                         )
                     self._pending = None
                     self._confirmation = None
-                    clarification_text = report.clarifications or report.findings
+                    clarification_text = review_text or (
+                        "请补充或核对计划信息后重新提交。",
+                    )
                     self._state = SessionState.NEEDS_CLARIFICATION
                     self._message = "独立审查需要澄清：" + "；".join(clarification_text)
                     return SubmissionView(
@@ -912,9 +973,18 @@ class Session:
                     ReviewStatus.REJECT,
                     ReviewStatus.MANUAL,
                 }:
+                    review_text = (
+                        report.findings
+                        if report.channel != ReviewChannel.LLM_STRICT.value
+                        else ()
+                    )
+                    reason = (
+                        "独立审查未通过：" + "；".join(review_text)
+                        if review_text
+                        else "独立审查未通过，请转人工核对。"
+                    )
                     self._enter_takeover(
-                        "独立审查未通过：" + "；".join(report.findings or (report.status.value,)),
-                        pending,
+                        reason, pending,
                     )
                     return SubmissionView(self._state, self._message, card, decision, plan, ())
             else:
@@ -1185,7 +1255,9 @@ class Session:
             user_id=self._deps.user_id, today=self._deps.today, flags=flags,
         ))
 
-    def _context_flags(self, utterance: str) -> frozenset[str]:
+    def _context_flags(
+        self, *, injection_already_tripped: bool = False,
+    ) -> frozenset[str]:
         """上下文异常标记的**唯一生产者**，并同步接线熔断触发 2 / 5（**作用域不同**，裁决 #27）。
 
         - 注入检测命中 → 标记 `injection_detected`（PDP 单向升 `MANUAL`）+ **全局**熔断（触发 2）：
@@ -1196,9 +1268,9 @@ class Session:
           **不得默认放行**：宁可多一次人工核验，也不把未知当正常。
         """
         flags: set[str] = set()
-        if detect_injection(utterance):
+        # 提交入口已检测并熔断；这里直接沿用结果，不重复扫描同一条输入。
+        if injection_already_tripped:
             flags.add(FLAG_INJECTION_DETECTED)
-            self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
         anomaly = self._session_risk_anomaly()
         if anomaly is None:
             flags.add(FLAG_DEVICE_CHANGE)
@@ -1238,6 +1310,22 @@ class Session:
                 "state": self._deps.breaker.state().value,
             },
         )
+
+    def _note_verification_auth_failure(self, reason: str) -> None:
+        """挑战错码、重放、过期或绑定异常计入全局连续授权失败熔断。"""
+        trigger = BreakerTrigger.CONSECUTIVE_AUTH_FAILURES
+        was_open = self._deps.breaker.is_open()
+        self._deps.breaker.record_failure()
+        if not was_open and self._deps.breaker.is_open():
+            self._audit(KIND_BREAKER, {
+                "trigger": trigger.value,
+                "detail": f"强验证挑战异常：{reason}",
+                "scope": "global",
+                "state": self._deps.breaker.state().value,
+                "user_id": self._deps.user_id,
+                "session_id": self._session_id,
+                "execution_id": self._execution_id,
+            })
 
     def _trip_session(self, trigger: BreakerTrigger, detail: str) -> None:
         """**会话级**熔断（触发 3 / 4 / 5 = 单会话行为异常）：只惩罚本会话，不动全局。
@@ -1387,8 +1475,23 @@ class Session:
             raise SessionStateError("业务证据待人工核对，禁止继续执行")
         if self._state is SessionState.COMPLETED:
             if card_id != pending.card.card_id:
+                self._note_confirmation_auth_failure(
+                    pending,
+                    card_id=card_id,
+                    frozen_hash=frozen_hash,
+                    reason="card_mismatch",
+                )
                 raise ConfirmationMismatchError("计划卡不匹配")
-            assert_frozen(pending.plan, frozen_hash)
+            try:
+                assert_frozen(pending.plan, frozen_hash)
+            except StalePlanError:
+                self._note_confirmation_auth_failure(
+                    pending,
+                    card_id=card_id,
+                    frozen_hash=frozen_hash,
+                    reason="hash_mismatch",
+                )
+                raise
             self._require_confirmation(pending)
             return self._execution_view()
         if self._state not in (
@@ -1398,28 +1501,56 @@ class Session:
             raise SessionStateError(f"当前状态不允许确认：{self._state.value}")
         self._assert_not_expired(pending, now=now)
         if card_id != pending.card.card_id:
+            self._note_confirmation_auth_failure(
+                pending,
+                card_id=card_id,
+                frozen_hash=frozen_hash,
+                reason="card_mismatch",
+            )
             raise ConfirmationMismatchError(
                 f"计划卡不匹配：收到 {card_id}｜待确认 {pending.card.card_id}"
             )
-        assert_frozen(pending.plan, frozen_hash)
-        prior = self._confirmation
-        strong_verified = (
-            prior is not None
-            and prior.execution_id == self._execution_id
-            and prior.frozen_hash == pending.card.frozen_hash
-            and prior.strong_verified
-        )
+        try:
+            assert_frozen(pending.plan, frozen_hash)
+        except StalePlanError:
+            self._note_confirmation_auth_failure(
+                pending,
+                card_id=card_id,
+                frozen_hash=frozen_hash,
+                reason="hash_mismatch",
+            )
+            raise
+        proof = self._strong_verification_proof
+        strong_verified = proof is not None and proof.binding == self._verification_binding(pending)
         if PROMPT_STRONG_VERIFY in pending.card.requires and not strong_verified:
             self._assert_strong_verification(
                 pending, verification_code, now=now if now is not None else datetime.now(UTC)
             )
-            strong_verified = True
+            proof = self._strong_verification_proof
+            strong_verified = proof is not None
         self._confirmation = ConfirmationRecord(
             plan=pending.plan, frozen_hash=pending.card.frozen_hash,
             execution_id=self._execution_id, approved_level=pending.card.level,
             strong_verified=strong_verified,
         )
-        if self._breaker_blocks(pending):
+        blocked_by_breaker = self._breaker_blocks(pending)
+        try:
+            self._audit(KIND_DECISION, {
+                "kind": "confirmation",
+                "status": "blocked" if blocked_by_breaker else "accepted",
+                "user_id": self._deps.user_id,
+                "session_id": self._session_id,
+                "execution_id": self._execution_id,
+                "card_id": pending.card.card_id,
+                "frozen_hash": pending.card.frozen_hash,
+                "decision_level": pending.decision.level.name,
+                "strong_verified": strong_verified,
+            })
+        except BaseException:
+            self._confirmation = None
+            self._strong_verification_proof = None
+            raise
+        if blocked_by_breaker:
             self._enter_takeover("熔断打开：非纯查询转人工接管", pending)
             return self._execution_view()
         if not self._pending_node_ids:
@@ -1466,10 +1597,15 @@ class Session:
             self._verification_audit("failed", pending, reason="delivery_failed")
             raise StrongVerificationRequiredError("强验证投递失败，请稍后重新申请") from None
         self._challenge = replace(challenge, provider_reference=delivery.reference)
-        self._verification_audit(
-            "delivered", pending, mode=delivery.mode.value, channel=delivery.channel,
-            target=delivery.target,
-        )
+        try:
+            self._verification_audit(
+                "delivered", pending, mode=delivery.mode.value, channel=delivery.channel,
+                target=delivery.target,
+            )
+        except BaseException:
+            self._challenge = invalidate_challenge(self._challenge)
+            self._strong_verification_proof = None
+            raise
         return VerificationPrompt(
             channel=delivery.channel,
             target=delivery.target,
@@ -1503,19 +1639,33 @@ class Session:
             raise StrongVerificationRequiredError(
                 "红色（大额 / 不可逆）需强验证：请先申请验证码"
             )
-        self._assert_verification_allowed(pending, now=now)
+        # 新验证尝试先清理旧绑定证明，签发或审计失败后不得残留授权。
+        self._strong_verification_proof = None
         try:
-            self._challenge = verify_challenge(
-                challenge, self._verification_binding(pending), code,
-                key=self._verification_key, now=now,
+            consumed_challenge = self._verification_limiter.verify_attempt(
+                self._deps.user_id,
+                now=now,
+                compare=lambda: verify_challenge(
+                    challenge, self._verification_binding(pending), code,
+                    key=self._verification_key, now=now,
+                ),
             )
         except VerificationError as error:
+            if error.reason in {"locked", "throttled"}:
+                self._verification_audit("throttled", pending, reason=error.reason)
+                message = (
+                    "验证码错误次数过多，请稍后再试"
+                    if error.reason == "locked" else "验证码尝试过于频繁，请稍后再试"
+                )
+                raise StrongVerificationRequiredError(message) from None
             if error.reason == "expired":
                 self._challenge = replace(challenge, status=ChallengeStatus.EXPIRED)
             failures = (
-                self._verification_limiter.record_failure(self._deps.user_id, now=now)
+                self._verification_limiter.failures(self._deps.user_id)
                 if error.reason == "invalid_code" else None
             )
+            if error.reason in {"invalid_code", "binding_mismatch", "inactive", "expired"}:
+                self._note_verification_auth_failure(error.reason)
             self._verification_audit(
                 "expired" if error.reason == "expired" else "failed", pending,
                 reason=error.reason, attempts=failures,
@@ -1526,8 +1676,19 @@ class Session:
                 "inactive": "验证码已失效：请重新申请",
             }.get(error.reason, "验证码不正确")
             raise StrongVerificationRequiredError(message) from None
-        self._verification_limiter.reset(self._deps.user_id)
-        self._verification_audit("consumed", pending)
+        self._challenge = consumed_challenge
+        try:
+            if not self._verification_key:
+                raise StrongVerificationRequiredError("强验证密钥不可用，拒绝签发授权证明")
+            proof = HmacStrongVerificationProofVerifier(self._verification_key).issue(
+                self._challenge
+            )
+            self._verification_audit("consumed", pending)
+            self._verification_limiter.reset(self._deps.user_id)
+        except BaseException:
+            self._strong_verification_proof = None
+            raise
+        self._strong_verification_proof = proof
 
     def _verification_binding(self, pending: _Pending) -> VerificationBinding:
         return VerificationBinding(
@@ -1545,7 +1706,31 @@ class Session:
             **details,
         })
 
+    def _note_confirmation_auth_failure(
+        self,
+        pending: _Pending,
+        *,
+        card_id: str,
+        frozen_hash: str,
+        reason: str,
+    ) -> None:
+        """记录伪造确认并计入全局连续授权失败熔断。"""
+        self._audit(KIND_DECISION, {
+            "kind": "confirmation",
+            "status": "failed",
+            "reason": reason,
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "card_id": pending.card.card_id,
+            "frozen_hash": pending.card.frozen_hash,
+            "supplied_card_id": card_id,
+            "supplied_frozen_hash": frozen_hash,
+        })
+        self._note_verification_auth_failure(f"confirmation_{reason}")
+
     def _invalidate_verification(self, reason: str) -> None:
+        self._strong_verification_proof = None
         if self._challenge is not None and self._challenge.status is ChallengeStatus.ACTIVE:
             self._challenge = invalidate_challenge(self._challenge)
             if self._pending is not None:
@@ -1650,8 +1835,9 @@ class Session:
                     user_id=self._deps.user_id,
                     session_id=self._session_id,
                     execution_id=self._execution_id,
+                    card_id=pending.card.card_id,
                     approved_level=confirmation.approved_level,
-                    strong_verified=confirmation.strong_verified,
+                    verification_proof=self._strong_verification_proof,
                     today=self._deps.today,
                     completed_records=tuple(
                         record_id
@@ -1670,6 +1856,9 @@ class Session:
                     pending.plan,
                     request_key,
                     execution=execution,
+                    user_id=self._deps.user_id,
+                    session_id=self._session_id,
+                    execution_id=self._execution_id,
                 )
             except WritePreconditionError as error:
                 self._in_flight = None
@@ -2176,6 +2365,29 @@ def _span_override_for(
     if isinstance(raw, (tuple, list)) and index < len(raw):
         value = raw[index]
         return value if isinstance(value, str) else None
+    return None
+
+
+def _configured_reviewer_channel(reviewer: object | None) -> str | None:
+    """返回当前装配 Reviewer 的通道；未知实现不视为可验证来源。"""
+    if reviewer is None:
+        return None
+    channel = getattr(reviewer, "channel", None)
+    if isinstance(channel, ReviewChannel):
+        return channel.value
+    if isinstance(channel, str):
+        try:
+            return ReviewChannel(channel).value
+        except ValueError:
+            return None
+    if isinstance(reviewer, StrictPlanReviewer):
+        return ReviewChannel.LLM_STRICT.value
+    if isinstance(reviewer, TemplatePlanReviewer):
+        return ReviewChannel.TEMPLATE.value
+    if isinstance(reviewer, BypassPlanReviewer):
+        return ReviewChannel.BYPASS.value
+    if isinstance(reviewer, FallbackPlanReviewer):
+        return _configured_reviewer_channel(reviewer._primary)
     return None
 
 

@@ -15,10 +15,12 @@ from ai_banking_copilot.scenarios.bill_findings import (
     BILL_DATA_SOURCE,
     DUPLICATE_WINDOW_HOURS,
     LOOKBACK_MONTHS,
+    NARRATIVE_SUMMARY_ID,
     Finding,
     FindingEvidence,
     analyze_bill,
     narrate_bill_findings,
+    narrative_choice_ids,
     report_payload,
     summarize_findings,
 )
@@ -359,11 +361,11 @@ def test_narrative_accepts_evidence_bound_explanation(
     report = _analyze(gateway)
     finding = report.findings[0]
     narrator = _Narrator({
-        "summary": "账单中发现一笔未登记的持续性扣费，建议先核对扣费方。",
+        "summary_id": NARRATIVE_SUMMARY_ID,
         "findings": [{
             "finding_id": finding.finding_id,
-            "explanation": "该扣费名称带有服务性质，但未在订阅登记中，可能是自动续费。",
-            "suggestion": "核对扣费依据；若非本人授权，联系商户核实。",
+            "explanation_id": narrative_choice_ids(finding)["explanation"][1],
+            "suggestion_id": narrative_choice_ids(finding)["suggestion"][0],
         }],
     })
 

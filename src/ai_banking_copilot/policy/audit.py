@@ -23,8 +23,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
+from threading import RLock
+from typing import Any, BinaryIO, cast
 
 from ai_banking_copilot.gateway.hashing import canonical_json, sha256_hex
 
@@ -59,6 +66,7 @@ KIND_TOOL_HOOK = "tool_hook"
 """**Pre-Tool Hook** 事件：写操作被拦截时的工具名、操作类型、计划 ID、拦截原因与确认状态。"""
 
 _REQUIRED_KEYS = ("event_id", "kind", "payload", "prev_hash", "entry_hash")
+_PROCESS_FILE_LOCK = RLock()
 
 
 class ChainBrokenError(RuntimeError):
@@ -73,6 +81,7 @@ class AuditEvent:
     kind: str
     payload: dict[str, object]
     prev_hash: str
+    timestamp: str = ""
 
     def __post_init__(self) -> None:
         if not self.event_id:
@@ -81,15 +90,23 @@ class AuditEvent:
             raise ValueError("kind 不得为空")
         if self.prev_hash and len(self.prev_hash) != 64:
             raise ValueError("prev_hash 必须是 64 位十六进制或空串")
+        if self.timestamp and not self.timestamp.endswith("Z"):
+            raise ValueError("timestamp 必须是 UTC RFC3339 字符串")
 
 
 class AuditLog:
-    """追加式审计链：**只追加、不修改**历史行。"""
+    """追加式审计链：**只追加、不修改**历史行。
+
+    追加由同进程路径锁和操作系统文件锁共同保护，因此多个 `AuditLog` 实例及多个
+    worker 不会同时读取同一个旧链头后各自追加。文件锁只覆盖本地文件系统；把日志复制到
+    不支持锁语义的远端文件系统仍需外部单写者或日志服务。
+    """
 
     def __init__(self, path: str | Path, *, key: str | None = None) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._key = key.strip() if key and key.strip() else None
+        self._lock = RLock()
 
     @property
     def path(self) -> Path:
@@ -107,20 +124,27 @@ class AuditLog:
 
     def append(self, event: AuditEvent) -> str:
         """追加一条事件，返回本条 `entry_hash`（即新链头）。"""
-        head = self.head()
-        if event.prev_hash and event.prev_hash != head:
-            raise ChainBrokenError(
-                f"审计链断裂：事件 {event.event_id} 声明 prev_hash={event.prev_hash}，链头={head}"
-            )
-        alg = ALG_HMAC_SHA256 if self._key is not None else ALG_SHA256
-        entry_hash = _entry_hash(event, head, alg=alg, key=self._key)
-        record = _record(event, head)
-        if alg != ALG_SHA256:
-            record[_ALG_FIELD] = alg
-        record["entry_hash"] = entry_hash
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(canonical_json(record) + "\n")
-        return entry_hash
+        with self._lock, _PROCESS_FILE_LOCK, _locked_file(self._path) as handle:
+            entries = _read_entries_from_handle(handle)
+            head = str(entries[-1]["entry_hash"]) if entries else GENESIS_HASH
+            if event.prev_hash and event.prev_hash != head:
+                raise ChainBrokenError(
+                    f"审计链断裂：事件 {event.event_id} 声明 "
+                    f"prev_hash={event.prev_hash}，链头={head}"
+                )
+            # New events always carry one UTC timestamp; empty timestamps preserve legacy hashes.
+            stamped = event if event.timestamp else _stamp(event)
+            alg = ALG_HMAC_SHA256 if self._key is not None else ALG_SHA256
+            entry_hash = _entry_hash(stamped, head, alg=alg, key=self._key)
+            record = _record(stamped, head)
+            if alg != ALG_SHA256:
+                record[_ALG_FIELD] = alg
+            record["entry_hash"] = entry_hash
+            handle.seek(0, 2)
+            handle.write((canonical_json(record) + "\n").encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+            return entry_hash
 
     def verify_chain(self) -> bool:
         """重算全链并校验链接关系；任一不符返回 `False`（不抛异常）。
@@ -155,22 +179,66 @@ class AuditLog:
         return tuple(_event_of(entry, str(entry["prev_hash"])) for entry in self._read_entries())
 
     def _read_entries(self) -> list[dict[str, object]]:
-        if not self._path.is_file():
-            return []
-        return [
-            _parse_line(line)
-            for line in self._path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        with _PROCESS_FILE_LOCK, _locked_file(self._path) as handle:
+            return _read_entries_from_handle(handle)
+
+
+@contextmanager
+def _locked_file(path: Path) -> Iterator[BinaryIO]:
+    """Hold an advisory lock for one local audit file while reading or appending."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.touch()
+    with path.open("r+b") as handle:
+        handle.seek(0)
+        if os.name == "nt":
+            msvcrt = cast(Any, import_module("msvcrt"))
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl = cast(Any, import_module("fcntl"))
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield handle
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt = cast(Any, import_module("msvcrt"))
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl = cast(Any, import_module("fcntl"))
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_entries_from_handle(handle: BinaryIO) -> list[dict[str, object]]:
+    handle.seek(0)
+    text = handle.read().decode("utf-8")
+    return [_parse_line(line) for line in text.splitlines() if line.strip()]
 
 
 def _record(event: AuditEvent, prev_hash: str) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "event_id": event.event_id,
         "kind": event.kind,
         "payload": event.payload,
         "prev_hash": prev_hash,
     }
+    if event.timestamp:
+        record["timestamp"] = event.timestamp
+    return record
+
+
+def _stamp(event: AuditEvent) -> AuditEvent:
+    return AuditEvent(
+        event_id=event.event_id,
+        kind=event.kind,
+        payload=event.payload,
+        prev_hash=event.prev_hash,
+        timestamp=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    )
 
 
 def _entry_hash(
@@ -194,6 +262,7 @@ def _event_of(entry: dict[str, object], prev_hash: str) -> AuditEvent:
         kind=str(entry["kind"]),
         payload={str(key): value for key, value in payload.items()},
         prev_hash=prev_hash,
+        timestamp=str(entry.get("timestamp", "")),
     )
 
 

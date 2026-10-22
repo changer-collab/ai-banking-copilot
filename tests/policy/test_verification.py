@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from threading import Barrier, Event, Lock
 from typing import Any
 
 import httpx
 import pytest
 
+from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.policy.verification import (
     ChallengeRecord,
     DemoVerificationProvider,
     ExternalVerificationProvider,
+    HmacStrongVerificationProofVerifier,
+    StoreVerificationAttemptStateStore,
     VerificationAttemptLimiter,
     VerificationBinding,
     VerificationError,
@@ -36,6 +42,26 @@ def test_challenge_is_hmac_backed_and_one_time() -> None:
     with pytest.raises(VerificationError) as exc:
         verify_challenge(consumed, binding(), code, key=b"test-secret", now=now)
     assert exc.value.reason == "inactive"
+
+
+def test_strong_verification_proof_is_signed_and_bound_to_execution() -> None:
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    key = b"test-secret"
+    record, code = create_challenge(binding(), key=key, now=now)
+    consumed = verify_challenge(record, binding(), code, key=key, now=now)
+    verifier = HmacStrongVerificationProofVerifier(key)
+    proof = verifier.issue(consumed)
+
+    expected = {
+        "user_id": "u-1",
+        "session_id": "s-1",
+        "execution_id": "e-1",
+        "card_id": "card-1",
+        "plan_hash": "hash-1",
+    }
+    assert verifier.verify(proof, **expected)
+    assert not verifier.verify(proof, **{**expected, "session_id": "other"})
+    assert not verifier.verify(replace(proof, signature="forged"), **expected)
 
 
 def test_wrong_code_does_not_consume_and_binding_mismatch_is_rejected() -> None:
@@ -114,6 +140,25 @@ def test_external_provider_posts_safe_payload_and_masks_target() -> None:
         "card_id": "card-1",
         "frozen_hash": "hash-1",
     }
+
+
+@pytest.mark.parametrize("endpoint", ["http://verify.invalid/challenge", "ftp://verify.invalid"])
+def test_external_provider_refuses_non_https_without_sending(endpoint: str) -> None:
+    calls = 0
+
+    class Transport:
+        def post(self, _endpoint: str, **_kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("non-HTTPS endpoint must not be contacted")
+
+    provider = ExternalVerificationProvider(
+        endpoint=endpoint, token="server-token", target="configured-recipient",
+        transport=Transport(),
+    )
+    with pytest.raises(VerificationError, match="^delivery_unavailable$"):
+        provider.deliver(binding(), "c1", "123456", datetime(2026, 10, 20, tzinfo=UTC))
+    assert calls == 0
 
 
 @pytest.mark.parametrize(
@@ -363,3 +408,136 @@ def test_attempt_limiter_errors_carry_no_sensitive_detail() -> None:
         limiter.check("u-1", now=now)
     assert exc.value.reason == "locked"
     assert str(exc.value) == "locked"
+
+
+def test_attempt_limiter_shares_failures_across_instances_and_store_reopen(
+    rw_store: Store,
+    db_path: Path,
+) -> None:
+    first_store = StoreVerificationAttemptStateStore(rw_store)
+    first = VerificationAttemptLimiter(
+        max_failures=2, lockout_seconds=60, backoff_seconds=(0,), store=first_store
+    )
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    first.record_failure("u-1", now=now)
+
+    second_store = Store(db_path, StoreMode.READ_WRITE)
+    try:
+        second = VerificationAttemptLimiter(
+            max_failures=2,
+            lockout_seconds=60,
+            backoff_seconds=(0,),
+            store=StoreVerificationAttemptStateStore(second_store),
+        )
+        assert second.failures("u-1") == 1
+        second.record_failure("u-1", now=now)
+        with pytest.raises(VerificationError, match="^locked$"):
+            VerificationAttemptLimiter(
+                max_failures=2,
+                lockout_seconds=60,
+                backoff_seconds=(0,),
+                store=StoreVerificationAttemptStateStore(rw_store),
+            ).check("u-1", now=now)
+    finally:
+        second_store.close()
+
+
+def test_attempt_limiter_concurrent_failures_are_atomic_across_stores(
+    rw_store: Store,
+    db_path: Path,
+) -> None:
+    second_store = Store(db_path, StoreMode.READ_WRITE)
+    first = VerificationAttemptLimiter(
+        max_failures=6,
+        lockout_seconds=60,
+        backoff_seconds=(0,),
+        store=StoreVerificationAttemptStateStore(rw_store),
+    )
+    second = VerificationAttemptLimiter(
+        max_failures=6,
+        lockout_seconds=60,
+        backoff_seconds=(0,),
+        store=StoreVerificationAttemptStateStore(second_store),
+    )
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    start = Barrier(2)
+
+    def record_three(limiter: VerificationAttemptLimiter) -> list[int]:
+        start.wait()
+        return [limiter.record_failure("u-concurrent", now=now) for _ in range(3)]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            counts = [
+                count
+                for worker_counts in pool.map(record_three, (first, second))
+                for count in worker_counts
+            ]
+        assert sorted(counts) == list(range(1, 7))
+        for limiter in (first, second):
+            with pytest.raises(VerificationError, match="^locked$"):
+                limiter.check("u-concurrent", now=now)
+    finally:
+        second_store.close()
+
+
+def test_attempt_check_compare_and_failure_are_atomic_across_stores(
+    rw_store: Store,
+    db_path: Path,
+) -> None:
+    second_store = Store(db_path, StoreMode.READ_WRITE)
+    first = VerificationAttemptLimiter(
+        max_failures=1, lockout_seconds=60, backoff_seconds=(0,),
+        store=StoreVerificationAttemptStateStore(rw_store),
+    )
+    second = VerificationAttemptLimiter(
+        max_failures=1, lockout_seconds=60, backoff_seconds=(0,),
+        store=StoreVerificationAttemptStateStore(second_store),
+    )
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    start = Barrier(2)
+    comparison_started = Event()
+    release_comparison = Event()
+    comparisons = 0
+    comparisons_lock = Lock()
+
+    def reject_code() -> None:
+        nonlocal comparisons
+        with comparisons_lock:
+            comparisons += 1
+        comparison_started.set()
+        assert release_comparison.wait(timeout=5)
+        raise VerificationError("invalid_code")
+
+    def accept_code() -> str:
+        nonlocal comparisons
+        with comparisons_lock:
+            comparisons += 1
+        return "accepted"
+
+    def run(
+        limiter: VerificationAttemptLimiter, compare: object
+    ) -> str:
+        start.wait(timeout=5)
+        if compare is accept_code:
+            assert comparison_started.wait(timeout=5)
+        try:
+            return limiter.verify_attempt(
+                "u-atomic", now=now, compare=compare  # type: ignore[arg-type]
+            )
+        except VerificationError as error:
+            return error.reason
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rejected = pool.submit(run, first, reject_code)
+            accepted = pool.submit(run, second, accept_code)
+            assert comparison_started.wait(timeout=5)
+            release_comparison.set()
+            outcomes = [rejected.result(timeout=5), accepted.result(timeout=5)]
+        assert sorted(outcomes) == ["invalid_code", "locked"]
+        assert comparisons == 1
+        assert first.failures("u-atomic") == 1
+    finally:
+        release_comparison.set()
+        second_store.close()

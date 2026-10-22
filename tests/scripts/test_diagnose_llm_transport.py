@@ -34,7 +34,16 @@ def _result(channel: str, classification: ProbeClass, text: str | None = None) -
 
 def _planner_text(action: str = "bills.monthly") -> str:
     return json.dumps(
-        {"intents": [{"action": action, "confidence": 1.0, "evidence": "查账单"}]},
+        {
+            "intents": [
+                {
+                    "action": action,
+                    "confidence": 1.0,
+                    "evidence": "查账单",
+                    "slots": {"span": "上月账单"},
+                }
+            ]
+        },
         ensure_ascii=False,
     )
 

@@ -20,8 +20,8 @@ def _strict_response(
         return {
             **{key: request[key] for key in ("execution_id", "cfhash", "prompt_version")},
             "status": status,
-            "findings": [] if status == "allow" else ["固定响应：原文条件或对象不一致"],
-            "clarifications": ["请明确原文条件或收款对象"] if status == "clarify" else [],
+            "findings": [],
+            "clarifications": [],
         }
 
     return StrictPlanReviewer(transport=transport)

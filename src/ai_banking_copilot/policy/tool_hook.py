@@ -29,10 +29,13 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 
 from ai_banking_copilot.contracts.authorization import Level
 from ai_banking_copilot.policy.audit import KIND_TOOL_HOOK, AuditEvent, AuditLog
+from ai_banking_copilot.policy.breaker import CircuitBreaker
+from ai_banking_copilot.policy.verification import StrongVerificationProof
 from ai_banking_copilot.tools.registry import ToolSpec
 
 DEFAULT_GRANT_TTL_SECONDS = 120.0
@@ -97,6 +100,10 @@ class WriteGrant:
     member: str
     approved_level: Level
     strong_verified: bool
+    verification_proof: StrongVerificationProof | None
+    today: date
+    completed_records: tuple[str, ...]
+    flags: frozenset[str]
     issued_at: float
     expires_at: float
 
@@ -129,6 +136,10 @@ class GrantLedger:
         member: str,
         approved_level: Level,
         strong_verified: bool,
+        verification_proof: StrongVerificationProof | None,
+        today: date,
+        completed_records: tuple[str, ...],
+        flags: frozenset[str],
     ) -> WriteGrant:
         now = self._clock()
         grant = WriteGrant(
@@ -142,6 +153,10 @@ class GrantLedger:
             member=member,
             approved_level=approved_level,
             strong_verified=strong_verified,
+            verification_proof=verification_proof,
+            today=today,
+            completed_records=completed_records,
+            flags=flags,
             issued_at=now,
             expires_at=now + self._ttl,
         )
@@ -162,9 +177,18 @@ class GrantLedger:
 class PreToolHook:
     """工具执行前的统一拦截器：分类 → 只读直通 / 写操作凭据校验 → 审计落链。"""
 
-    def __init__(self, *, ledger: GrantLedger, audit: AuditLog) -> None:
+    def __init__(
+        self,
+        *,
+        ledger: GrantLedger,
+        audit: AuditLog,
+        breaker: CircuitBreaker | None = None,
+        failure_recorder: Callable[[str, str, str, str, str], None] | None = None,
+    ) -> None:
         self._ledger = ledger
         self._audit = audit
+        self._breaker = breaker
+        self._failure_recorder = failure_recorder
 
     @property
     def ledger(self) -> GrantLedger:
@@ -183,27 +207,42 @@ class PreToolHook:
         execution_id: str = "",
     ) -> ToolHookBlocked:
         """构造一次拦截并落审计（不抛出，由调用方 `raise`）。不含任何凭证 / 敏感值。"""
-        self._audit.append(
-            AuditEvent(
-                event_id=f"hook:{spec.action}:{secrets.token_hex(8)}",
-                kind=KIND_TOOL_HOOK,
-                payload={
-                    "tool": spec.action,
-                    "op_type": operation_of(spec),
-                    "tool_class": classify(spec).value,
-                    "plan_id": plan_id,
-                    "plan_hash": plan_hash,
-                    "block_reason": reason,
-                    "confirmation_state": status.value,
-                    "result": "blocked",
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "execution_id": execution_id,
-                },
-                prev_hash="",
+        if self._failure_recorder is not None:
+            self._failure_recorder(
+                spec.action,
+                f"write_grant_{status.value}",
+                user_id,
+                session_id,
+                execution_id,
             )
-        )
-        return ToolHookBlocked(status, spec.action, reason, plan_id=plan_id)
+        elif self._breaker is not None:
+            self._breaker.record_failure()
+        blocked = ToolHookBlocked(status, spec.action, reason, plan_id=plan_id)
+        try:
+            self._audit.append(
+                AuditEvent(
+                    event_id=f"hook:{spec.action}:{secrets.token_hex(8)}",
+                    kind=KIND_TOOL_HOOK,
+                    payload={
+                        "tool": spec.action,
+                        "op_type": operation_of(spec),
+                        "tool_class": classify(spec).value,
+                        "plan_id": plan_id,
+                        "plan_hash": plan_hash,
+                        "reject_reason": f"write_grant_{status.value}",
+                        "block_reason": reason,
+                        "confirmation_state": status.value,
+                        "result": "blocked",
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "execution_id": execution_id,
+                    },
+                    prev_hash="",
+                )
+            )
+        except Exception:
+            blocked.add_note("Hook 拒绝事件未能写入审计链；写操作仍被拦截。")
+        return blocked
 
     def authorize(
         self,

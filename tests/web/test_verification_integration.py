@@ -34,8 +34,10 @@ class _ExternalProvider:
 
 def test_external_api_omits_code_and_binds_session(deps: AppDeps) -> None:
     provider = _ExternalProvider()
+    verification_key = deps.verification_key
+    assert verification_key is not None
     configured = replace(
-        deps, verification_provider=provider, verification_key=b"test-key",
+        deps, verification_provider=provider, verification_key=verification_key,
         verification_strict=True,
     )
     client = TestClient(create_app(configured))
@@ -66,7 +68,7 @@ def test_strict_demo_and_failed_delivery_do_not_create_active_challenge(deps: Ap
     for configured in (
         replace(deps, verification_strict=True),
         replace(deps, verification_provider=_ExternalProvider(fail=True),
-                verification_key=b"test-key", verification_strict=True),
+                verification_key=deps.verification_key, verification_strict=True),
     ):
         session = Session(configured, session_id="strict")
         submitted = session.submit("转给李娜 1500 元")

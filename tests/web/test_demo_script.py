@@ -98,7 +98,14 @@ def test_llm_on_succeeds_where_llm_off_refuses(deps: AppDeps) -> None:
 
     def _transport(request: str) -> str:
         return json.dumps(
-            {"intents": [{"action": "transfer.create", "confidence": 0.9, "evidence": "长尾口语"}]}
+            {
+                "intents": [{
+                    "action": "transfer.create",
+                    "confidence": 0.9,
+                    "evidence": "长尾口语",
+                    "slots": {"span": utterance},
+                }]
+            }
         )
 
     from dataclasses import replace

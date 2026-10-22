@@ -15,8 +15,10 @@ from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.policy.verification import HmacStrongVerificationProofVerifier
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.registry import ParamSpec, RiskClass, ToolRegistry, ToolSpec
+from tests.policy.verification_support import TEST_VERIFICATION_KEY
 
 
 @pytest.fixture
@@ -244,4 +246,13 @@ def pep(
     audit: AuditLog,
     breaker: CircuitBreaker,
 ) -> Pep:
-    return Pep(registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS)
+    return Pep(
+        registry,
+        gateway,
+        core_bank,
+        audit,
+        breaker,
+        WRITE_HANDLERS,
+        QUERY_HANDLERS,
+        strong_verification=HmacStrongVerificationProofVerifier(TEST_VERIFICATION_KEY),
+    )

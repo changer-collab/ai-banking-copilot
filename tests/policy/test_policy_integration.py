@@ -17,13 +17,14 @@ from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
-from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditLog
+from ai_banking_copilot.policy.audit import KIND_DECISION, KIND_EXECUTION, AuditLog
 from ai_banking_copilot.policy.breaker import BreakerTrigger, CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError, assert_frozen
 from ai_banking_copilot.policy.pdp import ObjectState, PolicyRequest, evaluate, evaluate_plan
 from ai_banking_copilot.policy.pep import ExecResult, NotAuthorizedError, Pep, manifest_plan
 from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.tools.registry import ToolCall
+from tests.policy.verification_support import issue_policy_write_grant
 
 
 @dataclass(frozen=True)
@@ -64,14 +65,17 @@ def _execute_confirmed(pep: Pep, call: ToolCall, level: Level, key: str) -> Exec
     """以「用户已确认」的服务端路径执行写动作（签发一次性凭据后再过 Pre-Tool Hook）。"""
     decision = _decision(level)
     plan = manifest_plan(call)
-    return pep.execute(
-        call, decision, plan, key,
-        execution=pep.issue_write_grant(
-            call, decision, plan,
-            approved_level=level,
-            strong_verified=level >= Level.RED,
-        ),
+    execution = issue_policy_write_grant(
+        pep,
+        call,
+        decision,
+        plan,
+        user_id=DEMO_USER_ID,
+        session_id=f"policy-integration:{key}",
+        execution_id=f"execution:{key}",
+        approved_level=level,
     )
+    return pep.execute(call, decision, plan, key, execution=execution)
 
 
 def _node_params(amount_cents: int = 50000) -> dict[str, object]:
@@ -189,7 +193,9 @@ def test_end_to_end_query_then_transfer_with_intact_audit_chain(
     transfer_result = _execute_confirmed(pep, transfer_call, Level.RED, "t1")
     assert query_result.status == "queried"
     assert transfer_result.status == "settled"
-    assert [event.kind for event in audit.events()] == [KIND_EXECUTION, KIND_EXECUTION]
+    assert [event.kind for event in audit.events()] == [
+        KIND_EXECUTION, KIND_DECISION, KIND_EXECUTION,
+    ]
     assert audit.verify_chain() is True
     transaction_id = transfer_result.record_ids[0]
     txn = gateway.transaction(transaction_id.split(":")[1])

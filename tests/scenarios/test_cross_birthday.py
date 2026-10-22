@@ -18,7 +18,13 @@ from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
-from ai_banking_copilot.policy.pep import Pep
+from ai_banking_copilot.policy.pep import Pep, _plan_hash
+from ai_banking_copilot.policy.verification import (
+    HmacStrongVerificationProofVerifier,
+    VerificationBinding,
+    create_challenge,
+    verify_challenge,
+)
 from ai_banking_copilot.scenarios.cross import birthday_plan
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
@@ -28,6 +34,7 @@ _DUE = date(2026, 10, 1)
 """生日（演示播种 `10-03`）前 2 天，恰为统一基准日。"""
 
 _BEFORE = date(2026, 9, 30)
+_TEST_VERIFICATION_KEY = b"birthday-test-verification-key"
 
 
 @pytest.fixture
@@ -89,6 +96,7 @@ def test_birthday_order_executes_and_verifies_provenance(
         CircuitBreaker(),
         WRITE_HANDLERS,
         QUERY_HANDLERS,
+        strong_verification=HmacStrongVerificationProofVerifier(_TEST_VERIFICATION_KEY),
     )
     node = nodes[0]
     call = ToolCall(
@@ -102,13 +110,35 @@ def test_birthday_order_executes_and_verifies_provenance(
         },
     )
     decision = Decision(level=Level.RED, reasons=(ReasonCode.AMOUNT_OVER_DAILY_LIMIT,))
+    session_id = "birthday-session"
+    execution_id = "birthday-execution"
+    card_id = "birthday-card"
+    binding = VerificationBinding(
+        user_id=DEMO_USER_ID,
+        session_id=session_id,
+        execution_id=execution_id,
+        card_id=card_id,
+        frozen_hash=_plan_hash(plan),
+    )
+    challenge, code = create_challenge(binding, key=_TEST_VERIFICATION_KEY)
+    consumed = verify_challenge(challenge, binding, code, key=_TEST_VERIFICATION_KEY)
+    verifier = HmacStrongVerificationProofVerifier(_TEST_VERIFICATION_KEY)
+    proof = verifier.issue(consumed)
     result = pep.execute(
         call,
         decision,
         plan,
         "birthday:order1",
         execution=pep.issue_write_grant(
-            call, decision, plan, approved_level=Level.RED, strong_verified=True,
+            call,
+            decision,
+            plan,
+            user_id=DEMO_USER_ID,
+            session_id=session_id,
+            execution_id=execution_id,
+            approved_level=Level.RED,
+            verification_proof=proof,
+            card_id=card_id,
         ),
     )
     assert result.status == "placed"

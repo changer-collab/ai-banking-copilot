@@ -6,11 +6,18 @@ import pytest
 
 from ai_banking_copilot.contracts.plan import validate_plan
 from ai_banking_copilot.contracts.taint import Trust, Value
+from ai_banking_copilot.gateway.errors import SandboxTimeout, SandboxViolation
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.sandbox import SandboxResourceLimit, SandboxUnavailable
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
+from ai_banking_copilot.planning.analysis_codegen import (
+    AnalysisCodeGenerationError,
+    AnalysisTask,
+)
 from ai_banking_copilot.planning.llm import Intent
-from ai_banking_copilot.policy.pep import QueryContext, QueryResult
+from ai_banking_copilot.policy.pep import NotAuthorizedError, QueryContext, QueryResult
+from ai_banking_copilot.scenarios import bills as bills_module
 from ai_banking_copilot.scenarios.base import ClarificationRequired, plan_is_pure_query
 from ai_banking_copilot.scenarios.bills import (
     ANOMALY_THRESHOLD_CENTS,
@@ -22,6 +29,11 @@ from ai_banking_copilot.scenarios.bills import (
     large_transactions,
 )
 from ai_banking_copilot.tools.catalog import build_default_registry
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_codegen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AIB_DISABLE_LLM", "1")
 
 
 def _bills_intent() -> Intent:
@@ -246,6 +258,17 @@ def test_yearly_bill_reads_same_period_of_two_years(gateway: FactGateway) -> Non
     # 种子库含 2025 年同期数据 ⇒ 产出**真实百分比**（2026 支出为 2025 的 100/85 ⇒ +17.65%）。
     assert "同比不可判" not in result.detail
     assert "+17.65%" in result.detail
+    assert len(result.sandbox_events) == 4
+    assert result.sandbox_events[0]["use"] == "current_year_expense"
+    first_result = result.sandbox_events[0]["result"]
+    assert isinstance(first_result, dict)
+    assert first_result["operator"] == "sum"
+    assert len(first_result["sources"]) == 9
+    assert result.sandbox_events[-1]["task"] == "yoy"
+    assert result.sandbox_events[-1]["use"] == "year_over_year"
+    yoy_result = result.sandbox_events[-1]["result"]
+    assert isinstance(yoy_result, dict)
+    assert yoy_result["operator"] == "yoy"
 
 
 def test_yearly_bill_reports_no_prior_period_without_calling_operator(tmp_path: Path) -> None:
@@ -297,3 +320,128 @@ def test_yearly_bill_refuses_yoy_when_prior_period_sums_to_zero(tmp_path: Path) 
         reader.close()
     assert "支出合计为 0" in detail
     assert "同比不可判" in detail
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [SandboxUnavailable, SandboxTimeout, SandboxResourceLimit, SandboxViolation],
+)
+def test_yearly_bill_sandbox_failure_returns_sources_without_annual_values(
+    gateway: FactGateway,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise error_type("test sandbox failure")
+
+    monkeypatch.setattr(bills_module, "run_generated_analysis", fail)
+    result = _yearly_result(gateway)
+
+    assert len(result.record_ids) == 18
+    assert len(result.provenance) == 18
+    assert len(set(result.record_ids)) == 18
+    assert result.detail == "年度账单分析沙箱拒绝或无法执行；本次未生成年度数值。"
+
+
+def test_yearly_bill_yoy_sandbox_failure_hides_computed_annual_values(
+    gateway: FactGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_analysis = bills_module.run_generated_analysis
+
+    def fail_yoy(code: str, snapshot: object, **kwargs: object) -> object:
+        if code.startswith("yoy("):
+            raise SandboxTimeout("test timeout")
+        return real_analysis(code, snapshot, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bills_module, "run_generated_analysis", fail_yoy)
+    result = _yearly_result(gateway)
+
+    assert len(result.record_ids) == 18
+    assert result.detail == "年度账单分析沙箱拒绝或无法执行；本次未生成年度数值。"
+
+
+def test_yearly_bill_codegen_receives_only_tasks_and_field_names(
+    gateway: FactGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[AnalysisTask, tuple[str, ...]]] = []
+
+    def generate(task: AnalysisTask, fields: tuple[str, ...]) -> str:
+        calls.append((task, fields))
+        if task is AnalysisTask.SUM:
+            return f"sum({fields[0]})"
+        return f"yoy(sum({fields[0]}), sum({fields[1]}))"
+
+    monkeypatch.setattr(bills_module, "generate_analysis_code", generate)
+
+    result = _yearly_result(gateway)
+
+    assert "+17.65%" in result.detail
+    assert calls == [
+        (AnalysisTask.SUM, ("facts",)),
+        (AnalysisTask.SUM, ("facts",)),
+        (AnalysisTask.SUM, ("facts",)),
+        (AnalysisTask.YOY, ("current", "prior")),
+    ]
+
+
+def test_yearly_bill_codegen_failure_hides_computed_annual_values(
+    gateway: FactGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*args: object, **kwargs: object) -> str:
+        raise AnalysisCodeGenerationError("invalid model output")
+
+    monkeypatch.setattr(bills_module, "generate_analysis_code", fail)
+
+    result = _yearly_result(gateway)
+
+    assert len(result.record_ids) == 18
+    assert result.detail == "年度账单分析沙箱拒绝或无法执行；本次未生成年度数值。"
+
+
+def test_yearly_bill_preserves_failed_sandbox_monitor_event(
+    gateway: FactGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monitor = {
+        "code_sha256": "a" * 64,
+        "limits": {"timeout_s": 2.0},
+        "duration_ms": 2_000,
+        "exit_code": -1,
+        "status": "timeout",
+        "isolation": "process",
+    }
+
+    def fail(*args: object, **kwargs: object) -> object:
+        error = SandboxTimeout("test timeout")
+        error.monitor = monitor
+        raise error
+
+    monkeypatch.setattr(bills_module, "run_generated_analysis", fail)
+
+    result = _yearly_result(gateway)
+
+    assert len(result.sandbox_events) == 1
+    event = result.sandbox_events[0]
+    assert event["code_sha256"] == monitor["code_sha256"]
+    assert event["task"] == "sum"
+    assert event["use"] == "current_year_expense"
+    assert event["result"] is None
+    assert event["failure"] == "SandboxTimeout"
+
+
+def test_yearly_bill_rejects_result_when_monitor_audit_fails(
+    gateway: FactGateway,
+) -> None:
+    spec = build_default_registry().get("bills.yearly")
+
+    def reject_monitor(_monitor: object) -> None:
+        raise NotAuthorizedError("隔离执行审计不可用，拒绝使用沙箱结果")
+
+    with pytest.raises(NotAuthorizedError, match="隔离执行审计不可用"):
+        QUERY_HANDLERS["bills.yearly"](
+            QueryContext(
+                gateway=gateway,
+                params={"user_id": DEMO_USER_ID, "year": 2026},
+                spec=spec,
+                sandbox_monitor=reject_monitor,
+            )
+        )
