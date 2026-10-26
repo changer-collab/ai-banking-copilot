@@ -31,4 +31,14 @@ install httpx2 instead.
 | 里程碑 | 日期 | 提交 | ruff | mypy | pytest | 备注 |
 |---|---|---|---|---|---|---|
 | D0 基线 | 2026-10-26 | `3375d52` | 过 | 过 | 1562 passed | — |
-| D3 收口后 | 待填 | 待填 | 待填 | 待填 | 待填 | 后端收口 + 25 动作 |
+| D3 收口后 | 2026-10-27 | `25fdccc` | 过 | 过（92 files） | 1564 passed | 25 动作 + ⑥ 改 B 案 + 三动作升红 |
+
+**D3 收口后明细（2026-10-27，`25fdccc`）**
+
+| 命令 | 结论 |
+|---|---|
+| `ruff check .` | `All checks passed!` |
+| `mypy src` | `Success: no issues found in 92 source files` |
+| `pytest -q --junitxml=...` | `tests=1564 errors=0 failures=0 skipped=0`，耗时 221.91s |
+
+较 D0 多 2 条用例（新增 `password.change` 与生日链冻结/释放断言），无失败、无跳过。唯一 warning 与 D0 相同（Starlette/httpx 弃用提示）。
