@@ -1049,18 +1049,19 @@ CANONICAL_ACTIONS = {
     "card.set_limit",
     "funds.freeze",
     "funds.release",
+    "password.change",
 }
 
 
 def test_pep_handles_every_canonical_action(pep: Pep, registry: ToolRegistry) -> None:
-    """本测试自建的 20 动作白名单**全部有处理器**（README 裁决 #14；03 独立于 02 的 catalog 验收）。
+    """本测试自建的 21 动作白名单**全部有处理器**（README 裁决 #14；03 独立于 02 的 catalog 验收）。
 
     步骤 1.5 / 步骤 4「残留」：读、写两侧的分派都已改为**注册表**，`Pep.handled_actions()`
     返回的是**处理器键的并集**（不再拿注册表里的纯查询动作充数）。故此处断言为**包含**
     ——生产侧「处理器集 == 注册表动作集」的双向严格断言在
     `tests/scenarios/test_registry.py::test_every_canonical_action_has_exactly_one_handler`。
     """
-    assert len(CANONICAL_ACTIONS) == 20
+    assert len(CANONICAL_ACTIONS) == 21
     assert set(registry.actions()) == CANONICAL_ACTIONS
     assert set(registry.actions()) <= pep.handled_actions()
 
@@ -1141,7 +1142,8 @@ def test_card_set_limit_updates_limit(pep: Pep, gateway: FactGateway) -> None:
         action="card.set_limit",
         params={"card_id": _trusted("card_debit"), "daily_limit_cents": _trusted(1500000)},
     )
-    result = _execute_confirmed(pep, call, Level.YELLOW, "k6")
+    # 调高限额 = 解除既有风控上限（官方红，见 pdp.OFFICIAL_RED_ACTIONS），须按 RED 确认 + 强验证。
+    result = _execute_confirmed(pep, call, Level.RED, "k6")
     assert result.status == "updated"
     assert gateway.card("card_debit").payload.daily_limit == Money(1500000)
 
@@ -1157,7 +1159,19 @@ def test_subscription_sign_creates_subscription(pep: Pep, gateway: FactGateway) 
             "next_charge_on": _trusted("2027-03-01"),
         },
     )
-    result = _execute_confirmed(pep, call, Level.YELLOW, "k7")
+    # 代扣签约把未来无限次扣款授权给商户（官方红），须按 RED 确认 + 强验证。
+    result = _execute_confirmed(pep, call, Level.RED, "k7")
     assert result.status == "signed"
     subscription_id = result.record_ids[0].split(":", 1)[1]
     assert gateway.subscription(subscription_id).payload.merchant == "云盘会员"
+
+
+def test_password_change_registers_event_without_password(pep: Pep, gateway: FactGateway) -> None:
+    call = ToolCall(action="password.change", params={"user_id": _trusted(DEMO_USER_ID)})
+    # 官方红色「密码修改」：须按 RED 确认 + 强验证；只登记事件，密码明文/摘要不入库。
+    result = _execute_confirmed(pep, call, Level.RED, "k8")
+    assert result.status == "pending_verification"
+    event_id = result.record_ids[0].split(":", 1)[1]
+    event = gateway.password_change_event(event_id).payload
+    assert event.user_id == DEMO_USER_ID
+    assert event.status == "pending_verification"

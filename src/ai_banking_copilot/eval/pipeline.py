@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -41,7 +41,7 @@ from ai_banking_copilot.gateway.risk_store import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.planning.kernel import Kernel, PlanningResult
-from ai_banking_copilot.planning.llm import Intent, TemplateIntentModel
+from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent, TemplateIntentModel
 from ai_banking_copilot.planning.slots import SlotInputs, fill_control_slots
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
@@ -231,6 +231,7 @@ class EvalPipeline:
             return _blocked_result(case, "blocked", outcome.message, flags, started)
         plan = outcome.plan
         net = plan_net_effect(plan, gateway)
+        plan_daily = _plan_daily_accumulated(plan, self._registry, gateway)
         pep = Pep(
             self._registry, gateway, core_bank, audit, breaker, WRITE_HANDLERS, QUERY_HANDLERS
         )
@@ -240,7 +241,13 @@ class EvalPipeline:
         for node_id in topological_order(plan):
             node = node_map[node_id]
             node_outcome, decision = self._evaluate_node(
-                node, gateway=gateway, flags=flags, pep=pep, case_id=case.id, plan=plan
+                node,
+                gateway=gateway,
+                flags=flags,
+                pep=pep,
+                case_id=case.id,
+                plan=plan,
+                plan_daily=plan_daily,
             )
             node_outcomes.append(node_outcome)
             if decision is not None:
@@ -275,8 +282,11 @@ class EvalPipeline:
         pep: Pep,
         case_id: str,
         plan: Plan,
+        plan_daily: Money | None = None,
     ) -> tuple[NodeOutcome, Decision | None]:
         spec = self._registry.get(node.action)
+        if plan_daily is None:
+            plan_daily = _plan_daily_accumulated(plan, self._registry, gateway)
         request = node_policy_request(
             node,
             spec=spec,
@@ -285,6 +295,8 @@ class EvalPipeline:
             today=DEFAULT_BOOKING_DATE,
             flags=flags,
         )
+        if request.amount_applies:
+            request = replace(request, daily_accumulated=plan_daily)
         decision = evaluate(request)
         executed = _execute(pep, self._registry, node, decision, case_id, plan)
         return (
@@ -300,6 +312,26 @@ class EvalPipeline:
             ),
             decision,
         )
+
+
+def _plan_daily_accumulated(plan: Plan, registry: ToolRegistry, gateway: FactGateway) -> Money:
+    """计划级当日累计额度占用（**毛额**，含 `funds.freeze` 等中性动作）。
+
+    与 `policy.execution.assess_plan` 同一口径：冻结仍占用当日额度，虽不计入计划级净效应
+    （见 `planning.net_effect.NEUTRAL_NET_ACTIONS`），但按 `docs/三色基准表` 视同流出参与档位判定。
+    口径取**计划执行前**的当日累计，避免前面的黄档节点执行后抬高后续节点的累计。
+    """
+    outflow = 0
+    for node in plan.nodes:
+        if ACTION_KINDS.get(node.action) is not ActionKind.OUTFLOW:
+            continue
+        spec = registry.get(node.action)
+        raw = node.params.get(spec.money_param or "amount_cents")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            continue
+        outflow += raw
+    baseline = gateway.daily_transfer_total(DEMO_USER_ID, DEFAULT_BOOKING_DATE).cents
+    return Money(baseline + outflow)
 
 
 def _execute(

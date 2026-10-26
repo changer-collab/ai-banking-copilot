@@ -50,7 +50,7 @@ from ai_banking_copilot.scenarios.base import (
 )
 from ai_banking_copilot.scenarios.bills import BillsHandler
 from ai_banking_copilot.scenarios.cards import CardsHandler
-from ai_banking_copilot.scenarios.scheduling import ScheduledItem, due_date, plan_due
+from ai_banking_copilot.scenarios.scheduling import due_date, is_due
 from ai_banking_copilot.scenarios.subscriptions import SubscriptionsHandler
 from ai_banking_copilot.scenarios.transfer import TransferHandler, build_money_node
 from ai_banking_copilot.scenarios.wealth import WealthHandler
@@ -268,6 +268,12 @@ BIRTHDAY_MERCHANT = "鲜花礼品店"
 BIRTHDAY_ORDER_CENTS = 29900
 """生日联动的演示下单金额（分）：299 元，走 `merchant.order` 的金额档（LARGE_FUNDS）。"""
 
+BIRTHDAY_BUDGET_CENTS = 100000
+"""生日联动的预算冻结额（分）：1000 元。下单后解冻剩余 701 元（= 1000 − 299）。
+
+冻结是**硬上限**：下单额不得超过冻结额，避免「先冻结 1000，再偷偷下单 5000」绕过额度判档。
+"""
+
 _BIRTHDAY_LEAD_DAYS = 2
 """「生日前 N 天」的提前量（P2-5）。"""
 
@@ -275,10 +281,14 @@ _BIRTHDAY_LEAD_DAYS = 2
 def birthday_plan(
     gateway: FactGateway, as_of: date, *, user_id: str = DEMO_USER_ID
 ) -> tuple[PlanNode, ...]:
-    """生日联动：**到期则**装配「生日前 2 天 → `merchant.order`」的下单节点（P2-5）。
+    """生日联动：**到期则**装配「冻结预算 → 下单 → 解冻剩余」三节点 DAG（P2-5）。
+
+    为什么是三节点：`merchant.order` 是不可逆流出，直接扣款无法撤销；先冻结一笔预算
+    （`funds.freeze`）→ 下单从冻结额结算（`merchant.order`）→ 解冻剩余（`funds.release`），
+    失败时最多损失一笔可回滚的冻结，且净效应仍只有下单额（冻结/解冻净效应中性）。
 
     日期算术**一律走公共调度** `scenarios.scheduling`（`due_date(..., lead_days=2)` +
-    `plan_due`），不另写一套；基准时钟只取入参 `as_of`（演示 / 评测统一用
+    `is_due`），不另写一套；基准时钟只取入参 `as_of`（演示 / 评测统一用
     `scheduling.REFERENCE_DATE`）。生日数据源 = `user_profiles`（**演示播种值**，非真实客户资料）。
     """
     profile = gateway.user_profile(user_id)
@@ -288,21 +298,57 @@ def birthday_plan(
     if birthday is None:
         return ()
     order_on = due_date(birthday, lead_days=_BIRTHDAY_LEAD_DAYS)
+    if not is_due(order_on, as_of=as_of):
+        return ()
     occasion_id = f"birthday:{as_of.year}:flowers"
     if gateway.merchant_occasion_completed(user_id, occasion_id):
         return ()
-    item = ScheduledItem(
-        key=f"birthday:{user_id}:{as_of.year}",
-        due_on=order_on,
-        action="merchant.order",
-        params={
+    affordable = [
+        record.payload
+        for record in gateway.accounts_of(user_id)
+        if record.payload.balance.cents >= BIRTHDAY_BUDGET_CENTS
+    ]
+    # 优先储蓄账户（演示口径：生日预算从储蓄账户锁定）；无储蓄账户时退回首个可覆盖余额的账户。
+    account = next((item for item in affordable if item.kind == "savings"), None)
+    if account is None:
+        account = affordable[0] if affordable else None
+    if account is None:
+        return ()
+    account_id = account.account_id
+    budget_hold_id = f"birthday:{user_id}:{as_of.year}:hold"
+    ledger = AnchorLedger()
+    nodes = (
+        ("freeze1", _FREEZE_ACTION, {
+            "account_id": account_id,
+            "amount_cents": BIRTHDAY_BUDGET_CENTS,
+            "reason": "生日预算冻结",
+            "budget_hold_id": budget_hold_id,
+        }, ()),
+        ("order1", "merchant.order", {
             "merchant": BIRTHDAY_MERCHANT,
             "amount_cents": BIRTHDAY_ORDER_CENTS,
             "order_on": order_on.isoformat(),
             "occasion_id": occasion_id,
-        },
+            "budget_hold_id": budget_hold_id,
+        }, ("freeze1",)),
+        ("release1", _RELEASE_ACTION, {
+            "budget_hold_id": budget_hold_id,
+            "amount_cents": BIRTHDAY_BUDGET_CENTS - BIRTHDAY_ORDER_CENTS,
+        }, ("freeze1", "order1")),
     )
-    return plan_due((item,), as_of=as_of, ledger=AnchorLedger(), node_prefix="order")
+    return tuple(
+        PlanNode(
+            node_id=node_id,
+            action=action,
+            params=params,
+            intent=IntentRef(
+                source=AnchorSource.EXPLICIT,
+                anchor_id=grant_anchor(ledger, AnchorSource.EXPLICIT, f"生日联动：{node_id}"),
+            ),
+            depends_on=depends_on,
+        )
+        for node_id, action, params, depends_on in nodes
+    )
 
 
 def _birthday_in_year(birthday: str, year: int) -> date | None:
@@ -317,6 +363,16 @@ def _birthday_in_year(birthday: str, year: int) -> date | None:
         return None
 
 
+def _optional_str(params: dict[str, object], key: str) -> str | None:
+    """取可选字符串参数：缺省 ⇒ `None`；出现但为空 / 非字符串 ⇒ fail-closed。"""
+    return require_str(params, key) if key in params else None
+
+
+def _hold_id_of(params: dict[str, object]) -> str:
+    """显式解冻带 `hold_id`；跨场景预算链只带 `budget_hold_id`（二者择一，必填）。"""
+    return require_str(params, "hold_id" if "hold_id" in params else "budget_hold_id")
+
+
 def _freeze_handler(context: WriteContext) -> WriteReceipt:
     """把 `funds.freeze` 映射到 `CoreBank.freeze_funds`。"""
     return context.core_bank.freeze_funds(
@@ -324,21 +380,22 @@ def _freeze_handler(context: WriteContext) -> WriteReceipt:
         amount=Money(money_cents(context.params, context.spec)),
         reason=require_str(context.params, "reason"),
         idempotency_key=context.idempotency_key,
+        hold_id=_optional_str(context.params, "budget_hold_id"),
         before_write=context.before_write,
     )
 
 
 def _release_handler(context: WriteContext) -> WriteReceipt:
-    """把 `funds.release` 映射到 `CoreBank.unfreeze_funds`。"""
+    """把 `funds.release` 映射到 `CoreBank.unfreeze_funds`（全额解冻该冻结记录的剩余额）。"""
     return context.core_bank.unfreeze_funds(
-        hold_id=require_str(context.params, "hold_id"),
+        hold_id=_hold_id_of(context.params),
         idempotency_key=context.idempotency_key,
         before_write=context.before_write,
     )
 
 
 def _merchant_order_handler(context: WriteContext) -> WriteReceipt:
-    """把 `merchant.order` 映射到 `CoreBank.place_merchant_order`。"""
+    """把 `merchant.order` 映射到 `CoreBank.place_merchant_order`（有冻结预算时从其结算）。"""
     return context.core_bank.place_merchant_order(
         user_id=require_str(context.params, "user_id"),
         merchant=require_str(context.params, "merchant"),
@@ -350,6 +407,7 @@ def _merchant_order_handler(context: WriteContext) -> WriteReceipt:
             require_str(context.params, "occasion_id")
             if "occasion_id" in context.params else None
         ),
+        hold_id=_optional_str(context.params, "budget_hold_id"),
     )
 
 

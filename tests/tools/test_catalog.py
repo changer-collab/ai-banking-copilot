@@ -29,6 +29,7 @@ SCENARIO_ACTIONS = {
     "card.report_lost",
     "card.apply_virtual",
     "card.set_limit",
+    "password.change",
     "merchant.order",
 }
 

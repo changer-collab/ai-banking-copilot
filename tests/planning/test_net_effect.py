@@ -19,13 +19,13 @@ def _plan(*nodes: PlanNode) -> Plan:
     return Plan(plan_id="p1", nodes=nodes)
 
 
-def test_transfer_and_freeze_are_positive_outflows(gateway: FactGateway) -> None:
+def test_freeze_is_neutral_and_transfer_stays_an_outflow(gateway: FactGateway) -> None:
     plan = _plan(
         _node("n1", "transfer.create", {"amount_cents": 50000}),
         _node("n2", "funds.freeze", {"amount_cents": 100000}),
     )
     result = net_effect(plan, gateway)
-    assert result.amount == Money(150000)
+    assert result.amount == Money(50000)
     assert result.irreversibles == ()
     assert result.node_ids == ("n1", "n2")
 

@@ -50,6 +50,7 @@ CARD_ACTIONS = frozenset(
         "card.report_lost",
         "card.apply_virtual",
         "card.set_limit",
+        "password.change",
     }
 )
 """卡片域动作（README 规范动作表 #6 / #14–#18）。"""
@@ -161,12 +162,22 @@ def _set_limit_handler(context: WriteContext) -> WriteReceipt:
     )
 
 
+def _change_password_handler(context: WriteContext) -> WriteReceipt:
+    """把 `password.change` 映射到 `CoreBank.request_password_change`（只登记事件，不碰密码）。"""
+    return context.core_bank.request_password_change(
+        user_id=require_str(context.params, "user_id"),
+        idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
+    )
+
+
 WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "card.lock": _card_status_handler("locked"),
     "card.unlock": _card_status_handler("active"),
     "card.report_lost": _card_status_handler("lost"),
     "card.apply_virtual": _apply_virtual_handler,
     "card.set_limit": _set_limit_handler,
+    "password.change": _change_password_handler,
 }
 """卡片域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""
 

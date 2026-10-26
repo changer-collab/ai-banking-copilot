@@ -76,7 +76,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | 模块 | 冻结符号 |
 |---|---|
 | `tools.registry` | `RiskClass`(READ_ONLY/NOTIFY/SMALL_CHANGE/LARGE_FUNDS/IRREVERSIBLE) · `ParamSpec(name, slot, py_type, required)` · `ToolSpec(action, risk, params, is_pure_query, reversible, money_param, description)` · `ToolCall(action, params)` · `ToolRegistry`（`register` / `get` / `actions` / `validate_params`）· `UnknownActionError` / `ParamValidationError` / `ForbiddenParamError` |
-| `tools.catalog` | `build_default_registry() -> ToolRegistry`（**全量 24 个动作**，七域：transfer / bills / wealth / cards / subscriptions / cross / merchant） |
+| `tools.catalog` | `build_default_registry() -> ToolRegistry`（**全量 25 个动作**，七域：transfer / bills / wealth / cards / subscriptions / cross / merchant） |
 
 ### 03 `policy`
 

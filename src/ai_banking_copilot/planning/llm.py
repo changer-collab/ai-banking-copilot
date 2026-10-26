@@ -100,6 +100,11 @@ _CLAUSE_SPLIT = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
+        re.compile(r"(?:修改|更改|重置|变更|换)(?:一下)?(?:交易|支付|登录)?密码|密码(?:修改|重置|变更)"),
+        "password.change",
+        "命中『修改密码』模板",
+    ),
+    (
         re.compile(r"AA\s*收款|发起收款|让大家还我钱"),
         "transfer.request_collection",
         "命中『AA 收款』模板",

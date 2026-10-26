@@ -26,7 +26,7 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
-from ai_banking_copilot.planning.net_effect import NetEffect
+from ai_banking_copilot.planning.net_effect import NEUTRAL_NET_ACTIONS, NetEffect
 from ai_banking_copilot.policy.pep import ExecResult
 
 
@@ -182,6 +182,8 @@ def plan_net_effect(plan: Plan, gateway: FactGateway) -> NetEffect:
             irreversibles.append(node.node_id)
             continue
         if kind in (ActionKind.QUERY, ActionKind.STATE):
+            continue
+        if node.action in NEUTRAL_NET_ACTIONS:
             continue
         if kind is ActionKind.CANCEL_OUTFLOW:
             total -= _subscription_cents(node, gateway)

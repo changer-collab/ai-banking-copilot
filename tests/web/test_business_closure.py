@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.scenarios.cross import BIRTHDAY_ORDER_CENTS
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 
@@ -88,11 +89,13 @@ def test_due_requires_confirmation_and_is_not_repeated(tmp_path: Path) -> None:
     assert due["state"] == "awaiting_confirm", due
     assert deps.gateway.account("acc_savings").payload.balance.cents == initial
     assert _confirm(client, due, "due-1")["state"] == "completed"
-    assert deps.gateway.account("acc_savings").payload.balance.cents == initial - 10000
+    # /api/due 同时装配到期预约转账与生日预算链（冻结→下单→解冻），后者从储蓄账户结算。
+    expected = initial - 10000 - BIRTHDAY_ORDER_CENTS
+    assert deps.gateway.account("acc_savings").payload.balance.cents == expected
     again = client.post("/api/due", json={"session_id": "due-2"}).json()
     assert again["state"] == "idle", again
     assert again["card"] is None
-    assert deps.gateway.account("acc_savings").payload.balance.cents == initial - 10000
+    assert deps.gateway.account("acc_savings").payload.balance.cents == expected
     assert deps.audit.verify_chain()
 
 

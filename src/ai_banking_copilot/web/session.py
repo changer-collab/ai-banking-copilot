@@ -1872,6 +1872,7 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
+                self._release_open_holds()
                 return self._execution_view()
             except CommittedWriteError as error:
                 self._unverified_results[node_id] = ExecResult(
@@ -1888,6 +1889,7 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
+                self._release_open_holds()
                 return self._execution_view()
             self._unverified_results.pop(node_id, None)
             self._exec_results.append(result)
@@ -2012,6 +2014,35 @@ class Session:
         if self._takeover is None:
             raise SessionStateError("当前无人工接管上下文包")
         return self._takeover
+
+    def _release_open_holds(self) -> None:
+        """终态失败收尾：把本次执行已冻结的预算退回可用余额（不静默吞钱）。
+
+        只在「本计划不会再有后续成功」的分支调用：`WritePreconditionError`（可重新确认后继续）
+        与 `CommittedWriteError`（可恢复核对后重试）**不**收尾，否则会抽走后续节点依赖的冻结额。
+        """
+        records = tuple(
+            record_id
+            for result in self._exec_results
+            for record_id in result.record_ids
+            if record_id.startswith("holds:")
+        )
+        if not records:
+            return
+        service = self._deps.reversal
+        if service is None:
+            self._message = f"{self._message}；冻结预算未释放（未装配冲正通道）"
+            return
+        try:
+            released = service.compensate(records)
+        except CompensationError as error:
+            self._message = f"{self._message}；冻结预算释放失败：{error}"
+            return
+        self._message = f"{self._message}；已释放冻结预算 {len(released)} 笔"
+        self._audit(
+            KIND_REVERSAL,
+            {"subject": "holds", "outcome": "released_on_failure", "records": list(released)},
+        )
 
     def _compensation(self, subject: str) -> Callable[[], str]:
         """补偿动作：调用**组合根注入**的冲正通道（`AppDeps.reversal`）。

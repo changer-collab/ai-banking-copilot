@@ -1,4 +1,4 @@
-"""六场景动作目录：把 `README.md` 的「规范动作表（唯一真源）」20 个动作固化为**白名单契约**。
+"""六场景动作目录：把 `README.md` 的「规范动作表（唯一真源）」25 个动作固化为**白名单契约**。
 
 覆盖（PRD §4.1 / §5.2）：
 - ① 智能转账：`transfer.create` / `transfer.schedule`（`remark` 为数据槽，演示 H3）
@@ -6,22 +6,24 @@
   `bills.category_trend` / `bills.yearly`
 - ③ 理财操作：`wealth.list`（纯查询）/ `wealth.subscribe` / `wealth.redeem`
 - ④ 卡片管理：`card.list`（纯查询）/ `card.lock` / `card.unlock` / `card.report_lost` /
-  `card.apply_virtual` / `card.set_limit`
+  `card.apply_virtual` / `card.set_limit` / `password.change`
 - ⑤ 订阅代扣：`subscription.list`（纯查询）/ `subscription.cancel` / `subscription.sign`
 - ⑥ 跨场景联动：`funds.freeze` / `funds.release`
 
 **动作名唯一真源**：本目录就是规范动作表的**唯一真源**（旧文档指向的 README 表已不存在）。
-基线 20 个动作**不得增删或改名**；新增动作按 `docs/已修复清单-2026-10-08.md` 第七节
+基线 25 个动作**不得增删或改名**；新增动作按 `docs/已修复清单-2026-10-08.md` 第七节
 「硬性协作规则」一次改齐
 （本目录自己域那一段 + 自己场景模块的 handler + 评测用例）；计数断言只设**下限**（防误删）。
 `bills.yearly` 即步骤 2 冻结的第一个新增动作。
 
 **与 01 写原语的关系**：`transfer.create` / `wealth.subscribe` / `wealth.redeem` /
 `subscription.cancel` / `subscription.sign` / `funds.freeze` / `funds.release` /
-`card.lock` / `card.unlock` / `card.report_lost` / `card.apply_virtual` / `card.set_limit`
+`card.lock` / `card.unlock` / `card.report_lost` / `card.apply_virtual` / `card.set_limit` /
+`password.change`
 均有 01 的 `CoreBank` 写原语（其中 `subscription.sign` 对应新增的 `sign_subscription`）；
 `transfer.schedule` 复用转账语义（带 `booked_on`）。**执行处理器由各场景模块自带、组合根汇入
 03 的 PEP handler 注册表**（本层只做声明，不执行）。
+`password.change` 只登记改密事件，**密码明文与摘要一律不入目录、不落库、不进审计**。
 
 **写动作的 `user_id` 控制槽**（README 裁决 #16）：`transfer.create` / `transfer.schedule` /
 `wealth.subscribe` / `wealth.redeem` / `subscription.sign` / `subscription.cancel` 一律声明
@@ -322,6 +324,18 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
         money_param="daily_limit_cents",
         description="调整卡片额度（官方黄色；额度进控制槽）",
     ),
+    ToolSpec(
+        action="password.change",
+        risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("user_id", SlotKind.CONTROL, str, slot_name="user_id"),
+        ),
+        is_pure_query=False,
+        reversible=True,
+        money_param=None,
+        description="修改交易密码（官方红色；只登记事件，密码明文/摘要不入目录/不落库/不进审计）",
+    ),
 )
 
 _SUBSCRIPTION_SPECS: tuple[ToolSpec, ...] = (
@@ -375,20 +389,25 @@ _CROSS_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
             ParamSpec("reason", SlotKind.DATA, str, required=False),
+            # 场景层（跨场景预算链）**预先确定**的冻结记录标识：冻结 / 下单结算 / 解冻三方共享，
+            # 用于把同一条预算串成一张 DAG。`slot_name=None` ⇒ 规划层不补全、按槽位无关参数处理。
+            ParamSpec("budget_hold_id", SlotKind.CONTROL, str, required=False),
         ),
         is_pure_query=False,
         reversible=True,
         money_param="amount_cents",
-        description="冻结指定金额（跨场景预算锁定；cf 口径视同流出）",
+        description="冻结指定金额（跨场景预算锁定；净效应中性，仅占用可用余额）",
     ),
     ToolSpec(
         action="funds.release",
         risk=RiskClass.SMALL_CHANGE,
         kind=ActionKind.INFLOW,
         params=(
-            ParamSpec("hold_id", SlotKind.CONTROL, str, slot_name="hold"),
+            # 用户显式解冻：规划层按 `hold` 槽补全；跨场景预算链只带 `budget_hold_id`，故非必填。
+            ParamSpec("hold_id", SlotKind.CONTROL, str, slot_name="hold", required=False),
             # 场景从冻结事实回读，用于计划净额与成员校验；执行金额仍取冻结记录。
             ParamSpec("amount_cents", SlotKind.CONTROL, int, required=False),
+            ParamSpec("budget_hold_id", SlotKind.CONTROL, str, required=False),
         ),
         is_pure_query=False,
         reversible=True,
@@ -412,11 +431,13 @@ _MERCHANT_SPECS: tuple[ToolSpec, ...] = (
             # 填充，规划层不补全——与 `ParamSpec.slot_name` 的判据（「是否由规划层补全」）一致。
             ParamSpec("order_on", SlotKind.CONTROL, date),
             ParamSpec("occasion_id", SlotKind.CONTROL, str, required=False),
+            # 跨场景预算链：下单从该冻结记录结算（不重复扣可用余额），见 `funds.freeze`。
+            ParamSpec("budget_hold_id", SlotKind.CONTROL, str, required=False),
         ),
         is_pure_query=False,
         reversible=False,
         money_param="amount_cents",
-        description="向商户下单（生日联动：生日前 2 天下单；不可逆流出）",
+        description="向商户下单（生日联动：生日前 2 天下单；有冻结预算时从其结算；不可逆流出）",
     ),
 )
 

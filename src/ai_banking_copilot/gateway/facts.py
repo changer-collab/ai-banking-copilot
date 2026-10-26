@@ -27,6 +27,7 @@ from ai_banking_copilot.gateway.models import (
     Transaction,
     WealthProduct,
 )
+from ai_banking_copilot.gateway.security_store import PasswordChangeEvent
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     CollectionRequest,
@@ -237,6 +238,12 @@ class FactGateway:
         )
         return bool(rows)
 
+    def password_change_event(self, event_id: str) -> Record[PasswordChangeEvent]:
+        """按主键回读一条密码修改事件（安全动作独立表；出处校验用，**不含密码**）。"""
+        return self._password_change_event(
+            self._one("password_change_events", "event_id", event_id)
+        )
+
     def user_profile(self, user_id: str) -> Record[UserProfile] | None:
         """按用户读取资料（生日来源；`user_profiles` 为演示播种，缺行返回 `None`）。"""
         rows = self._store.query(
@@ -278,6 +285,8 @@ class FactGateway:
             return self.scheduled_transfer(pk).content_hash
         if table == "merchant_orders":
             return self.merchant_order(pk).content_hash
+        if table == "password_change_events":
+            return self.password_change_event(pk).content_hash
         raise GatewayNotFoundError(f"未知记录表：{table}")
 
     def _one(self, table: str, key: str, value: str) -> sqlite3.Row:
@@ -391,6 +400,15 @@ class FactGateway:
             status=str(row["status"]),  # type: ignore[index]
         )
         return _record("scheduled_transfers", payload.schedule_id, payload)
+
+    def _password_change_event(self, row: object) -> Record[PasswordChangeEvent]:
+        payload = PasswordChangeEvent(
+            event_id=str(row["event_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            status=str(row["status"]),  # type: ignore[index]
+            requested_on=date.fromisoformat(str(row["requested_on"])),  # type: ignore[index]
+        )
+        return _record("password_change_events", payload.event_id, payload)
 
 
 def _record(table: str, pk: str, payload: T) -> Record[T]:

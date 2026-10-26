@@ -55,9 +55,10 @@ _ACTION_LABELS: dict[str, str] = {
     "card.report_lost": "卡片挂失",
     "card.apply_virtual": "申请虚拟卡",
     "card.set_limit": "调整卡片额度",
+    "password.change": "修改交易密码",
     "funds.freeze": "冻结资金",
     "funds.release": "解冻资金",
-    "merchant.order": "演示商户订单登记（不扣款）",
+    "merchant.order": "向商户下单（从冻结预算结算）",
 }
 
 
@@ -178,6 +179,8 @@ def _requires_for_level(level: Level) -> tuple[str, ...]:
 
 
 def _object_label(node: PlanNode, gateway: FactGateway) -> str:
+    if node.action == "password.change":
+        return "本人交易密码"
     if node.action == "account.balance":
         account_id = _str_param(node, "account_id")
         if account_id is not None:
