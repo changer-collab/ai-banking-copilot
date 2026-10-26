@@ -1,7 +1,8 @@
 """六场景动作目录：把 `README.md` 的「规范动作表（唯一真源）」25 个动作固化为**白名单契约**。
 
 覆盖（PRD §4.1 / §5.2）：
-- ① 智能转账：`transfer.create` / `transfer.schedule`（`remark` 为数据槽，演示 H3）
+- ① 智能转账：`transfer.create` / `transfer.schedule` / `transfer.book`（登记不扣款）/
+  `transfer.request_collection`（发起 AA 收款，不产生资金流）（`remark` 为数据槽，演示 H3）
 - ② 账单分析：`account.balance` / `account.transactions` / `bills.monthly` /
   `bills.category_trend` / `bills.yearly`
 - ③ 理财操作：`wealth.list`（纯查询）/ `wealth.subscribe` / `wealth.redeem`
@@ -21,7 +22,9 @@
 `card.lock` / `card.unlock` / `card.report_lost` / `card.apply_virtual` / `card.set_limit` /
 `password.change`
 均有 01 的 `CoreBank` 写原语（其中 `subscription.sign` 对应新增的 `sign_subscription`）；
-`transfer.schedule` 复用转账语义（带 `booked_on`）。**执行处理器由各场景模块自带、组合根汇入
+`transfer.schedule` 复用转账语义（带 `booked_on`）；`transfer.book` 对应 `book_transfer`、
+`transfer.request_collection` 对应 `request_collection`（两者登记时不扣款）。
+**执行处理器由各场景模块自带、组合根汇入
 03 的 PEP handler 注册表**（本层只做声明，不执行）。
 `password.change` 只登记改密事件，**密码明文与摘要一律不入目录、不落库、不进审计**。
 
