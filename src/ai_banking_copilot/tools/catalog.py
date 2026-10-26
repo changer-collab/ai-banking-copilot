@@ -9,7 +9,7 @@
 - ④ 卡片管理：`card.list`（纯查询）/ `card.lock` / `card.unlock` / `card.report_lost` /
   `card.apply_virtual` / `card.set_limit` / `password.change`
 - ⑤ 订阅代扣：`subscription.list`（纯查询）/ `subscription.cancel` / `subscription.sign`
-- ⑥ 跨场景联动：`funds.freeze` / `funds.release`
+- ⑥ 跨场景联动：`funds.freeze` / `merchant.order`（下单，不扣冻结额度）/ `funds.release`
 
 **动作名唯一真源**：本目录就是规范动作表的**唯一真源**（旧文档指向的 README 表已不存在）。
 基线 25 个动作**不得增删或改名**；新增动作按 `docs/已修复清单-2026-10-08.md` 第七节
