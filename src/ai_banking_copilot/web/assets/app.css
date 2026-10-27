@@ -314,6 +314,35 @@ body {
   color: var(--lvl-red);
 }
 
+/* 转账记录（场景①）------------------------------------------------------- */
+.records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.records .record {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--voucher-alt);
+  font-size: var(--fs-small);
+}
+
+.records .record summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.records .record[open] summary {
+  margin-bottom: 4px;
+}
+
 /* 戳记 -------------------------------------------------------------------- */
 .seal {
   --seal-color: var(--lvl-green);

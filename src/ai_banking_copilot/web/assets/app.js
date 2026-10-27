@@ -232,6 +232,46 @@ function renderInsights(data) {
   }).join("");
 }
 
+/* ---- 转账记录（场景①）：AI 做过的事必须查得到、点得开；数据只来自 /api/transfers ---- */
+
+function yuanText(cents) {
+  return `¥${(Number(cents) / 100).toFixed(2)}`;
+}
+
+function renderTransfers(payload) {
+  const status = el("transfers-status");
+  const list = el("transfers-list");
+  if (!status || !list) return;
+  const items = (payload && payload.items) || [];
+  status.textContent = `最近 ${payload.window_days} 天 · 业务日 ${payload.as_of}`;
+  if (!items.length) {
+    list.innerHTML = '<li class="muted">最近没有转账记录。</li>';
+    return;
+  }
+  list.innerHTML = items.map((item) => {
+    const kind = item.kind === "scheduled" ? "定时登记" : "即时转账";
+    const remark = item.remark ? esc(item.remark) : "—";
+    return `<li class="record">
+      <details>
+        <summary>
+          <b>${esc(item.payee)}</b>
+          <span class="chip">${esc(item.status)}</span>
+          <span class="mono">${esc(yuanText(item.amount_cents))}</span>
+          <span class="muted">${esc(item.booked_on)}</span>
+        </summary>
+        <p class="muted">${esc(kind)} · ${esc(item.account)} · 记账日 ${esc(item.booked_on)}</p>
+        <p class="muted">备注：${remark} · 记录号 <span class="mono">${esc(item.record_id)}</span></p>
+      </details>
+    </li>`;
+  }).join("");
+}
+
+async function refreshTransfers() {
+  const response = await fetch("/api/transfers", { cache: "no-store" });
+  if (!response.ok) throw new Error("转账记录读取失败");
+  renderTransfers(await response.json());
+}
+
 function subscriptionStatusLabel(status) {
   return { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
 }
@@ -358,6 +398,11 @@ async function refreshAfterExecution() {
     await refreshOptions();
   } catch (_) {
     timelineAdd("业务结果已返回，对象列表刷新失败；请重新加载页面后核对。", "warn");
+  }
+  try {
+    await refreshTransfers();
+  } catch (_) {
+    timelineAdd("业务结果已返回，转账记录刷新失败；请重新加载页面后核对。", "warn");
   }
 }
 
@@ -1517,12 +1562,16 @@ refreshOptions().catch(() => {
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
 });
+refreshTransfers().catch(() => {
+  el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";
+});
 
 window.addEventListener("offline", () => setOfflineState(true));
 window.addEventListener("online", () => {
   setOfflineState(false);
   refreshOptions().catch(() => {});
   refreshInsights().catch(() => {});
+  refreshTransfers().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });

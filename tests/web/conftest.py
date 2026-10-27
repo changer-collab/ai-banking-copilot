@@ -17,6 +17,7 @@ from ai_banking_copilot.gateway.risk_store import (
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
+from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
 from ai_banking_copilot.planning.llm import TemplateIntentModel
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
@@ -40,6 +41,8 @@ def db_path(tmp_path: Path) -> Path:
     seed_database(store)
     init_risk_schema(store)
     seed_risk_assessment(store)
+    init_transfer_schema(store)
+    # 与组合根（compose.build_deps）保持一致：定时转账表同样在装配期 bootstrap。
     store.close()
     return path
 

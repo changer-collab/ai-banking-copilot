@@ -144,6 +144,12 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="subscription-cancel-result" hidden></div>
     </section>
 
+    <section class="panel" id="transfers-panel">
+      <p class="panel__title">转账记录</p>
+      <p class="muted" id="transfers-status">正在读取最近转账…</p>
+      <ul class="records" id="transfers-list"></ul>
+    </section>
+
     <section class="panel">
       <p class="panel__title">三色分级（官方口径）</p>
       <ul class="legend">
