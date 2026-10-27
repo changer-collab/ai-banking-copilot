@@ -17,6 +17,8 @@ const PRESETS = [
   "订阅取消",
   "锁卡",
   "挂失卡片",
+  "我要做风险测评",
+  "看看理财产品",
   "帮我做点什么",
 ];
 
@@ -193,6 +195,157 @@ async function refreshOptions() {
   setButtons();
 }
 
+/* ---------------- 理财：风险测评 / 产品目录 / 持仓 ---------------- */
+
+/* 问卷表单：只回传「题号 → 选项号」，等级由服务端算分（前端不给分值、不填等级）。
+   `prefix` 区分面板内（panel）与聊天内（chat）两处表单，避免 radio 同名互相顶掉。 */
+function assessmentFormHtml(prefix, questionnaire) {
+  const items = questionnaire || [];
+  if (!items.length) return '<p class="muted">服务端没有下发问卷，请刷新后重试。</p>';
+  const fields = items.map((item, index) => {
+    const options = (item.options || []).map((option) =>
+      `<label class="wealth-option"><input type="radio" name="${esc(prefix)}-${esc(item.id)}"` +
+      ` value="${esc(option.id)}" data-question="${esc(item.id)}" />` +
+      `<span>${esc(option.label)}</span></label>`
+    ).join("");
+    return `<fieldset class="wealth-question"><legend>${index + 1}. ${esc(item.prompt)}</legend>${options}</fieldset>`;
+  }).join("");
+  return `<form class="wealth-form" data-assessment-form="${esc(prefix)}">
+    <p class="muted">共 ${items.length} 道题。答完由服务端算分定级（R1–R5），等级不能自填。</p>
+    ${fields}
+    <p class="muted wealth-error" data-form-error hidden></p>
+    <div class="btn-row"><button class="btn btn--primary" type="button" data-action="submit-assessment">提交测评</button></div>
+  </form>`;
+}
+
+function wealthAssessmentLine(assessment) {
+  const info = assessment || {};
+  if (info.state === "valid") {
+    const source = info.source_label ? ` · 来源：${esc(info.source_label)}` : "";
+    return `<p><b>当前等级 ${esc(info.risk_profile)}</b> <span class="chip chip--green">测评有效</span></p>` +
+      `<p class="muted">测评日 ${esc(info.assessed_on || "—")} · 有效期至 ${esc(info.expires_on || "—")}${source}</p>`;
+  }
+  if (info.state === "expired") {
+    return `<p><b>上次等级 ${esc(info.risk_profile || "—")}</b> <span class="chip">测评已过期</span></p>` +
+      `<p class="muted">有效期至 ${esc(info.expires_on || "—")}；过期后不能申购，请重新作答。</p>`;
+  }
+  return '<p><b>尚未测评</b> <span class="chip">未完成风险测评</span></p>' +
+    '<p class="muted">未测评时任何产品都不能申购（服务端硬拦截），先答完这 5 道题。</p>';
+}
+
+function wealthProductHtml(item) {
+  const disabled = item.eligible === false;
+  const chip = disabled
+    ? '<span class="chip chip--denied">不可申购</span>'
+    : '<span class="chip chip--green">可申购</span>';
+  return `<article class="wealth-product${disabled ? " wealth-product--disabled" : ""}">
+    <div><b>${esc(item.name)}</b> ${chip}</div>
+    <p class="muted">${esc(item.risk_level)} · 期限 ${esc(item.term_days)} 天 · 起购 ${esc(item.min_amount_yuan)} 元</p>
+    ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+    <p class="muted"><span class="tech">${esc(item.product_id)}</span></p>
+  </article>`;
+}
+
+function wealthHoldingHtml(item) {
+  return `<article class="wealth-product">
+    <div><b>${esc(item.name)}</b> <span class="chip">${esc(item.risk_level)}</span></div>
+    <p>金额 ${esc(item.amount_yuan)} 元 · 起息日 ${esc(item.purchased_on)}</p>
+    <p class="muted">当前收益：${esc(item.current_income)}</p>
+    <p class="muted"><span class="tech">${esc(item.record_id)}</span></p>
+  </article>`;
+}
+
+function renderWealth(data) {
+  const payload = data || {};
+  const assessment = payload.assessment || {};
+  const status = el("wealth-status");
+  if (status) status.innerHTML = wealthAssessmentLine(assessment);
+  const box = el("wealth-assessment");
+  /* 表单一经渲染就保留用户已选答案：只在没有表单时（首次 / 提交后）重建 */
+  if (box && !box.querySelector("[data-assessment-form]")) {
+    const open = assessment.state === "valid" ? "" : " open";
+    box.innerHTML = `<details class="wealth-retake"${open}>
+      <summary>${assessment.state === "valid" ? "重新测评（覆盖当前等级）" : "开始答题"}</summary>
+      ${assessmentFormHtml("panel", assessment.questionnaire)}
+    </details>`;
+  }
+  const products = el("wealth-products");
+  if (products) {
+    const rows = payload.products || [];
+    products.innerHTML = rows.length
+      ? rows.map(wealthProductHtml).join("")
+      : '<p class="muted">产品目录为空。</p>';
+  }
+  const holdings = el("wealth-holdings");
+  if (holdings) {
+    const rows = payload.holdings || [];
+    holdings.innerHTML = rows.length
+      ? rows.map(wealthHoldingHtml).join("")
+      : '<p class="muted">当前没有持仓。</p>';
+  }
+  const source = el("wealth-source");
+  if (source) source.textContent = payload.data_source ? `数据来源：${payload.data_source}` : "";
+}
+
+async function refreshWealth() {
+  const response = await fetch("/api/wealth/overview", { cache: "no-store" });
+  if (response.status === 404) {
+    const status = el("wealth-status");
+    if (status) status.textContent = "理财服务尚未接入（当前渠道没有该读接口）。";
+    return;
+  }
+  if (!response.ok) throw new Error("理财面板读取失败");
+  renderWealth(await response.json());
+}
+
+function assessmentResultHtml(outcome) {
+  const result = (outcome && outcome.result) || {};
+  const assessment = (outcome && outcome.assessment) || {};
+  const level = result.risk_profile || assessment.risk_profile || "—";
+  const score = result.score === undefined ? "—" : `${result.score} / ${result.max_score}`;
+  return `<div class="takeover wealth-result">
+    <div><b>测评完成：${esc(level)}</b> <span class="chip chip--green">按问卷重新定级</span></div>
+    <p>得分 ${esc(score)}（等级由服务端按得分算出，不能自填）。</p>
+    <p class="muted">测评日 ${esc(assessment.assessed_on || "—")} · 有效期至 ${esc(assessment.expires_on || "—")}</p>
+    <p class="muted">产品目录已按新等级重新判定可申购范围。</p>
+  </div>`;
+}
+
+async function onAssessmentSubmit(form) {
+  const error = form.querySelector("[data-form-error]");
+  const answers = {};
+  form.querySelectorAll("input[data-question]:checked").forEach((node) => {
+    answers[node.dataset.question] = node.value;
+  });
+  const questions = Array.from(new Set(Array.from(form.querySelectorAll("input[data-question]"))
+    .map((node) => node.dataset.question)));
+  const missing = questions.filter((id) => !answers[id]);
+  if (missing.length) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = `还有 ${missing.length} 道题没有选，请逐题完成后提交。`;
+    }
+    return;
+  }
+  const result = await post("/api/risk-assessment", { answers });
+  if (result.status !== 200) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = (result.data && result.data.detail) || "提交未被接受，请核对答案后重试。";
+    }
+    return;
+  }
+  const card = assessmentResultHtml(result.data);
+  const box = el("wealth-assessment");
+  if (box && box.contains(form)) {
+    box.innerHTML = "";
+  } else {
+    form.outerHTML = card;
+  }
+  await refreshWealth();
+  timelineAdd(`风险测评已提交：服务端算分定级 ${result.data.result.risk_profile}`, "done");
+}
+
 function insightRuleLabel(ruleId) {
   return {
     "subscription-renewal": "订阅续费提醒",
@@ -358,6 +511,12 @@ async function refreshAfterExecution() {
     await refreshOptions();
   } catch (_) {
     timelineAdd("业务结果已返回，对象列表刷新失败；请重新加载页面后核对。", "warn");
+  }
+  /* 申购 / 赎回会改余额与持仓：执行后一并刷新理财面板，避免页面停留在旧数字 */
+  try {
+    await refreshWealth();
+  } catch (_) {
+    timelineAdd("理财面板刷新失败；余额与持仓请以服务端记录为准。", "warn");
   }
 }
 
@@ -823,6 +982,17 @@ async function applySubmission(data) {
     const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
     if (data.card.level === "GREEN") await onConfirm();
+    return;
+  }
+  if (data.state === "idle" && Array.isArray(data.questionnaire) && data.questionnaire.length) {
+    /* 「我要做风险测评」⇒ 聊天内直接出 5 题表单；等级仍由服务端算分，前端不填等级 */
+    state.phase = "idle";
+    state.panel = `<div class="takeover" data-assessment-host="chat">
+      <p class="wealth-invite">${esc(data.message || "风险测评")}</p>
+      ${assessmentFormHtml("chat", data.questionnaire)}
+    </div>`;
+    renderStage();
+    timelineAdd("风险测评 · 已下发 5 道题（答完由服务端算分定级）", "done");
     return;
   }
   if (data.state === "idle") {
@@ -1468,6 +1638,29 @@ el("stage").addEventListener("click", (event) => {
   if (event.target && event.target.id === "btn-refresh-session") action(refreshSession)();
 });
 
+/* 问卷表单在「面板」和「聊天内」两处动态渲染，故用文档级事件委托 */
+document.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const trigger = target ? target.closest('[data-action="submit-assessment"]') : null;
+  if (!trigger) return;
+  const form = trigger.closest("[data-assessment-form]");
+  if (!form || form.dataset.busy === "1") return;
+  form.dataset.busy = "1";
+  trigger.disabled = true;
+  try {
+    await onAssessmentSubmit(form);
+  } catch (_) {
+    const error = form.querySelector("[data-form-error]");
+    if (error) {
+      error.hidden = false;
+      error.textContent = "提交失败：未收到服务端回执，请稍后重试。";
+    }
+  } finally {
+    form.dataset.busy = "0";
+    trigger.disabled = false;
+  }
+});
+
 function readTheme() {
   try {
     return localStorage.getItem("ab-theme");
@@ -1517,17 +1710,21 @@ refreshOptions().catch(() => {
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
 });
+refreshWealth().catch(() => {
+  el("wealth-status").textContent = "理财面板读取失败，请稍后重试。";
+});
 
 window.addEventListener("offline", () => setOfflineState(true));
 window.addEventListener("online", () => {
   setOfflineState(false);
   refreshOptions().catch(() => {});
   refreshInsights().catch(() => {});
+  refreshWealth().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=11", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=12", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

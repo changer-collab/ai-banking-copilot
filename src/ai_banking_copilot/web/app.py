@@ -66,7 +66,10 @@ from ai_banking_copilot.scenarios.subscriptions import (
     subscription_report,
 )
 from ai_banking_copilot.scenarios.wealth import (
+    PRODUCT_DATA_SOURCE,
     AssessmentState,
+    holdings_payload,
+    product_catalog,
     to_risk_assessment,
 )
 from ai_banking_copilot.scenarios.wealth_assessment import (
@@ -472,6 +475,29 @@ def create_app(deps: AppDeps) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"state": "updated", "assessment": _risk_payload(deps)}
 
+    @app.get("/api/wealth/overview")
+    def wealth_overview() -> dict[str, object]:
+        """理财面板聚合（只读）：测评状态 + 产品目录（逐只可申购判定与原因）+ 本人持仓。
+
+        - 等级只认服务端测评事实：未测评 / 过期 ⇒ 目录全部标「未测评」，不默认等级；
+        - 不可申购的产品**保留并写明原因**（页面据此灰显，不隐藏、不编造）；
+        - 持仓金额 / 起息日来自 gateway 事实；当前收益无净值数据 ⇒ 如实标未知。
+        """
+        assessment = _risk_payload(deps)
+        raw_profile = assessment["risk_profile"]
+        risk_profile = (
+            raw_profile
+            if isinstance(raw_profile, str)
+            and assessment["state"] == AssessmentState.VALID.value
+            else None
+        )
+        return {
+            "assessment": assessment,
+            "products": list(product_catalog(deps.gateway.wealth_products(), risk_profile)),
+            "holdings": list(holdings_payload(deps.gateway, deps.user_id)),
+            "data_source": PRODUCT_DATA_SOURCE,
+        }
+
     @app.get("/api/bills/analysis")
     def bill_analysis(year: int | None = None, month: int | None = None) -> dict[str, object]:
         """只读账单异常识别 + 结论式解释；不写事实、不产生执行授权。
@@ -838,6 +864,7 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "card": card,
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
+        "questionnaire": list(view.questionnaire),
     }
 
 

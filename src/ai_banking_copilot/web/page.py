@@ -22,7 +22,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=6" />
-<link rel="stylesheet" href="/assets/workspace.css?v=5" />
+<link rel="stylesheet" href="/assets/workspace.css?v=6" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app">
@@ -144,6 +144,17 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="subscription-cancel-result" hidden></div>
     </section>
 
+    <section class="panel" id="wealth-panel">
+      <p class="panel__title">理财 · 测评与持仓</p>
+      <div class="muted" id="wealth-status">正在读取测评状态与持仓…</div>
+      <div id="wealth-assessment"><p class="muted">尚未读取风险测评问卷。</p></div>
+      <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定</span></p>
+      <div id="wealth-products"><p class="muted">尚未读取产品目录。</p></div>
+      <p class="panel__title panel__title--sub">我的持仓</p>
+      <div id="wealth-holdings"><p class="muted">尚未读取持仓。</p></div>
+      <p class="muted" id="wealth-source"></p>
+    </section>
+
     <section class="panel">
       <p class="panel__title">三色分级（官方口径）</p>
       <ul class="legend">
@@ -183,7 +194,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </aside>
 </div>
 
-<script src="/assets/app.js?v=15"></script>
+<script src="/assets/app.js?v=16"></script>
 </body>
 </html>
 """

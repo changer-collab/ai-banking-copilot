@@ -21,6 +21,7 @@ from ai_banking_copilot.scenarios.wealth import (
     RiskAssessment,
     SuitabilityError,
     WealthHandler,
+    blocked_suitability_message,
     candidate_labels,
     describe_candidate,
     is_recommendation_request,
@@ -113,7 +114,7 @@ def test_expired_assessment_blocks_recommendation() -> None:
 # 3. 选品词不是红线词；收益承诺词仍是红线
 def test_recommendation_intents_are_not_red_lines() -> None:
     assert set(FORBIDDEN_HINTS).isdisjoint(RECOMMENDATION_HINTS)
-    for text in ("推荐理财产品", "哪款适合我", "比较几款产品"):
+    for text in ("推荐理财产品", "哪款适合我", "比较几款产品", "对比一下理财产品"):
         assert is_recommendation_request(text)
     assert not is_recommendation_request("查看理财产品")
     assert is_recommendation_request("推荐收益最高的理财")
@@ -169,3 +170,15 @@ def test_candidate_disclosure_marks_unknown_and_demo_source(gateway: FactGateway
     assert "%" not in text
     assert "bp" not in text
     assert re.search(r"\d{4}-\d{2}-\d{2}", text) is None
+
+
+# 8. 等级不匹配：拒绝时给「相近等级」的可申购替代，绝不夹带不匹配产品
+def test_blocked_message_offers_nearest_eligible_alternatives(gateway: FactGateway) -> None:
+    products = gateway.wealth_products()
+    equity = gateway.wealth_product("wp_equity").payload
+    message = blocked_suitability_message(_assessment("R2"), equity, products)
+    assert message.startswith("风险等级不匹配：测评 R2 < 产品 R4")
+    assert "可申购" in message
+    assert "稳利债券 A" in message
+    assert "均衡配置 B" not in message
+    assert "成长精选 C" not in message

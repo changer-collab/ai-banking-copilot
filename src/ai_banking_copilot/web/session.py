@@ -133,6 +133,11 @@ from ai_banking_copilot.scenarios.wealth import (
     is_recommendation_request,
     to_risk_assessment,
 )
+from ai_banking_copilot.scenarios.wealth_assessment import (
+    invitation_message,
+    is_assessment_request,
+    questionnaire_payload,
+)
 from ai_banking_copilot.tools.registry import ToolCall
 from ai_banking_copilot.web.plan_card import (
     PROMPT_STRONG_VERIFY,
@@ -316,6 +321,9 @@ class SubmissionView:
 
     clarifications: tuple[ClarificationAsk, ...] = ()
     """待澄清的**结构化**提问（槽位 + 文案）：渠道层据此渲染「回答即可继续」的闭环输入。"""
+
+    questionnaire: tuple[dict[str, object], ...] = ()
+    """风险测评问卷（题号 / 题干 / 选项，不含分值）：仅「我要做风险测评」时下发。"""
 
 
 @dataclass(frozen=True)
@@ -669,6 +677,8 @@ class Session:
         invalid = self._invalid_selection(selected or {})
         if invalid is not None:
             return self._refuse(invalid, utterance)
+        if is_assessment_request(utterance):
+            return self._assessment_invitation()
         intents, asks, notes = self._assemble_intents(utterance, selected)
         if asks:
             self._state = SessionState.NEEDS_CLARIFICATION
@@ -1395,6 +1405,20 @@ class Session:
         if not capability_boundary:
             self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
+
+    def _assessment_invitation(self) -> SubmissionView:
+        """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。"""
+        self._state = SessionState.IDLE
+        self._message = invitation_message()
+        return SubmissionView(
+            self._state,
+            self._message,
+            None,
+            None,
+            None,
+            (),
+            questionnaire=questionnaire_payload(),
+        )
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
         self._state = SessionState.TAKEN_OVER
