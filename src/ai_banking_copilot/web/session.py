@@ -439,6 +439,8 @@ class Session:
         """**会话级熔断器**（README 裁决 #27）：触发 3 / 4 / 5 的**作用域**——只让本会话转人工接管，
         不波及其他会话。全局熔断器（`deps.breaker`）只由**系统性**信号触发（触发 1 / 2）。"""
         self._reversed_records: list[str] = []
+        self._released_holds: set[str] = set()
+        """已被终态收尾释放的冻结记录（幂等去重，避免重复释放被重复计数）。"""
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
         self._last_selected: Mapping[str, object] | None = None
@@ -1872,7 +1874,7 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
-                self._release_open_holds()
+                self._release_open_holds(reason="tool_hook_blocked")
                 return self._execution_view()
             except CommittedWriteError as error:
                 self._unverified_results[node_id] = ExecResult(
@@ -1889,7 +1891,28 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
-                self._release_open_holds()
+                self._release_open_holds(reason="gateway_or_authorization_failed")
+                return self._execution_view()
+            except Exception as error:
+                # 未预期异常同样属于「本计划不会再有后续成功」：先把已冻结预算退回，再如实报错，
+                # 绝不把冻结额悬空在核心银行。
+                self._in_flight = None
+                self._message = f"执行失败（{node.action}）：{type(error).__name__}: {error}"
+                self._state = (
+                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+                )
+                self._audit(
+                    "execution_error",
+                    {
+                        "node_id": node_id,
+                        "action": node.action,
+                        "error": f"{type(error).__name__}: {error}",
+                        "user_id": self._deps.user_id,
+                        "session_id": self._session_id,
+                        "execution_id": self._execution_id,
+                    },
+                )
+                self._release_open_holds(reason="unexpected_error")
                 return self._execution_view()
             self._unverified_results.pop(node_id, None)
             self._exec_results.append(result)
@@ -2015,34 +2038,65 @@ class Session:
             raise SessionStateError("当前无人工接管上下文包")
         return self._takeover
 
-    def _release_open_holds(self) -> None:
+    def _release_open_holds(self, *, reason: str) -> tuple[str, ...]:
         """终态失败收尾：把本次执行已冻结的预算退回可用余额（不静默吞钱）。
 
-        只在「本计划不会再有后续成功」的分支调用：`WritePreconditionError`（可重新确认后继续）
-        与 `CommittedWriteError`（可恢复核对后重试）**不**收尾，否则会抽走后续节点依赖的冻结额。
+        调用时机：**本计划不会再有后续成功**（安全策略拦截 / 执行受阻 / 未预期异常 /
+        用户放弃 / 会话重置）。`WritePreconditionError`（可重新确认后继续）与
+        `CommittedWriteError`（可恢复核对后重试）**不**收尾，否则会抽走后续节点依赖的冻结额。
+
+        返回实际释放的记录；审计携带用户 / 会话 / 执行身份与原因，便于对账。
         """
         records = tuple(
             record_id
             for result in self._exec_results
             for record_id in result.record_ids
-            if record_id.startswith("holds:")
+            if record_id.startswith("holds:") and record_id not in self._released_holds
         )
+        # 只释放**仍处于冻结中**的记录：已完成计划里的冻结可能已由 `funds.release` 解冻，
+        # 重复解冻是幂等空操作，不应计为一次新的退回。
+        records = tuple(record for record in records if self._hold_is_active(record))
         if not records:
-            return
+            return ()
+        context: dict[str, object] = {
+            "subject": "holds",
+            "reason": reason,
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "requested": list(records),
+        }
         service = self._deps.reversal
         if service is None:
             self._message = f"{self._message}；冻结预算未释放（未装配冲正通道）"
-            return
+            self._audit(KIND_REVERSAL, {**context, "outcome": "release_unavailable"})
+            return ()
         try:
             released = service.compensate(records)
         except CompensationError as error:
             self._message = f"{self._message}；冻结预算释放失败：{error}"
-            return
+            self._audit(
+                KIND_REVERSAL,
+                {**context, "outcome": "release_failed", "error": str(error)},
+            )
+            return ()
+        self._released_holds.update(records)
         self._message = f"{self._message}；已释放冻结预算 {len(released)} 笔"
         self._audit(
             KIND_REVERSAL,
-            {"subject": "holds", "outcome": "released_on_failure", "records": list(released)},
+            {**context, "outcome": "released_on_failure", "records": list(released)},
         )
+        return tuple(released)
+
+    def _hold_is_active(self, record: str) -> bool:
+        """冻结记录是否仍占用可用余额（读不到时按「需要释放」处理，交由冲正通道如实报错）。"""
+        hold_id = record.partition(":")[2]
+        if not hold_id:
+            return False
+        try:
+            return self._deps.gateway.hold(hold_id).payload.status == "active"
+        except Exception:
+            return True
 
     def _compensation(self, subject: str) -> Callable[[], str]:
         """补偿动作：调用**组合根注入**的冲正通道（`AppDeps.reversal`）。
@@ -2127,6 +2181,9 @@ class Session:
         if self._state not in (SessionState.AWAITING_CONFIRM, SessionState.INTERRUPTED):
             raise SessionStateError(f"当前状态不可放弃：{self._state.value}")
         self._invalidate_verification("plan_rejected")
+        self._message = ""
+        released = self._release_open_holds(reason="plan_rejected")
+        release_note = self._message
         self._audit(KIND_DECISION, {
             "kind": "plan_rejected",
             "user_id": self._deps.user_id,
@@ -2142,6 +2199,10 @@ class Session:
         self._quota = None
         self._state = SessionState.IDLE
         self._message = "已放弃当前计划：原计划作废，如仍需办理请重新提交"
+        if released:
+            self._message += f"；已退回冻结预算 {len(released)} 笔"
+        elif release_note:
+            self._message += release_note
         return SessionView(self._state, self._message)
 
     def _execution_view(self) -> ExecutionView:
@@ -2208,10 +2269,15 @@ class Session:
     def _reset(self) -> None:
         if self._recovery_blocked or self._unverified_results:
             raise SessionStateError("存在待核对业务回执，不能用新计划覆盖")
+        # 上一计划若被中断 / 失败后直接重新提交，已冻结的预算必须先退回，否则新计划一开
+        # 就永久悬空一笔冻结额。
+        self._message = ""
+        self._release_open_holds(reason="session_reset")
+        release_note = self._message
         self._invalidate_verification("plan_changed")
         self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
-        self._message = "会话已重置"
+        self._message = "会话已重置" + release_note
         self._pending = None
         self._confirmation = None
         self._takeover = None
@@ -2230,6 +2296,7 @@ class Session:
         self._recovery_blocked = False
         self._planner_channel = None
         self._model_calls = []
+        self._released_holds.clear()
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:

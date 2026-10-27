@@ -396,6 +396,32 @@ body {
   overflow: hidden;
 }
 
+/* 余额轨迹（冻结类计划的可用余额变化） -------------------------------------- */
+.trace {
+  margin-top: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  background: var(--voucher-alt);
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-control);
+}
+
+.trace__title {
+  font-size: 12px;
+  color: var(--ink-3);
+  letter-spacing: 0.08em;
+  margin-bottom: var(--s-2);
+}
+
+.trace__rows {
+  margin: 0;
+  padding-left: 1.2em;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  display: grid;
+  gap: 2px;
+}
+
 .step {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto;

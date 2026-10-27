@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .layer-title { font-size: 16px; font-weight: 700; }
+      .layer-sub { font-size: 12.5px; fill: #475569; }
+      .note { font-size: 11.5px; fill: #64748b; }
+      .side-title { font-size: 14px; font-weight: 700; fill: #0f172a; }
+      .side-body { font-size: 11.5px; fill: #475569; }
+      .badge { font-size: 11px; fill: #ffffff; font-weight: 700; }
+      .arrow-label { font-size: 11.5px; fill: #64748b; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="900" fill="#f8fafc"/>
+
+  <!-- 标题 -->
+  <text x="48" y="44" font-size="24" font-weight="700" fill="#0f172a">AI 银行副驾 · 系统架构总览</text>
+  <text x="48" y="68" class="layer-sub">LLM 只提案 · 事实只出自网关 · 三色门卫先于执行 · 全程审计可回溯</text>
+
+  <!-- 1 用户入口 -->
+  <rect x="48" y="92" width="800" height="64" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5"/>
+  <text x="72" y="118" class="layer-title" fill="#075985">用户入口</text>
+  <text x="72" y="140" class="layer-sub">Web / PWA（手机可安装）　·　IM 文本适配器（进程内，复用同一 Session）</text>
+
+  <line x1="448" y1="156" x2="448" y2="184" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="460" y="176" class="arrow-label">自然语言</text>
+
+  <!-- 2 规划内核 -->
+  <rect x="48" y="184" width="800" height="80" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="72" y="210" class="layer-title" fill="#5b21b6">规划内核 planning/　（能力上限）</text>
+  <text x="72" y="232" class="layer-sub">多意图拆解 → 控制槽补全 → DAG 规划 → 净效应　｜　LLM 只提案，不能执行</text>
+  <text x="72" y="252" class="note">降级通道 = 模板 + 规则；无凭据时输出 UNAVAILABLE，绝不伪造</text>
+
+  <line x1="448" y1="264" x2="448" y2="292" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="460" y="284" class="arrow-label">结构化意图</text>
+
+  <!-- 3 场景装配 -->
+  <rect x="48" y="292" width="800" height="88" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="72" y="318" class="layer-title" fill="#166534">场景装配 scenarios/　（六业务场景 + 生活链路原型）</text>
+  <text x="72" y="340" class="layer-sub">转账 · 账单 · 理财 · 卡片 · 订阅 · 跨场景　＋　L1–L7 生活链路原型（一套骨架，参数化覆盖生活事件）</text>
+  <text x="72" y="362" class="note">同一个 Plan 结构：动作 / 对象 / 金额 / 时间 / 依赖 / 锚点来源</text>
+
+  <line x1="448" y1="380" x2="448" y2="408" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="460" y="400" class="arrow-label">同一份 Plan（不可改写）</text>
+
+  <!-- 4 计划后置审查 -->
+  <rect x="48" y="408" width="800" height="64" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="72" y="434" class="layer-title" fill="#92400e">计划后置审查 planning/reviewer.py</text>
+  <text x="72" y="456" class="layer-sub">旁路诊断 / 严格 Reviewer；绑定 execution_id + 计划哈希；不改 Plan、金额与授权</text>
+
+  <line x1="448" y1="472" x2="448" y2="500" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 5 可信执行内核 -->
+  <rect x="48" y="500" width="800" height="128" rx="10" fill="#ffe4e6" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="72" y="526" class="layer-title" fill="#9f1239">可信执行内核 policy/　（安全下限）</text>
+  <text x="72" y="550" class="layer-sub">① PDP 三色策略（绿只含纯查询；红=强验证）　② 计划卡（确认绑定哈希）　③ PEP 工具白名单</text>
+  <text x="72" y="572" class="layer-sub">④ 执行门（计划级 + 节点级哈希）　⑤ 审计链（JSONL + sha256 链）　⑥ 熔断（只加严）</text>
+  <text x="72" y="594" class="layer-sub">⑦ 撤销窗口 + saga 补偿：节点失败 / 中断 / 超时 ⇒ 自动释放冻结并留痕</text>
+  <text x="72" y="616" class="note">无裁决不执行；金额档：日累计 ≤1000 黄，&gt;1000 红；红色动作无条件红</text>
+
+  <line x1="448" y1="628" x2="448" y2="656" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="460" y="648" class="arrow-label">只读事实 / 幂等写原语</text>
+
+  <!-- 6 事实网关 -->
+  <rect x="48" y="656" width="800" height="80" rx="10" fill="#e2e8f0" stroke="#334155" stroke-width="1.5"/>
+  <text x="72" y="682" class="layer-title" fill="#0f172a">事实网关 gateway/　（TCB · 模拟核心银行）</text>
+  <text x="72" y="704" class="layer-sub">只读事实服务 · 幂等写原语 · 确定性解析器 · 算子白名单 · 受限沙箱</text>
+  <text x="72" y="724" class="note">系统里唯一能写库的组件；数值与出处只从这里出，LLM 零生成事实</text>
+
+  <line x1="448" y1="736" x2="448" y2="764" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 7 存储 -->
+  <rect x="48" y="764" width="800" height="72" rx="10" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="72" y="790" class="layer-title" fill="#334155">演示数据与留痕</text>
+  <text x="72" y="812" class="layer-sub">SQLite 演示库（确定性播种，`scripts/reset_demo.py` 一键重置）　·　audit.jsonl（追加式哈希链）</text>
+  <text x="72" y="830" class="note">重置只删业务库 / 审计 / 洞察库，保留密钥文件；连续重置 3 次业务摘要一致</text>
+
+  <!-- 右侧：场景层与横切 -->
+  <rect x="888" y="92" width="344" height="200" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <rect x="888" y="92" width="344" height="34" rx="10" fill="#16a34a"/>
+  <rect x="888" y="112" width="344" height="14" fill="#16a34a"/>
+  <text x="904" y="115" class="side-title" fill="#ffffff">生活场景归类法（7 条原型）</text>
+  <text x="904" y="148" class="side-body">A 时间形态：一次性 / 先备后花 / 周期 / 到日必达</text>
+  <text x="904" y="168" class="side-body">B 资金形态：户内锁 / 单次流出 / 周期流出 / 流入 / 户内搬</text>
+  <text x="904" y="188" class="side-body">C 风险形态：卡风险 / 身份风险 / 授权范围 / 无风险</text>
+  <text x="904" y="214" class="side-body" font-weight="700">→ L1 预算锁定　L2 定期出资　L3 出行保障</text>
+  <text x="904" y="234" class="side-body" font-weight="700">→ L4 大额凑集　L5 失卡止损　L6 阶段盘点</text>
+  <text x="904" y="254" class="side-body" font-weight="700">→ L7 分摊收款（原型可串：L6→L4、L5→L3）</text>
+  <text x="904" y="276" class="note">不枚举场景，枚举链路形状：7 形状 × 参数化覆盖大部分生活事件</text>
+
+  <rect x="888" y="308" width="344" height="176" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <rect x="888" y="308" width="344" height="34" rx="10" fill="#0284c7"/>
+  <rect x="888" y="328" width="344" height="14" fill="#0284c7"/>
+  <text x="904" y="331" class="side-title" fill="#ffffff">渠道与体验 web/</text>
+  <text x="904" y="364" class="side-body">计划卡：动作 / 金额 / 依赖 / 三色 / 余额轨迹</text>
+  <text x="904" y="386" class="side-body">四类卡：结果 · 确认 · 强验证 · 失败</text>
+  <text x="904" y="408" class="side-body">中断 / 回退 / 人工接管；失败态明示「已退回」</text>
+  <text x="904" y="430" class="side-body">PWA 可安装 + 离线兜底；IM 文本适配器</text>
+  <text x="904" y="458" class="note">同一 Session 服务 Web 与 IM，确认与执行逻辑不分叉</text>
+
+  <rect x="888" y="500" width="344" height="192" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <rect x="888" y="500" width="344" height="34" rx="10" fill="#7c3aed"/>
+  <rect x="888" y="520" width="344" height="14" fill="#7c3aed"/>
+  <text x="904" y="523" class="side-title" fill="#ffffff">评测与门禁（可复现）</text>
+  <text x="904" y="556" class="side-body">四个数字：危险动作拦截率 · 误拒率 · 任务成功率 · 数字可回溯率</text>
+  <text x="904" y="578" class="side-body">数据集：web-smoke-v2（21）· evidence_dev_v1（93）· heldout_v1（40）</text>
+  <text x="904" y="600" class="side-body">复跑：`python scripts/run_benchmark.py --repeat 2`</text>
+  <text x="904" y="622" class="side-body">manifest：提交号 / 数据集哈希 / 评分器哈希 / 基准日</text>
+  <text x="904" y="644" class="side-body">门禁：ruff · mypy · pytest（1564）· CI</text>
+  <text x="904" y="672" class="note">口径冻结在 docs/RESULTS.md：改定义必须同时改代码与文档</text>
+
+  <rect x="888" y="708" width="344" height="128" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <rect x="888" y="708" width="344" height="34" rx="10" fill="#334155"/>
+  <rect x="888" y="728" width="344" height="14" fill="#334155"/>
+  <text x="904" y="731" class="side-title" fill="#ffffff">端到端 7 项（一条链路算完成的定义）</text>
+  <text x="904" y="764" class="side-body">① 口语触发 → ② 缺槽追问 → ③ DAG 装配 → ④ 计划卡</text>
+  <text x="904" y="786" class="side-body">⑤ 三色取最严 → ⑥ 审计留痕 → ⑦ 失败可恢复（冻结必释放）</text>
+  <text x="904" y="814" class="note">七项缺一不算完成；生活链路与业务场景用同一套验收</text>
+</svg>

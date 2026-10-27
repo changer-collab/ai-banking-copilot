@@ -83,6 +83,13 @@ class PlanCard:
     expires_at: datetime | None = None
     """服务端下发的过期时刻（G-02）：过期后原计划不得再被确认；`None` = 未设置。"""
 
+    balance_trace: tuple[str, ...] = ()
+    """预算冻结类计划的**可用余额轨迹**（冻结 → 扣款 → 释放），逐节点给出执行后可用余额。
+
+    与 `lines` 分离：`lines` 是受润色守卫约束的三元组文案（行数不得变），轨迹是纯追加的
+    事实回显，不参与润色。非冻结类计划为空。
+    """
+
     def __post_init__(self) -> None:
         if not self.card_id:
             raise ValueError("card_id 不得为空")
@@ -129,7 +136,72 @@ def render_plan_card(
         lines=lines,
         requires=_requires_for_level(decision.level),
         expires_at=expires_at,
+        balance_trace=_balance_trace(plan, gateway),
     )
+
+
+_TRACE_ACTIONS = frozenset({"funds.freeze", "funds.release", "merchant.order", "transfer.create"})
+"""余额轨迹覆盖的资金动作：冻结 / 解冻 / 冻结额度内扣款 / 转账。"""
+
+_TRACE_LABELS: dict[str, str] = {
+    "funds.freeze": "冻结",
+    "funds.release": "解冻",
+    "merchant.order": "扣款",
+    "transfer.create": "转账",
+}
+
+
+def _balance_trace(plan: Plan, gateway: FactGateway) -> tuple[str, ...]:
+    """预算冻结类计划的可用余额轨迹（其余计划返回空）。
+
+    数值只来自 `PlanNode.params` 与 `FactGateway`，本函数**不生成**任何数字；`merchant.order`
+    从冻结额度结算，可用余额在冻结时已扣减，因此只标注扣款额而不再次扣减。
+    """
+    if not any(node.action in ("funds.freeze", "funds.release") for node in plan.nodes):
+        return ()
+    account_id = _trace_account_id(plan, gateway)
+    if account_id is None:
+        return ()
+    try:
+        available = gateway.account(account_id).payload.balance.cents
+    except GatewayNotFoundError:
+        return ()
+    trace = [f"执行前可用余额 {Money(available).yuan} 元"]
+    for node in plan.nodes:
+        if node.action not in _TRACE_ACTIONS:
+            continue
+        cents = node.params.get("amount_cents")
+        if not isinstance(cents, int) or isinstance(cents, bool):
+            continue
+        if node.action == "funds.freeze":
+            available -= cents
+        elif node.action == "funds.release":
+            available += cents
+        elif node.action == "transfer.create":
+            available -= cents
+        note = "（从冻结预算结算）" if node.action == "merchant.order" else ""
+        trace.append(
+            f"{_TRACE_LABELS[node.action]} {Money(cents).yuan} 元{note}"
+            f" → 可用 {Money(available).yuan} 元"
+        )
+    return tuple(trace)
+
+
+def _trace_account_id(plan: Plan, gateway: FactGateway) -> str | None:
+    """轨迹账户：优先取节点自带 `account_id`，否则由冻结记录反查。"""
+    for node in plan.nodes:
+        account_id = _str_param(node, "account_id")
+        if account_id is not None:
+            return account_id
+    for node in plan.nodes:
+        hold_id = _str_param(node, "hold_id") or _str_param(node, "budget_hold_id")
+        if hold_id is None:
+            continue
+        try:
+            return gateway.hold(hold_id).payload.account_id
+        except GatewayNotFoundError:
+            return None
+    return None
 
 
 def plan_triples(plan: Plan, gateway: FactGateway) -> tuple[PlanTriple, ...]:

@@ -481,6 +481,17 @@ function receiptNo(frozen) {
   return `PLAN-${stamp}-${String(frozen).slice(0, 4).toUpperCase()}`;
 }
 
+function traceHtml(trace) {
+  const rows = trace || [];
+  if (!rows.length) {
+    return "";
+  }
+  return `<div class="trace">
+      <div class="trace__title">可用余额轨迹</div>
+      <ol class="trace__rows">${rows.map((row) => `<li>${esc(row)}</li>`).join("")}</ol>
+    </div>`;
+}
+
 function voucherHtml() {
   const card = state.card;
   const lines = card.lines || [];
@@ -514,6 +525,8 @@ function voucherHtml() {
     ${quotaHtml(card)}
 
     ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
+
+    ${traceHtml(card.balance_trace)}
 
     <p class="muted" style="margin-top: var(--s-3)">
       命中规则<span class="rules">${rulesHtml(state.decision ? state.decision.reasons || [] : [])}</span>
