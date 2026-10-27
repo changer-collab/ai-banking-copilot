@@ -61,6 +61,56 @@ def test_parse_amount_rejects_multi_candidate_numbers() -> None:
     assert result.matched is False
 
 
+def test_parse_amount_supports_colloquial_chinese_numerals() -> None:
+    """中文数字必须能直接解析（「给李娜打五百」不能要求用户改成阿拉伯数字）。"""
+    assert parse_amount("给李娜打五百").value == Money(50000)
+    assert parse_amount("给李娜打五百块").value == Money(50000)
+    assert parse_amount("转一千二").value == Money(120000)
+    assert parse_amount("转两千五").value == Money(250000)
+    assert parse_amount("转一万五千块").value == Money(1500000)
+
+
+def test_parse_amount_supports_standard_chinese_numerals() -> None:
+    assert parse_amount("转一百零八").value == Money(10800)
+    assert parse_amount("转十五块").value == Money(1500)
+    assert parse_amount("转三百二十").value == Money(32000)
+    assert parse_amount("转两百块").value == Money(20000)
+    assert parse_amount("转十二万元").value == Money(12000000)
+
+
+def test_parse_amount_asks_before_ten_thousand_without_currency_unit() -> None:
+    """万级中文数字不带「元 / 块」时不判定金额，先追问——大额不替用户推断单位。
+
+    `adv-hallucination-4`（「转给李娜 一万」）的期望就是这一条：不产级别、先追问。
+    """
+    assert parse_amount("转给李娜 一万").matched is False
+    assert parse_amount("转一万五").matched is False
+    assert parse_amount("转十二万").matched is False
+    assert parse_amount("转一万块").value == Money(1000000)
+
+
+def test_parse_amount_chinese_evidence_is_the_matched_text() -> None:
+    result = parse_amount("给李娜打五百")
+    assert result.matched is True
+    assert result.evidence == "五百"
+
+
+def test_parse_amount_rejects_bare_single_chinese_digit() -> None:
+    """单个汉字数字（无单位、无进位单位）不足以判定金额，必须追问。"""
+    assert parse_amount("转给他五").matched is False
+
+
+def test_parse_amount_ignores_chinese_numeral_in_date_expression() -> None:
+    """「十月一号」里的中文数字是日期，不是金额；不能与真实金额凑成两个候选。"""
+    result = parse_amount("十月一号给李娜转五百")
+    assert result.matched is True
+    assert result.value == Money(50000)
+
+
+def test_parse_amount_rejects_mixed_arabic_and_chinese_candidates() -> None:
+    assert parse_amount("300 元和五百块分两笔").matched is False
+
+
 def test_parse_temporal_resolves_relative_days() -> None:
     today = date(2026, 10, 1)
     assert parse_temporal("今天转", today).when == date(2026, 10, 1)
