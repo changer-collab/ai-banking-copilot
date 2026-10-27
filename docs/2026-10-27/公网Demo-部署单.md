@@ -269,8 +269,110 @@ A：`./runtime` 没挂数据卷。本仓库 compose 已挂；自己改过 compos
 
 ### 10.3 服务器现状提醒
 
-- 磁盘 **96% 已用（仅剩约 4.8G）**：镜像与日志继续涨会先在这里出问题，建议清理无用镜像（`docker image prune -a`）或扩容后再堆其他服务。
+- 磁盘紧张：部署当天做过一次安全清理（**只清构建缓存与悬空镜像，没动任何人的镜像/容器**）：`docker builder prune -af` + `docker image prune -f`，**释放约 4.1G 构建缓存**，可用空间 4.5G → **6.3G（95% 使用）**。
+  - **以后每次部署后建议顺手跑一次**：`docker builder prune -af`（只删构建缓存，不影响运行中的容器）。
+  - 还剩 12.8G 镜像，都是运行中容器在用的（其中 `expert-managementsystem-app:latest` 4.07G、`napcat` 2.12G、`medicine-process-api` 2.17G、两个 `mysql` 共 2.4G）——**这些不是我们的，别删**，要清得先问对应的人。
 - 这台机器上还跑着 `expert-managementsystem-*`、`komari`、`qq_feishu_bot`、`qq_napcat` 等**别人的服务**，部署与重启**只操作 `aib-*`**，不要 `docker compose down` 全局、不要改 80/443 的占用。
+
+---
+
+## 11. 每日部署清单（尹辰每天跑一遍，约 2 分钟）
+
+> 目标：把当天 `sprint/1026` 的最新代码放上去，**且尽量不改隧道地址**（地址一变，飞书后台就得跟着改一次）。
+> **关键：只重建 `aib-api`，不重启 `aib-tunnel`。** 隧道活着，地址就不变。
+
+```bash
+# ① 本机：打包当天代码并上传
+cd /path/to/ai-banking-copilot
+git checkout sprint/1026 && git pull
+git archive --format=tar.gz -o aib.tar.gz sprint/1026
+scp aib.tar.gz aistock@121.37.46.229:/home/aistock/
+
+# ② 服务器：解包（保留 .env 与 runtime）+ 只重建应用
+ssh aistock@121.37.46.229
+cd ~ && rm -rf aib/src aib/docs aib/tests aib/scripts aib/deploy aib/Dockerfile aib/docker-compose.yml aib/pyproject.toml
+tar -xzf ~/aib.tar.gz -C ~/aib
+cd ~/aib
+API_HOST_PORT=18080 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose -p aib up -d --build
+docker builder prune -af            # 顺手清构建缓存（磁盘只剩 6G 左右）
+```
+
+③ 验收三条（缺一条就回滚到上一个 tar.gz）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/                # 200
+curl -s http://127.0.0.1:18080/api/channels/health                              # feishu 状态如实
+curl -s -X POST http://127.0.0.1:18080/api/im/message \
+  -H 'Content-Type: application/json' -d '{"text":"查余额"}' | head -c 200        # 出计划卡
+```
+
+④ 取当天公网地址（**隧道没重启的话，和昨天一样**）：
+
+```bash
+docker logs aib-tunnel 2>&1 | grep trycloudflare | tail -1
+```
+
+⑤ 只有这几种情况才需要重启隧道（并**立刻告诉王昌泽新地址**）：容器挂了、服务器重启、`docker ps` 里看不到 `aib-tunnel`。
+```bash
+docker restart aib-tunnel && sleep 10 && docker logs aib-tunnel 2>&1 | grep trycloudflare | tail -1
+```
+
+> `.env` 和 `runtime/` 在 `~/aib` 下，上面第 ② 步**不删它们**，所以密钥与会话/审计数据每天都在，不会被覆盖。
+
+---
+
+## 12. 渠道对接（**王昌泽看这一节就够了**）
+
+### 12.1 你需要的三样东西
+
+| 你要的 | 从哪来 |
+|---|---|
+| **回调地址** | `https://<当日隧道域名>/api/im/feishu`。域名每天可能变，**找尹辰要当天那条**（或等尹辰发群里），不要自己猜 |
+| **四个凭据变量名** | `AIB_FEISHU_APP_ID` / `AIB_FEISHU_APP_SECRET` / `AIB_FEISHU_VERIFICATION_TOKEN` / `AIB_FEISHU_ENCRYPT_KEY`。**值只私发给尹辰**，由他写进服务器 `.env` 并重启 `aib-api`；**群里/文档/截图里都不写值** |
+| **服务是否可达** | 浏览器打开 `https://<当日隧道域名>/api/channels/health`，`feishu` 那段应是 `stub / not_configured`（你接好之后应变成 `adapter`） |
+
+### 12.2 现在能不能填飞书后台
+
+**先别填。** 现在 `POST /api/im/feishu` 是 **501 + `feishu_adapter_not_integrated`**（M2 还没做），飞书后台点「保存」会报**请求地址校验失败**——不是你配错，是后端还没实现。
+
+**正确顺序**：
+
+1. 先在本机把 `web/channels/feishu.py` 写完（验签 / AES 解密 / `url_verification` 回声 / `event_id` 幂等 / 3 秒内 ACK / 出交互卡片 / 出站发消息）；
+2. 本机四开关全过：`replay_webhook.py --tamper`→401、`--replay`→只执行一次、`--burst 30`→429、正常→出计划卡；
+3. 找尹辰要**当日回调地址**，同时把四个凭据私发给他（他写进服务器、重启 `aib-api`）；
+4. 再回飞书后台填地址 → 订阅 `im.message.receive_v1` → 保存（这时校验才会通过）；
+5. 在飞书里发一句「给李娜转500」，找尹辰看 `docker logs aib-api-1` 是否收到、`/api/channels/health` 的 `feishu` 是否变 `adapter`；
+6. 同一句话再走一遍网页 `/`，比对 `state`、三色等级、`card_id` 结构**逐字段相同**（M1 的双端一致）。
+
+### 12.3 填后台时容易踩的点
+
+| 现象 | 原因 |
+|---|---|
+| 保存时「请求地址校验失败」 | 后端还是 501（M2 未完成），或地址少写 `/api/im/feishu`，或用了昨天的旧域名 |
+| 飞书发消息没反应 | 没订阅 `im.message.receive_v1`；或后端在 3 秒内没 ACK 被飞书重试；看 `docker logs aib-api-1` |
+| 收到 401 | 签名算法/`X-Lark-Signature` 拼错，或 `ENCRYPT_KEY` 与实际配置不一致 |
+| 同一条消息执行了两次 | `event_id` 幂等没做（必须命中幂等表直接 200，不重放业务） |
+| 频繁 429 | 触发了 20 次/分钟的令牌桶（`channel:external_user_id`），属预期，不是 bug |
+
+### 12.4 你可以动 / 不能动
+
+- **可以动**：`web/channels/feishu.py`（新建）、`web/channels/ratelimit.py`（新建）、`tests/web/test_channels_im.py`、`scripts/replay_webhook.py`、`docs/2026-10-27/飞书接入-配置单.md`。
+- **先申请再动**：`web/app.py` 里 `/api/im/feishu` 那段 501 占位（改成调你的适配器）、`web/channels/{contracts,identity,dispatcher,render}.py`（M1 契约，改之前跟我说一声）。
+- **不要动**：服务器上的容器（尤其 `expert-managementsystem-*`、`qq_*`、`komari` 这些别人的）、`.env` 里的密钥（由尹辰统一写）。
+
+### 12.5 一句提醒
+
+渠道这一摊是全组最宽的，**卡住超过 30 分钟就找我**（微信/电话都行），尤其涉及**契约、身份映射、幂等表结构、降级策略**时——先问再写，别自己硬扛。
+
+---
+
+## 13. 部署与地址变更记录
+
+| 日期 | 隧道地址 | 备注 |
+|---|---|---|
+| 2026-10-27 | `https://speeches-plant-confidence-constantly.trycloudflare.com` | 首次部署（18080 + aib-tunnel），五项实测全绿 |
+
+> 地址变了就在这张表加一行，并同步给王昌泽。
 
 ---
 
