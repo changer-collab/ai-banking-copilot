@@ -1,6 +1,10 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        # 国内服务器直连 pypi.org 会超时；用 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 构建
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     ports:
       # 宿主端口可改：服务器上 8000 常被别的服务占用，用 API_HOST_PORT=18080 起即可。
       - "${API_HOST_PORT:-8000}:8000"

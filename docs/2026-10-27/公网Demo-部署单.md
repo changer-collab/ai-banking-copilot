@@ -54,6 +54,12 @@ curl -s http://127.0.0.1:8000/api/channels/health                      # 三渠�
 > `docker-compose.yml` 已把 `.env` 里的 key 注入容器（缺 `DEEPSEEK_API_KEY` 会**静默降级成模板卡**，日志会出现 `fallback`）；
 > `./runtime` 已挂成数据卷，**会话 / 计划卡 / 审计链都在里面**，容器重建不丢数据。
 
+> **两条与服务器相关的开关**（本仓库已支持，别漏）：
+> - `API_HOST_PORT=18080`：宿主 8000 被别的服务占用时改端口，容器内仍是 8000；
+> - `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`：国内服务器直连 pypi.org 会 read timeout，构建必须换源。
+>
+> 完整命令：`API_HOST_PORT=18080 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose -p aib up -d --build`
+
 ### 不用 Docker 的裸跑方式（应急）
 
 ```bash
@@ -87,7 +93,18 @@ sudo systemctl daemon-reload && sudo systemctl enable --now aib
 
 ## 3. cloudflared 隧道（拿 https 的关键一步）
 
-### 3.1 服务器上装（Linux）
+### 3.0 推荐：用 Docker 镜像跑（服务器上最省事，本次就是这么做的）
+
+```bash
+docker run -d --name aib-tunnel --restart unless-stopped --network host \
+  cloudflare/cloudflared:latest tunnel --url http://127.0.0.1:18080 --no-autoupdate
+docker logs aib-tunnel 2>&1 | grep trycloudflare     # 这里就是 https 地址
+```
+
+> 用 `--network host` 才能访问宿主 `127.0.0.1:18080`；`--restart unless-stopped` 让机器重启后自动恢复（但**地址会变**）。
+> 好处：不用下载二进制（国内服务器直连 GitHub Releases 常下载不完整，二进制会段错误）。
+
+### 3.1 备选：装二进制（Linux）
 
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
@@ -199,20 +216,61 @@ A：`./runtime` 没挂数据卷。本仓库 compose 已挂；自己改过 compos
 
 ---
 
-## 10. 实测记录（2026-10-27，尹辰本机跑通）
+## 10. 实测记录（2026-10-27）
 
-第一版跑通方式：本机 `python -m ai_banking_copilot` 同源起服务（8000 被旧进程占用，演示实例起在 **8010**，`runtime/` 用干净目录避审计链校验冲突）→ `cloudflared tunnel --url http://127.0.0.1:8010`。
+### 10.1 云服务器正式部署（已完成）
 
-| 检查项 | 实测结果 |
+**服务器**：`aistock@121.37.46.229`（Ubuntu 22.04 / x86_64 / Docker 29.3.1 / 7.5G 内存），已用 SSH 密钥登录部署完毕。
+
+**当前公网地址**：`https://speeches-plant-confidence-constantly.trycloudflare.com`（quick tunnel，重启会变）
+
+| 项 | 实际值 |
+|---|---|
+| 代码位置 | `/home/aistock/aib`（无 `.git`，见下方「服务器拉的什么」） |
+| 容器 | `aib-api-1`（应用）+ `aib-tunnel`（cloudflared），均 `--restart unless-stopped` |
+| 宿主端口 | **18080**（服务器 8000 / 80 / 443 已被别的项目占用，**没有动别人的容器**） |
+| 启动命令 | `API_HOST_PORT=18080 docker compose -p aib up -d --build` |
+| 数据 | `/home/aistock/aib/runtime/`（挂载进容器，重建不丢） |
+| 日志 | 应用 `docker logs aib-api-1`；隧道 `docker logs aib-tunnel` |
+
+**这次踩到的三个坑（已在仓库里修掉）**：
+
+1. **GitHub 私有库服务器拉不下来**（`could not read Username`，且不装 token）→ 用本地 `git archive` 打包上传：
+   ```bash
+   # 本机
+   git archive --format=tar.gz -o aib.tar.gz sprint/1026
+   scp aib.tar.gz aib.env aistock@121.37.46.229:/home/aistock/
+   # 服务器
+   mkdir -p ~/aib && tar -xzf ~/aib.tar.gz -C ~/aib && mv ~/aib.env ~/aib/.env
+   ```
+   > 后续要么给仓库加 **Deploy Key**（只读）让服务器能 `git pull`，要么继续用这个打包流程；**别再手改服务器上的源码**，否则和仓库分叉。
+2. **服务器直连 pypi.org 超时**（`files.pythonhosted.org` read timeout）→ Dockerfile 现在支持 `PIP_INDEX_URL` 构建参数，构建时用清华源：
+   ```bash
+   API_HOST_PORT=18080 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose up -d --build
+   ```
+3. **服务器 8000 端口被占** → compose 的宿主端口改成可配 `API_HOST_PORT`（默认仍是 8000，不影响本地）。
+
+**公网实测（从本机访问隧道地址）**：
+
+| 检查项 | 结果 |
 |---|---|
 | `GET /` | **200**（7752 字节） |
-| `GET /m`（窄屏 App） | **200** |
-| `GET /api/channels/health` | **200**，`im=local`、`feishu=stub/not_configured`（如实） |
-| `POST /api/im/feishu` | **501 + `feishu_adapter_not_integrated`**（M2 未完成，如实不假成功） |
-| `POST /api/im/message {"text":"查余额"}` | **200**，出计划卡「1 步 · GREEN」，`decision.reasons=["QUERY_ONLY"]`，含飞书卡片渲染体 |
+| `GET /m` | **200** |
+| `GET /api/channels/health` | **200**，`im=local`、`feishu=stub/not_configured` |
+| `POST /api/im/feishu` | **501 + `feishu_adapter_not_integrated`**（如实） |
+| `POST /api/im/message {"text":"查余额"}` | **200**，计划卡「1 步 · GREEN」，`reasons=["QUERY_ONLY"]`，含飞书卡片渲染体 |
+
+### 10.2 本机预演（部署前先在本机验过一遍）
+
+本机 `python -m ai_banking_copilot` 起服务（8000 被旧进程占用 → 换 8010，`runtime/` 用干净目录避审计链校验冲突）→ `cloudflared tunnel --url http://127.0.0.1:8010`，五项检查同样全绿。
 
 > 结论：**无域名也能把整条链路放到公网 https 上**，`/api/im/message` 的往返已经过公网验证；只有真实飞书回调（M2）还等适配器。
-> 注意：quick tunnel 的地址是**临时的**，本机进程一停就失效；正式演示前重新起一次，把新地址发群里。
+> 注意：quick tunnel 的地址是**临时的**，进程一停就失效；**演示当天先起隧道、再发地址**，并把新地址写进彩排脚本。
+
+### 10.3 服务器现状提醒
+
+- 磁盘 **96% 已用（仅剩约 4.8G）**：镜像与日志继续涨会先在这里出问题，建议清理无用镜像（`docker image prune -a`）或扩容后再堆其他服务。
+- 这台机器上还跑着 `expert-managementsystem-*`、`komari`、`qq_feishu_bot`、`qq_napcat` 等**别人的服务**，部署与重启**只操作 `aib-*`**，不要 `docker compose down` 全局、不要改 80/443 的占用。
 
 ---
 
