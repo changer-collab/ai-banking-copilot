@@ -3,5 +3,17 @@ services:
     build: .
     ports:
       - "8000:8000"
+    # 下面这些值由仓库根目录的 .env 提供（docker compose 会自动读取同目录的 .env 做变量替换）。
+    # DEEPSEEK_API_KEY 必须显式传进来，否则容器里拿不到 key，会静默降级成模板卡。
     environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-qwen}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - AI_BASE_URL=${AI_BASE_URL:-https://api.deepseek.com/chat/completions}
+      - AI_MODEL=${AI_MODEL:-deepseek-flash}
+      - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # 会话 / 计划卡 / 审计链都落在 runtime/copilot.db，必须挂出来，否则容器重建即丢数据。
+    volumes:
+      - ./runtime:/app/runtime
+    restart: unless-stopped
