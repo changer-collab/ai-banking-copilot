@@ -144,6 +144,24 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="subscription-cancel-result" hidden></div>
     </section>
 
+    <section class="panel" id="cards-panel">
+      <p class="panel__title">卡片管理 <span class="tech">④ 场景</span></p>
+      <p class="muted" id="cards-status">正在读取卡片…</p>
+      <div id="cards-list"></div>
+    </section>
+
+    <section class="panel" id="bills-panel">
+      <p class="panel__title">账单分析 <span class="tech">② 场景</span></p>
+      <p class="muted" id="bills-status">正在读取账单识别结果…</p>
+      <p class="muted" id="bills-disclaimer" hidden></p>
+      <div id="bills-summary"></div>
+      <div id="bills-findings"></div>
+      <details class="bills-details" id="bills-details">
+        <summary>账单明细（本期交易）</summary>
+        <div id="bills-table"></div>
+      </details>
+    </section>
+
     <section class="panel">
       <p class="panel__title">三色分级（官方口径）</p>
       <ul class="legend">

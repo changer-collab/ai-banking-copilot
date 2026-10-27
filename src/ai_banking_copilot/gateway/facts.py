@@ -340,6 +340,8 @@ class FactGateway:
             category=str(row["category"]),  # type: ignore[index]
             channel=str(row["channel"]),  # type: ignore[index]
             direction=str(row["direction"]),  # type: ignore[index]
+            booked_at=_optional_text(row["booked_at"]),  # type: ignore[index]
+            city=_optional_text(row["city"]),  # type: ignore[index]
         )
         return _record("transactions", payload.txn_id, payload)
 
@@ -417,6 +419,14 @@ def _record(table: str, pk: str, payload: T) -> Record[T]:
         payload=payload,
         content_hash=sha256_hex(canonical_json(payload)),
     )
+
+
+def _optional_text(value: object) -> str | None:
+    """可空文本列：`NULL` / 空串一律归一为 `None`（判据必须能识别「不适用」）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _merchant_order(row: object) -> MerchantOrder:

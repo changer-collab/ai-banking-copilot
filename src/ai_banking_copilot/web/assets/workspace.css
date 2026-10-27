@@ -521,3 +521,72 @@ html[data-view="app"] .trace__head { padding-bottom: var(--s-2); border-bottom: 
     box-shadow: none;
   }
 }
+
+/* ④ 卡片面板 / ② 账单分析面板（场景自有样式，不改既有面板） */
+.card-item {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.card-item__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.card-state {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(15, 138, 95, 0.12);
+  color: #0f8a5f;
+}
+.card-state--locked {
+  background: rgba(168, 113, 15, 0.14);
+  color: #a8710f;
+}
+.card-state--lost,
+.card-state--cancelled {
+  background: rgba(179, 54, 42, 0.12);
+  color: #b3362a;
+}
+.card-actions {
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.card-actions .card-limit {
+  width: 96px;
+}
+.finding {
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 10px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.finding summary {
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+.finding .evidence {
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.bills-details {
+  margin-top: 8px;
+}
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mini-table th,
+.mini-table td {
+  border-bottom: 1px solid var(--line, #eee);
+  padding: 4px 6px;
+  text-align: left;
+}

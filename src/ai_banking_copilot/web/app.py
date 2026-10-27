@@ -419,6 +419,28 @@ def create_app(deps: AppDeps) -> FastAPI:
             },
         }
 
+    @app.get("/api/cards")
+    def cards() -> dict[str, object]:
+        """卡片面板只读事实：类型 / 状态 / 日限额。状态与额度一律读服务端，前端不得自行推导。"""
+        card_types = {"debit": "借记卡", "credit": "信用卡", "virtual": "虚拟卡"}
+        statuses = {"active": "正常", "locked": "已锁定", "lost": "已挂失", "cancelled": "已取消"}
+        return {
+            "as_of": deps.today.isoformat(),
+            "cards": [
+                {
+                    "card_id": record.payload.card_id,
+                    "type": record.payload.card_type,
+                    "type_label": card_types.get(
+                        record.payload.card_type, record.payload.card_type
+                    ),
+                    "status": record.payload.status,
+                    "status_label": statuses.get(record.payload.status, record.payload.status),
+                    "daily_limit_cents": record.payload.daily_limit.cents,
+                }
+                for record in deps.gateway.cards_of(deps.user_id)
+            ],
+        }
+
     @app.get("/api/risk-assessment")
     def risk_assessment_state() -> dict[str, object]:
         """当前已认证用户的测评状态（只读）；未测评 / 过期如实返回，绝不默认等级。"""
