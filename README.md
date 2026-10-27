@@ -256,9 +256,38 @@ AIB_OPERATOR_TOKEN=<口令> python -m ai_banking_copilot
 python scripts/operator_unlock.py --reason "注入误报，已人工核实"
 ```
 
-## 部署
+## 部署与线上环境
 
-见 `deploy/README.md`（随实施计划落地）。
+### 当前线上环境（华为云 ECS + Cloudflare Tunnel）
+
+| 项 | 值 |
+|---|---|
+| 云服务器 | **华为云 ECS**（Ubuntu 22.04 / x86_64 / Docker 29.3.1），登录 `aistock@121.37.46.229` |
+| 运行形态 | Docker Compose 项目 `aib`：`aib-api`（应用，容器内 8000，宿主 **18080**）+ `aib-tunnel`（cloudflared） |
+| 公网入口 | **Cloudflare Tunnel**（quick tunnel）：`https://<当日隧道域名>`，自带 https |
+| 域名 | **暂无**（境内备案周期长）→ 用云隧道临时域名代替，**免域名、免备案、免开端口** |
+| 数据 | 宿主 `/home/aistock/aib/runtime/`，挂载进容器；容器重建不丢会话 / 计划卡 / 审计链 |
+| 当前地址 | <https://speeches-plant-confidence-constantly.trycloudflare.com>（隧道重启即变，以当天群里发的为准） |
+
+入口（把 `<tunnel>` 换成当天域名）：
+
+| 用途 | 地址 |
+|---|---|
+| 网页端 | `https://<tunnel>/` |
+| APP 端（窄屏 PWA） | `https://<tunnel>/m` |
+| 本地联调页（不算产品页） | `https://<tunnel>/im` |
+| 渠道健康 | `https://<tunnel>/api/channels/health` |
+| 飞书回调（M2 完成后生效） | `https://<tunnel>/api/im/feishu` |
+
+**为什么这么部署（都是踩过的坑）**：
+
+- 服务器 **8000 / 80 / 443 已被别的项目占用** → 应用走 `API_HOST_PORT=18080`，不与人抢端口；
+- 国内服务器直连 pypi.org **read timeout** → 构建时用 `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`；
+- GitHub 私有库在服务器上**拉不下来** → 用 `git archive` 打包上传（或给仓库配只读 Deploy Key）；
+- 没有域名、也不走备案 → **cloudflared 出站隧道**，不占端口、不动防火墙。
+
+> 线上部署明细、**每日部署清单**、**渠道对接（飞书）步骤**与排障：见 [docs/2026-10-27/公网Demo-部署单.md](docs/2026-10-27/公网Demo-部署单.md)。
+> 本地一键复现（`docker compose up` / `pip install -e .`）：见 [deploy/README.md](deploy/README.md)。
 
 ## 团队与分工
 
