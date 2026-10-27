@@ -40,7 +40,7 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=6")
-    workspace_css = _get(base, "/assets/workspace.css?v=4")
+    workspace_css = _get(base, "/assets/workspace.css?v=5")
     js = _get(base, "/assets/app.js?v=15")
 
     checks = {
@@ -63,7 +63,7 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=6" in html
-            and "/assets/workspace.css?v=4" in html
+            and "/assets/workspace.css?v=5" in html
             and "/assets/app.js?v=15" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,

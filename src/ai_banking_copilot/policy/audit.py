@@ -65,6 +65,12 @@ KIND_OPERATOR = "operator"
 KIND_TOOL_HOOK = "tool_hook"
 """**Pre-Tool Hook** 事件：写操作被拦截时的工具名、操作类型、计划 ID、拦截原因与确认状态。"""
 
+KIND_CHANNEL = "channel"
+"""**渠道入站**事件：渠道名、会话键、外部身份、`event_id`、状态 / 等级、文本**摘要**。
+
+只落 `text_digest` 与长度，**不落原文**——审计要能追溯「谁在哪个渠道做了什么」，
+而不是把用户消息再抄一份。"""
+
 _REQUIRED_KEYS = ("event_id", "kind", "payload", "prev_hash", "entry_hash")
 _PROCESS_FILE_LOCK = RLock()
 

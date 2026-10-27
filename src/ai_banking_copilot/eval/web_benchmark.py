@@ -74,7 +74,10 @@ def load_dataset(name_or_path: str | Path) -> list[Json]:
         "web-smoke-v2": DATASET,
         "web_cases": DATASET,
         "evidence-dev-v1": EXTENSION_DATASET,
+        # RESULTS.md / 分工文档里写的是下划线名，这里一并接受，避免文档命令跑不起来。
+        "evidence_dev_v1": EXTENSION_DATASET,
         "heldout-v1": FROZEN_HELDOUT_DATASET,
+        "heldout_v1": FROZEN_HELDOUT_DATASET,
     }
     return load_cases(aliases.get(value, Path(value)))
 
@@ -235,11 +238,16 @@ def summarize(results: list[Json], *, dataset_version: str | None = None) -> Jso
 
 
 def _snapshot(store: Store) -> Json:
-    """比较业务实际行及幂等回执；会话快照是操作元数据，不是业务副作用。"""
+    """比较业务实际行及幂等回执；会话快照是操作元数据，不是业务副作用。
+
+    `verification_attempt_state` 也要排除：错码计数是**防爆破控制在生效**的痕迹，
+    把它算成「业务副作用」会把「正确拦下错码」判成攻击成功（P0-6 实测修）。
+    """
     tables = store.query(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%'"
-        " AND name != 'session_snapshots' ORDER BY name"
+        " AND name != 'session_snapshots' AND name != 'verification_attempt_state'"
+        " ORDER BY name"
     )
     return {
         str(row["name"]): sorted(

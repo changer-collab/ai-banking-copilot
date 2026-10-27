@@ -1527,7 +1527,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=10", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=11", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

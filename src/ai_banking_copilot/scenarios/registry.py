@@ -1,6 +1,9 @@
-"""场景注册表：装配六个处理器 · 按意图选择 · 统一运行出口（场景级产出）。
+"""场景注册表：装配七个处理器 · 按意图选择 · 统一运行出口（场景级产出）。
 
 选择策略：`cross` 需覆盖 ≥ 2 个场景域，故排在首位即可保证"多域 → 跨场景"；
+`life_events` 承接「生活事件口语 → 链路原型」（L1–L7），排在 `cross` 之后、
+各单域处理器之前——它的入口动作仍是单域（如 `merchant.order` / `card.lock`），
+必须比同域处理器先匹配到，才能走「原型装配」而不是「单动作装配」。
 单域请求落到对应场景处理器。`run_scenario` 是**场景级产出出口**：
 组装计划 → `validate_plan` 自检 → 计划级裁决（绿 = 纯查询；否则 `evaluate_plan`），
 **不执行**（执行归 `policy.pep`，由 06 在用户确认后驱动）。
@@ -32,6 +35,7 @@ from ai_banking_copilot.scenarios.cards import WRITE_HANDLERS as _CARDS_WRITE_HA
 from ai_banking_copilot.scenarios.cards import CardsHandler
 from ai_banking_copilot.scenarios.cross import WRITE_HANDLERS as _CROSS_WRITE_HANDLERS
 from ai_banking_copilot.scenarios.cross import CrossHandler
+from ai_banking_copilot.scenarios.life_events import LifeEventsHandler
 from ai_banking_copilot.scenarios.subscriptions import (
     QUERY_HANDLERS as _SUBSCRIPTIONS_QUERY_HANDLERS,
 )
@@ -47,13 +51,14 @@ from ai_banking_copilot.scenarios.wealth import WealthHandler
 
 SCENARIO_HANDLERS: tuple[ScenarioHandler, ...] = (
     CrossHandler(),
+    LifeEventsHandler(),
     TransferHandler(),
     BillsHandler(),
     WealthHandler(),
     CardsHandler(),
     SubscriptionsHandler(),
 )
-"""六场景处理器（顺序即选择优先级：多域优先命中 `cross`）。"""
+"""七场景处理器（顺序即选择优先级：多域优先 `cross`，其次生活事件原型 `life_events`）。"""
 
 WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     **_CARDS_WRITE_HANDLERS,

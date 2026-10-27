@@ -32,6 +32,10 @@ class InsufficientFundsError(CoreBankError):
     """余额不足。"""
 
 
+class InsufficientHoldingError(CoreBankError):
+    """理财产品持仓不足（赎回不得超过已持有份额：事实零生成）。"""
+
+
 class BlockedPayeeError(CoreBankError):
     """收款对象处于 blocked 吸收态（PRD §5.2）。"""
 

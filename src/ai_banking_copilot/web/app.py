@@ -31,8 +31,13 @@ from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.receipt_store import ReceiptReader
-from ai_banking_copilot.gateway.risk_store import RiskAssessmentSource, RiskAssessmentWriter
+from ai_banking_copilot.gateway.risk_store import (
+    SOURCE_QUESTIONNAIRE,
+    RiskAssessmentSource,
+    RiskAssessmentWriter,
+)
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
+from ai_banking_copilot.gateway.store import Store
 from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.planning.task_observations import TaskObservations
@@ -64,9 +69,30 @@ from ai_banking_copilot.scenarios.wealth import (
     AssessmentState,
     to_risk_assessment,
 )
+from ai_banking_copilot.scenarios.wealth_assessment import (
+    AssessmentError,
+    evaluate_answers,
+    questionnaire_payload,
+)
 from ai_banking_copilot.tools.registry import ToolRegistry
+from ai_banking_copilot.web.channels.contracts import (
+    CHANNEL_FEISHU,
+    CHANNEL_LOCAL,
+    ChannelError,
+    ConfirmCommand,
+    InboundMessage,
+    OutboundMessage,
+)
+from ai_banking_copilot.web.channels.dispatcher import Dispatcher
+from ai_banking_copilot.web.channels.identity import (
+    IdentityDirectory,
+    MemoryIdentityDirectory,
+    StoreIdentityDirectory,
+    init_channel_schema,
+)
+from ai_banking_copilot.web.channels.render import render_feishu_card, render_text
 from ai_banking_copilot.web.insights import InsightService
-from ai_banking_copilot.web.page import INDEX_HTML
+from ai_banking_copilot.web.page import APP_HTML, INDEX_HTML
 from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
 from ai_banking_copilot.web.session import (
     MAX_CONFIRM_STEPS,
@@ -145,6 +171,11 @@ class AppDeps:
 
     模型只解释 `scenarios.bill_findings` 已核实的识别结果，**不参与金额计算**；
     识别引擎与金额核算在装配缺失时仍完整可用（可测试、可重算）。"""
+    channel_store: Store | None = None
+    """渠道身份（绑定关系 / 绑定码）的持久化连接。
+
+    `None ⇒ 进程内身份目录`：单进程演示与测试可用，重启即失效；组合根（`compose.build_deps`）
+    注入写连接后，外部身份绑定跨重启仍生效。**任何情况下外部 id 都必须先绑定**（fail-closed）。"""
 
 
 DEFAULT_SESSION_ID = "default"
@@ -153,6 +184,7 @@ DEFAULT_SESSION_ID = "default"
 RISK_SOURCE_LABELS = {
     "seed": "演示 seed 数据（非真实测评）",
     "user_input": "用户自助录入",
+    "questionnaire": "风险测评问卷",
 }
 """测评来源标注：`seed` 必须显式说明不是真实测评。"""
 
@@ -204,9 +236,52 @@ class _BudgetRequest(BaseModel):
 
 
 class _RiskAssessmentRequest(BaseModel):
-    """用户自助录入的风险等级；**身份只取服务端 `deps.user_id`**，不接受请求体用户 id。"""
+    """用户侧测评录入：**身份只取服务端 `deps.user_id`**，不接受请求体用户 id。
 
-    risk_profile: str
+    两条互斥路径：
+    - `answers`：固定题库作答，等级**由服务端评分算出**（`source='questionnaire'`）；
+    - `risk_profile`：旧的直接录入（`source='user_input'`，保留兼容）。
+    两者同时提交一律 400——等级不允许既由用户自填又由问卷算出。
+    """
+
+    risk_profile: str | None = None
+    answers: dict[str, str] | None = None
+
+
+class _ImMessageRequest(BaseModel):
+    """IM 入站文本：`user_id / chat_id / event_id` 全部可选，但**外部 id 必须先绑定**。
+
+    不带 `user_id` 时走服务端身份（仅本地 IM 渠道）；`event_id` 相同即视为平台重投，
+    直接回放首次结果，不重复执行。
+    """
+
+    text: str
+    chat_id: str | None = None
+    user_id: str | None = None
+    event_id: str | None = None
+
+
+class _ImConfirmRequest(BaseModel):
+    """IM 计划卡确认：字段与 `POST /api/confirm` 同口径，复用同一冻结校验。"""
+
+    card_id: str
+    frozen_hash: str
+    verification_code: str | None = None
+    steps: StrictInt | None = Field(default=None, ge=1, le=MAX_CONFIRM_STEPS)
+    chat_id: str | None = None
+    user_id: str | None = None
+    event_id: str | None = None
+
+
+def build_session_manager(deps: AppDeps) -> SessionManager[Session]:
+    """按 `AppDeps` 构造会话管理器；Web 与 IM 共用**同一份**实现（避免两套状态机）。"""
+    return SessionManager(
+        deps.session_repository,
+        factory=lambda _user, session_id, lock: Session(
+            deps, session_id=session_id, shared_lock=lock,
+        ),
+        restore=lambda snapshot, lock: Session.restore(deps, snapshot, lock),
+    )
 
 
 def create_app(deps: AppDeps) -> FastAPI:
@@ -244,12 +319,20 @@ def create_app(deps: AppDeps) -> FastAPI:
         StaticFiles(directory=str(Path(__file__).parent / "assets")),
         name="assets",
     )
-    manager = SessionManager(
-        deps.session_repository,
-        factory=lambda _user, session_id, lock: Session(
-            deps, session_id=session_id, shared_lock=lock,
-        ),
-        restore=lambda snapshot, lock: Session.restore(deps, snapshot, lock),
+    manager = build_session_manager(deps)
+    identities: IdentityDirectory
+    if deps.channel_store is not None:
+        init_channel_schema(deps.channel_store)
+        identities = StoreIdentityDirectory(deps.channel_store)
+    else:
+        identities = MemoryIdentityDirectory()
+    dispatcher = Dispatcher(
+        manager=manager,
+        identities=identities,
+        submission_payload=_submission_payload,
+        execution_payload=_execution_payload,
+        audit=deps.audit,
+        server_user_id=deps.user_id,
     )
 
     @app.exception_handler(SessionPersistenceError)
@@ -258,6 +341,14 @@ def create_app(deps: AppDeps) -> FastAPI:
         return JSONResponse(status_code=409, content={
             "detail": "会话存储或恢复失败，已暂停；请核对业务回执后重启服务",
         })
+
+    @app.exception_handler(ChannelError)
+    async def channel_error(_request: Request, error: ChannelError) -> JSONResponse:
+        """渠道层稳定错误：直接采用错误族自带的 `status_code`，不吞成 500。"""
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": error.code, "message": str(error)},
+        )
 
     def _session_for(session_id: str) -> Session:
         return manager.get(deps.user_id, session_id)
@@ -273,6 +364,11 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
         return HTMLResponse(INDEX_HTML)
+
+    @app.get("/m", response_class=HTMLResponse)
+    def index_app() -> HTMLResponse:
+        """APP 端版式：同一份骨架 + `data-view="app"`，手机框内铺满。"""
+        return HTMLResponse(APP_HTML)
 
     @app.get("/api/options")
     def options() -> dict[str, object]:
@@ -330,8 +426,11 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.post("/api/risk-assessment")
     def save_risk_assessment(request: _RiskAssessmentRequest) -> dict[str, object]:
-        """用户自助录入风险等级（真实测评入口，`source='user_input'`）。
+        """用户侧测评录入（真实测评入口）。
 
+        - **问卷路径**（`answers`）：固定 5 题，等级由 `scenarios.wealth_assessment` 算出，
+          请求体不得同时给 `risk_profile`（模型不得自填等级），落库 `source='questionnaire'`；
+        - **直接录入路径**（`risk_profile`）：保留兼容，落库 `source='user_input'`；
         - **身份**只取服务端 `deps.user_id`，请求体不能指定他人；
         - 日期取服务端 `deps.today`，客户端不能把过期测评"刷新"成有效；
         - 只写测评事实，不触碰任何理财交易；录入后推荐仍走同一读路径与服务端硬筛选。
@@ -339,6 +438,34 @@ def create_app(deps: AppDeps) -> FastAPI:
         writer = deps.risk_writer
         if writer is None:
             raise HTTPException(status_code=404, detail="风险测评录入未装配")
+        if request.answers is not None:
+            if request.risk_profile is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="answers 与 risk_profile 只能二选一：等级由问卷算出，不能自填",
+                )
+            try:
+                result = evaluate_answers(request.answers)
+            except AssessmentError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            writer.save(
+                deps.user_id, result.risk_profile, deps.today, source=SOURCE_QUESTIONNAIRE,
+            )
+            return {
+                "state": "updated",
+                "assessment": _risk_payload(deps),
+                "result": {
+                    "risk_profile": result.risk_profile,
+                    "score": result.score,
+                    "max_score": result.max_score,
+                    "answers": [
+                        {"question_id": question_id, "option_id": option_id}
+                        for question_id, option_id in result.answers
+                    ],
+                },
+            }
+        if request.risk_profile is None:
+            raise HTTPException(status_code=400, detail="缺少 risk_profile 或 answers")
         try:
             writer.save(deps.user_id, request.risk_profile.strip().upper(), deps.today)
         except ValueError as error:
@@ -606,6 +733,61 @@ def create_app(deps: AppDeps) -> FastAPI:
             "state_after": deps.breaker.state().value,
         }
 
+    @app.post("/api/im/message")
+    def im_message(request: _ImMessageRequest) -> dict[str, object]:
+        """IM 入站文本：走**与 Web 同一条**会话状态机（渠道只搬消息）。"""
+        try:
+            inbound = InboundMessage(
+                channel=CHANNEL_LOCAL,
+                external_user_id=request.user_id,
+                external_chat_id=request.chat_id,
+                event_id=request.event_id,
+                text=request.text,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _channel_payload(dispatcher.dispatch(inbound))
+
+    @app.post("/api/im/confirm")
+    def im_confirm(request: _ImConfirmRequest) -> dict[str, object]:
+        """IM 计划卡确认：`card_id + frozen_hash` 原样交给会话层做冻结校验。"""
+        try:
+            command = ConfirmCommand(
+                channel=CHANNEL_LOCAL,
+                external_user_id=request.user_id,
+                external_chat_id=request.chat_id,
+                event_id=request.event_id,
+                card_id=request.card_id,
+                frozen_hash=request.frozen_hash,
+                verification_code=request.verification_code,
+                steps=request.steps,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return _channel_payload(dispatcher.dispatch(command))
+
+    @app.get("/api/channels/health")
+    def channels_health() -> dict[str, object]:
+        """渠道健康页：如实区分「已配置 / 未配置」，不把 stub 说成可用。"""
+        return dispatcher.health()
+
+    @app.post("/api/im/feishu")
+    def im_feishu() -> JSONResponse:
+        """飞书回调：**当前未接入**（M2 未完成），如实 501，不做假成功。"""
+        return JSONResponse(
+            status_code=501,
+            content={
+                "detail": "not_configured",
+                "channel": CHANNEL_FEISHU,
+                "reason": "feishu_adapter_not_integrated",
+            },
+        )
+
+    @app.get("/im", response_class=HTMLResponse)
+    def im_page() -> HTMLResponse:
+        """IM 聊天页占位（前端冻结中，待组长放行后统一重做）。"""
+        return HTMLResponse(_IM_PAGE_HTML)
+
     return app
 
 
@@ -615,6 +797,7 @@ def _risk_payload(deps: AppDeps) -> dict[str, object]:
     if source is None:
         raise HTTPException(status_code=404, detail="风险测评服务未装配")
     assessment = to_risk_assessment(source.assessment_for(deps.user_id))
+    questionnaire = list(questionnaire_payload())
     if assessment is None:
         return {
             "state": AssessmentState.UNASSESSED.value,
@@ -623,6 +806,7 @@ def _risk_payload(deps: AppDeps) -> dict[str, object]:
             "expires_on": None,
             "source": None,
             "source_label": None,
+            "questionnaire": questionnaire,
         }
     expires_on = assessment.assessed_on + timedelta(days=assessment.valid_days)
     return {
@@ -632,6 +816,7 @@ def _risk_payload(deps: AppDeps) -> dict[str, object]:
         "expires_on": expires_on.isoformat(),
         "source": assessment.source or None,
         "source_label": RISK_SOURCE_LABELS.get(assessment.source),
+        "questionnaire": questionnaire,
     }
 
 
@@ -774,3 +959,46 @@ def _decision_payload(decision: Decision | None) -> dict[str, object] | None:
     if decision is None:
         return None
     return {"level": decision.level.name, "reasons": list(describe_decision(decision))}
+
+
+def _channel_payload(outbound: OutboundMessage) -> dict[str, object]:
+    """出站消息统一成 HTTP 响应：会话原始 payload + 渠道元信息 + 双端渲染。
+
+    `payload` 就是 Web 端同一份 `_submission_payload / _execution_payload`，
+    故 IM 与 Web 看到的计划卡、等级与回执**完全一致**（渠道不二次加工事实）。
+    """
+    base: dict[str, object] = dict(outbound.payload or {})
+    return {
+        **base,
+        "channel": outbound.channel,
+        "chat_id": outbound.chat_id,
+        "session_id": outbound.session_id,
+        "state": outbound.state,
+        "level": outbound.level,
+        "kind": outbound.kind,
+        "replayed": outbound.replayed,
+        "rendered": {
+            "text": render_text(outbound),
+            "feishu": render_feishu_card(outbound),
+        },
+    }
+
+
+_IM_PAGE_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 银行副驾 · IM 渠道</title>
+</head>
+<body>
+<main>
+  <h1>IM 渠道</h1>
+  <p>聊天页前端正在统一重做中，暂由 <code>POST /api/im/message</code> 与
+  <code>POST /api/im/confirm</code> 提供同一套会话状态机。</p>
+  <p>渠道健康：<a href="/api/channels/health">/api/channels/health</a></p>
+</main>
+</body>
+</html>
+"""
+

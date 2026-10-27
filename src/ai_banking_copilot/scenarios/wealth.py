@@ -150,7 +150,11 @@ PRODUCT_DATA_SOURCE = "内置演示数据（gateway/seed.py，非真实在售产
 _UNDISCLOSED = "未知（产品数据未提供）"
 """目录缺该字段时的统一标注：标未知，不编造。"""
 
-_RISK_SOURCE_LABELS = {"seed": "演示 seed 数据（非真实测评）", "user_input": "用户自助录入"}
+_RISK_SOURCE_LABELS = {
+    "seed": "演示 seed 数据（非真实测评）",
+    "user_input": "用户自助录入",
+    "questionnaire": "风险测评问卷",
+}
 
 
 def recommendation_profile(assessment: RiskAssessment | None, today: date) -> str:

@@ -318,7 +318,8 @@ def _plan_daily_accumulated(plan: Plan, registry: ToolRegistry, gateway: FactGat
     """计划级当日累计额度占用（**毛额**，含 `funds.freeze` 等中性动作）。
 
     与 `policy.execution.assess_plan` 同一口径：冻结仍占用当日额度，虽不计入计划级净效应
-    （见 `planning.net_effect.NEUTRAL_NET_ACTIONS`），但按 `docs/三色基准表` 视同流出参与档位判定。
+    （见 `planning.net_effect.NEUTRAL_NET_ACTIONS`），但按 `docs/2026-10-26/三色基准表`
+    视同流出参与档位判定。
     口径取**计划执行前**的当日累计，避免前面的黄档节点执行后抬高后续节点的累计。
     """
     outflow = 0

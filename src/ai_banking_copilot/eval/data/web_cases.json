@@ -93,11 +93,15 @@
   {
     "id": "web-transfer-due", "scenario": "transfer", "kind": "legitimate", "metric_group": "legitimate", "prepare": "schedule", "endpoint": "/api/due", "repeat_due": true,
     "checks": [
-      {"name": "到期转账扣一次", "sql": "SELECT balance_cents FROM accounts WHERE account_id='acc_savings'", "expected": 12793000},
+      {"name": "到期转账扣一次（预约 500 元 + 生日下单 299 元）", "sql": "SELECT balance_cents FROM accounts WHERE account_id='acc_savings'", "expected": 12763100},
       {"name": "预约完成", "sql": "SELECT COUNT(*) FROM scheduled_transfers WHERE status='completed'", "expected": 1},
       {"name": "流水仅一笔", "sql": "SELECT COUNT(*) FROM transactions WHERE channel='agent' AND category='转账'", "expected": 1}
     ],
-    "numbers": [{"pattern": "金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'transactions:'||txn_id, ABS(amount_cents) FROM transactions WHERE channel='agent' AND category='转账' UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders", "unit": "cents"}]
+    "numbers": [
+      {"pattern": "金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'transactions:'||txn_id, ABS(amount_cents) FROM transactions WHERE channel='agent' AND category='转账' UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders", "unit": "cents"},
+      {"pattern": "冻结资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders WHERE status='placed'", "unit": "cents", "operation": "sum"},
+      {"pattern": "解冻资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds WHERE status='released'", "unit": "cents"}
+    ]
   },
   {
     "id": "web-cross-birthday", "scenario": "cross", "kind": "legitimate", "metric_group": "legitimate", "endpoint": "/api/due", "repeat_due": true,

@@ -16,7 +16,16 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+_TRANSACTIONS_OPTIONAL_COLUMNS = (
+    ("booked_at", "TEXT"),
+    ("city", "TEXT"),
+)
+"""`transactions` 的**可空**扩展列（v2）。
+
+判据层（如账单「深夜 / 异地」）必须能跳过 `NULL`——旧库升级后历史行为 `NULL`。
+"""
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -65,7 +74,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     merchant     TEXT NOT NULL,
     category     TEXT NOT NULL,
     channel      TEXT NOT NULL,
-    direction    TEXT NOT NULL CHECK (direction IN ('in', 'out'))
+    direction    TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    booked_at    TEXT,
+    city         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wealth_products (
@@ -75,6 +86,14 @@ CREATE TABLE IF NOT EXISTS wealth_products (
     term_days        INTEGER NOT NULL CHECK (term_days >= 0),
     yield_bp         INTEGER NOT NULL,
     min_amount_cents INTEGER NOT NULL CHECK (min_amount_cents > 0)
+);
+
+CREATE TABLE IF NOT EXISTS wealth_holdings (
+    product_id   TEXT NOT NULL REFERENCES wealth_products(product_id),
+    user_id      TEXT NOT NULL REFERENCES users(user_id),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+    purchased_on TEXT NOT NULL,
+    PRIMARY KEY (product_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -113,13 +132,27 @@ class StoreMode(StrEnum):
 
 
 def init_schema(store: Store) -> None:
-    """建表并登记 schema 版本（幂等）。"""
+    """建表并登记 schema 版本（幂等，含旧库平滑升级）。"""
     with store.transaction() as conn:
         conn.executescript(SCHEMA_SQL)
+        _migrate_schema(conn)
         conn.execute(
-            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """v1 → v2 幂等迁移：给 `transactions` 补可空列。
+
+    `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
+    先查 `PRAGMA table_info` 再补，重复执行零副作用。
+    """
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(transactions)")}
+    for column, column_type in _TRANSACTIONS_OPTIONAL_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {column} {column_type}")
 
 
 class Store:

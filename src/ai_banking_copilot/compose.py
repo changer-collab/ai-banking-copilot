@@ -66,6 +66,7 @@ from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.bill_narrative import LlmBillNarrator
+from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.insights import InsightService, SQLiteInsightMetadataStore
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
@@ -264,6 +265,7 @@ def build_deps(
     init_transfer_schema(writer)
     init_breaker_schema(writer)
     init_session_schema(writer)
+    init_channel_schema(writer)
     writer.close()
 
     read_store = Store(db_path, StoreMode.READ_ONLY)
@@ -343,6 +345,7 @@ def build_deps(
         verification_strict=verification_strict,
         verification_limiter=verification_limiter,
         session_repository=SQLiteSessionRepository(session_store),
+        channel_store=session_store,
         receipts=StoreReceiptReader(read_store),
         model_observations=model_observations,
         session_risk_strict=build_session_risk_strict(env),

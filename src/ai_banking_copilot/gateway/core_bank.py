@@ -22,6 +22,7 @@ from ai_banking_copilot.gateway.errors import (
     CurrencyMismatchError,
     IdempotencyConflictError,
     InsufficientFundsError,
+    InsufficientHoldingError,
     NotReversibleError,
     StoreError,
     UnknownAccountError,
@@ -69,6 +70,8 @@ class WriteReceipt:
     replayed: bool = False
     external_status: str = ""
     previous_status: str | None = None
+    holding_before: int | None = None
+    holding_after: int | None = None
 
 
 def _effect_id(kind: str, action: str, idempotency_key: str) -> str:
@@ -840,17 +843,48 @@ class CoreBank:
             ).fetchone()
             if product is None:
                 raise UnknownProductError(product_id)
-            min_cents = int(product["min_amount_cents"])
-            if amount.cents < min_cents:
-                raise CoreBankError(f"{product_id} 起购金额为 {min_cents} 分")
             account = conn.execute(
                 "SELECT balance_cents FROM accounts WHERE account_id = ? AND user_id = ?",
                 (account_id, user_id),
             ).fetchone()
             if account is None:
                 raise UnknownAccountError(account_id)
-            if direction == "out" and int(account["balance_cents"]) < amount.cents:
-                raise InsufficientFundsError("可用余额不足")
+            holding = conn.execute(
+                "SELECT amount_cents FROM wealth_holdings WHERE product_id = ? AND user_id = ?",
+                (product_id, user_id),
+            ).fetchone()
+            holding_before = int(holding["amount_cents"]) if holding is not None else 0
+            if direction == "out":
+                # 申购：起购金额只约束**买入**；同时写持仓（事实零生成：钱与份额同增）。
+                min_cents = int(product["min_amount_cents"])
+                if amount.cents < min_cents:
+                    raise CoreBankError(f"{product_id} 起购金额为 {min_cents} 分")
+                if int(account["balance_cents"]) < amount.cents:
+                    raise InsufficientFundsError("可用余额不足")
+                holding_after = holding_before + amount.cents
+                conn.execute(
+                    "INSERT INTO wealth_holdings(product_id, user_id, amount_cents, purchased_on)"
+                    " VALUES(?, ?, ?, ?) ON CONFLICT(product_id, user_id)"
+                    " DO UPDATE SET amount_cents = excluded.amount_cents",
+                    (
+                        product_id,
+                        user_id,
+                        holding_after,
+                        DEFAULT_BOOKING_DATE.isoformat(),
+                    ),
+                )
+            else:
+                # 赎回：不受起购金额约束（H2），但**不得超过持仓**（H1）。
+                if amount.cents > holding_before:
+                    raise InsufficientHoldingError(
+                        f"{product_id} 持仓 {holding_before} 分，不足以赎回 {amount.cents} 分"
+                    )
+                holding_after = holding_before - amount.cents
+                conn.execute(
+                    "UPDATE wealth_holdings SET amount_cents = ?"
+                    " WHERE product_id = ? AND user_id = ?",
+                    (holding_after, product_id, user_id),
+                )
             signed = -amount.cents if direction == "out" else amount.cents
             txn_id = _effect_id("txn", action, idempotency_key)
             conn.execute(
@@ -877,7 +911,9 @@ class CoreBank:
                 action=action,
                 status="settled",
                 record_ids=(f"transactions:{txn_id}",),
-                effect_ids=(f"accounts:{account_id}",),
+                effect_ids=(f"accounts:{account_id}", f"wealth_holdings:{product_id}"),
+                holding_before=holding_before,
+                holding_after=holding_after,
             )
 
         return self._run_once(action, idempotency_key, body,
@@ -937,6 +973,12 @@ class CoreBank:
             previous_status=(
                 str(data["previous_status"]) if data.get("previous_status") is not None else None
             ),
+            holding_before=(
+                int(data["holding_before"]) if data.get("holding_before") is not None else None
+            ),
+            holding_after=(
+                int(data["holding_after"]) if data.get("holding_after") is not None else None
+            ),
         )
 
     def _store_receipt(self, conn: sqlite3.Connection, receipt: WriteReceipt) -> None:
@@ -948,6 +990,8 @@ class CoreBank:
             "effect_ids": list(receipt.effect_ids),
             "external_status": receipt.external_status,
             "previous_status": receipt.previous_status,
+            "holding_before": receipt.holding_before,
+            "holding_after": receipt.holding_after,
         }
         conn.execute(
             "INSERT INTO write_receipts(idempotency_key, action, receipt_json) VALUES(?, ?, ?)",

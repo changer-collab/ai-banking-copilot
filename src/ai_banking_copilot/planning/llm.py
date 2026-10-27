@@ -181,6 +181,32 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "account.transactions",
         "命中『异常交易』模板",
     ),
+    # ↓ 生活事件原型 L1–L7（`scenarios/life_events.py`）：**必须留在表尾**——这些是窄词，
+    #   只负责把口语送进 `LifeEventsHandler`，绝不能抢上面已冻结的域内规则
+    #   （如「锁 2000 元给生日」仍归 `funds.freeze`、「年度账单」仍归 `bills.yearly`）。
+    (re.compile(r"生日|寿宴|纪念日|过节"), "merchant.order", "命中『L1 预算锁定』生活事件"),
+    (
+        re.compile(r"每月给|按月给|定期给|固定出资|每月生活费|按月生活费"),
+        "transfer.schedule",
+        "命中『L2 定期出资』生活事件",
+    ),
+    (re.compile(r"出行|出差|旅行|旅游|境外"), "card.set_limit", "命中『L3 出行保障』生活事件"),
+    (re.compile(r"凑钱|首付|学费|装修款"), "wealth.redeem", "命中『L4 大额凑集』生活事件"),
+    (
+        re.compile(r"卡丢了|银行卡丢|卡片丢失|手机丢了|钱包被偷|钱包丢了|疑似盗刷"),
+        "card.lock",
+        "命中『L5 失卡止损』生活事件",
+    ),
+    (
+        re.compile(r"阶段盘点|年度盘点|年终总结|全年盘点"),
+        "bills.yearly",
+        "命中『L6 阶段盘点』生活事件",
+    ),
+    (
+        re.compile(r"分摊收款|合租分摊|团购收款|份子钱|AA制分摊"),
+        "transfer.request_collection",
+        "命中『L7 分摊收款』生活事件",
+    ),
 )
 """规则按**优先级**排列：更具体的规则在前（如"定时"先于"转账"）。"""
 

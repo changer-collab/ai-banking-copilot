@@ -83,7 +83,7 @@ OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
 - `password.change`：官方红色示例「密码修改」——改密是账户被接管的最后一步，无金额参数，
   按金额档只会落绿，强制 ≥ 红。
 
-依据：`docs/三色基准表-2026-10-26.md` 第三节（2026-10-26 裁决）。
+依据：`docs/2026-10-26/三色基准表-2026-10-26.md` 第三节（2026-10-26 裁决）。
 """
 
 KNOWN_CONTEXT_FLAGS: frozenset[str] = frozenset(
