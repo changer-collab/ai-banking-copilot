@@ -177,6 +177,18 @@ def test_delete_conversation_requires_single_use_reverify_ticket(
     assert replay.status_code == 403, "票据一次性，重放应失效"
 
 
+def test_logout_invalidates_the_old_cookie(client: TestClient) -> None:
+    _login(client, "chenming")
+    assert client.get("/api/session").status_code == 200
+    token = client.cookies.get("aib_session")
+    assert token, "登录后应签发 HttpOnly 会话 Cookie"
+
+    assert client.post("/api/auth/logout").status_code == 200
+
+    replay = client.get("/api/session", headers={"cookie": f"aib_session={token}"})
+    assert replay.status_code == 401, "退出后旧 Cookie 必须失效"
+
+
 def test_life_event_panel_lists_seven_prototypes_with_examples(client: TestClient) -> None:
     _login(client, "chenming")
     payload = client.get("/api/life-events").json()
