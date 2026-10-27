@@ -1223,6 +1223,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "event_id": prototype.event_id,
                     "name": prototype.name,
                     "domains": list(prototype.domains),
+                    "description": prototype.description,
+                    "triggers": list(prototype.triggers),
+                    "example": prototype.example,
+                    "steps": len(prototype.skeleton),
                 }
                 for prototype in LIFE_EVENT_PROTOTYPES
             ],

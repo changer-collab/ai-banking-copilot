@@ -1788,25 +1788,42 @@ async function refreshLifeEvents() {
   const prototypes = Array.isArray(payload.prototypes) ? payload.prototypes : [];
   const combos = Array.isArray(payload.combos) ? payload.combos : [];
   const records = Array.isArray(payload.records) ? payload.records : [];
-  if (payload.records_available === false) {
-    status.textContent = "当前部署未开启生活事件记录。";
-    list.innerHTML = "";
-    return;
-  }
-  status.textContent = `记录已开启 · 原型 ${prototypes.length} 个 · 组合律 ${combos.length} 个`;
-  if (!records.length) {
-    list.innerHTML = '<p class="muted">还没有生活事件记录；办理会在留痕后出现在这里。</p>';
-    return;
-  }
-  list.innerHTML = records.map((record) => {
-    const label = LIFE_EVENT_STATUS[record.status] || record.status;
-    const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
-    return `<article class="takeover insight-item">
+  const recordsNote = payload.records_available === false
+    ? " · 本部署未开启记录"
+    : ` · 我的记录 ${records.length} 条`;
+  status.textContent = `原型 ${prototypes.length} 个 · 组合律 ${combos.length} 个${recordsNote}`;
+
+  const cards = prototypes.map((prototype) => {
+    const eventId = typeof prototype.event_id === "string" ? prototype.event_id : "";
+    const name = typeof prototype.name === "string" ? prototype.name : "";
+    const description = typeof prototype.description === "string" ? prototype.description : "";
+    const example = typeof prototype.example === "string" ? prototype.example : "";
+    const steps = typeof prototype.steps === "number" ? `${prototype.steps} 步` : "";
+    return `<article class="life-card" data-event="${esc(eventId)}">
+      <div class="life-card__head"><b>${esc(eventId)} · ${esc(name)}</b><span class="life-card__steps">${esc(steps)}</span></div>
+      <p class="life-card__desc">${esc(description)}</p>
+      <div class="life-card__foot">
+        <p class="life-card__example">示例：${esc(example)}</p>
+        ${example ? `<button class="life-send" type="button" data-life-send="${esc(example)}">用这句发起</button>` : ""}
+      </div>
+    </article>`;
+  }).join("");
+
+  const recordRows = records.length
+    ? records.map((record) => {
+      const label = LIFE_EVENT_STATUS[record.status] || record.status;
+      const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
+      return `<article class="takeover insight-item">
       <div><b>${esc(record.event_name || record.event_id)}</b> <span class="chip">${esc(label)}</span></div>
       <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
       <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span></p>
     </article>`;
-  }).join("");
+    }).join("")
+    : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
+
+  list.innerHTML = `<div class="life-grid">${cards}</div>
+    <p class="side__label">我的生活事件</p>
+    <div class="life-records">${recordRows}</div>`;
 }
 
 /* ---------------- 装配 ---------------- */
@@ -1820,6 +1837,21 @@ function onPresetClick(event) {
 ["quick-scenes", "presets"].forEach((id) => {
   const container = el(id);
   if (container) container.addEventListener("click", onPresetClick);
+});
+/* 生活事件卡片：示例话术直接走同一条 `/api/submit`（缺信息仍由服务端追问） */
+el("life-events-list").addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target ? target.closest("[data-life-send]") : null;
+  if (!button) return;
+  const text = button.dataset.lifeSend || "";
+  if (!text) return;
+  button.disabled = true;
+  try {
+    const start = () => submitTask(text, {});
+    if (requestStart(start)) await start();
+  } finally {
+    button.disabled = false;
+  }
 });
 el("btn-submit").addEventListener("click", action(onSubmit));
 el("btn-due").addEventListener("click", action(onDue));

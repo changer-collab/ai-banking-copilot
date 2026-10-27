@@ -175,3 +175,17 @@ def test_delete_conversation_requires_single_use_reverify_ticket(
         "/api/conversations/del-1", headers={"X-Reverify-Ticket": ticket}
     )
     assert replay.status_code == 403, "票据一次性，重放应失效"
+
+
+def test_life_event_panel_lists_seven_prototypes_with_examples(client: TestClient) -> None:
+    _login(client, "chenming")
+    payload = client.get("/api/life-events").json()
+    prototypes = payload["prototypes"]
+    assert [item["event_id"] for item in prototypes] == [f"L{index}" for index in range(1, 8)]
+    for item in prototypes:
+        assert item["description"], f"{item['event_id']} 缺少一句人话说明"
+        assert item["example"], f"{item['event_id']} 缺少示例话术"
+        assert item["steps"] >= 2
+        assert item["triggers"], f"{item['event_id']} 缺少触发词"
+    assert payload["records"] == []
+    assert payload["records_available"] is True

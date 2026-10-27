@@ -53,6 +53,17 @@ _PAGE_HTML = """<!DOCTYPE html>
 .conv-row__meta { display: block; color: var(--ink-3); font-size: 11px; }
 .conv-delete { flex: none; padding: 4px 8px; border: 0; border-radius: var(--r-control); background: transparent; color: var(--ink-3); font-size: var(--fs-small); cursor: pointer; }
 .conv-delete:hover { background: var(--lvl-red-bg); color: var(--lvl-red); }
+
+.life-grid { display: grid; gap: var(--s-2); margin-bottom: var(--s-3); }
+.life-card { display: grid; gap: 4px; padding: var(--s-2) var(--s-3); border: 1px solid var(--rule); border-radius: var(--r-control); background: var(--voucher); }
+.life-card__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
+.life-card__head b { font-size: var(--fs-body); }
+.life-card__steps { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+.life-card__desc { margin: 0; color: var(--ink-2); font-size: var(--fs-small); }
+.life-card__foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.life-card__example { margin: 0; color: var(--ink-3); font-size: 11px; }
+.life-send { padding: 2px 10px; border: 1px solid var(--blue-600); border-radius: var(--r-chip); background: var(--blue-050); color: var(--blue-700); font-size: 11px; cursor: pointer; }
+.life-send:disabled { opacity: .5; cursor: default; }
 @media (max-width: 1020px) {
   #progress-steps { padding: 0 var(--s-4); }
 }
@@ -237,7 +248,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </aside>
 </div>
 
-<script src="/assets/app.js?v=17"></script>
+<script src="/assets/app.js?v=18"></script>
 </body>
 </html>
 """
