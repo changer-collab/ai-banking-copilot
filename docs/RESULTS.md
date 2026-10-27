@@ -173,6 +173,19 @@ python -m pytest -q           # 1631 passed / 0 failed / 0 skipped
 
 前端定版后原先唯一那条红（`tests/web/test_pwa.py::test_index_exposes_versioned_installable_shell`，`workspace.css` 版本断言停在与 `page.py` 不同的 `?v=4`）已随版本链同步修掉：`sw.js` 的 `CACHE_NAME` 升到 `aib-static-shell-v11`、`STATIC_ASSETS` 用 `workspace.css?v=5`、`app.js` 注册 `sw.js?v=11`、测试断言同版。计数以 `runtime/pytest-full3.xml`（junit）为准：`tests=1631 / failures=0 / errors=0 / skipped=0`。
 
+### 7. 合并后基线（2026-10-28，PR #18 合入 `sprint/1026` 后）
+
+```
+python -m ruff check .        # All checks passed!
+python -m mypy                # Success: no issues found in 102 source files
+python -m pytest -q           # tests=1671 / failures=0 / errors=0 / skipped=0（287.0s，junit）
+```
+
+- 提交：`2214e02`（`sprint/1026` 合并 PR #18 之后；跑数时工作树与该提交一致）。
+- 较 D1 的 **1631** 增加 40 条，主体是多用户登录/隔离、对话历史、生活事件记录与阶段进度的新增用例。
+- 前端静态壳：`app.js?v=21` / `app.css?v=6` / `workspace.css?v=5` / `aib-static-shell-v11`（三处版本断言同步）。
+- 合并窗口内其余 PR 合入后需再跑一次全量并回填本节。
+
 ---
 
 ## 四个数字的口径（2026-10-27 冻结）
