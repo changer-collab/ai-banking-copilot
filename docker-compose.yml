@@ -2,7 +2,8 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      # 宿主端口可改：服务器上 8000 常被别的服务占用，用 API_HOST_PORT=18080 起即可。
+      - "${API_HOST_PORT:-8000}:8000"
     # 下面这些值由仓库根目录的 .env 提供（docker compose 会自动读取同目录的 .env 做变量替换）。
     # DEEPSEEK_API_KEY 必须显式传进来，否则容器里拿不到 key，会静默降级成模板卡。
     environment:
