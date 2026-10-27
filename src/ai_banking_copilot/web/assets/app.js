@@ -141,6 +141,51 @@ function newSessionId() {
 }
 let SESSION_ID = newSessionId();
 
+/* 阶段步进器：服务端在 guard / understand / plan / review 四个真实边界推进，
+   `finally` 里补 done。前端 500ms 轮询 + 400ms 最短展示，答案生成后收起。 */
+const PROGRESS_POLL_MS = 500;
+const PROGRESS_MIN_MS = 400;
+
+/* 生活事件记录状态（与服务端 LifeEventStore 的 status 取值同口径） */
+const LIFE_EVENT_STATUS = {
+  planned: "已计划",
+  executed: "已执行",
+  rejected: "已放弃",
+  failed: "失败",
+};
+
+function newRequestId() {
+  try {
+    if (window.crypto && crypto.randomUUID) return "req-" + crypto.randomUUID();
+  } catch (_) {
+    /* 同 newSessionId 的降级路径（老浏览器 / 非安全上下文） */
+  }
+  return "req-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+
+/* 同源请求统一入口：带上 Cookie 会话；401（登录失效）直接回登录页，不弹错误面板。 */
+async function apiFetch(method, path, body, headers) {
+  const options = {
+    method,
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: Object.assign({}, headers || {}),
+  };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(path, options);
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (_) {
+    data = {};
+  }
+  if (response.status === 401) window.location.replace("/");
+  return { status: response.status, ok: response.ok, data };
+}
+
 async function post(path, body) {
   if (state.offline || (typeof navigator !== "undefined" && navigator.onLine === false)) {
     throw new Error("当前离线，已禁用需要在线确认的操作");
@@ -153,13 +198,82 @@ async function post(path, body) {
   }[path] || "正在请求服务端…";
   showRequestStatus();
   const payload = Object.assign({ session_id: SESSION_ID }, body || {});
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  const staged = path === "/api/submit" || path === "/api/clarify";
+  if (staged) {
+    payload.request_id = newRequestId();
+    startProgress(payload.request_id);
+  }
+  try {
+    const result = await apiFetch("POST", path, payload);
+    state.operationUnknown = false;
+    return result;
+  } finally {
+    if (staged) endProgress();
+    refreshConversations().catch(() => {});
+  }
+}
+
+/* ---------------- 阶段步进器 ---------------- */
+
+const progress = { requestId: "", timer: null, startedAt: 0 };
+
+function renderProgressSteps(payload) {
+  const root = el("progress-steps");
+  if (!root) return;
+  const stages = payload && Array.isArray(payload.stages) ? payload.stages : [];
+  if (!stages.length) {
+    root.hidden = true;
+    root.innerHTML = "";
+    return;
+  }
+  root.innerHTML = stages
+    .map((stage) => {
+      const phaseName = stage.done ? "done" : stage.active ? "active" : "pending";
+      return `<span class="progress-step progress-step--${phaseName}">${esc(stage.label)}</span>`;
+    })
+    .join('<span class="progress-step__sep" aria-hidden="true">›</span>');
+  root.hidden = false;
+}
+
+async function pollProgress(requestId) {
+  if (!requestId || requestId !== progress.requestId) return;
+  try {
+    const result = await apiFetch(
+      "GET",
+      `/api/progress?request_id=${encodeURIComponent(requestId)}&session_id=${encodeURIComponent(SESSION_ID)}`,
+    );
+    if (requestId !== progress.requestId) return;
+    if (result.ok) renderProgressSteps(result.data);
+  } catch (_) {
+    /* 阶段条只是过程反馈：网络抖动不打断主流程，也不弹错误面板 */
+  }
+}
+
+function startProgress(requestId) {
+  progress.requestId = requestId;
+  progress.startedAt = Date.now();
+  renderProgressSteps(null);
+  if (progress.timer) window.clearInterval(progress.timer);
+  progress.timer = window.setInterval(() => {
+    pollProgress(requestId);
+  }, PROGRESS_POLL_MS);
+  pollProgress(requestId);
+}
+
+/* 答案已生成：先补最后一次轮询把「完成」画出来，再保证最短展示时长后收起 */
+function endProgress() {
+  const requestId = progress.requestId;
+  if (!requestId) return;
+  if (progress.timer) window.clearInterval(progress.timer);
+  progress.timer = null;
+  pollProgress(requestId).then(() => {
+    const wait = Math.max(0, PROGRESS_MIN_MS - (Date.now() - progress.startedAt));
+    window.setTimeout(() => {
+      if (progress.requestId !== requestId) return;
+      progress.requestId = "";
+      renderProgressSteps(null);
+    }, wait);
   });
-  state.operationUnknown = false;
-  return { status: response.status, data: await response.json() };
 }
 
 function optionLabel(item) {
@@ -691,13 +805,8 @@ function beginTask(text, selected = {}) {
   task.setAttribute("aria-label", `办理 ${++state.taskCount}：${text}`);
   state.task = task;
   el("stage").appendChild(task);
-  const record = document.createElement("button");
-  record.type = "button";
-  record.className = "conversation-record";
-  record.textContent = text;
-  record.addEventListener("click", () => task.scrollIntoView({ behavior: "smooth", block: "start" }));
-  if (state.taskCount === 1) el("conversation-list").innerHTML = "";
-  el("conversation-list").prepend(record);
+  /* 左栏列表改为读取服务端历史（`/api/conversations`），不再本地插入临时记录：
+     消息入库发生在 `/api/submit` 返回之后，`post()` 的 finally 会刷新列表。 */
   appendMessage("user", text);
   if (Object.keys(selected).length) {
     const objects = Object.keys(selected).map((slot) => {
@@ -1364,6 +1473,342 @@ async function onTakeover() {
   timelineAdd("已导出人工接管包（意图 / 计划 / 命中规则 / 审计 ID）", "warn");
 }
 
+/* ---------------- 历史对话 ---------------- */
+
+const CONVERSATION_STATE_LABELS = {
+  idle: "未开始",
+  needs_clarification: "待补充信息",
+  blocked: "已拒绝",
+  awaiting_confirm: "待确认",
+  executing: "执行中",
+  interrupted: "已中断",
+  completed: "已完成",
+  partial: "部分完成",
+  failed: "执行失败",
+  taken_over: "已转人工",
+  reversed: "已回退",
+};
+
+function conversationStateLabel(stateName) {
+  return CONVERSATION_STATE_LABELS[stateName] || "";
+}
+
+/* 服务端存 ISO 时间（带 T）；列表里只展示到分钟 */
+function momentLabel(stamp) {
+  const text = String(stamp || "");
+  if (!text) return "—";
+  return text.replace("T", " ").slice(0, 16);
+}
+
+async function refreshConversations() {
+  const list = el("conversation-list");
+  if (!list || state.offline) return;
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/conversations");
+  } catch (_) {
+    list.innerHTML = '<p class="muted convs__empty">历史对话读取失败，请稍后重试。</p>';
+    return;
+  }
+  if (!result.ok) {
+    list.innerHTML = '<p class="muted convs__empty">历史对话读取失败，请稍后重试。</p>';
+    return;
+  }
+  const payload = result.data || {};
+  if (payload.available === false) {
+    list.innerHTML = '<p class="muted convs__empty">当前部署未启用历史保存。</p>';
+    return;
+  }
+  const conversations = Array.isArray(payload.conversations) ? payload.conversations : [];
+  if (!conversations.length) {
+    list.innerHTML = '<p class="muted convs__empty">开始办理后，对话会保存在这里。</p>';
+    return;
+  }
+  list.innerHTML = conversations.map((item) => {
+    const title = item.title || "未命名会话";
+    const meta = [
+      momentLabel(item.last_active_at),
+      `${Number(item.message_count) || 0} 条消息`,
+      conversationStateLabel(item.state),
+    ].filter(Boolean).join(" · ");
+    const active = item.session_id === SESSION_ID ? " conv-row--active" : "";
+    return `<div class="conv-row${active}">
+      <button class="conversation-record" type="button" data-open-session="${esc(item.session_id)}">
+        <span class="conv-row__title">${esc(title)}</span>
+        <span class="conv-row__meta">${esc(meta)}</span>
+      </button>
+      <button class="conv-delete" type="button" data-delete-session="${esc(item.session_id)}"
+              aria-label="删除对话：${esc(title)}">删除</button>
+    </div>`;
+  }).join("");
+}
+
+/* 点开历史：待确认的计划卡恢复成可继续确认的活卡，其余一律只读 */
+async function openConversation(sessionId) {
+  if (!sessionId || sessionId === SESSION_ID) return;
+  if (hasUnfinishedTask() && !window.confirm("当前办理尚未结束，切换后将保存为只读记录。继续？")) {
+    return;
+  }
+  let result;
+  try {
+    result = await apiFetch("GET", `/api/conversations/${encodeURIComponent(sessionId)}`);
+  } catch (_) {
+    timelineAdd("历史对话读取失败，请稍后重试。", "warn");
+    return;
+  }
+  if (!result.ok) {
+    timelineAdd(
+      result.status === 404 ? "这条对话已不存在。" : "历史对话读取失败，请稍后重试。",
+      "warn",
+    );
+    refreshConversations().catch(() => {});
+    return;
+  }
+  const data = result.data || {};
+  archiveTask();
+  reset(false);
+  SESSION_ID = sessionId;
+  const welcome = el("conversation-welcome");
+  if (welcome) welcome.hidden = true;
+  const task = document.createElement("section");
+  task.className = "chat-task";
+  task.dataset.session = sessionId;
+  task.setAttribute("aria-label", `历史对话 ${++state.taskCount}`);
+  state.task = task;
+  el("stage").appendChild(task);
+  (data.messages || []).forEach((message) => {
+    appendMessage(message.role === "user" ? "user" : "assistant", message.text || "");
+  });
+  if (data.card && data.state === "awaiting_confirm") {
+    state.card = data.card;
+    state.decision = null;
+    state.stepStates = (data.card.lines || []).map(() => "pending");
+    state.phase = "awaiting_confirm";
+    state.response = appendMessage("assistant");
+    state.panel = "";
+    state.notice = "";
+    renderStage();
+    timelineAdd("已恢复为可继续确认的计划卡（计划仍按原冻结哈希核对）。", "done");
+  } else {
+    makeReadOnly(task);
+    state.task = null;
+    state.response = null;
+    state.phase = "idle";
+    const note = document.createElement("p");
+    note.className = "archive-note";
+    note.textContent = "历史对话 · 只读记录；需要继续办理请新建对话。";
+    task.appendChild(note);
+    const label = conversationStateLabel(data.snapshot_state || data.state);
+    timelineAdd(`已打开历史对话${label ? `（${label}）` : ""}。`, "live");
+  }
+  setButtons();
+  refreshConversations().catch(() => {});
+}
+
+/* 删除单条历史：`demo` 模式下先试删，403 再补一次性票据重试 */
+async function deleteConversation(sessionId) {
+  if (!sessionId) return;
+  if (!window.confirm("删除这条对话？消息记录与办理快照都会删除，且不可恢复。")) return;
+  let result;
+  try {
+    result = await apiFetch("DELETE", `/api/conversations/${encodeURIComponent(sessionId)}`);
+    if (result.status === 403) {
+      const password = window.prompt("删除历史需要再次验证身份，请输入登录口令：");
+      if (!password) return;
+      const ticket = await apiFetch("POST", "/api/auth/reverify", {
+        password,
+        purpose: "delete_conversation",
+      });
+      if (!ticket.ok || !ticket.data || !ticket.data.ticket) {
+        timelineAdd("口令校验未通过，删除已取消。", "warn");
+        return;
+      }
+      result = await apiFetch(
+        "DELETE",
+        `/api/conversations/${encodeURIComponent(sessionId)}`,
+        undefined,
+        { "X-Reverify-Ticket": ticket.data.ticket },
+      );
+    }
+  } catch (_) {
+    timelineAdd("删除失败，请稍后重试。", "warn");
+    return;
+  }
+  if (!result.ok) {
+    timelineAdd(
+      result.status === 404 ? "这条对话已不存在。" : "删除失败，请稍后重试。",
+      "warn",
+    );
+    refreshConversations().catch(() => {});
+    return;
+  }
+  if (sessionId === SESSION_ID) {
+    const stale = state.task;
+    archiveTask();
+    if (stale) stale.remove();
+    reset(false);
+    SESSION_ID = newSessionId();
+    const welcome = el("conversation-welcome");
+    if (welcome && !el("stage").querySelector(".chat-task")) welcome.hidden = false;
+  }
+  timelineAdd("已删除一条历史对话。", "live");
+  refreshConversations().catch(() => {});
+}
+
+/* ---------------- 个人中心 ---------------- */
+
+function profileValue(value) {
+  return value === null || value === undefined || value === "" ? "—" : String(value);
+}
+
+function renderProfile(me, audit) {
+  const body = el("profile-body");
+  if (!body) return;
+  const user = me.user || {};
+  const session = me.session || {};
+  const name = user.display_name || user.username || "当前用户";
+  const entry = el("profile-entry-name");
+  if (entry) entry.textContent = name;
+  const logins = (me.recent_logins || []).map((record) => {
+    const revoked = record.revoked ? " · 已失效" : "";
+    return `<li>${esc(momentLabel(record.issued_at))} 登录 · ${esc(profileValue(record.client_ip))} · ${esc(profileValue(record.user_agent))}${revoked}</li>`;
+  }).join("");
+  const trail = (audit.events || []).map((event) =>
+    `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))} <span class="tech">${esc(profileValue(event.event_id))}</span></li>`
+  ).join("");
+  body.innerHTML = `
+    <section class="profile-block">
+      <h3>身份</h3>
+      <dl>
+        <dt>姓名</dt><dd>${esc(name)}</dd>
+        <dt>账号</dt><dd class="mono">${esc(profileValue(user.username))}</dd>
+        <dt>用户号</dt><dd class="mono">${esc(profileValue(user.user_id))}</dd>
+        <dt>手机</dt><dd>${esc(user.phone_tail ? `尾号 ${user.phone_tail}` : "—")}</dd>
+      </dl>
+    </section>
+    <section class="profile-block">
+      <h3>本次登录</h3>
+      <dl>
+        <dt>状态</dt><dd>${session.authenticated ? "已登录" : "未启用登录（单用户演示）"}</dd>
+        <dt>登录时间</dt><dd>${esc(momentLabel(session.issued_at))}</dd>
+        <dt>失效时间</dt><dd>${esc(momentLabel(session.expires_at))}</dd>
+      </dl>
+    </section>
+    <section class="profile-block">
+      <h3>最近登录</h3>
+      ${logins ? `<ul class="profile-trail">${logins}</ul>` : '<p class="muted">暂无可查看的登录记录。</p>'}
+    </section>
+    <section class="profile-block">
+      <h3>关联数据</h3>
+      <dl>
+        <dt>账户</dt><dd>${esc(String(me.accounts ?? 0))} 个</dd>
+        <dt>收款人</dt><dd>${esc(String(me.payees ?? 0))} 个</dd>
+        <dt>渠道绑定</dt><dd>${esc(String(me.channel_bindings ?? 0))} 个</dd>
+        <dt>鉴权模式</dt><dd>${esc(profileValue(me.auth_mode))}</dd>
+      </dl>
+    </section>
+    <section class="profile-block">
+      <h3>我的操作轨迹</h3>
+      ${
+        audit.available === false
+          ? '<p class="muted">审计链读取失败，轨迹暂不可用。</p>'
+          : trail
+            ? `<ul class="profile-trail">${trail}</ul>`
+            : '<p class="muted">暂无可查看的操作。</p>'
+      }
+    </section>
+    ${me.auth_mode === "demo" ? '<div class="btn-row"><button class="btn btn--ghost" id="btn-logout" type="button">退出登录</button></div>' : ""}
+  `;
+}
+
+async function openProfile() {
+  const panel = el("profile-panel");
+  const body = el("profile-body");
+  if (!panel || !body) return;
+  panel.hidden = false;
+  el("btn-profile").setAttribute("aria-expanded", "true");
+  body.innerHTML = '<p class="muted">正在读取账户信息…</p>';
+  el("btn-close-profile").focus();
+  try {
+    const [me, audit] = await Promise.all([
+      apiFetch("GET", "/api/me"),
+      apiFetch("GET", "/api/audit?limit=8"),
+    ]);
+    if (!me.ok) {
+      body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+      return;
+    }
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
+  } catch (_) {
+    body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+  }
+}
+
+function closeProfile() {
+  const panel = el("profile-panel");
+  if (!panel || panel.hidden) return;
+  panel.hidden = true;
+  el("btn-profile").setAttribute("aria-expanded", "false");
+  el("btn-profile").focus();
+}
+
+/* 顶部入口只做身份标识：读不到就保留默认文案，不打断主流程 */
+async function refreshProfileEntry() {
+  const entry = el("profile-entry-name");
+  if (!entry) return;
+  try {
+    const result = await apiFetch("GET", "/api/me");
+    if (!result.ok) return;
+    const user = (result.data || {}).user || {};
+    const name = user.display_name || user.username;
+    if (name) entry.textContent = name;
+  } catch (_) {
+    /* 只影响入口文案，静默保留默认值 */
+  }
+}
+
+/* ---------------- 生活事件 ---------------- */
+
+async function refreshLifeEvents() {
+  const status = el("life-events-status");
+  const list = el("life-events-list");
+  if (!status || !list || state.offline) return;
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/life-events");
+  } catch (_) {
+    status.textContent = "生活事件读取失败，请稍后重试。";
+    return;
+  }
+  if (!result.ok) {
+    status.textContent = "生活事件读取失败，请稍后重试。";
+    return;
+  }
+  const payload = result.data || {};
+  const prototypes = Array.isArray(payload.prototypes) ? payload.prototypes : [];
+  const combos = Array.isArray(payload.combos) ? payload.combos : [];
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  if (payload.records_available === false) {
+    status.textContent = "当前部署未开启生活事件记录。";
+    list.innerHTML = "";
+    return;
+  }
+  status.textContent = `记录已开启 · 原型 ${prototypes.length} 个 · 组合律 ${combos.length} 个`;
+  if (!records.length) {
+    list.innerHTML = '<p class="muted">还没有生活事件记录；办理会在留痕后出现在这里。</p>';
+    return;
+  }
+  list.innerHTML = records.map((record) => {
+    const label = LIFE_EVENT_STATUS[record.status] || record.status;
+    const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
+    return `<article class="takeover insight-item">
+      <div><b>${esc(record.event_name || record.event_id)}</b> <span class="chip">${esc(label)}</span></div>
+      <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
+      <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span></p>
+    </article>`;
+  }).join("");
+}
+
 /* ---------------- 装配 ---------------- */
 
 renderPresets();
@@ -1385,6 +1830,37 @@ el("btn-reject").addEventListener("click", action(onReject));
 el("btn-reverse").addEventListener("click", action(onReverse));
 el("btn-takeover").addEventListener("click", action(onTakeover));
 el("btn-reset").addEventListener("click", action(startFreshConversation));
+el("btn-profile").addEventListener("click", openProfile);
+el("btn-close-profile").addEventListener("click", closeProfile);
+/* 个人中心内容动态渲染：退出登录按钮用事件委托 */
+el("profile-body").addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target || target.id !== "btn-logout") return;
+  try {
+    await apiFetch("POST", "/api/auth/logout", {});
+  } catch (_) {
+    /* 退出失败也回登录页：Cookie 可能已失效 */
+  }
+  window.location.replace("/");
+});
+/* 历史对话行同样动态渲染：点开 / 删除都用事件委托 */
+el("conversation-list").addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const openButton = target.closest("[data-open-session]");
+  if (openButton) {
+    openConversation(openButton.dataset.openSession).catch(() => {
+      timelineAdd("历史对话读取失败，请稍后重试。", "warn");
+    });
+    return;
+  }
+  const deleteButton = target.closest("[data-delete-session]");
+  if (deleteButton) {
+    deleteConversation(deleteButton.dataset.deleteSession).catch(() => {
+      timelineAdd("删除失败，请稍后重试。", "warn");
+    });
+  }
+});
 el("btn-continue-task").addEventListener("click", () => {
   state.pendingStart = null;
   el("task-guard").hidden = true;
@@ -1447,6 +1923,7 @@ document.addEventListener("keydown", (event) => {
       setMobileDrawer(openDrawer, false);
       el(`btn-${openDrawer}-mobile`)?.focus();
     }
+    closeProfile();
   }
 });
 el("btn-close-trace").addEventListener("click", () => {
@@ -1517,12 +1994,17 @@ refreshOptions().catch(() => {
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
 });
+refreshConversations().catch(() => {});
+refreshLifeEvents().catch(() => {});
+refreshProfileEntry().catch(() => {});
 
 window.addEventListener("offline", () => setOfflineState(true));
 window.addEventListener("online", () => {
   setOfflineState(false);
   refreshOptions().catch(() => {});
   refreshInsights().catch(() => {});
+  refreshConversations().catch(() => {});
+  refreshLifeEvents().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });

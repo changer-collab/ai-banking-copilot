@@ -23,6 +23,40 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=6" />
 <link rel="stylesheet" href="/assets/workspace.css?v=5" />
+<style>
+/* 本页新增组件（阶段步进器 / 个人中心抽屉 / 历史对话行）：只作用于新增元素，
+   不改动共享样式表 `app.css` / `workspace.css`。 */
+#progress-steps { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 0 var(--s-6); color: var(--ink-3); font-size: var(--fs-small); }
+#progress-steps[hidden] { display: none; }
+.progress-step { padding: 2px 10px; border: 1px solid var(--rule); border-radius: var(--r-chip); }
+.progress-step--pending { opacity: .55; }
+.progress-step--active { border-color: var(--blue-600); background: var(--blue-050); color: var(--blue-700); font-weight: 600; }
+.progress-step--done { border-color: var(--lvl-green); background: var(--lvl-green-bg); color: var(--lvl-green); }
+.progress-step__sep { color: var(--ink-3); }
+
+#profile-panel { position: fixed; z-index: 60; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: var(--s-4); width: min(392px, 94vw); padding: var(--s-5); overflow: auto; background: var(--voucher); border-left: 1px solid var(--rule); box-shadow: var(--sh-3); }
+#profile-panel[hidden] { display: none; }
+#profile-body { display: grid; gap: var(--s-4); min-width: 0; }
+.profile-block { display: grid; gap: var(--s-2); min-width: 0; }
+.profile-block h3 { margin: 0; font-family: var(--font-display); font-size: var(--fs-h2); }
+.profile-block dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-3); margin: 0; }
+.profile-block dt { color: var(--ink-3); }
+.profile-block dd { margin: 0; overflow-wrap: anywhere; }
+.profile-trail { display: grid; gap: 2px; margin: 0; padding-left: var(--s-4); font-size: var(--fs-small); }
+.profile-entry { max-width: 168px; }
+.profile-entry__name { display: inline-block; max-width: 132px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: bottom; }
+
+.conv-row { display: flex; align-items: center; gap: 2px; border-radius: var(--r-control); }
+.conv-row--active { background: var(--blue-050); }
+.conv-row .conversation-record { flex: 1; min-width: 0; }
+.conv-row__title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.conv-row__meta { display: block; color: var(--ink-3); font-size: 11px; }
+.conv-delete { flex: none; padding: 4px 8px; border: 0; border-radius: var(--r-control); background: transparent; color: var(--ink-3); font-size: var(--fs-small); cursor: pointer; }
+.conv-delete:hover { background: var(--lvl-red-bg); color: var(--lvl-red); }
+@media (max-width: 1020px) {
+  #progress-steps { padding: 0 var(--s-4); }
+}
+</style>
 </head>
 <body>
 <div class="layout layout--workspace" id="app">
@@ -34,8 +68,8 @@ _PAGE_HTML = """<!DOCTYPE html>
     <div class="side__pad">
       <button class="btn" id="btn-reset" type="button">＋ 新建对话</button>
     </div>
-    <p class="side__label">本页记录 <span class="history-badge">临时</span></p>
-    <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，记录会出现在这里。</p></div>
+    <p class="side__label">历史对话</p>
+    <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，对话会保存在这里。</p></div>
     <p class="side__label">常用办理</p>
     <section class="convs convs--scenes" id="quick-scenes" aria-label="快捷场景列表"></section>
     <div class="side__foot">
@@ -62,8 +96,14 @@ _PAGE_HTML = """<!DOCTYPE html>
           <input type="checkbox" id="theme-toggle" />
           夜航主题
         </label>
+        <button class="btn btn--ghost profile-entry" id="btn-profile" type="button"
+                aria-controls="profile-panel" aria-expanded="false">
+          <span class="profile-entry__name" id="profile-entry-name">个人中心</span>
+        </button>
       </div>
     </header>
+
+    <div class="progress-steps" id="progress-steps" aria-live="polite" hidden></div>
 
     <div id="stage" class="stream" aria-live="polite" aria-relevant="additions text">
       <section id="conversation-welcome" class="conversation-welcome">
@@ -136,6 +176,12 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
     </section>
 
+    <section class="panel" id="life-events-panel">
+      <p class="panel__title">生活事件</p>
+      <p class="muted" id="life-events-status">正在读取生活事件原型…</p>
+      <div id="life-events-list"><p class="muted">尚未读取生活事件。</p></div>
+    </section>
+
     <section class="panel" id="subscription-panel">
       <p class="panel__title">订阅识别与取消状态</p>
       <p class="muted" id="subscription-status">正在读取订阅识别结果…</p>
@@ -181,9 +227,17 @@ _PAGE_HTML = """<!DOCTYPE html>
       <ul class="timeline" id="timeline"><li class="timeline__item">等待操作…</li></ul>
     </section>
   </aside>
+
+  <aside class="profile-panel" id="profile-panel" aria-label="个人中心" hidden>
+    <div class="trace__head">
+      <p class="panel__title">个人中心</p>
+      <button class="btn btn--ghost" id="btn-close-profile" type="button">关闭</button>
+    </div>
+    <div id="profile-body"><p class="muted">正在读取账户信息…</p></div>
+  </aside>
 </div>
 
-<script src="/assets/app.js?v=15"></script>
+<script src="/assets/app.js?v=17"></script>
 </body>
 </html>
 """
@@ -196,3 +250,123 @@ APP_HTML = _PAGE_HTML.replace(
     '<html lang="zh-CN" data-theme="light" data-view="app">',
     1,
 )
+
+# 登录页：独立自包含页面（无外链资源、无设计仓依赖），仅同源调用 `/api/auth/login`。
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0b4fd8" />
+<title>登录 · AI 银行副驾</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 20% -10%, #dfe8ff 0%, #f6f8fc 55%, #eef1f7 100%);
+    color: #16233a; padding: 24px;
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  }
+  .login-card {
+    width: 100%; max-width: 400px; background: #fff; border-radius: 18px; padding: 32px 28px;
+    box-shadow: 0 18px 48px rgba(16, 38, 84, .14); border: 1px solid rgba(16, 38, 84, .06);
+  }
+  .brand { font-size: 20px; font-weight: 700; letter-spacing: .5px; margin: 0 0 6px; }
+  .brand em { font-style: normal; color: #0b4fd8; }
+  .sub { margin: 0 0 24px; font-size: 13px; color: #6b7a90; }
+  label { display: block; font-size: 13px; color: #40506b; margin: 14px 0 6px; }
+  input {
+    width: 100%; height: 44px; padding: 0 12px; font-size: 15px; color: #16233a;
+    border: 1px solid #cfd8e6; border-radius: 10px; background: #fbfcfe; outline: none;
+  }
+  input:focus { border-color: #0b4fd8; background: #fff; box-shadow: 0 0 0 3px rgba(11, 79, 216, .12); }
+  button {
+    width: 100%; height: 46px; margin-top: 22px; border: 0; border-radius: 10px; cursor: pointer;
+    background: #0b4fd8; color: #fff; font-size: 15px; font-weight: 600;
+  }
+  button:disabled { opacity: .6; cursor: default; }
+  .err {
+    margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
+    background: #fdecea; color: #b3362a; border: 1px solid #f5c6c1;
+  }
+  .demo {
+    margin-top: 22px; padding: 12px 14px; border-radius: 10px; font-size: 12px; line-height: 1.7;
+    background: #f4f7fd; color: #55637a; border: 1px dashed #cfd8e6;
+  }
+  .demo b { color: #16233a; font-weight: 600; }
+  .foot { margin-top: 18px; font-size: 12px; color: #93a0b4; text-align: center; }
+</style>
+</head>
+<body>
+<form class="login-card" id="login-form" autocomplete="on">
+  <p class="brand">AI 银行<em>副驾</em></p>
+  <p class="sub">登录后，您的对话、生活事件与办理记录都会保存在自己的账户下。</p>
+  <label for="username">用户名</label>
+  <input id="username" name="username" type="text" autocomplete="username" required />
+  <label for="password">密码</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required />
+  <button id="btn-login" type="submit">登录</button>
+  <div class="err" id="login-error" hidden></div>
+  <div class="demo">
+    演示账号：<b>chenming</b> / <b>linjing</b><br />
+    演示口令由部署方通过环境变量下发，请向现场负责人获取。
+  </div>
+  <p class="foot">模拟银行环境 · 不连接真实银行账户</p>
+</form>
+<script>
+(function () {
+  var form = document.getElementById("login-form");
+  var btn = document.getElementById("btn-login");
+  var err = document.getElementById("login-error");
+
+  function showError(text) {
+    err.textContent = text;
+    err.hidden = false;
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    err.hidden = true;
+    var username = document.getElementById("username").value.trim();
+    var password = document.getElementById("password").value;
+    if (!username || !password) {
+      showError("请填写用户名和密码。");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "登录中…";
+    fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, password: password })
+    }).then(function (resp) {
+      return resp.json().catch(function () { return {}; }).then(function (body) {
+        return { ok: resp.ok, status: resp.status, body: body || {} };
+      });
+    }).then(function (result) {
+      if (result.ok) {
+        window.location.replace("/");
+        return;
+      }
+      if (result.status === 429) {
+        showError(result.body.message || "尝试次数过多，请稍后再试。");
+      } else if (result.status === 401) {
+        showError("用户名或密码不正确。");
+      } else {
+        showError(result.body.message || "登录失败，请稍后再试。");
+      }
+      btn.disabled = false;
+      btn.textContent = "登录";
+    }).catch(function () {
+      showError("网络异常，请检查连接后重试。");
+      btn.disabled = false;
+      btn.textContent = "登录";
+    });
+  });
+})();
+</script>
+</body>
+</html>
+"""

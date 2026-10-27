@@ -46,3 +46,30 @@ class SessionManager(Generic[T]):
                     session = self._factory(user_id, session_id, self.lock)
                 self._sessions[key] = session
             return self._sessions[key]
+
+    def drop(self, user_id: str) -> int:
+        """清掉该用户的**全部内存会话**（登出 / 删除历史时调用）。
+
+        只清缓存，不删快照：登出后重新登录仍能读回历史；跨用户读不到彼此的会话。
+        返回被清掉的会话数。
+        """
+
+        if not user_id:
+            raise ValueError("invalid_session_identity")
+        with self.lock:
+            keys = [key for key in self._sessions if key[0] == user_id]
+            for key in keys:
+                del self._sessions[key]
+            return len(keys)
+
+    def drop_one(self, user_id: str, session_id: str) -> bool:
+        """清掉**单个**会话的内存缓存（删除单条对话历史时调用）。
+
+        同样只清缓存、不删快照；快照删除由 `SessionRepository.delete` 负责。
+        返回是否确有缓存被清掉。
+        """
+
+        if not user_id or not session_id:
+            raise ValueError("invalid_session_identity")
+        with self.lock:
+            return self._sessions.pop((user_id, session_id), None) is not None

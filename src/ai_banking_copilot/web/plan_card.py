@@ -72,6 +72,19 @@ class PlanTriple:
 
 
 @dataclass(frozen=True)
+class PlanLine:
+    """结构化计划卡的一行（键值对）。`lines` 的纯文本版原样保留。"""
+
+    label: str
+    value: str
+    emphasis: bool = False
+    """关键行（金额）加粗；由渲染层决定视觉，不承载判定。"""
+
+    def to_dict(self) -> dict[str, object]:
+        return {"label": self.label, "value": self.value, "emphasis": self.emphasis}
+
+
+@dataclass(frozen=True)
 class PlanCard:
     """计划卡：`requires` 由 `level` 单向推导，禁止外部自由填写。"""
 
@@ -88,6 +101,12 @@ class PlanCard:
 
     与 `lines` 分离：`lines` 是受润色守卫约束的三元组文案（行数不得变），轨迹是纯追加的
     事实回显，不参与润色。非冻结类计划为空。
+    """
+
+    summary: tuple[PlanLine, ...] = ()
+    """结构化摘要（动作 / 金额 / 对象 / 时间），供前端优先渲染。
+
+    与 `lines` 同源同值，只是拆成键值对；润色只改 `lines`，不改本字段。
     """
 
     def __post_init__(self) -> None:
@@ -137,6 +156,7 @@ def render_plan_card(
         requires=_requires_for_level(decision.level),
         expires_at=expires_at,
         balance_trace=_balance_trace(plan, gateway),
+        summary=plan_summary(plan, gateway),
     )
 
 
@@ -214,6 +234,38 @@ def plan_triples(plan: Plan, gateway: FactGateway) -> tuple[PlanTriple, ...]:
         )
         for node in plan.nodes
     )
+
+
+def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
+    """把三元组拆成结构化键值对（单节点）或逐步摘要（多节点）。
+
+    数值一律复用 `_amount_value`（与 `lines` 同源），不新增计算口径。
+    """
+    triples = plan_triples(plan, gateway)
+    if len(plan.nodes) == 1:
+        node = plan.nodes[0]
+        triple = triples[0]
+        rows = [PlanLine("动作", _ACTION_LABELS.get(node.action, node.action))]
+        amount = _amount_value(node)
+        if amount:
+            rows.append(PlanLine("金额", amount, emphasis=True))
+        rows.append(PlanLine("对象", triple.object_label))
+        if triple.when_label != "—":
+            rows.append(PlanLine("时间", triple.when_label))
+        return tuple(rows)
+    return tuple(
+        PlanLine(
+            f"{index}. {_ACTION_LABELS.get(node.action, node.action)}",
+            _step_value(node, triple),
+        )
+        for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
+    )
+
+
+def _step_value(node: PlanNode, triple: PlanTriple) -> str:
+    amount = _amount_value(node)
+    head = f"{triple.object_label} {amount}" if amount else triple.object_label
+    return f"{head}（{triple.when_label}）"
 
 
 def polish_plan_card(
@@ -366,6 +418,20 @@ def _amount_label(node: PlanNode) -> str:
     limit = node.params.get("daily_limit_cents")
     if isinstance(limit, int) and not isinstance(limit, bool):
         return f" 额度 {Money(limit).yuan} 元"
+    return ""
+
+
+def _amount_value(node: PlanNode) -> str:
+    """金额 / 额度的事实值（无则为空串）；与 `_amount_label` 同源同值。"""
+
+    cents = node.params.get("amount_cents")
+    if isinstance(cents, int) and not isinstance(cents, bool):
+        currency = _str_param(node, "currency")
+        suffix = f"（{currency.upper()}）" if currency is not None else ""
+        return f"{Money(cents).yuan} 元{suffix}"
+    limit = node.params.get("daily_limit_cents")
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        return f"{Money(limit).yuan} 元"
     return ""
 
 
