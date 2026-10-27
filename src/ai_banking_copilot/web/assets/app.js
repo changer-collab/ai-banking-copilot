@@ -254,8 +254,29 @@ function subscriptionEvidenceHtml(item) {
   return `<details><summary>对应交易（${evidence.length}）</summary><ul>` +
     evidence.map((txn) =>
       `<li><span class="mono">${esc(txn.booked_on)} · ${yuan(Math.abs(txn.amount_cents))}</span>` +
-      ` <span class="tech">${esc(txn.record_id)} · ${esc(txn.content_hash)}</span></li>`
+      ` <span class="tech">${esc(txn.record_id)} · ${esc(txn.content_hash)} · 渠道 ${esc(txn.channel || "—")}</span></li>`
     ).join("") + "</ul></details>";
+}
+
+function renderChannelHealth(data) {
+  const status = el("channel-health-status");
+  const list = el("channel-health-list");
+  if (!status || !list) return;
+  const channels = data && data.channels ? data.channels : {};
+  const rows = Object.entries(channels).map(([name, item]) => {
+    const state = item && item.mode ? item.mode : "unknown";
+    const configured = item && item.configured ? "已配置" : "未配置";
+    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
+      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
+  });
+  status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
+  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
+}
+
+async function refreshChannelHealth() {
+  const response = await fetch("/api/channels/health", { cache: "no-store" });
+  if (!response.ok) throw new Error("无法读取渠道状态");
+  renderChannelHealth(await response.json());
 }
 
 function subscriptionItemHtml(item) {
@@ -1514,6 +1535,10 @@ refreshOptions().catch(() => {
   el("business-date").textContent = "演示数据读取失败，请重新加载页面。";
   timelineAdd("可选对象读取失败，请重新加载页面。", "stop");
 });
+refreshChannelHealth().catch(() => {
+  const status = el("channel-health-status");
+  if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+});
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
 });
@@ -1522,6 +1547,7 @@ window.addEventListener("offline", () => setOfflineState(true));
 window.addEventListener("online", () => {
   setOfflineState(false);
   refreshOptions().catch(() => {});
+  refreshChannelHealth().catch(() => {});
   refreshInsights().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));

@@ -256,6 +256,7 @@ class _Outflow:
     category: str
     record_id: str
     content_hash: str
+    channel: str = ""
 
     @property
     def merchant_key(self) -> str:
@@ -277,6 +278,7 @@ class SubscriptionEvidence:
     amount_cents: int
     """原始带符号金额（支出为负），不做改写。"""
     merchant_label: str
+    channel: str = ""
 
 
 @dataclass(frozen=True)
@@ -441,6 +443,7 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                         "booked_on": evidence.booked_on.isoformat(),
                         "amount_cents": evidence.amount_cents,
                         "merchant_label": evidence.merchant_label,
+                        "channel": evidence.channel,
                     }
                     for evidence in item.evidence
                 ],
@@ -694,6 +697,7 @@ def _outflows(gateway: FactGateway, user_id: str, as_of: date) -> tuple[_Outflow
                 category=transaction.category,
                 record_id=record.record_id,
                 content_hash=record.content_hash,
+                channel=transaction.channel,
             )
     return tuple(sorted(collected.values(), key=lambda item: (item.booked_on, item.txn_id)))
 
@@ -772,6 +776,7 @@ def _evidence(flow: _Outflow) -> SubscriptionEvidence:
         booked_on=flow.booked_on,
         amount_cents=-flow.amount_cents,
         merchant_label=flow.merchant_label,
+        channel=flow.channel,
     )
 
 

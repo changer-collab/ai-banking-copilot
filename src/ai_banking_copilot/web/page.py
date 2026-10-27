@@ -144,6 +144,12 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="subscription-cancel-result" hidden></div>
     </section>
 
+    <section class="panel" id="channel-health-panel">
+      <p class="panel__title">渠道健康</p>
+      <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
+      <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
+    </section>
+
     <section class="panel">
       <p class="panel__title">三色分级（官方口径）</p>
       <ul class="legend">
