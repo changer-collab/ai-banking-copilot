@@ -18,11 +18,11 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Protocol
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.models import Payee
 from ai_banking_copilot.gateway.resolvers import (
-    Candidate,
     parse_amount,
     parse_temporal,
     resolve_payees,
@@ -399,7 +399,20 @@ def _resolve_when(
     return inputs.today.isoformat(), None, tuple(notes)
 
 
-def _payee_label(candidate: Candidate) -> str:
+class _NamedParty(Protocol):
+    """`_payee_label` 的入参形状：名册 `Payee` 与解析候选 `Candidate` 都满足。"""
+
+    @property
+    def full_name(self) -> str: ...
+
+    @property
+    def account_tail(self) -> str: ...
+
+    @property
+    def phone_tail(self) -> str: ...
+
+
+def _payee_label(candidate: _NamedParty) -> str:
     return (
         f"{candidate.full_name}"
         f"(账号尾号 {candidate.account_tail} / 手机尾号 {candidate.phone_tail})"

@@ -901,7 +901,15 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "message": view.message,
         "questions": list(view.questions),
         "clarifications": [
-            {"slot": ask.slot, "prompt": ask.prompt} for ask in view.clarifications
+            {
+                "slot": ask.slot,
+                "prompt": ask.prompt,
+                "candidates": [
+                    {"label": choice.label, "value": choice.value}
+                    for choice in ask.candidates
+                ],
+            }
+            for ask in view.clarifications
         ],
         "card": card,
         "decision": _decision_payload(view.decision),

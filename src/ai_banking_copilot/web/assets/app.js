@@ -920,6 +920,17 @@ function clarifyPrompt(ask) {
 function clarifyControl(ask) {
   const slot = baseSlot(ask.slot);
   const attrs = `class="input" id="ask-${esc(ask.slot)}" data-slot="${esc(ask.slot)}" required`;
+  /* 有候选（同名收款人）：点选即可，候选信息全部来自后端事实（手机尾号 / 账号尾号 / 最近一次转账） */
+  if (ask.candidates && ask.candidates.length) {
+    const options = ask.candidates
+      .map((item) => `<option value="${esc(item.value)}">${esc(item.label)}</option>`)
+      .join("");
+    return (
+      `<select ${attrs}><option value="">请选择${esc(SLOT_LABELS[slot] || "其一")}</option>` +
+      `${options}</select>` +
+      `<span class="muted">候选来自名册与已记账流水，只列事实，不做猜测。</span>`
+    );
+  }
   if (OBJECT_OPTIONS[slot]) return `<select ${attrs}>${optionsHtml(slot)}</select>`;
   if (slot === "period") {
     return `<select ${attrs}><option value="">请选择扣费周期</option>` +
