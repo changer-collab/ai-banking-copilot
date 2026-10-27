@@ -305,6 +305,8 @@ async function refreshOptions() {
     select.innerHTML = optionsHtml(slot, select.value);
   });
   setButtons();
+  /* 生活事件面板的对象下拉依赖 options：拿到后重渲染一次，避免「展开只有占位」 */
+  void refreshLifeEvents();
 }
 
 function insightRuleLabel(ruleId) {
@@ -1046,6 +1048,7 @@ async function submitTask(text, selected) {
     return;
   }
   await applySubmission(result.data);
+  return result.data;
 }
 
 async function onDue() {
@@ -1769,6 +1772,89 @@ async function refreshProfileEntry() {
 
 /* ---------------- 生活事件 ---------------- */
 
+/* 面板参数：键名与服务端槽位同名，发起后若仍需澄清，用同一份值自动续答 */
+const LIFE_FORMS = {
+  L1: [
+    { key: "amount", label: "预算金额（元）", type: "number", placeholder: "800" },
+    { key: "merchant", label: "商户", type: "text", placeholder: "鲜花礼品店" },
+    { key: "account", label: "冻结账户", type: "account" },
+  ],
+  L2: [
+    { key: "payee", label: "收款人", type: "text", placeholder: "李娜" },
+    { key: "amount", label: "每月金额（元）", type: "number", placeholder: "500" },
+  ],
+  L3: [
+    { key: "card", label: "卡片", type: "card" },
+    { key: "daily_limit", label: "出行日限额（元）", type: "number", placeholder: "1000" },
+  ],
+  L4: [
+    { key: "amount", label: "目标金额（元）", type: "number", placeholder: "500" },
+    { key: "payee", label: "收款人", type: "text", placeholder: "李娜" },
+    { key: "product", label: "赎回产品", type: "text", placeholder: "wp_cash" },
+    { key: "account", label: "转出账户", type: "account" },
+  ],
+  L5: [{ key: "card", label: "卡片", type: "card" }],
+  L6: [],
+  L7: [
+    { key: "payer", label: "付款人", type: "text", placeholder: "李娜" },
+    { key: "amount", label: "分摊金额（元）", type: "number", placeholder: "100" },
+  ],
+};
+
+const LIFE_UTTERANCE = {
+  L1: (v) => `我妈下个月过生日，预算 ${v.amount || 800} 元，商户 ${v.merchant || "鲜花礼品店"}`,
+  L2: (v) => `每月给${v.payee || "李娜"} ${v.amount || 500} 元生活费`,
+  L3: (v) => `下周三出差，把卡片日限额降到 ${v.daily_limit || 1000} 元`,
+  L4: (v) => `凑钱还房贷 ${v.amount || 500} 元给${v.payee || "李娜"}`,
+  L5: () => "我的借记卡丢了",
+  L6: () => "阶段盘点",
+  L7: (v) => `分摊收款，${v.payer || "李娜"} 应付 ${v.amount || 100} 元`,
+};
+
+function lifeFieldHtml(eventId, field) {
+  const attrs = `class="input" data-life-field="${esc(field.key)}" data-event="${esc(eventId)}"`;
+  if (field.type === "account" || field.type === "card") {
+    return `<select ${attrs}>${optionsHtml(field.type)}</select>`;
+  }
+  return `<input ${attrs} type="${field.type}" inputmode="${field.type === "number" ? "decimal" : "text"}" placeholder="${esc(field.placeholder || "")}" />`;
+}
+
+function lifeValues(form) {
+  const values = {};
+  Array.from(form.querySelectorAll("[data-life-field]")).forEach((node) => {
+    const value = (node.value || "").trim();
+    if (value) values[node.dataset.lifeField] = value;
+  });
+  return values;
+}
+
+async function runLifeEvent(eventId, form) {
+  const values = form ? lifeValues(form) : {};
+  const build = LIFE_UTTERANCE[eventId];
+  const text = build ? build(values) : "";
+  if (!text) return;
+  const selected = {};
+  if (values.card) selected.card = values.card;
+  const start = async () => {
+    const data = await submitTask(text, selected);
+    if (!data || data.state !== "needs_clarification") return;
+    const asks = (data.clarifications || []).filter((ask) => ask.slot !== "user_id");
+    const answers = {};
+    asks.forEach((ask) => {
+      const slot = baseSlot(ask.slot);
+      if (values[slot]) answers[ask.slot] = MONEY_SLOTS.has(slot) ? `${values[slot]}元` : values[slot];
+    });
+    if (!asks.length || Object.keys(answers).length !== asks.length) return;
+    const result = await post("/api/clarify", { answers });
+    if (result.status === 200) {
+      timelineAdd("已按面板参数补齐澄清", "live");
+      await applySubmission(result.data);
+    }
+  };
+  if (!requestStart(start)) return;
+  await start();
+}
+
 async function refreshLifeEvents() {
   const status = el("life-events-status");
   const list = el("life-events-list");
@@ -1799,12 +1885,19 @@ async function refreshLifeEvents() {
     const description = typeof prototype.description === "string" ? prototype.description : "";
     const example = typeof prototype.example === "string" ? prototype.example : "";
     const steps = typeof prototype.steps === "number" ? `${prototype.steps} 步` : "";
+    const fields = LIFE_FORMS[eventId] || [];
+    const form = fields.length
+      ? `<details class="life-form"><summary>填写参数</summary><div class="life-form__grid">
+          ${fields.map((field) => `<label class="life-form__field"><span>${esc(field.label)}</span>${lifeFieldHtml(eventId, field)}</label>`).join("")}
+        </div></details>`
+      : "";
     return `<article class="life-card" data-event="${esc(eventId)}">
       <div class="life-card__head"><b>${esc(eventId)} · ${esc(name)}</b><span class="life-card__steps">${esc(steps)}</span></div>
       <p class="life-card__desc">${esc(description)}</p>
+      <p class="life-card__example">示例：${esc(example)}</p>
+      ${form}
       <div class="life-card__foot">
-        <p class="life-card__example">示例：${esc(example)}</p>
-        ${example ? `<button class="life-send" type="button" data-life-send="${esc(example)}">用这句发起</button>` : ""}
+        <button class="life-send" type="button" data-life-send="${esc(example)}" data-event="${esc(eventId)}">发起</button>
       </div>
     </article>`;
   }).join("");
@@ -1816,7 +1909,8 @@ async function refreshLifeEvents() {
       return `<article class="takeover insight-item">
       <div><b>${esc(record.event_name || record.event_id)}</b> <span class="chip">${esc(label)}</span></div>
       <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
-      <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span></p>
+      <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span>
+        <button class="life-send" type="button" data-life-open="${esc(record.session_id)}">打开会话</button></p>
     </article>`;
     }).join("")
     : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
@@ -1824,6 +1918,12 @@ async function refreshLifeEvents() {
   list.innerHTML = `<div class="life-grid">${cards}</div>
     <p class="side__label">我的生活事件</p>
     <div class="life-records">${recordRows}</div>`;
+  /* 对象槽默认取第一个真实选项，避免「填了金额却卡在选卡片」 */
+  Array.from(list.querySelectorAll("select[data-life-field]")).forEach((node) => {
+    if (node.value) return;
+    const first = Array.from(node.options).find((option) => option.value);
+    if (first) node.value = first.value;
+  });
 }
 
 /* ---------------- 装配 ---------------- */
@@ -1838,20 +1938,24 @@ function onPresetClick(event) {
   const container = el(id);
   if (container) container.addEventListener("click", onPresetClick);
 });
-/* 生活事件卡片：示例话术直接走同一条 `/api/submit`（缺信息仍由服务端追问） */
+/* 生活事件卡片：面板参数 → 同一 `/api/submit`；仍缺槽位时用同一份参数自动续答 */
 el("life-events-list").addEventListener("click", async (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  const button = target ? target.closest("[data-life-send]") : null;
-  if (!button) return;
-  const text = button.dataset.lifeSend || "";
-  if (!text) return;
-  button.disabled = true;
-  try {
-    const start = () => submitTask(text, {});
-    if (requestStart(start)) await start();
-  } finally {
-    button.disabled = false;
+  if (!target) return;
+  const send = target.closest("[data-life-send]");
+  if (send) {
+    const card = send.closest("article.life-card");
+    const form = card ? card.querySelector(".life-form") : null;
+    send.disabled = true;
+    try {
+      await runLifeEvent(send.dataset.event || "", form);
+    } finally {
+      send.disabled = false;
+    }
+    return;
   }
+  const open = target.closest("[data-life-open]");
+  if (open) await openConversation(open.dataset.lifeOpen || "");
 });
 el("btn-submit").addEventListener("click", action(onSubmit));
 el("btn-due").addEventListener("click", action(onDue));

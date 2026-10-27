@@ -64,6 +64,11 @@ _PAGE_HTML = """<!DOCTYPE html>
 .life-card__example { margin: 0; color: var(--ink-3); font-size: 11px; }
 .life-send { padding: 2px 10px; border: 1px solid var(--blue-600); border-radius: var(--r-chip); background: var(--blue-050); color: var(--blue-700); font-size: 11px; cursor: pointer; }
 .life-send:disabled { opacity: .5; cursor: default; }
+.life-form { font-size: var(--fs-small); }
+.life-form summary { cursor: pointer; color: var(--blue-700); font-size: 11px; }
+.life-form__grid { display: grid; gap: 6px; margin-top: 6px; }
+.life-form__field { display: grid; gap: 2px; color: var(--ink-3); font-size: 11px; }
+.life-form__field .input { width: 100%; }
 @media (max-width: 1020px) {
   #progress-steps { padding: 0 var(--s-4); }
 }
@@ -248,7 +253,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </aside>
 </div>
 
-<script src="/assets/app.js?v=18"></script>
+<script src="/assets/app.js?v=21"></script>
 </body>
 </html>
 """

@@ -189,6 +189,36 @@ def test_logout_invalidates_the_old_cookie(client: TestClient) -> None:
     assert replay.status_code == 401, "退出后旧 Cookie 必须失效"
 
 
+def test_life_event_recorded_when_clarification_completes_the_plan(
+    client: TestClient,
+) -> None:
+    _login(client, "chenming")
+    first = client.post(
+        "/api/submit",
+        json={
+            "utterance": "我妈下个月过生日，预算 800 元，商户 鲜花礼品店",
+            "session_id": "life-1",
+        },
+    ).json()
+    assert first["state"] == "needs_clarification", "该话术应先走澄清"
+    assert client.get("/api/life-events").json()["records"] == [], "未成卡前不登记"
+
+    answers = {
+        ask["slot"]: ("800元" if "amount" in ask["slot"] else "鲜花礼品店")
+        for ask in first["clarifications"]
+        if "user_id" not in ask["slot"]
+    }
+    second = client.post(
+        "/api/clarify", json={"answers": answers, "session_id": "life-1"}
+    ).json()
+    assert second["state"] == "awaiting_confirm", second.get("message")
+
+    records = client.get("/api/life-events").json()["records"]
+    assert [
+        record["session_id"] for record in records if record["event_id"] == "L1"
+    ] == ["life-1"], "澄清后成卡也要登记，且只登记一次"
+
+
 def test_life_event_panel_lists_seven_prototypes_with_examples(client: TestClient) -> None:
     _login(client, "chenming")
     payload = client.get("/api/life-events").json()

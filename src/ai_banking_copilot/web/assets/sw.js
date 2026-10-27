@@ -7,7 +7,7 @@ const STATIC_ASSETS = [
   "/assets/tokens.css?v=2",
   "/assets/app.css?v=6",
   "/assets/workspace.css?v=5",
-  "/assets/app.js?v=18",
+  "/assets/app.js?v=21",
 ];
 
 self.addEventListener("install", (event) => {

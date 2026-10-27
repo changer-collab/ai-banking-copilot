@@ -850,6 +850,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     ) -> dict[str, object]:
         """澄清闭环：用补充答案重跑上一条指令，用户无需整句重述。"""
         session = _session_for(request.session_id, user_id)
+        pending_utterance = session.last_utterance()
         on_stage = _progress_callback(user_id, request.session_id, request.request_id)
         if request.request_id:
             deps.progress.start(user_id, request.session_id, request.request_id)
@@ -865,6 +866,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             "；".join(f"{slot}={value}" for slot, value in request.answers.items()),
         )
         _record_answer(user_id, request.session_id, view)
+        if pending_utterance:
+            _record_life_event(
+                user_id, request.session_id, pending_utterance, request.answers, view,
+            )
         return _response(request.session_id, user_id, _submission_payload(view))
 
     @app.post("/api/verify/request")

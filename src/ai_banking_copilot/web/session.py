@@ -617,6 +617,14 @@ class Session:
         """当前待确认的计划卡（无则 `None`）。"""
         return self._pending.card if self._pending is not None else None
 
+    def last_utterance(self) -> str | None:
+        """尚待澄清的原指令（无则 `None`）。
+
+        只读投影：`clarify` 成功后原指令会被清空，因此渠道层需要在调用前取用，
+        用于把「续答后成卡」的同一次生活事件也登记到记录表（不读信前端自称）。
+        """
+        return self._last_utterance
+
     def confirmation(self) -> ConfirmationRecord | None:
         """确认记录（未确认则 `None`）。"""
         return self._confirmation
