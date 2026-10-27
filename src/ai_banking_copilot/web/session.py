@@ -1044,9 +1044,13 @@ class Session:
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
-        chosen: dict[str, object] = (
-            dict(selected) if selected is not None else _default_selected(self._deps)
-        )
+        # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径（丢弃空值后
+        # 按受信任默认值补齐账户），否则同一句话会白问一轮账户。
+        chosen: dict[str, object] = {
+            key: value for key, value in (selected or {}).items() if value is not None
+        }
+        for key, value in _default_selected(self._deps).items():
+            chosen.setdefault(key, value)
         # `action` / `intent_spans` 是会话澄清用的元数据，不能作为场景槽位透传。
         extras = {
             key: value for key, value in chosen.items()

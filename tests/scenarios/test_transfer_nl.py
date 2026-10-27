@@ -80,24 +80,27 @@ def test_full_mobile_number_matches_payee_by_last_four(gateway: FactGateway) -> 
 
 
 def test_ellipsis_pronoun_payee_asks_who_and_how_much(gateway: FactGateway) -> None:
-    """「转 200 给他」：代词不可解析，且 200 无单位 ⇒ 收款人 + 金额双追问。"""
+    """「转 200 给他」：代词不可解析 ⇒ 收款人追问；200 无歧义，直接当 200 元（10-27 放宽）。"""
     fill = _fill(gateway, "转 200 给他")
     assert "payee" not in fill.slots
-    assert "amount" not in fill.slots
-    assert _asked(fill) == {"payee", "amount"}
+    assert fill.slots["amount"] == 20000
+    assert _asked(fill) == {"payee"}
 
 
 def test_ellipsis_incremental_transfer_never_guesses(gateway: FactGateway) -> None:
-    """「再转 500」：上一笔上下文不在本层，必须重新问收款人与金额。"""
+    """「再转 500」：上一笔上下文不在本层，必须重新问收款人（金额按无歧义裸数字取）。"""
     fill = _fill(gateway, "再转 500")
-    assert _asked(fill) == {"payee", "amount"}
+    assert "payee" not in fill.slots
+    assert fill.slots["amount"] == 50000
+    assert _asked(fill) == {"payee"}
 
 
-def test_ellipsis_known_payee_still_asks_amount_unit(gateway: FactGateway) -> None:
-    """「给李娜转 500」：收款人可定，但阿拉伯数字缺单位 ⇒ 只追问金额。"""
+def test_ellipsis_known_payee_fills_a_bare_amount(gateway: FactGateway) -> None:
+    """「给李娜转 500」：收款人可定，且 500 唯一、不是尾号 ⇒ 直接当 500 元（2026-10-27 放宽）。"""
     fill = _fill(gateway, "给李娜转 500")
     assert fill.slots["payee"] == "p_lina"
-    assert _asked(fill) == {"amount"}
+    assert fill.slots["amount"] == 50000
+    assert _asked(fill) == set()
 
 
 # ---------------------------------------------------------------- 模糊（3 条）
@@ -124,10 +127,10 @@ def test_bare_verb_asks_everything(gateway: FactGateway) -> None:
 
 
 def test_typo_does_not_fuzzy_match_payee(gateway: FactGateway) -> None:
-    """「转帐给李那 500」：错别字不纠错、不猜收款人 ⇒ 追问（安全方向）。"""
+    """「转帐给李那 500」：错别字不纠错、不猜收款人 ⇒ 只追问收款人（金额 500 无歧义）。"""
     fill = _fill(gateway, "转帐给李那 500")
     assert "payee" not in fill.slots
-    assert _asked(fill) == {"payee", "amount"}
+    assert _asked(fill) == {"payee"}
 
 
 def test_colloquial_verb_parses_chinese_amount(gateway: FactGateway) -> None:

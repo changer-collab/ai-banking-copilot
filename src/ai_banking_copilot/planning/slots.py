@@ -166,6 +166,14 @@ class SlotInputs:
     """当前意图的完整原文子句；模型截短的 text 不能消除对象限定。"""
 
 
+_BARE_AMOUNT_ACTIONS = frozenset({"transfer.create", "transfer.schedule", "transfer.book"})
+"""允许**无歧义裸数字**当金额的动作：只有转账族（「转给李娜 500」）。
+
+其余动作（冻结 / 额度 / 代扣签约）保持「必须带单位」：这些金额一旦读错方向更坏，
+且 2026-10-27 验收只批准放宽转账金额槽。
+"""
+
+
 def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
     """按 `REQUIRED_SLOTS[action]` 逐个补槽；返回已填槽与待澄清项。
 
@@ -183,8 +191,9 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
     filled: dict[str, object] = {}
     questions: list[SlotQuestion] = []
     trace: list[str] = []
+    bare_amount = action in _BARE_AMOUNT_ACTIONS
     for slot in REQUIRED_SLOTS.get(action, ()):
-        chosen, question, notes = _resolve_slot(slot, inputs)
+        chosen, question, notes = _resolve_slot(slot, inputs, bare_amount=bare_amount)
         trace.extend(notes)
         if chosen is not None:
             filled[slot] = _accept(slot, chosen)
@@ -245,15 +254,20 @@ def _accept(slot: str, value: object) -> object:
 
 
 def _resolve_slot(
-    slot: str, inputs: SlotInputs
+    slot: str, inputs: SlotInputs, *, bare_amount: bool = False
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     notes: list[str] = []
-    if slot in inputs.selected:
+    # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径，落到解析器 / 追问，
+    # 不能因为多了一个空键就改口径（见 2026-10-27 验收记录 §5 缺陷 8）。
+    if inputs.selected.get(slot) is not None:
         raw = inputs.selected[slot]
         if _is_trusted(raw):
             notes.append(f"selected:{slot}")
             value = _normalize_selected(
-                slot, raw.raw if isinstance(raw, Value) else raw, inputs.today
+                slot,
+                raw.raw if isinstance(raw, Value) else raw,
+                inputs.today,
+                bare_amount=bare_amount,
             )
             if value is not None:
                 return value, None, tuple(notes)
@@ -263,7 +277,7 @@ def _resolve_slot(
     if slot in {"payee", "payer"}:
         return _resolve_payee(inputs, notes)
     if slot in {"amount", "amount_cents"}:
-        return _resolve_amount(inputs, notes, slot)
+        return _resolve_amount(inputs, notes, slot, bare_amount=bare_amount)
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
     if slot == "when":
@@ -283,13 +297,16 @@ def _resolve_slot(
     return None, SlotQuestion(slot=slot, prompt=_PROMPTS[slot]), tuple(notes)
 
 
-def _normalize_selected(slot: str, raw: object, today: date) -> object | None:
+def _normalize_selected(
+    slot: str, raw: object, today: date, *, bare_amount: bool = False
+) -> object | None:
     """把澄清表单的可信字符串转回工具要求的金额 / 周期 / 日期类型。"""
     if slot in {"amount", "amount_cents", "daily_limit"} and isinstance(raw, str):
         text = raw.strip()
         if slot == "amount_cents" and text.isdigit():
             return int(text)
-        parsed_amount = parse_amount(text)
+        # 澄清表单里答一个「200」就是 200 元（与 `_resolve_amount` 同口径）；额度槽仍要求带单位。
+        parsed_amount = parse_amount(text, bare_amounts=bare_amount and slot == "amount")
         return parsed_amount.value.cents if parsed_amount.value is not None else None
     if slot == "period" and isinstance(raw, str):
         return _PERIOD_ALIASES.get(raw.strip().lower())
@@ -330,14 +347,29 @@ def _resolve_payee(
 
 
 def _resolve_amount(
-    inputs: SlotInputs, notes: list[str], slot: str
+    inputs: SlotInputs, notes: list[str], slot: str, *, bare_amount: bool = False
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
-    parsed = parse_amount(inputs.text)
+    """金额槽：转账族允许**无歧义的裸数字**（「转给李娜 500」）；尾号 / 日期 / 序数仍不当金额。"""
+    parsed = parse_amount(
+        inputs.text,
+        bare_amounts=bare_amount,
+        reserved_digits=_reserved_digits(inputs.payees),
+    )
     if not parsed.matched or parsed.value is None:
         notes.append(f"missing {slot}")
         return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
     notes.append(f"resolved {slot}:{parsed.value.cents}")
     return parsed.value.cents, None, tuple(notes)
+
+
+def _reserved_digits(payees: Sequence[Payee]) -> frozenset[str]:
+    """名册里的卡号尾号 / 手机尾号：这些数字属于收款人识别，不能被同时读成金额。"""
+    return frozenset(
+        digits
+        for payee in payees
+        for digits in (payee.account_tail, payee.phone_tail)
+        if digits
+    )
 
 
 def _resolve_daily_limit(

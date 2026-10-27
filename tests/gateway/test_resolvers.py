@@ -111,6 +111,34 @@ def test_parse_amount_rejects_mixed_arabic_and_chinese_candidates() -> None:
     assert parse_amount("300 元和五百块分两笔").matched is False
 
 
+def test_parse_amount_accepts_bare_number_only_when_caller_opts_in() -> None:
+    """「转 200 给李娜」：默认仍严格（旧口径不变），调用方显式开启后才把裸数字当金额。"""
+    assert parse_amount("转 200 给李娜").matched is False
+    parsed = parse_amount("转 200 给李娜", bare_amounts=True)
+    assert parsed.matched is True
+    assert parsed.value == Money(20000)
+    assert parsed.evidence == "200"
+
+
+def test_parse_amount_bare_number_never_shadows_a_payee_tail() -> None:
+    """尾号 / 卡号是收款人标识，不能同时被读成金额（宁可追问，也不误读）。"""
+    reserved = frozenset({"9021", "2210"})
+    parsed = parse_amount("转给 9021 500", bare_amounts=True, reserved_digits=reserved)
+    assert parsed.matched is True
+    assert parsed.value == Money(50000)
+    assert parse_amount("转给 9021", bare_amounts=True, reserved_digits=reserved).matched is False
+
+
+def test_parse_amount_bare_number_skips_dates_and_ordinals() -> None:
+    assert parse_amount("10 月 1 日", bare_amounts=True).matched is False
+    assert parse_amount("第 3 笔", bare_amounts=True).matched is False
+
+
+def test_parse_amount_bare_number_ignores_long_digit_runs() -> None:
+    """11 位手机号不会被当成「138 亿」；句子里只有中文数字时按中文数字取。"""
+    assert parse_amount("转给 13812342210 五百", bare_amounts=True).value == Money(50000)
+
+
 MOBILE_PAYEES = (
     Payee("p_lina", "u_demo", "李娜", "9021", "3721", True, False),
     Payee("p_wangwei", "u_demo", "王伟", "8812", "3301", True, False),

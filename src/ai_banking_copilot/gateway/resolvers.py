@@ -57,6 +57,12 @@ _MONTHLY_DAY = re.compile(r"每月\s*(?P<day>\d{1,2})\s*号")
 _NEGATION_WORDS = ("不要", "别", "不用", "不转", "不办", "暂不", "拒绝")
 _RELATIVE_DAYS = {"今天": 0, "明天": 1, "后天": 2, "大后天": 3}
 _UNIT_MULTIPLIER = {"元": 1, "块": 1, "块钱": 1, "人民币": 1, "万": 10000, "k": 1000, "K": 1000}
+_BARE_MAX_DIGITS = 4
+"""裸数字上限：5 位以上按手机号 / 订单号处理，且万级金额必须带单位（不替用户推断）。"""
+_BARE_BLOCKED_SUFFIX = "月号日年点个位张次天周笔条折成届岁秒分时-/."
+"""紧跟这些量词 / 时间词 / 日期分隔符的数字不属于金额（「10 月 1 日」「2026-10-01」）。"""
+_BARE_BLOCKED_PREFIX = "第-/:"
+"""「第 3 笔」这类序数前缀与日期 / 时间分隔符。"""
 
 
 @dataclass(frozen=True)
@@ -138,21 +144,36 @@ def resolve_payees(payees: Sequence[Payee], text: str) -> PayeeResolution:
     )
 
 
-def parse_amount(text: str) -> AmountParse:
+def parse_amount(
+    text: str,
+    *,
+    bare_amounts: bool = False,
+    reserved_digits: frozenset[str] = frozenset(),
+) -> AmountParse:
     """抽取金额。
 
-    - 阿拉伯数字**必须带单位**才算命中——无单位一律视为未命中（避免误读数字）；
+    - 阿拉伯数字**默认必须带单位**才算命中——无单位一律视为未命中（避免误读数字）；
     - 中文数字自带货币语义（「打五百」「十五块」），不强制带「元 / 块」；
     - **万级中文数字必须带货币单位**（「一万块」可解析，「一万」「一万五」视为未命中，
       先追问确认再执行）——大额不替用户推断单位，方向只加严；
     - 命中多个候选（如「300 元和五百块」）一律视为未命中，交由上层追问，**不猜**。
+
+    `bare_amounts=True` 是**调用方显式开启**的放宽（转账金额槽专用）：「转 200 给李娜」里
+    那个裸数字确实只能是金额。放宽仍守住三条边界，其余一律不猜：
+    ① `reserved_digits`（名册里的卡号 / 手机尾号）优先当收款人标识；
+    ② 日期与序数（「10 月 1 日」「第 3 笔」）不当金额；
+    ③ 5 位以上不认（手机号 / 订单号，且万级金额必须带单位）。
     """
     candidates: list[AmountParse] = []
     for match in _AMOUNT.finditer(text):
         unit = match.group("unit")
+        num = match.group("num")
         if unit is None:
+            if not bare_amounts or not _is_bare_amount(text, match, num, reserved_digits):
+                continue
+            candidates.append(_amount_from_arabic(num, "元", num))
             continue
-        candidates.append(_amount_from_arabic(match.group("num"), unit, match.group(0)))
+        candidates.append(_amount_from_arabic(num, unit, match.group(0)))
     for cn_match in _CN_NUMERAL.finditer(text):
         parsed = _amount_from_chinese(cn_match)
         if parsed is not None:
@@ -160,6 +181,23 @@ def parse_amount(text: str) -> AmountParse:
     if len(candidates) != 1:
         return AmountParse(matched=False, value=None, evidence="")
     return candidates[0]
+
+
+def _is_bare_amount(
+    text: str, match: re.Match[str], num: str, reserved_digits: frozenset[str]
+) -> bool:
+    """裸数字（无货币单位）能否当金额：只认「位数短、不是尾号、不是日期 / 序数」这一种。"""
+    if "." in num or len(num) > _BARE_MAX_DIGITS:
+        return False
+    if len(num) > 1 and num.startswith("0"):
+        return False
+    if num in reserved_digits or (num.lstrip("0") or "0") in reserved_digits:
+        return False
+    tail = text[match.end():].lstrip()[:1]
+    if tail and tail in _BARE_BLOCKED_SUFFIX:
+        return False
+    head = text[: match.start()].rstrip()[-1:]
+    return not (head and head in _BARE_BLOCKED_PREFIX)
 
 
 def _amount_from_arabic(num: str, unit: str, evidence: str) -> AmountParse:
