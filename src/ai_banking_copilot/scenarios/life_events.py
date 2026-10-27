@@ -76,6 +76,12 @@ class LifeEventPrototype:
     reuse: str
     """复用的既有构建器 / 场景模块（避免另写一套）。"""
 
+    description: str = ""
+    """一句人话说明（前端面板直接展示，避免前端硬编码文案）。"""
+
+    example: str = ""
+    """示例话术（前端「用这句发起」按钮直接提交，走同一条 `/api/submit`）。"""
+
 
 LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
     LifeEventPrototype(
@@ -85,6 +91,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("funds", "merchant"),
         skeleton=("funds.freeze", "merchant.order", "funds.release"),
         reuse="scenarios.cross.birthday_plan",
+        description="先把预算冻结住，商户下单后自动解冻剩余，超预算直接拒绝。",
+        example="我妈下个月过生日",
     ),
     LifeEventPrototype(
         event_id="L2",
@@ -93,6 +101,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("transfer", "subscription"),
         skeleton=("transfer.schedule", "subscription.list"),
         reuse="scenarios.transfer + scenarios.subscriptions",
+        description="按期自动转出，可在代扣清单里随时查看与停止。",
+        example="每月给李娜 500 元生活费",
     ),
     LifeEventPrototype(
         event_id="L3",
@@ -101,6 +111,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("card", "account"),
         skeleton=("card.set_limit", "account.transactions", "card.set_limit"),
         reuse="scenarios.cards",
+        description="出行期间把日限额调低，到期自动恢复原额度。",
+        example="下周三出差，把卡片日限额降到 1000 元",
     ),
     LifeEventPrototype(
         event_id="L4",
@@ -109,6 +121,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("account", "wealth", "transfer"),
         skeleton=("account.balance", "wealth.redeem", "transfer.create"),
         reuse="scenarios.wealth + scenarios.transfer",
+        description="先查余额，缺口才赎回，再一次性转出。",
+        example="凑钱还房贷 500 元给李娜",
     ),
     LifeEventPrototype(
         event_id="L5",
@@ -123,6 +137,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
             "account.transactions",
         ),
         reuse="scenarios.cards",
+        description="锁卡 → 挂失 → 补虚拟卡 → 改密码 → 查近期交易，五步止损。",
+        example="我的借记卡丢了",
     ),
     LifeEventPrototype(
         event_id="L6",
@@ -131,6 +147,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("bills", "subscription"),
         skeleton=("bills.yearly", "subscription.list"),
         reuse="scenarios.bills + scenarios.subscriptions",
+        description="年度账单 + 代扣盘点，纯查询不写资金。",
+        example="阶段盘点",
     ),
     LifeEventPrototype(
         event_id="L7",
@@ -139,6 +157,8 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("transfer", "account", "bills"),
         skeleton=("transfer.request_collection", "account.transactions", "bills.monthly"),
         reuse="scenarios.transfer + scenarios.bills",
+        description="发起分摊收款 → 确认到账 → 记到上月账单。",
+        example="分摊收款，李娜 应付 100 元",
     ),
 )
 """七条生活链路原型（顺序即触发优先级）。"""

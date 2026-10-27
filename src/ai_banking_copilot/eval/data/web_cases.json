@@ -13,19 +13,19 @@
     "selected": {},
     "checks": [{"name": "查询无资金副作用", "sql": "SELECT COUNT(*) FROM transactions WHERE channel='agent'", "expected": 0}],
     "numbers": [
-      {"pattern": "支出 (?P<value>[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0", "unit": "cents"},
-      {"pattern": "收入 (?P<value>[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0", "unit": "cents"},
-      {"pattern": "基期合计 (?P<value>-?[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'", "unit": "cents"}
+      {"pattern": "支出 (?P<value>[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0", "unit": "cents"},
+      {"pattern": "收入 (?P<value>[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0", "unit": "cents"},
+      {"pattern": "基期合计 (?P<value>-?[\\d.]+) 元", "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'", "unit": "cents"}
     ]
   },
   {
     "id": "web-bills-yearly", "scenario": "bills", "kind": "legitimate", "metric_group": "legitimate", "utterance": "查看2026年度账单", "selected": {},
     "checks": [{"name": "年度分析不写资金", "sql": "SELECT COUNT(*) FROM write_receipts", "expected": 0}],
     "numbers": [
-      {"pattern": "2026 年 1–9 月支出 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE booked_on BETWEEN '2026-01-01' AND '2026-09-30' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
-      {"pattern": "收入 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), SUM(amount_cents) FROM transactions WHERE booked_on BETWEEN '2026-01-01' AND '2026-09-30' AND amount_cents>0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
-      {"pattern": "上年同期支出 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE booked_on BETWEEN '2025-01-01' AND '2025-09-30' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
-      {"pattern": "(?P<value>[+-]?[\\d.]+)%", "operation": "yoy", "current_year": 2026, "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE substr(booked_on,6,2)<='09' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "percent"}
+      {"pattern": "2026 年 1–9 月支出 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on BETWEEN '2026-01-01' AND '2026-09-30' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
+      {"pattern": "收入 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on BETWEEN '2026-01-01' AND '2026-09-30' AND amount_cents>0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
+      {"pattern": "上年同期支出 (?P<value>[\\d.]+) 元", "operation": "sum", "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on BETWEEN '2025-01-01' AND '2025-09-30' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "cents"},
+      {"pattern": "(?P<value>[+-]?[\\d.]+)%", "operation": "yoy", "current_year": 2026, "sql": "SELECT 'bills:u_demo:'||substr(booked_on,1,7), -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND substr(booked_on,6,2)<='09' AND amount_cents<0 GROUP BY substr(booked_on,1,7)", "unit": "percent"}
     ]
   },
   {
