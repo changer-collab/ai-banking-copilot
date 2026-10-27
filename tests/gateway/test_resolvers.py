@@ -111,6 +111,47 @@ def test_parse_amount_rejects_mixed_arabic_and_chinese_candidates() -> None:
     assert parse_amount("300 元和五百块分两笔").matched is False
 
 
+MOBILE_PAYEES = (
+    Payee("p_lina", "u_demo", "李娜", "9021", "3721", True, False),
+    Payee("p_wangwei", "u_demo", "王伟", "8812", "3301", True, False),
+)
+
+TAIL_COLLISION_PAYEES = (
+    Payee("p_zhangwei_a", "u_demo", "张伟", "8812", "3721", True, False),
+    Payee("p_zhangwei_b", "u_demo", "张伟", "4417", "3721", False, False),
+)
+
+
+def test_resolution_by_full_mobile_matches_payee_tail() -> None:
+    """完整 11 位手机号按后四位匹配名册（库内只存尾号），且 trace 必须脱敏。"""
+    result = resolve_payees(MOBILE_PAYEES, "给 13812343721 转五百")
+    assert [item.payee_id for item in result.candidates] == ["p_lina"]
+    assert result.needs_clarification is False
+    assert any(trace.startswith("phone_full:138****3721") for trace in result.parse_trace)
+    assert all("13812343721" not in trace for trace in result.parse_trace)
+
+
+def test_resolution_by_full_mobile_with_tail_collision_forces_clarification() -> None:
+    result = resolve_payees(TAIL_COLLISION_PAYEES, "给 13812343721 转五百")
+    assert [item.payee_id for item in result.candidates] == [
+        "p_zhangwei_a",
+        "p_zhangwei_b",
+    ]
+    assert result.needs_clarification is True
+
+
+def test_resolution_by_unknown_full_mobile_fabricates_nothing() -> None:
+    result = resolve_payees(MOBILE_PAYEES, "给 13900001111 转五百")
+    assert result.candidates == ()
+    assert result.needs_clarification is False
+
+
+def test_resolution_ignores_eleven_digit_non_mobile_number() -> None:
+    """11 位但不是手机号（非 1[3-9] 开头）的数字不得被当作手机号匹配。"""
+    result = resolve_payees(MOBILE_PAYEES, "订单号 88881233721 转五百")
+    assert result.candidates == ()
+
+
 def test_parse_temporal_resolves_relative_days() -> None:
     today = date(2026, 10, 1)
     assert parse_temporal("今天转", today).when == date(2026, 10, 1)

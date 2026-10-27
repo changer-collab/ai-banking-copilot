@@ -17,6 +17,7 @@ from decimal import Decimal
 from ai_banking_copilot.gateway.models import Money, Payee
 
 _NUMBER_RUN = re.compile(r"\d{4,}")
+_MOBILE_FULL = re.compile(r"1[3-9]\d{9}")
 _AMOUNT = re.compile(r"(?P<num>\d+(?:\.\d{1,2})?)\s*(?P<unit>元|块|块钱|人民币|万|k|K)?")
 # 中文数字（口语）：五百 / 一千二 / 两千五 / 一百零八 / 十五块。
 # 后面紧跟 月/号/日/年… 的是日期（「十月一号」），不算金额，用负向断言排除。
@@ -92,7 +93,10 @@ class TemporalParse:
 
 
 def resolve_payees(payees: Sequence[Payee], text: str) -> PayeeResolution:
-    """按手机尾号 / 卡号尾号 / 姓名匹配名册。**只认名册，不产出新实体。**"""
+    """按手机尾号 / 完整 11 位手机号（取后四位） / 卡号尾号 / 姓名匹配名册。
+
+    **只认名册，不产出新实体**；完整手机号按后四位匹配属于能力子集（库内只存尾号）。
+    """
     hits: dict[str, Candidate] = {}
     trace: list[str] = []
 
@@ -109,6 +113,14 @@ def resolve_payees(payees: Sequence[Payee], text: str) -> PayeeResolution:
             )
             for payee in matched_accounts:
                 hits[payee.payee_id] = _candidate(payee)
+        if _MOBILE_FULL.fullmatch(run) is not None:
+            tail_hits = [payee for payee in payees if payee.phone_tail == run[-4:]]
+            if tail_hits:
+                trace.append(
+                    f"phone_full:{_mask_mobile(run)} -> {','.join(p.payee_id for p in tail_hits)}"
+                )
+                for payee in tail_hits:
+                    hits.setdefault(payee.payee_id, _candidate(payee))
 
     for payee in payees:
         if payee.full_name and payee.full_name in text:
@@ -274,6 +286,11 @@ def parse_temporal(text: str, today: date) -> TemporalParse:
         )
 
     return TemporalParse(matched=False, when=None, negation=False, evidence="")
+
+
+def _mask_mobile(run: str) -> str:
+    """手机号脱敏：保留前三位与后四位，中间打码（trace / 审计不得出现全号）。"""
+    return f"{run[:3]}****{run[-4:]}"
 
 
 def _candidate(payee: Payee) -> Candidate:
