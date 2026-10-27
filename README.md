@@ -40,7 +40,7 @@
 
 - `tools/catalog.py`、`policy/*`、`planning/kernel.py` 仅组长可改，其余成员以「变更申请卡」提需求。
 - D3（门卫规则申请卡）不单独验收，由组长在每日合并窗口统一落地并检查。
-- 用 agent 干活时按工位走：仓库内置 `.trae/rules/project_rules.md`（常驻硬约束）与 `.trae/skills/scene-workflow/SKILL.md`（八工位流程），开工先说清「场景 + 工位」。
+- 用 agent 干活时按工作流走：仓库内置 `.trae/rules/project_rules.md`（常驻硬约束）与 `.trae/skills/scene-workflow/SKILL.md`（S0–S7 八步流程），**开工只说一句自己是谁**即可（不用报工位）。
 
 ## 官方技术要求对照
 
@@ -65,7 +65,7 @@
 ├── THIRD_PARTY_NOTICES.md           # 第三方依赖清单（名称/版本/来源/许可证/使用范围）
 ├── Dockerfile                       # 容器镜像（api）
 ├── docker-compose.yml               # 一键复现编排
-├── .trae/                           # Trae 工作流：rules（常驻硬约束）+ skills/scene-workflow（八工位）
+├── .trae/                           # Trae 工作流：rules（常驻硬约束）+ skills/scene-workflow（S0–S7 八步）
 ├── docs/
 │   ├── README.md                    # 文档索引（推荐必看 / 本周必交 / 归档）
 │   ├── official-requirements.md     # 官方要求 → 本项目落点 对照表
