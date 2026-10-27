@@ -22,7 +22,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=6" />
-<link rel="stylesheet" href="/assets/workspace.css?v=6" />
+<link rel="stylesheet" href="/assets/workspace.css?v=7" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app">
@@ -194,7 +194,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </aside>
 </div>
 
-<script src="/assets/app.js?v=16"></script>
+<script src="/assets/app.js?v=17"></script>
 </body>
 </html>
 """

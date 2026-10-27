@@ -567,4 +567,13 @@ html[data-view="app"] .trace__head { padding-bottom: var(--s-2); border-bottom: 
 .wealth-product p { margin: 0; overflow-wrap: anywhere; }
 .wealth-product--disabled { opacity: 0.62; }
 .wealth-reason { color: var(--lvl-denied); font-size: var(--fs-small); }
+.wealth-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.wealth-action .input { flex: 1 1 8rem; min-width: 0; }
+.wealth-action .btn { flex: none; }
 .wealth-result { margin-top: 0; }
