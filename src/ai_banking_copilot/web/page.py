@@ -270,11 +270,27 @@ _PAGE_HTML = """<!DOCTYPE html>
         <section class="panel" id="wealth-panel">
           <p class="panel__title">理财 · 测评与持仓</p>
           <div class="muted" id="wealth-status">正在读取测评状态与持仓…</div>
+          <div id="wealth-viz">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取风险等级与持仓占比…</p>
+              <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <div id="wealth-assessment"><p class="muted">尚未读取风险测评问卷。</p></div>
           <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定</span></p>
-          <div id="wealth-products"><p class="muted">尚未读取产品目录。</p></div>
+          <div id="wealth-products">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取产品目录…</p>
+              <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <p class="panel__title panel__title--sub">我的持仓</p>
-          <div id="wealth-holdings"><p class="muted">尚未读取持仓。</p></div>
+          <div id="wealth-holdings">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取持仓…</p>
+              <span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <p class="muted" id="wealth-source"></p>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>

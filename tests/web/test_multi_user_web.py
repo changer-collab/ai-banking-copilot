@@ -143,6 +143,27 @@ def test_cards_are_scoped_to_the_logged_in_user(
     assert not primary & other
 
 
+def test_wealth_holdings_are_scoped_to_the_logged_in_user(
+    client: TestClient, auth_deps: AppDeps
+) -> None:
+    """`/api/wealth/overview` 的持仓必须按登录用户查表，不得回落到装配期用户。"""
+    _login(client, "chenming")
+    primary = {
+        row["product_id"]: row["amount_yuan"]
+        for row in client.get("/api/wealth/overview").json()["holdings"]
+    }
+    assert primary == {"wp_cash": "500.00", "wp_bond": "3000.00"}
+
+    secondary = TestClient(create_app(auth_deps))
+    _login(secondary, "linjing")
+    other = {
+        row["product_id"]: row["amount_yuan"]
+        for row in secondary.get("/api/wealth/overview").json()["holdings"]
+    }
+    assert other == {"wp_bond": "1200.00", "wp_mix": "6000.00"}
+    assert other != primary, "两个账号的持仓金额不得互相串号"
+
+
 def test_cross_site_write_is_rejected_before_any_state_change(client: TestClient) -> None:
     _login(client, "chenming")
     response = client.post(
