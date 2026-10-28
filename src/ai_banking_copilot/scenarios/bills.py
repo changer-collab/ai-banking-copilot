@@ -75,6 +75,26 @@ BILLS_ACTIONS = frozenset(
 ANOMALY_THRESHOLD_CENTS: int = 500_000
 """异常大额阈值（**单位=分**，= 5000 元）。**展示层谓词**，不进算子 / PDP / PEP。"""
 
+_CAPABILITY_BOUNDARIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("导出", "excel", "邮箱", "发我邮件"),
+        "暂不支持导出 Excel 或发送邮件：当前只提供页面账单分析与记录页查询。",
+    ),
+    (
+        ("深夜", "凌晨"),
+        "暂不支持按时间点筛选交易；账单面板已把深夜交易标为可疑，请到「可疑清单」查看。",
+    ),
+    (
+        ("在上海", "在深圳", "在北京", "在广州", "在杭州", "刷过吗", "哪个城市"),
+        "暂不支持按城市筛选交易；账单面板已标记异地交易，请到「可疑清单」查看。",
+    ),
+    (
+        ("退款", "退货", "到账了吗"),
+        "暂不支持按退款状态查询到账；如需核对请提供具体交易日期与商户。",
+    ),
+)
+"""能力边界（场景层）：不支持的问法一律明确说做不到，不拿大额扫描结果冒充答案。"""
+
 
 def large_transactions(
     gateway: FactGateway, account_id: str, start: date, end: date
@@ -139,6 +159,9 @@ class BillsHandler(ScenarioHandler):
         return any(intent.action in BILLS_ACTIONS for intent in intents)
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+        boundary = _capability_boundary(intents)
+        if boundary is not None:
+            raise ScenarioRefused(boundary)
         balances = [intent for intent in intents if intent.action == "account.balance"]
         account_txn = [
             intent for intent in intents if intent.action == "account.transactions"
@@ -263,6 +286,17 @@ def _category_expense_cents(summary: BillSummary, category: str) -> int:
         if item.category == category and item.total.cents < 0:
             return -item.total.cents
     raise ScenarioRefused(f"当期账单不存在支出分类：{category}")
+
+
+def _capability_boundary(intents: Sequence[Intent]) -> str | None:
+    """命中能力边界时返回一句人话；未命中返回 `None`（照常出计划卡）。"""
+    text = " ".join(
+        str(intent.slots.get("span") or intent.evidence or "") for intent in intents
+    ).lower()
+    for keywords, message in _CAPABILITY_BOUNDARIES:
+        if any(keyword in text for keyword in keywords):
+            return message
+    return None
 
 
 def _period(intents: Sequence[Intent]) -> tuple[int, int]:

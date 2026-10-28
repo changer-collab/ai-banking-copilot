@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=12" />
+<link rel="stylesheet" href="/assets/workspace.css?v=13" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -254,6 +254,9 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="bills-status">正在读取账单识别结果…</p>
           <p class="muted" id="bills-disclaimer" hidden></p>
           <div id="bills-summary"></div>
+          <div id="bills-profile"></div>
+          <div id="bills-charts"></div>
+          <div id="bills-top3"></div>
           <div id="bills-findings"></div>
           <details class="bills-details" id="bills-details">
             <summary>账单明细（本期交易）</summary>
@@ -286,6 +289,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="panel__title">卡片管理</p>
           <p class="muted" id="cards-status">正在读取卡片…</p>
           <div id="cards-list"></div>
+          <div id="cards-visual"></div>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="cards">看卡片状态</button>
           </div>
@@ -395,7 +399,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=28"></script>
+<script src="/assets/app.js?v=29"></script>
 </body>
 </html>
 """
