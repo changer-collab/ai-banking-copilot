@@ -1680,17 +1680,12 @@ def create_app(deps: AppDeps) -> FastAPI:
             channels["web"] = {"configured": True, "mode": "web", "reason": ""}
             channels[CHANNEL_FEISHU] = {
                 "configured": feishu.configured,
-                "mode": (
-                    "adapter"
-                    if feishu.configured
-                    else ("replay" if feishu.replay_mode else "stub")
-                ),
+                "mode": feishu.config.mode,
                 "reason": (
-                    ""
-                    if feishu.configured
-                    else ("replay_mode" if feishu.replay_mode else "not_configured")
+                    "replay_mode" if feishu.replay_mode
+                    else ("" if feishu.configured else "not_configured")
                 ),
-                "card_action": feishu.configured,
+                "card_action": feishu.configured and not feishu.replay_mode,
             }
         body["health"] = health.snapshot()
         return body

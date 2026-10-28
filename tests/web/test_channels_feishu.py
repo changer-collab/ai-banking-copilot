@@ -234,6 +234,22 @@ def test_live_send_retries_message_without_requesting_token_again(monkeypatch) -
     assert calls == [0.5, 2.0, 8.0]
 
 
+def test_live_send_rejects_success_http_with_missing_response_code(monkeypatch) -> None:
+    from ai_banking_copilot.web.channels import feishu as module
+
+    responses = iter(
+        (
+            (200, {"tenant_access_token": "t", "expire": 7200}),
+            (200, {}),
+        )
+    )
+    monkeypatch.setattr(module, "_post_json", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(module.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(FeishuProtocolError, match="feishu_message_send_failed"):
+        _live_adapter().send(_outbound())
+
+
 def test_live_send_reports_each_scheduled_retry(monkeypatch) -> None:
     from ai_banking_copilot.web.channels import feishu as module
 

@@ -171,6 +171,9 @@ def test_s6_cancel_is_yellow_local_only(
     assert after["accounts"] == before["accounts"]
     assert http.video()["registered_status"] == "cancelled"
     assert http.video()["external_cancel_status"] == "not_integrated"
+    assert http.video()["next_charge_on"] is None
+    assert http.video()["next_charge_is_prediction"] is False
+    assert "不在有效状态" in http.video()["next_charge_basis"]
 
 
 @pytest.mark.parametrize("utterance", [

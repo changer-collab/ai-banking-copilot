@@ -668,6 +668,8 @@ def _next_charge(
     median_gap: int | None,
 ) -> tuple[date | None, bool, str]:
     """下次扣费：有流水依据时**标注为预测值**，否则退回登记日期并说明非预测。"""
+    if subscription.status != "active":
+        return None, False, "订阅已不在有效状态，无下次扣费。"
     if items and cycle != CYCLE_UNKNOWN and median_gap is not None:
         return (
             items[-1].booked_on + timedelta(days=median_gap),
@@ -675,8 +677,6 @@ def _next_charge(
             f"按最近 {len(items) - 1} 次扣费间隔的中位数 {median_gap} 天推得，"
             "仅作预测；实际扣费日以商户为准。",
         )
-    if subscription.status != "active":
-        return None, False, "订阅已不在有效状态，无下次扣费。"
     reason = (
         "流水间隔无法判定周期，改用登记值"
         if items else "无流水可核验，取登记值"

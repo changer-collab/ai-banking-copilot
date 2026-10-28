@@ -256,6 +256,22 @@ def test_feishu_event_is_dispatched_once_and_health_is_adapter(
     assert event["status"] == "sent"
 
 
+def test_explicit_replay_mode_is_reported_even_with_complete_credentials(
+    deps: AppDeps, monkeypatch
+) -> None:
+    monkeypatch.setenv("AIB_FEISHU_APP_ID", "app")
+    monkeypatch.setenv("AIB_FEISHU_APP_SECRET", "secret")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "replay-key")
+    monkeypatch.setenv("AIB_FEISHU_REPLAY_MODE", "1")
+
+    health = TestClient(create_app(deps)).get("/api/channels/health").json()
+    feishu = health["channels"]["feishu"]
+    assert feishu["configured"] is True
+    assert feishu["mode"] == "replay"
+    assert feishu["card_action"] is False
+
+
 def test_feishu_group_injection_is_not_green_and_has_no_funds_side_effect(
     deps: AppDeps, rw_store, monkeypatch
 ) -> None:

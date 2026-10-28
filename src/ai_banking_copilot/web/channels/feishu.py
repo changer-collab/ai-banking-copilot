@@ -571,7 +571,7 @@ class FeishuAdapter:
             )
             if status >= 500:
                 return status
-            if status != 200 or response.get("code", 0) != 0:
+            if status != 200 or response.get("code") != 0:
                 raise FeishuProtocolError("feishu_message_send_failed")
             return status
 
