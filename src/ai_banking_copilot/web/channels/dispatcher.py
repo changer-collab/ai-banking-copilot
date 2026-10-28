@@ -18,8 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import replace
 from threading import Lock
@@ -37,6 +36,7 @@ from ai_banking_copilot.web.channels.contracts import (
     OutboundMessage,
 )
 from ai_banking_copilot.web.channels.identity import IdentityDirectory
+from ai_banking_copilot.web.channels.ratelimit import TokenBucketRateLimiter
 from ai_banking_copilot.web.session import ExecutionView, Session, SubmissionView
 from ai_banking_copilot.web.session_manager import SessionManager
 
@@ -51,33 +51,8 @@ _MAX_IDEMPOTENCY_ENTRIES = 500
 """幂等缓存条数上界：超出即淘汰最早一条（演示级，够覆盖重投窗口）。"""
 
 
-class SlidingWindowRateLimiter:
-    """进程内滑动窗口限流：`limit` 次 / `window_s` 秒，按用户计数。"""
-
-    def __init__(
-        self,
-        *,
-        limit: int = RATE_LIMIT_PER_MINUTE,
-        window_s: float = RATE_LIMIT_WINDOW_S,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._limit = limit
-        self._window_s = window_s
-        self._clock = clock
-        self._events: dict[str, deque[float]] = {}
-        self._lock = Lock()
-
-    def allow(self, key: str) -> bool:
-        """记一次入站；超限返回 `False`（调用方据此 429）。"""
-        with self._lock:
-            now = self._clock()
-            bucket = self._events.setdefault(key, deque())
-            while bucket and now - bucket[0] >= self._window_s:
-                bucket.popleft()
-            if len(bucket) >= self._limit:
-                return False
-            bucket.append(now)
-            return True
+SlidingWindowRateLimiter = TokenBucketRateLimiter
+"""兼容旧导入名；实现已迁移到可靠性模块。"""
 
 
 class Dispatcher:
@@ -92,7 +67,7 @@ class Dispatcher:
         execution_payload: Callable[[ExecutionView], dict[str, object]],
         audit: AuditLog,
         server_user_id: str,
-        limiter: SlidingWindowRateLimiter | None = None,
+        limiter: TokenBucketRateLimiter | None = None,
         feishu_configured: bool = False,
     ) -> None:
         self._manager = manager
@@ -101,7 +76,7 @@ class Dispatcher:
         self._execution_payload = execution_payload
         self._audit = audit
         self._server_user_id = server_user_id
-        self._limiter = limiter if limiter is not None else SlidingWindowRateLimiter()
+        self._limiter = limiter if limiter is not None else TokenBucketRateLimiter()
         self._feishu_configured = feishu_configured
         self._cache: OrderedDict[str, OutboundMessage] = OrderedDict()
         self._cache_lock = Lock()
@@ -113,7 +88,10 @@ class Dispatcher:
             return replace(cached, replayed=True)
 
         user_id = self._resolve_user(inbound)
-        if not self._limiter.allow(f"{inbound.channel}:{user_id}"):
+        rate_identity = inbound.external_user_id or user_id
+        if not self._limiter.allow(
+            f"{inbound.channel}:{rate_identity}", reservation_id=inbound.event_id
+        ):
             raise ChannelRateLimited("消息过于频繁，请稍后再试")
 
         chat_id = inbound.external_chat_id or inbound.external_user_id or DEFAULT_CHAT_ID

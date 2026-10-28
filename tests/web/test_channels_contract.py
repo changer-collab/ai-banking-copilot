@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from ai_banking_copilot.policy.audit import KIND_CHANNEL, AuditLog
 from ai_banking_copilot.web.app import AppDeps, create_app
+from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
 
@@ -59,6 +60,42 @@ def test_same_event_id_replays_without_reexecuting(deps: AppDeps) -> None:
     assert second.status_code == 200
     assert second.json()["replayed"] is True
     assert second.json()["state"] == first.json()["state"]
+
+
+def test_rate_limit_uses_external_identity_then_falls_back_to_internal_user(
+    deps: AppDeps, rw_store
+) -> None:
+    init_channel_schema(rw_store)
+    for external_id in ("ou-a", "ou-b"):
+        rw_store.execute(
+            "INSERT INTO channel_identities(channel, external_user_id, user_id, bound_at) "
+            "VALUES ('im', ?, ?, 'now')",
+            (external_id, deps.user_id),
+        )
+    client = TestClient(create_app(replace(deps, channel_store=rw_store)))
+
+    for external_id in ("ou-a", "ou-b"):
+        responses = [
+            client.post(
+                "/api/im/message",
+                json={
+                    "text": "查一下余额",
+                    "user_id": external_id,
+                    "event_id": f"{external_id}-{index}",
+                },
+            )
+            for index in range(21)
+        ]
+        assert [response.status_code for response in responses] == [200] * 20 + [429]
+
+    local = [
+        client.post(
+            "/api/im/message",
+            json={"text": "查一下余额", "event_id": f"local-{index}"},
+        )
+        for index in range(21)
+    ]
+    assert [response.status_code for response in local] == [200] * 20 + [429]
 
 
 def test_audit_carries_channel_and_only_a_digest(deps: AppDeps, audit: AuditLog) -> None:
@@ -137,3 +174,18 @@ def test_health_reports_feishu_as_not_configured(deps: AppDeps) -> None:
     assert body["channels"]["feishu"]["mode"] == "replay"
     assert body["channels"]["feishu"]["reason"] == "replay_mode"
     assert body["rate_limit"]["limit"] == 20
+    expected = {
+        "status": "unknown",
+        "last_event_at": None,
+        "events": 0,
+        "ok": 0,
+        "failed": 0,
+        "replayed": 0,
+        "retries": 0,
+        "ratelimit_hits": 0,
+    }
+    for channel in ("web", "im", "feishu"):
+        assert body["health"][channel] == {
+            **expected,
+            "replay_mode": channel == "feishu",
+        }

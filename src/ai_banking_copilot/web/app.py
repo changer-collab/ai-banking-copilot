@@ -123,7 +123,11 @@ from ai_banking_copilot.web.channels.identity import (
     StoreIdentityDirectory,
     init_channel_schema,
 )
-from ai_banking_copilot.web.channels.ratelimit import EventLedger, HealthRegistry
+from ai_banking_copilot.web.channels.ratelimit import (
+    EventLedger,
+    HealthRegistry,
+    TokenBucketRateLimiter,
+)
 from ai_banking_copilot.web.channels.render import render_feishu_card, render_text
 from ai_banking_copilot.web.conversation_store import ConversationStore
 from ai_banking_copilot.web.insights import InsightService
@@ -432,6 +436,10 @@ def create_app(deps: AppDeps) -> FastAPI:
         identities = MemoryIdentityDirectory()
     feishu = FeishuAdapter(FeishuConfig.from_env())
     health = HealthRegistry()
+    health.register("web")
+    health.register(CHANNEL_LOCAL)
+    health.register(CHANNEL_FEISHU, replay_mode=feishu.replay_mode)
+    channel_limiter = TokenBucketRateLimiter()
     event_ledger: EventLedger | None = None
     memory_event_ids: set[str] = set()
     replay_responses: dict[str, dict[str, object]] = {}
@@ -451,6 +459,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 execution_payload=_execution_payload,
                 audit=deps.audit,
                 server_user_id=user_id,
+                limiter=channel_limiter,
                 feishu_configured=feishu.configured,
             )
             _dispatchers[user_id] = built
@@ -1483,13 +1492,26 @@ def create_app(deps: AppDeps) -> FastAPI:
         body["health"] = health.snapshot()
         return body
 
-    def _send_live_feishu(outbound: OutboundMessage) -> None:
+    def _release_feishu_event(event_id: str | None) -> None:
+        if not event_id:
+            return
+        if event_ledger is not None:
+            event_ledger.release(event_id)
+        else:
+            memory_event_ids.discard(event_id)
+
+    def _dispatch_live_feishu(
+        material: InboundMessage | ConfirmCommand,
+        user_id: str,
+        event_id: str | None,
+    ) -> None:
         try:
+            outbound = _dispatcher_for(user_id).dispatch(material)
             feishu.send(outbound)
             health.record_event(CHANNEL_FEISHU, success=True)
         except Exception:
+            _release_feishu_event(event_id)
             health.record_event(CHANNEL_FEISHU, success=False)
-            health.record_retry(CHANNEL_FEISHU)
 
     @app.post("/api/im/feishu")
     async def im_feishu(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
@@ -1567,15 +1589,29 @@ def create_app(deps: AppDeps) -> FastAPI:
                         "replayed": True,
                     }
                 )
+        if feishu.configured and not feishu.replay_mode:
+            rate_identity = material.external_user_id or binding.user_id
+            rate_key = f"{material.channel}:{rate_identity}"
+            if event_id is None or not channel_limiter.reserve(rate_key, event_id):
+                _release_feishu_event(event_id)
+                raise ChannelRateLimited("消息过于频繁，请稍后再试")
+            envelope = {
+                "code": 0,
+                "channel": CHANNEL_FEISHU,
+                "event_id": event_id,
+                "replayed": False,
+            }
+            if event_id:
+                replay_responses[event_id] = envelope
+            background_tasks.add_task(
+                _dispatch_live_feishu, material, binding.user_id, event_id
+            )
+            return JSONResponse(content=envelope)
         try:
             outbound = _dispatcher_for(binding.user_id).dispatch(material)
         except Exception:
             # 未执行成功（401/429/409/状态机拒绝）不得消费事件，否则平台重投只会拿到空回放。
-            if event_id:
-                if event_ledger is not None:
-                    event_ledger.release(event_id)
-                else:
-                    memory_event_ids.discard(event_id)
+            _release_feishu_event(event_id)
             health.record_event(CHANNEL_FEISHU, success=False)
             raise
         health.record_event(CHANNEL_FEISHU, success=True)
@@ -1584,8 +1620,6 @@ def create_app(deps: AppDeps) -> FastAPI:
             "text": render_text(outbound),
             "feishu": feishu.render(outbound),
         }
-        if feishu.configured and not feishu.replay_mode:
-            background_tasks.add_task(_send_live_feishu, outbound)
         envelope = {
             "code": 0,
             "channel": CHANNEL_FEISHU,
