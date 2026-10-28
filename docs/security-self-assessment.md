@@ -28,6 +28,8 @@
 | 熔断 | `policy/breaker.py` | `CircuitBreaker`（五类触发） |
 | 回归证据 | `eval/invariants.py` | `I1′`–`I4′` + 绿色纯度 + 非退化 + must-pass |
 | 计划后置审查 | `planning/reviewer.py` · `web/session.py` | 旁路诊断或严格审查；绑定执行 ID/冻结哈希；失败不改计划，写动作按需澄清/接管 |
+| 理财资金守恒 | `gateway/core_bank.py` · `gateway/store.py` | `wealth_holdings` 与账户同事务变更；赎回不得超过持仓，起购价只约束申购 |
+| 登录与会话（增强层） | `web/auth.py` · `web/app.py` | `scrypt` 口令哈希 / 会话只存 `sha256(token)` / 失败锁定 / 5 分钟一次性二次验证票据 / CSRF；`AIB_AUTH_MODE=demo` 启用 |
 | PWA / 主动洞察 | `web/assets/sw.js` · `web/insights.py` | 静态壳缓存、金融 API 直连；洞察只读扫描且元数据与银行库分离 |
 
 ### 1.3 硬化规则
@@ -46,6 +48,7 @@
 - **强验证失败计数**：默认组合根为每用户计数注入独立 RW SQLite 存储，失败次数与锁定跨会话、worker 和重启共享；手工构造 `AppDeps` 的测试默认仍是进程内。挑战本身仍按当前会话流程管理，不宣称持久化。
 - **事实零生成的叙事边界**：账单模型只返回已登记的摘要、解释与建议 ID，由服务端按事实渲染；严格 Reviewer 只接受空 `findings` / `clarifications`，澄清和接管文案由服务端模板产生。模型无法把自写事实展示为审查理由。
 - **受限分析沙箱**：只执行白名单表达式 DSL，不执行任意 Python；源值必须来自快照且结果保留全部原始 `record_id`。POSIX 使用 `rlimit`，Windows 使用 Job Object 和父进程 watchdog；限制能力不等于容器级隔离。
+- **理财资金守恒**：申购校验起购金额与余额，并同事务累加 `wealth_holdings`；赎回校验「持有且不超持仓」，起购价不再拦截赎回（2026-10-28 关闭 R20）。
 
 ### 1.4 强验证（红色）的落地形态与边界
 
@@ -111,12 +114,12 @@
 | R12 | 原无密钥审计与服务算法降级 | 已消除 / 残留低 | 服务严格 HMAC 与显式旧链迁移见 §1.3。默认密钥仍与日志同目录，不构成抗抵赖；未解决有效后缀截断或密钥轮换。迁移只代表运维接收 SHA 历史，不能追溯证明未被改写 |
 | R13 | 多步执行与会话持久性 | 中 | 每节点独立事务，整张计划不是单一原子事务；SQLite 快照支持单进程、单 worker 重启恢复，恢复后未完成写操作须重新确认、旧挑战失效；已完成步骤通过现有补偿路径回退 |
 | R14 | 业务提交与 JSONL 审计不原子 | 中 | 尚无 outbox；提交后异常报告 `committed_unverified` 和原回执，暂停后续，可从持久会话快照沿原键恢复核对。跨 worker 的熔断状态更新与 JSONL 追加也不构成原子事务；与运维解锁并发时专用 `breaker` 转换事件理论上可能重复或缺失。崩溃窗口仍需人工对账，不宣称审计与业务原子落盘 |
-| R15 | 「按手机号转账」实际按**手机尾号**匹配，非完整号码 | 中 | `gateway/resolvers.py::resolve_payees` 只比对 `payees.phone_tail`（4 位）。尾号重名时**不产出级别、强制澄清**（安全侧正确），但与官方点名的「按手机号转账」存在语义差距。缓解：澄清卡同时展示账号尾号 / 手机尾号 / 全名三要素。生产化需接完整号码 + 实名映射 |
-| R16 | 账单「异常交易识别」覆盖 5 类，但缺**时空两维** | 中 | 已有 5 类判据：`scenarios/bill_findings.py::FINDING_KINDS`（重复扣款 / 涨价 / 隐藏费用 / 循环订阅 / 异常大额，金额档 `ANOMALY_THRESHOLD_CENTS = 500_000`）。**未覆盖**异地 / 境外、深夜时段——因为 `gateway/store.py::transactions` 只有 `booked_on`，无 `booked_at` 与 `city`，物理上无法判定；另缺「商户首次出现 / 金额偏离历史分布」两类统计判据 |
-| R17 | 理财「风险评估」有判定能力但**缺对话式问卷入口** | 中 | `gateway/risk_store.py` + `assess_suitability` + `POST /api/risk-assessment` 已存在，能按风险等级拦截不适配申购；但未做成 Agent 对话内的问卷（无题库、无逐题追问），用户须走 REST 端点完成测评。评测口径上属「半有」 |
-| R18 | IM 渠道为**孤儿库代码**，实际未接线 | 中 | `web/channels/im.py::ImChannel` 自建 `SessionManager`（非与 Web 复用同一个），全仓**无人 import**，`web/app.py` 19 条路由里**没有任何 IM 端点**，前端也**没有 IM 页面**。PWA（`manifest.json` + `sw.js`）承担官方「APP 渠道」形态；IM 需先由组长落 P0-4 装配骨架，才有「真 IM」可讲 |
-| R19 | 确定性解析器**不识别中文数字金额** | 低 | `gateway/resolvers.py::parse_amount` 的正则只接受阿拉伯数字 + 单位（且**必须带单位**才命中）。「转五百给老张」在降级通道下无法解析，会走澄清追问；模型通道可用但非等价实现。宁可追问也不误读，属 fail-safe 取舍 |
-| R20 | 理财赎回**无持仓校验**：余额直接加回，等于凭空造钱 | **高** | `gateway/core_bank.py::_wealth_flow` 里 `signed = +amount.cents`（`direction == "in"`）无条件入账，`Store` 里**没有 `wealth_holdings` 表**，因此赎回不校验「是否真的持有、持有多少」。同一函数第 844 行 `if amount.cents < min_cents: raise` **不分方向**，导致「赎回 100 元」会被 1000 元起购价拦住（H2）。两项均破「事实零生成」，已在 `docs/2026-10-27/分工文档-2026-10-27.md` §3 P0-2 列为今日必修 |
+| R15 | 「按手机号转账」按**手机尾号**匹配，完整号码不单独存 | 中 | `gateway/resolvers.py::resolve_payees` 能识别完整 11 位号码，但名册只存 `payees.phone_tail`（4 位），实际按后四位比对。尾号重名时**不产出级别、强制澄清**（安全侧正确），但与官方点名的「按手机号转账」存在语义差距。缓解：澄清卡同时展示账号尾号 / 手机尾号 / 全名三要素。生产化需接完整号码 + 实名映射 |
+| R16 | 账单异常识别覆盖 7 类，仍缺两类统计判据 | 低 | 已覆盖 7 类：`scenarios/bill_findings.py::FINDING_KINDS`（重复扣款 / 涨价 / 隐藏费用 / 循环订阅 / 异常大额 / 深夜 / 异地）；深夜为 22:00–06:00，异地以常用城市为基线、历史样本 < 2 不启用（避免新用户误报）。**未覆盖**「商户首次出现」「金额偏离历史分布」；时间 / 城市为空时**跳过判据并说明不适用**，不猜测 |
+| R17 | ~~理财风险评估缺对话式问卷入口~~ | 已关闭 | 2026-10-28 关闭：聊天内直接下发固定 5 题问卷（`web/session.py` + `scenarios/wealth_assessment.py`），**等级由服务端评分算出**，请求体不得自填 `risk_profile`；落库 `source='questionnaire'`，未测评 / 过期 / 不匹配仍 fail-closed 拒绝申购 |
+| R18 | 飞书渠道**代码已接线、生产凭据未配置** | 中 | 2026-10-28 代码侧关闭：`POST /api/im/feishu`（验签 + 时间戳 ±5 分钟 + AES 解密 + `card.action`）、`POST /api/im/message`、`POST /api/im/confirm`、`GET /im`、`GET /api/channels/health` 均已在 `web/app.py`；入站按 `channel_identities` 解析用户、失败给绑定指引不回落，`event_id` 幂等 + 20 次/分限流。**残留是运维**：服务器尚无 4 个 `AIB_FEISHU_*`，health 现为 `feishu.mode=stub`，演示用 `scripts/replay_webhook.py` 回放 |
+| R19 | ~~确定性解析器不识别中文数字金额~~ | 已关闭 | 2026-10-28 关闭：`gateway/resolvers.py::parse_amount` 支持「五百 / 一千二 / 两千五 / 一百零八 / 一万块」等口语写法；万级中文数字**必须带货币单位**（「一万」视为未命中），多候选（如「300 元和五百块」）一律不猜、交上层追问 |
+| R20 | ~~理财赎回无持仓校验~~ | 已关闭 | 2026-10-28 关闭：`Store` 新增 `wealth_holdings`，`gateway/core_bank.py::_wealth_flow` 申购时同事务累加持仓、赎回时校验「不得超过持仓」，起购金额只约束申购（不再拦截赎回）；持仓与余额同增同减，回执 `effect_ids` 同时声明 `accounts:*` 与 `wealth_holdings:*` |
 
 ## 三、自评结论
 
@@ -125,8 +128,9 @@
 - 界面与实现一致：红色不再宣称「人脸 / U 盾」，中断失败如实报错，回退由「如实失败」升级为**真实冲正**（回补余额 + 反向分录）。
 - 工程门禁由 Ruff、严格 mypy、全量 pytest 和模板服务自检组成；当前提交的执行结果以 CI 与 PR 验证记录为准。
 - 能力边界如实声明：**不证决策正确、不证泛化、LLM 侧有抖动、降级通道非等价实现、强验证无真实第二信道**。
-- 官方六场景 × 25 项点名能力：**23 项有 · 2 项半有（R15 手机尾号、R17 缺问卷入口）· 0 项无**，逐条对照见 [official-requirements.md](official-requirements.md)；半有项一律在上表登记为已知风险，不包装成「已完成」。另有 2 项**额外缺口**不在这 25 项里：R18（IM 未接线）、R20（赎回凭空造钱，**高**）。
+- 官方六场景 × 25 项点名能力：**24 项有 · 1 项半有（R15 手机尾号）· 0 项无**，逐条对照见 [official-requirements.md](official-requirements.md)；半有项仍登记为已知风险，不包装成「已完成」。R16 / R17 / R18 / R19 / R20 已于 2026-10-28 关闭，其中 R18 只剩运维配置（飞书凭据），不是代码缺口。
 
 ---
 
 *2026-10-01 建立 · 2026-10-27 补 R15–R20（手机尾号 / 异常五类缺时空 / 缺问卷入口 / IM 孤儿代码 / 中文数字 / 赎回凭空造钱）*
+*2026-10-28 复核：R17 / R19 / R20 关闭，R16 升至 7 类，R18 代码关闭、仅留飞书凭据配置；R15 保留*

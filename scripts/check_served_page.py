@@ -40,21 +40,23 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=9")
-    js = _get(base, "/assets/app.js?v=25")
+    workspace_css = _get(base, "/assets/workspace.css?v=12")
+    js = _get(base, "/assets/app.js?v=28")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
-        "page: 技术详情开关": 'id="tech-toggle"' in html and "技术详情" in html,
         "page: 顶栏/三栏/处理详情": (
             'class="topbar"' in html and 'class="layout layout--workspace"' in html
             and 'class="side"' in html and 'class="main"' in html and 'class="trace rail"' in html
         ),
-        "page: 视图层（首页/对话/记录/渠道/个人中心弹窗）": (
+        "page: 视图层（首页/对话/记录/渠道/我的）": (
             'id="view-home"' in html and 'id="view-chat"' in html
             and 'id="view-records"' in html and 'id="view-health"' in html
-            and 'id="profile-panel"' in html and 'id="profile-backdrop"' in html
+            and 'id="view-me"' in html and 'id="profile-panel"' in html
         ),
+        "page: 窄屏首页列表容器": 'id="home-scene-list"' in html,
+        "page: 左栏无「常用办理」": "常用办理" not in html and 'id="quick-scenes"' not in html,
+        "page: 右栏无三色分级图例": "三色分级（官方口径）" not in html,
         "page: 对话式结构": (
             'id="conversation-sidebar"' in html
             and 'id="conversation-welcome"' in html
@@ -68,14 +70,13 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=9" in html
-            and "/assets/app.js?v=25" in html
+            and "/assets/workspace.css?v=12" in html
+            and "/assets/app.js?v=28" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
         "css: .tech 默认收起": ".tech {" in css and "display: none;" in css,
-        "css: data-tech 展开": 'html[data-tech="on"] .tech' in css,
         "workspace: 三栏/抽屉样式": (
             ".layout.layout--workspace" in workspace_css
             and ".shell.is-trace-open .trace" in workspace_css
@@ -86,7 +87,7 @@ def run(base: str) -> list[str]:
         "js: 读额度字段": "daily_limit_cents" in js and "daily_accumulated_cents" in js,
         "js: 链节点中文+tech": "function chainAdd(label, tech)" in js and "node.label" in js,
         "js: 中文级别名": 'name: "黄色"' in js,
-        "js: techToggle": "techToggle" in js,
+        "js: 窄屏我的为页面": 'isAppShell()' in js and 'navigate("me"' in js,
         "js: 规则字典（真实枚举）": "AMOUNT_OVER_DAILY_LIMIT:" in js and "QUERY_ONLY:" in js,
         "js: 要求字典": "user_confirm: " in js and "strong_verify: " in js,
         "js: 凭证号替代哈希": "function receiptNo(" in js,

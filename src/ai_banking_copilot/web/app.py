@@ -133,7 +133,7 @@ from ai_banking_copilot.web.life_event_store import (
     STATUS_REJECTED,
     LifeEventStore,
 )
-from ai_banking_copilot.web.page import APP_HTML, INDEX_HTML, LOGIN_HTML
+from ai_banking_copilot.web.page import INDEX_HTML, LOGIN_HTML
 from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
 from ai_banking_copilot.web.progress import ProgressRegistry
 from ai_banking_copilot.web.session import (
@@ -649,11 +649,6 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         return _page_or_login(request, INDEX_HTML)
-
-    @app.get("/m", response_class=HTMLResponse)
-    def index_app(request: Request) -> HTMLResponse:
-        """APP 端版式：同一份骨架 + `data-view="app"`，手机框内铺满。"""
-        return _page_or_login(request, APP_HTML)
 
     @app.get("/api/options")
     def options(user_id: str = Depends(current_user)) -> dict[str, object]:
