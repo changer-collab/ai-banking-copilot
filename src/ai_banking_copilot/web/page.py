@@ -22,46 +22,81 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=6" />
-<link rel="stylesheet" href="/assets/workspace.css?v=6" />
+<link rel="stylesheet" href="/assets/workspace.css?v=7" />
 </head>
 <body>
-<div class="layout layout--workspace" id="app" data-view-name="home">
+<div class="layout layout--workspace" id="app" data-view-name="chat">
   <aside class="side" id="conversation-sidebar" aria-label="对话与场景" aria-hidden="false">
     <div class="side__brand topbar__brand">
       <span class="brand-mark">AI 银行<em>副驾</em></span>
       <span class="brand-sub">把想办的事说出来 · 每一步由您掌控</span>
     </div>
-    <nav class="appnav" id="app-nav" aria-label="功能导航">
-      <button class="appnav__item" type="button" data-nav="home">首页</button>
-      <p class="side__label">场景</p>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="transfer">转账</button>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="bills">账单分析</button>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="wealth">理财</button>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="cards">卡片</button>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
-      <button class="appnav__item" type="button" data-nav="scene" data-scene="life">生活事件</button>
-      <p class="side__label">办理</p>
-      <button class="appnav__item" type="button" data-nav="chat">对话</button>
-      <p class="side__label">工具</p>
-      <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
-      <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
-      <button class="appnav__item" type="button" data-nav="states">三态演示</button>
-      <button class="appnav__item" type="button" data-nav="me">我的</button>
-    </nav>
     <div class="side__pad">
-      <button class="btn" id="btn-reset" type="button">＋ 新建对话</button>
+      <button class="new-chat-card" id="btn-reset" type="button">
+        <span class="new-chat-card__plus" aria-hidden="true">＋</span>
+        <span>新建对话</span>
+      </button>
     </div>
-    <p class="side__label">历史对话</p>
-    <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，对话会保存在这里。</p></div>
-    <p class="side__label">常用办理</p>
-    <section class="convs convs--scenes" id="quick-scenes" aria-label="快捷场景列表"></section>
+    <div class="side__scroll" id="side-scroll">
+      <nav class="appnav" id="app-nav" aria-label="功能导航">
+        <button class="appnav__item" type="button" data-nav="home">首页</button>
+        <p class="side__label">场景</p>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="transfer">转账</button>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="bills">账单分析</button>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="wealth">理财</button>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="cards">卡片</button>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
+        <button class="appnav__item" type="button" data-nav="scene" data-scene="life">生活事件</button>
+        <p class="side__label">办理</p>
+        <button class="appnav__item" type="button" data-nav="chat">对话</button>
+        <p class="side__label">工具</p>
+        <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
+        <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
+      </nav>
+      <p class="side__label">历史对话</p>
+      <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，对话会保存在这里。</p></div>
+      <p class="side__label">常用办理</p>
+      <section class="convs convs--scenes" id="quick-scenes" aria-label="快捷场景列表"></section>
+    </div>
     <div class="side__foot">
+      <button class="side-user" id="btn-me-side" type="button" data-nav="me">
+        <span class="side-user__avatar" aria-hidden="true">AI</span>
+        <span class="side-user__meta">
+          <span class="side-user__name" id="side-user-name">我的</span>
+          <span class="side-user__sub">个人中心 · 登录身份</span>
+        </span>
+      </button>
       <p class="side-note">模拟银行环境 · 不连接真实银行账户<br />绿色仅自动查询 · 黄色由您确认 · 红色需要强验证</p>
     </div>
   </aside>
 
   <main class="main" id="main" aria-label="银行办理对话">
-    <section class="view" id="view-home">
+    <header class="topbar">
+      <div class="top__brand">
+        <div class="top__t">AI 银行副驾</div>
+        <div class="top__s">今天，有什么可以帮您？</div>
+      </div>
+      <div class="topbar__nav">
+        <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
+                aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
+        <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
+                aria-controls="trace" aria-expanded="true">处理详情</button>
+        <label class="switch">
+          <input type="checkbox" id="tech-toggle" />
+          技术详情
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="theme-toggle" />
+          夜航主题
+        </label>
+        <button class="btn btn--ghost profile-entry" id="btn-profile" type="button"
+                aria-controls="profile-panel" aria-expanded="false">
+          <span class="profile-entry__name" id="profile-entry-name">个人中心</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="view" id="view-home" hidden>
       <header class="view__head">
         <div>
           <h2>今天想办什么？</h2>
@@ -124,38 +159,12 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="btn-row">
           <button class="btn" type="button" data-nav="records">记录与明细</button>
           <button class="btn" type="button" data-nav="health">渠道健康</button>
-          <button class="btn" type="button" data-nav="states">三态演示</button>
           <button class="btn" type="button" data-nav="me">我的</button>
         </div>
       </section>
     </section>
 
-    <section class="view view--chat" id="view-chat" hidden>
-    <header class="topbar">
-      <div class="top__brand">
-        <div class="top__t">AI 银行副驾</div>
-        <div class="top__s">今天，有什么可以帮您？</div>
-      </div>
-      <div class="topbar__nav">
-        <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
-                aria-controls="conversation-sidebar" aria-expanded="false">对话与场景</button>
-        <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
-                aria-controls="trace" aria-expanded="false">处理详情</button>
-        <label class="switch">
-          <input type="checkbox" id="tech-toggle" />
-          技术详情
-        </label>
-        <label class="switch">
-          <input type="checkbox" id="theme-toggle" />
-          夜航主题
-        </label>
-        <button class="btn btn--ghost profile-entry" id="btn-profile" type="button"
-                aria-controls="profile-panel" aria-expanded="false">
-          <span class="profile-entry__name" id="profile-entry-name">个人中心</span>
-        </button>
-      </div>
-    </header>
-
+    <section class="view view--chat" id="view-chat">
     <div class="progress-steps" id="progress-steps" aria-live="polite" hidden></div>
 
     <div id="stage" class="stream" aria-live="polite" aria-relevant="additions text">
@@ -320,31 +329,6 @@ _PAGE_HTML = """<!DOCTYPE html>
       </section>
     </section>
 
-    <section class="view" id="view-states" hidden>
-      <header class="view__head">
-        <div>
-          <h2>三态演示</h2>
-          <p class="muted">空 / 加载 / 失败三种标准态；失败一律写人话，不出现 Error / 500。</p>
-        </div>
-      </header>
-      <div class="state-grid">
-        <article class="state-card">
-          <p class="state-card__k">空</p>
-          <p class="muted">还没有记录。完成一次办理后会出现在这里。</p>
-        </article>
-        <article class="state-card">
-          <p class="state-card__k">加载</p>
-          <p class="muted">正在读取…</p>
-          <div class="skeleton"></div>
-        </article>
-        <article class="state-card">
-          <p class="state-card__k">失败</p>
-          <p class="muted">读取失败，请稍后重试；已完成的办理不受影响。</p>
-          <button class="btn btn--sm" type="button" data-nav="records">重试</button>
-        </article>
-      </div>
-    </section>
-
     <section class="view" id="view-me" hidden>
       <header class="view__head">
         <div>
@@ -413,8 +397,6 @@ _PAGE_HTML = """<!DOCTYPE html>
     </div>
     <div id="profile-body"><p class="muted">正在读取账户信息…</p></div>
   </aside>
-  <button class="nav-fab" id="btn-nav-mobile" type="button"
-          aria-controls="conversation-sidebar" aria-expanded="false">导航</button>
   <nav class="tabbar" id="app-tabbar" aria-label="底部导航">
     <button class="tabbar__item" type="button" data-nav="home">首页</button>
     <button class="tabbar__item" type="button" data-nav="chat">对话</button>
@@ -422,7 +404,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=23"></script>
+<script src="/assets/app.js?v=24"></script>
 </body>
 </html>
 """

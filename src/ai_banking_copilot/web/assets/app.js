@@ -1803,13 +1803,17 @@ async function refreshMeView() {
 /* 顶部入口只做身份标识：读不到就保留默认文案，不打断主流程 */
 async function refreshProfileEntry() {
   const entry = el("profile-entry-name");
-  if (!entry) return;
+  const sideName = el("side-user-name");
+  if (!entry && !sideName) return;
   try {
     const result = await apiFetch("GET", "/api/me");
     if (!result.ok) return;
     const user = (result.data || {}).user || {};
-    const name = user.display_name || user.username;
-    if (name) entry.textContent = name;
+    const name = user.display_name || user.username || "当前用户";
+    if (name) {
+      if (entry) entry.textContent = name;
+      if (sideName) sideName.textContent = name;
+    }
   } catch (_) {
     /* 只影响入口文案，静默保留默认值 */
   }
@@ -2085,18 +2089,47 @@ function setMobileDrawer(name, open) {
   if (open && name === "trace") el("btn-close-trace")?.focus();
 }
 
-["scenes", "trace"].forEach((name) => {
-  const button = el(`btn-${name}-mobile`);
-  if (button) {
-    button.setAttribute("aria-expanded", "false");
-    button.addEventListener("click", () => {
-      if (!app) return;
-      setMobileDrawer(name, !app.classList.contains(`is-${name}-open`));
-    });
-  }
-});
+function isNarrowNav() {
+  return window.matchMedia("(max-width: 1180px)").matches;
+}
+
+function isNarrowTrace() {
+  return window.matchMedia("(max-width: 1020px)").matches;
+}
+
+/* 顶栏两个按钮：宽屏收起整列，窄屏走抽屉；状态同步到 aria-expanded */
+function syncColumnButtons() {
+  if (!app) return;
+  const navOpen = isNarrowNav()
+    ? app.classList.contains("is-scenes-open")
+    : !app.classList.contains("is-nav-collapsed");
+  const traceOpen = isNarrowTrace()
+    ? app.classList.contains("is-trace-open")
+    : !app.classList.contains("is-trace-collapsed");
+  el("btn-scenes-mobile")?.setAttribute("aria-expanded", String(navOpen));
+  el("btn-trace-mobile")?.setAttribute("aria-expanded", String(traceOpen));
+}
+
+function toggleNav() {
+  if (!app) return;
+  if (isNarrowNav()) setMobileDrawer("scenes", !app.classList.contains("is-scenes-open"));
+  else app.classList.toggle("is-nav-collapsed");
+  syncColumnButtons();
+}
+
+function toggleTrace() {
+  if (!app) return;
+  if (isNarrowTrace()) setMobileDrawer("trace", !app.classList.contains("is-trace-open"));
+  else app.classList.toggle("is-trace-collapsed");
+  syncColumnButtons();
+}
+
+el("btn-scenes-mobile")?.addEventListener("click", toggleNav);
+el("btn-trace-mobile")?.addEventListener("click", toggleTrace);
 setMobileDrawer("scenes", false);
 setMobileDrawer("trace", false);
+syncColumnButtons();
+window.addEventListener("resize", syncColumnButtons);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     const openDrawer = app?.classList.contains("is-scenes-open")
@@ -2212,14 +2245,14 @@ const RECORD_TABS = {
   charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 卡尾号 / 渠道。" },
 };
 
-const VIEWS = ["home", "chat", "scene", "records", "health", "states", "me"];
+const VIEWS = ["home", "chat", "scene", "records", "health", "me"];
 let currentScene = "transfer";
 let currentRecordTab = "transfers";
 
 function parseHash() {
   const raw = String(window.location.hash || "").replace(/^#\/?/, "");
   const parts = raw.split("/");
-  const name = VIEWS.includes(parts[0]) ? parts[0] : "home";
+  const name = VIEWS.includes(parts[0]) ? parts[0] : "chat";
   return { name, arg: parts[1] || "" };
 }
 
@@ -2302,8 +2335,10 @@ document.addEventListener("click", (event) => {
       if (input) input.value = prefill;
     }
     navigate(nav.dataset.nav || "home", opts);
-    if (el("app")?.classList.contains("is-scenes-open")) setMobileDrawer("scenes", false);
-    el("btn-nav-mobile")?.setAttribute("aria-expanded", "false");
+    if (el("app")?.classList.contains("is-scenes-open")) {
+      setMobileDrawer("scenes", false);
+      syncColumnButtons();
+    }
     return;
   }
   const tab = target.closest("#records-tabs [data-record-tab]");
@@ -2333,16 +2368,8 @@ el("btn-health-refresh")?.addEventListener("click", () => {
   });
 });
 
-el("btn-nav-mobile")?.addEventListener("click", () => {
-  const appNode = el("app");
-  if (!appNode) return;
-  const open = !appNode.classList.contains("is-scenes-open");
-  setMobileDrawer("scenes", open);
-  el("btn-nav-mobile")?.setAttribute("aria-expanded", String(open));
-});
-
 const initialRoute = parseHash();
-if (!window.location.hash) window.history.replaceState(null, "", "#/home");
+if (!window.location.hash) window.history.replaceState(null, "", "#/chat");
 showView(
   initialRoute.name,
   initialRoute.name === "scene"
@@ -2382,7 +2409,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=15", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=16", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
