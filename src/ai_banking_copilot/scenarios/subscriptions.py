@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -257,6 +258,8 @@ class _Outflow:
     record_id: str
     content_hash: str
     channel: str = ""
+    booked_at: str | None = None
+    card_tail: str | None = None
 
     @property
     def merchant_key(self) -> str:
@@ -279,6 +282,8 @@ class SubscriptionEvidence:
     """原始带符号金额（支出为负），不做改写。"""
     merchant_label: str
     channel: str = ""
+    booked_at: str | None = None
+    card_tail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -315,6 +320,9 @@ class SubscriptionInsight:
     cancel_action: str
     cancel_path: str
     external_cancel_status: str
+    price_increased_12m: bool | None
+    price_change_12m_from_cents: int | None
+    price_change_12m_to_cents: int | None
 
 
 @dataclass(frozen=True)
@@ -366,7 +374,9 @@ def subscription_report(
             if renamed_from is not None:
                 items = tuple(grouped[renamed_from])
                 pending.discard(renamed_from)
-        insights.append(_registered_insight(subscription, items, renamed_from=renamed_from))
+        insights.append(_registered_insight(
+            subscription, items, renamed_from=renamed_from, as_of=as_of,
+        ))
 
     notes: list[str] = [
         f"数据来源：{SUBSCRIPTION_DATA_SOURCE}。",
@@ -374,7 +384,7 @@ def subscription_report(
     ]
     for key in sorted(pending):
         pending_items = grouped[key]
-        candidate = _unregistered_insight(key, pending_items)
+        candidate = _unregistered_insight(key, pending_items, as_of=as_of)
         if candidate is not None:
             insights.append(candidate)
         elif _has_subscription_keyword(key) or _has_subscription_keyword(
@@ -430,6 +440,9 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                 "next_charge_is_prediction": item.next_charge_is_prediction,
                 "next_charge_basis": item.next_charge_basis,
                 "charge_count": item.charge_count,
+                "price_increased_12m": item.price_increased_12m,
+                "price_change_12m_from_cents": item.price_change_12m_from_cents,
+                "price_change_12m_to_cents": item.price_change_12m_to_cents,
                 "registered_status": item.registered_status,
                 "notices": [
                     {"code": notice.code, "message": notice.message}
@@ -441,6 +454,8 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                         "record_id": evidence.record_id,
                         "content_hash": evidence.content_hash,
                         "booked_on": evidence.booked_on.isoformat(),
+                        "booked_at": evidence.booked_at,
+                        "card_tail": evidence.card_tail,
                         "amount_cents": evidence.amount_cents,
                         "merchant_label": evidence.merchant_label,
                         "channel": evidence.channel,
@@ -463,6 +478,7 @@ def _registered_insight(
     items: Sequence[_Outflow],
     *,
     renamed_from: str | None,
+    as_of: date,
 ) -> SubscriptionInsight:
     """已登记订阅：状态恒为 `confirmed`，但流水与登记不一致时必须逐条提示。"""
     gaps = _gaps([item.booked_on for item in items])
@@ -531,6 +547,7 @@ def _registered_insight(
     else:
         suggestion = "如仍在使用可保留；不再使用可在订阅管理中取消。"
 
+    increased, price_from, price_to = _price_change_12m(items, as_of)
     return SubscriptionInsight(
         insight_id=f"subscription:{subscription.subscription_id}",
         merchant=subscription.merchant,
@@ -556,10 +573,15 @@ def _registered_insight(
             if active else "订阅已不在有效状态，无需取消"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
+        price_increased_12m=increased,
+        price_change_12m_from_cents=price_from,
+        price_change_12m_to_cents=price_to,
     )
 
 
-def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionInsight | None:
+def _unregistered_insight(
+    key: str, items: Sequence[_Outflow], *, as_of: date,
+) -> SubscriptionInsight | None:
     """未登记商户：只有证据足够时才列为**疑似**订阅，否则返回 `None`（由调用方提示）。"""
     if not _subscription_like(items):
         return None
@@ -583,6 +605,7 @@ def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionIn
         "该商户未在订阅登记中，本应用无法直接取消，只能提供商户自助取消指引。",
     ))
     latest = items[-1]
+    increased, price_from, price_to = _price_change_12m(items, as_of)
     return SubscriptionInsight(
         insight_id=f"outflow:{key}",
         merchant=latest.merchant_label,
@@ -613,7 +636,28 @@ def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionIn
             "本应用尚未接入该商户的取消接口"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
+        price_increased_12m=increased,
+        price_change_12m_from_cents=price_from,
+        price_change_12m_to_cents=price_to,
     )
+
+
+def _twelve_months_before(day: date) -> date:
+    """回退十二个日历月；闰日落到上一年二月末。"""
+    year = day.year - 1
+    return day.replace(year=year, day=min(day.day, monthrange(year, day.month)[1]))
+
+
+def _price_change_12m(
+    items: Sequence[_Outflow], as_of: date,
+) -> tuple[bool | None, int | None, int | None]:
+    """仅在十二个月闭区间内比较首末扣费；不足两笔时结论未知。"""
+    start = _twelve_months_before(as_of)
+    window = [item for item in items if start <= item.booked_on <= as_of]
+    if len(window) < 2:
+        return None, None, None
+    first, last = window[0].amount_cents, window[-1].amount_cents
+    return last > first, first, last
 
 
 def _next_charge(
@@ -698,8 +742,13 @@ def _outflows(gateway: FactGateway, user_id: str, as_of: date) -> tuple[_Outflow
                 record_id=record.record_id,
                 content_hash=record.content_hash,
                 channel=transaction.channel,
+                booked_at=transaction.booked_at,
+                card_tail=transaction.card_tail,
             )
-    return tuple(sorted(collected.values(), key=lambda item: (item.booked_on, item.txn_id)))
+    return tuple(sorted(
+        collected.values(),
+        key=lambda item: (item.booked_on, item.booked_at or "", item.txn_id),
+    ))
 
 
 def _group_outflows(flows: Sequence[_Outflow]) -> dict[str, list[_Outflow]]:
@@ -777,6 +826,8 @@ def _evidence(flow: _Outflow) -> SubscriptionEvidence:
         amount_cents=-flow.amount_cents,
         merchant_label=flow.merchant_label,
         channel=flow.channel,
+        booked_at=flow.booked_at,
+        card_tail=flow.card_tail,
     )
 
 
