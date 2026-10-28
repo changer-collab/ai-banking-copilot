@@ -665,8 +665,9 @@ async function refreshTransfers() {
   renderTransfers(result.data);
 }
 
-function subscriptionStatusLabel(status) {
-  return { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
+function subscriptionStatusLabel(status, registeredStatus = "") {
+  const local = { cancelled: "已取消订阅", locked: "已锁定", lost: "已挂失" };
+  return local[registeredStatus] || { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
 }
 
 function confidenceLabel(value) {
@@ -745,7 +746,7 @@ function subscriptionItemHtml(item) {
   const external = item.external_cancel_status === "not_integrated"
     ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
   return `<article class="takeover">
-    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status))}</span>
+    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status, item.registered_status))}</span>
       <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span></div>
     <p>扣费 ${yuan(item.amount_cents)} · ${esc(item.currency)} · ${esc(item.cycle_label)}扣费</p>
     <p class="subscription-price">${price}</p>

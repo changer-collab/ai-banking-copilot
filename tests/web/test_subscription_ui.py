@@ -18,6 +18,9 @@ def test_subscription_cards_expose_price_tristate_and_next_charge(deps: AppDeps)
     assert "yuan(item.price_change_12m_from_cents)" in script
     assert "yuan(item.price_change_12m_to_cents)" in script
     assert ': "未提供"' in script
+    assert "subscriptionStatusLabel(item.status, item.registered_status)" in script
+    assert 'cancelled: "已取消订阅"' in script
+    assert 'active: "已确认订阅"' not in script
 
 
 def test_charge_records_reuse_options_evidence_and_show_seven_columns(deps: AppDeps) -> None:
