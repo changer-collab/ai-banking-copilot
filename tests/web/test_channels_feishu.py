@@ -8,7 +8,12 @@ from threading import Barrier, Lock
 
 import pytest
 
-from ai_banking_copilot.web.channels.contracts import CHANNEL_FEISHU, OutboundMessage
+from ai_banking_copilot.web.channels.contracts import (
+    CHANNEL_FEISHU,
+    InboundMessage,
+    OutboundMessage,
+)
+from ai_banking_copilot.web.channels.dispatcher import Dispatcher
 from ai_banking_copilot.web.channels.feishu import (
     FeishuAdapter,
     FeishuConfig,
@@ -248,6 +253,39 @@ def test_live_send_rejects_success_http_with_missing_response_code(monkeypatch) 
 
     with pytest.raises(FeishuProtocolError, match="feishu_message_send_failed"):
         _live_adapter().send(_outbound())
+
+
+def test_channel_audit_uses_resolved_internal_user_id() -> None:
+    class _Audit:
+        def __init__(self) -> None:
+            self.events = []
+
+        def append(self, event) -> None:
+            self.events.append(event)
+
+    audit = _Audit()
+    dispatcher = object.__new__(Dispatcher)
+    dispatcher._audit = audit
+    dispatcher._server_user_id = "server-user"
+    dispatcher._feishu_audit_channel = CHANNEL_FEISHU
+    inbound = InboundMessage(
+        channel=CHANNEL_FEISHU,
+        external_user_id="ou-mapped",
+        external_chat_id="oc-1",
+        event_id="evt-audit-user",
+        text="查一下余额",
+    )
+    outbound = OutboundMessage(
+        channel=CHANNEL_FEISHU,
+        chat_id="oc-1",
+        session_id="feishu:oc-1",
+        state="needs_clarification",
+        text="请补充信息",
+    )
+
+    dispatcher._record_audit(inbound, outbound, user_id="mapped-user")
+
+    assert audit.events[0].payload["user_id"] == "mapped-user"
 
 
 def test_live_send_reports_each_scheduled_retry(monkeypatch) -> None:

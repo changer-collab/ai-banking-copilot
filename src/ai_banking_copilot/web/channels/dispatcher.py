@@ -216,7 +216,7 @@ class Dispatcher:
             outbound = _outbound(
                 inbound, session_id=session_id, payload=payload, kind=kind
             )
-            self._record_audit(inbound, outbound)
+            self._record_audit(inbound, outbound, user_id=user_id)
             self._remember(inbound, outbound)
             return outbound
         except Exception as error:
@@ -294,7 +294,11 @@ class Dispatcher:
                 self._cache.popitem(last=False)
 
     def _record_audit(
-        self, inbound: InboundMessage | ConfirmCommand, outbound: OutboundMessage
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        outbound: OutboundMessage,
+        *,
+        user_id: str,
     ) -> None:
         """只落摘要：渠道 / 会话 / 状态 / 等级 / 卡片标识 / 文本摘要，**不落原文**。"""
         if isinstance(inbound, ConfirmCommand):
@@ -310,7 +314,7 @@ class Dispatcher:
                 event_id=f"{KIND_CHANNEL}:{self._audit_channel(inbound)}:{secrets.token_hex(8)}",
                 kind=KIND_CHANNEL,
                 payload=channel_audit_payload(
-                    user_id=self._server_user_id,
+                    user_id=user_id,
                     channel=self._audit_channel(inbound),
                     direction="inbound",
                     status="sent",

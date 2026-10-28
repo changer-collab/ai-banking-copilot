@@ -865,13 +865,13 @@ def _build_subscription_node(
 ) -> PlanNode:
     detail = f"订阅操作：{intent.evidence or intent.action}"
     anchor_id = grant_anchor(ledger, AnchorSource.EXPLICIT, detail)
+    user_id = _subscription_user_id(intent)
     if intent.action == "subscription.list":
-        params: dict[str, object] = {"user_id": DEMO_USER_ID}
+        params: dict[str, object] = {"user_id": user_id}
     elif intent.action == "subscription.sign":
-        params = _sign_params(intent)
+        params = _sign_params(intent, user_id=user_id)
     else:
         subscription_id = _subscription_id(intent)
-        user_id = _subscription_user_id(intent)
         _require_subscription(gateway, subscription_id, user_id)
         params = {"user_id": user_id, "subscription_id": subscription_id}
     return PlanNode(
@@ -882,13 +882,14 @@ def _build_subscription_node(
     )
 
 
-def _sign_params(intent: Intent) -> dict[str, object]:
+def _sign_params(intent: Intent, *, user_id: str | None = None) -> dict[str, object]:
     """代扣签约装配（README 裁决 #17）：对象是**商户**，不涉及已有订阅 id。"""
+    resolved_user_id = user_id or _subscription_user_id(intent)
     period = as_str(trusted_slot(intent, ("period",), "period"), "period")
     if period not in _SIGN_PERIODS:
         raise ScenarioRefused(f"代扣周期只支持 {sorted(_SIGN_PERIODS)}，收到 {period}")
     return {
-        "user_id": DEMO_USER_ID,
+        "user_id": resolved_user_id,
         "merchant": as_str(trusted_slot(intent, ("merchant",), "merchant"), "merchant"),
         "amount_cents": as_money(
             trusted_slot(intent, ("amount", "amount_cents"), "amount"), "amount"

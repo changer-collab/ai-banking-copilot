@@ -181,10 +181,14 @@ class _BestEffortAuditDispatcher(Dispatcher):
     """成功结果已构造后，渠道审计故障不得改变业务与幂等结果。"""
 
     def _record_audit(
-        self, inbound: InboundMessage | ConfirmCommand, outbound: OutboundMessage
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        outbound: OutboundMessage,
+        *,
+        user_id: str,
     ) -> None:
         try:
-            super()._record_audit(inbound, outbound)
+            super()._record_audit(inbound, outbound, user_id=user_id)
         except Exception as error:
             LOGGER.warning(
                 "channel_audit channel=%s event_id=%s status=failed "

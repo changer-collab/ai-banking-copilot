@@ -760,7 +760,8 @@ def test_live_feishu_confirm_audit_failure_keeps_claim_after_business_success(
         confirm_calls += 1
         return original_confirm(session, *args, **kwargs)
 
-    def fail_audit(_dispatcher: Dispatcher, _material, _outbound) -> None:
+    def fail_audit(_dispatcher: Dispatcher, _material, _outbound, *, user_id: str) -> None:
+        del user_id
         raise RuntimeError("channel audit unavailable")
 
     def send(_adapter: FeishuAdapter, _outbound, *, on_attempt=None, on_retry=None) -> int:
@@ -827,7 +828,8 @@ def test_replay_confirm_audit_failure_keeps_claim_after_business_success(
         confirm_calls += 1
         return original_confirm(session, *args, **kwargs)
 
-    def fail_audit(_dispatcher: Dispatcher, _material, _outbound) -> None:
+    def fail_audit(_dispatcher: Dispatcher, _material, _outbound, *, user_id: str) -> None:
+        del user_id
         raise RuntimeError("audit credentials must stay secret")
 
     monkeypatch.setattr(Session, "confirm", confirm)

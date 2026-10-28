@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
 from ai_banking_copilot.web.app import AppDeps, create_app
+from ai_banking_copilot.web.session import Session
 
 SIGN = "帮我给视频会员开通每月 25 元自动扣款，下月 1 号开始"
 CANCEL = "把视频会员的自动续费取消"
@@ -116,6 +117,13 @@ def test_s6_list_next_month_is_green_and_read_only(subscription_http: Subscripti
     assert http.snapshot() == before
     assert len(http.deps.audit.events()) > audit_count
     assert http.deps.audit.verify_chain()
+
+
+def test_s6_subscription_plan_uses_session_user_id(subscription_http: SubscriptionHttp) -> None:
+    session = Session(replace(subscription_http.deps, user_id="u_lin"))
+    view = session.submit("有哪些订阅")
+    assert view.plan is not None
+    assert view.plan.nodes[0].params["user_id"] == "u_lin"
 
 
 def test_s6_sign_requires_strong_verify_and_never_charges_early(

@@ -339,7 +339,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>渠道健康</h2>
-          <p class="muted">未接入的渠道如实显示 stub；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
+          <p class="muted">未接入的渠道如实显示 replay/未接入；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
         </div>
         <button class="btn btn--sm" type="button" id="btn-health-refresh">刷新</button>
       </header>
