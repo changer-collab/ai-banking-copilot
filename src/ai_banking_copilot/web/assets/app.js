@@ -375,7 +375,7 @@ function wealthAssessmentLine(assessment) {
 
 /* 产品卡自带金额输入 + 申购按钮：点了就把 product 作为**受信任选择**随提交送上去，
    写操作仍由服务端出计划卡、确认后才执行（前端不直连任何写接口）。 */
-function wealthProductHtml(item) {
+function wealthProductHtml(item, assessment) {
   const disabled = item.eligible === false;
   const min = esc(item.min_amount_yuan);
   const chip = disabled
@@ -393,6 +393,7 @@ function wealthProductHtml(item) {
     <div><b>${esc(item.name)}</b> ${chip}</div>
     <p class="muted">${esc(item.risk_level)} · 期限 ${esc(item.term_days)} 天 · 起购 ${esc(item.min_amount_yuan)} 元</p>
     ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+    ${wealthUnlockHtml(item, assessment)}
     ${action}
     <p class="muted"><span class="tech">${esc(item.product_id)}</span></p>
     <p class="muted wealth-error" data-wealth-error hidden></p>
@@ -416,6 +417,125 @@ function wealthHoldingHtml(item) {
   </article>`;
 }
 
+/* ---------------- 理财：场景页可视化（阶梯 / 占比 / 收益） ---------------- */
+
+/* R1 最保守 → R5 最激进（口径见 scenarios/wealth_assessment.py） */
+const RISK_SCALE = ["R1", "R2", "R3", "R4", "R5"];
+
+function riskRank(level) {
+  return RISK_SCALE.indexOf(String(level || "").toUpperCase());
+}
+
+/* 灰显产品的「解锁路径」：只依据产品等级与当前测评状态给下一步，不承诺结果。 */
+function wealthUnlockHtml(item, assessment) {
+  if (item.eligible !== false) return "";
+  if (!assessment || assessment.state !== "valid") {
+    return '<p class="muted wealth-unlock">解锁路径：先完成风险测评；等级由服务端算分后，才判定可申购范围。</p>';
+  }
+  return `<p class="muted wealth-unlock">解锁路径：本只要求 ${esc(item.risk_level)}；` +
+    `你当前 ${esc(assessment.risk_profile)}，可在上方「重新测评」重答（等级仍由服务端算分）。</p>`;
+}
+
+function wealthLadderHtml(assessment) {
+  const info = assessment || {};
+  const current = info.state === "valid" ? riskRank(info.risk_profile) : -1;
+  const steps = RISK_SCALE.map((level, index) => {
+    const hit = index === current;
+    return `<li class="wealth-ladder__step${hit ? " is-current" : ""}"${hit ? ' aria-current="true"' : ""}>` +
+      `<span class="wealth-ladder__code">${level}</span>` +
+      `${hit ? '<span class="wealth-ladder__flag">当前</span>' : ""}</li>`;
+  }).join("");
+  const note = current >= 0
+    ? `当前 ${esc(info.risk_profile)} · 有效期至 ${esc(info.expires_on || "—")}`
+    : "尚未取得有效等级：先完成测评，产品才按等级判定。";
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">风险等级阶梯 <span class="tech">R1 最保守 → R5 最激进</span></p>
+    <ol class="wealth-ladder">${steps}</ol>
+    <p class="muted">${note}</p>
+  </div>`;
+}
+
+/* 持仓占比：金额全部来自接口，只做本人持仓内部的相对占比（合计 100%）。 */
+function holdingsShareHtml(holdings) {
+  const rows = (holdings || []).map((item) => ({
+    name: item.name || "—",
+    amount: Number(item.amount_yuan) || 0,
+  }));
+  const total = rows.reduce((sum, item) => sum + item.amount, 0);
+  if (!rows.length) {
+    return `<div class="wealth-viz__block">
+      <p class="wealth-viz__k">持仓占比</p>
+      <p class="muted">当前没有持仓，暂无可计算的占比。</p>
+    </div>`;
+  }
+  const bars = rows.map((item) => {
+    const pct = (total > 0 ? (item.amount / total) * 100 : 0).toFixed(1);
+    return `<li class="wealth-share__row">
+      <span class="wealth-share__name">${esc(item.name)}</span>
+      <span class="wealth-share__track" role="img" aria-label="${esc(item.name)} 占 ${pct}%">
+        <span class="wealth-share__fill" style="width:${pct}%"></span>
+      </span>
+      <span class="wealth-share__pct mono">${pct}%</span>
+      <span class="wealth-share__amt mono">${esc(item.amount.toFixed(2))} 元</span>
+    </li>`;
+  }).join("");
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">持仓占比 <span class="tech">合计 ${total.toFixed(2)} 元</span></p>
+    <ul class="wealth-share">${bars}</ul>
+  </div>`;
+}
+
+function incomeUnknown(row) {
+  return /未知/.test(String((row && row.current_income) || ""));
+}
+
+/* 收益：服务端没有净值数据就标「未知」，前端不补零、不推算盈亏。 */
+function wealthIncomeHtml(holdings) {
+  const rows = holdings || [];
+  if (!rows.length) {
+    return `<div class="wealth-viz__block">
+      <p class="wealth-viz__k">收益</p>
+      <p class="muted">当前没有持仓，暂无收益。</p>
+    </div>`;
+  }
+  const unknown = rows.filter(incomeUnknown).length;
+  const allUnknown = unknown === rows.length;
+  const text = allUnknown
+    ? `全部 ${rows.length} 笔持仓均无净值数据，收益标「未知」，不推算盈亏。`
+    : `${unknown} / ${rows.length} 笔持仓无净值数据，收益标「未知」。`;
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">收益</p>
+    <p class="wealth-income"><b>${allUnknown ? "未知" : "部分未知"}</b></p>
+    <p class="muted">${esc(text)}</p>
+  </div>`;
+}
+
+function wealthVizHtml(payload) {
+  const data = payload || {};
+  return wealthLadderHtml(data.assessment) +
+    holdingsShareHtml(data.holdings) +
+    wealthIncomeHtml(data.holdings);
+}
+
+function wealthLoadingHtml(label) {
+  return `<div class="wealth-loading" role="status" aria-live="polite">
+    <p class="muted">正在读取${esc(label)}…</p>
+    <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+  </div>`;
+}
+
+/* 首次读取 / 失败重试时先把骨架摆回来，不留「正在读取…」的假运行态。 */
+function showWealthLoading() {
+  const viz = el("wealth-viz");
+  if (viz) viz.innerHTML = wealthLoadingHtml("风险等级与持仓占比");
+  ["wealth-products", "wealth-holdings"].forEach((id) => {
+    const box = el(id);
+    if (box) box.innerHTML = wealthLoadingHtml(id === "wealth-products" ? "产品目录" : "持仓");
+  });
+}
+
+let wealthRendered = false;
+
 function renderWealth(data) {
   const payload = data || {};
   /* 产品目录同时是「产品」槽的候选来源：先落到 state，再渲染 */
@@ -423,9 +543,12 @@ function renderWealth(data) {
     products: payload.products || [],
     holdings: payload.holdings || [],
   };
+  wealthRendered = true;
   const assessment = payload.assessment || {};
   const status = el("wealth-status");
   if (status) status.innerHTML = wealthAssessmentLine(assessment);
+  const viz = el("wealth-viz");
+  if (viz) viz.innerHTML = wealthVizHtml(payload);
   const box = el("wealth-assessment");
   /* 表单一经渲染就保留用户已选答案：只在没有表单时（首次 / 提交后）重建 */
   if (box && !box.querySelector("[data-assessment-form]")) {
@@ -439,25 +562,42 @@ function renderWealth(data) {
   if (products) {
     const rows = payload.products || [];
     products.innerHTML = rows.length
-      ? rows.map(wealthProductHtml).join("")
-      : '<p class="muted">产品目录为空。</p>';
+      ? rows.map((item) => wealthProductHtml(item, assessment)).join("")
+      : `<article class="state-card">
+        <p class="state-card__k">产品目录 · 暂无产品</p>
+        <p class="muted">服务端当前没有下发任何理财产品，目录更新后会自动出现。</p>
+      </article>`;
   }
   const holdings = el("wealth-holdings");
   if (holdings) {
     const rows = payload.holdings || [];
     holdings.innerHTML = rows.length
       ? rows.map(wealthHoldingHtml).join("")
-      : '<p class="muted">当前没有持仓。</p>';
+      : `<article class="state-card">
+        <p class="state-card__k">持仓 · 暂无持仓</p>
+        <p class="muted">还没有理财申购记录；在上方产品卡输入金额申购后，这里会出现持仓。</p>
+      </article>`;
   }
   const source = el("wealth-source");
   if (source) source.textContent = payload.data_source ? `数据来源：${payload.data_source}` : "";
 }
 
 async function refreshWealth() {
+  if (!wealthRendered) showWealthLoading();
   const result = await apiFetch("GET", "/api/wealth/overview");
   if (result.status === 404) {
+    const message = "理财服务尚未接入（当前渠道没有该读接口）。";
     const status = el("wealth-status");
-    if (status) status.textContent = "理财服务尚未接入（当前渠道没有该读接口）。";
+    if (status) status.textContent = message;
+    ["wealth-viz", "wealth-products", "wealth-holdings"].forEach((id) => {
+      const box = el(id);
+      if (box) {
+        box.innerHTML = `<article class="state-card">
+          <p class="state-card__k">未接入</p>
+          <p class="muted">${esc(message)}</p>
+        </article>`;
+      }
+    });
     return;
   }
   if (!result.ok) throw new Error("理财面板读取失败");
@@ -516,13 +656,13 @@ async function onAssessmentSubmit(form) {
 function showWealthFailure(message) {
   const status = el("wealth-status");
   if (status) status.textContent = message;
-  ["wealth-products", "wealth-holdings"].forEach((id) => {
+  ["wealth-viz", "wealth-products", "wealth-holdings"].forEach((id) => {
     const box = el(id);
     if (!box) return;
     box.innerHTML = `<article class="state-card">
       <p class="state-card__k">读取失败</p>
       <p class="muted">${esc(message)}</p>
-      ${id === "wealth-products" ? '<button class="btn btn--sm" type="button" data-panel-retry="wealth">重试</button>' : ""}
+      ${id === "wealth-viz" ? '<button class="btn btn--sm" type="button" data-panel-retry="wealth">重试</button>' : ""}
     </article>`;
   });
 }
@@ -2938,14 +3078,21 @@ function recordsRowsFor(key, payload) {
     ]));
   }
   if (key === "holdings") {
-    return (data.holdings || []).map((item) => recordsRow([
-      esc(item.name || "—"),
-      esc(item.risk_level || "—"),
-      `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
-      `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
-      esc(item.current_income || "未知"),
-      "—",
-    ]));
+    return (data.holdings || []).map((item) => {
+      const income = String(item.current_income || "");
+      /* 收益列只给短标；「无净值数据」的完整口径放进 title，不占列宽 */
+      const incomeCell = incomeUnknown(item)
+        ? `<span title="${esc(income)}">未知</span>`
+        : esc(income || "—");
+      return recordsRow([
+        esc(item.name || "—"),
+        esc(item.risk_level || "—"),
+        `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
+        `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
+        incomeCell,
+        esc(recordChannelLabel(item.channel)),
+      ]);
+    });
   }
   if (key === "cards") {
     return (data.cards || []).map((item) => recordsRow([
@@ -3248,7 +3395,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=21", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=22", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

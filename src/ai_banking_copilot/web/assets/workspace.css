@@ -864,6 +864,61 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-action .btn { flex: none; }
 .wealth-result { margin-top: 0; }
 
+/* 场景页可视化：风险等级阶梯 / 持仓占比 / 收益（数据全部来自接口） */
+#wealth-viz { display: grid; gap: var(--s-3); margin: var(--s-2) 0 var(--s-3); }
+.wealth-viz__block { display: grid; gap: var(--s-1); }
+.wealth-viz__k { margin: 0; font-size: var(--fs-small); color: var(--ink-3); }
+
+.wealth-ladder { display: flex; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+.wealth-ladder__step {
+  flex: 1 1 0;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+}
+.wealth-ladder__step.is-current {
+  border-color: var(--blue-600);
+  color: var(--ink);
+  font-weight: 600;
+}
+.wealth-ladder__code { font-family: var(--font-mono); }
+.wealth-ladder__flag { font-size: 10px; }
+
+.wealth-share { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+.wealth-share__row {
+  display: grid;
+  grid-template-columns: minmax(4rem, 1fr) 2fr auto auto;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-small);
+}
+.wealth-share__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wealth-share__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--rule);
+}
+.wealth-share__fill { display: block; height: 100%; border-radius: 3px; background: var(--blue-600); }
+.wealth-share__pct,
+.wealth-share__amt { color: var(--ink-3); white-space: nowrap; }
+
+.wealth-income { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; }
+.wealth-unlock { font-size: var(--fs-small); }
+
+.wealth-loading { display: grid; gap: 6px; padding: var(--s-2) 0; }
+.wealth-loading p { margin: 0; }
+
+@media (max-width: 640px) {
+  .wealth-share__row { grid-template-columns: minmax(3rem, 1fr) 1.5fr auto; }
+  .wealth-share__amt { display: none; }
+}
+
 
 /* ④ 卡片面板 / ② 账单分析面板（场景自有样式，不改既有面板） */
 #cards-list,
