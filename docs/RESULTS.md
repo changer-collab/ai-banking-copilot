@@ -247,6 +247,25 @@ python scripts/check_design_sync.py   # 仅 app.css 两仓既有漂移（非本�
 
 ---
 
+### 12. 公网重建基线（2026-10-29）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 104 source files
+python -m pytest -q                   # tests=1790 / failures=0 / errors=0 / skipped=0（退出码 0）
+python scripts/check_served_page.py --base-url https://speeches-plant-confidence-constantly.trycloudflare.com   # ALL OK（27 项）
+python scripts/e2e_check.py --base-url https://speeches-plant-confidence-constantly.trycloudflare.com          # ALL PASSED（[1]–[6]）
+```
+
+- 前端静态壳（线上实测）：`tokens.css?v=2` / `app.css?v=7` / `workspace.css?v=16` / `app.js?v=32` / `sw.js?v=25` / `aib-static-shell-v25`。
+- 部署：本地打包（排除 `.git` / `runtime` / `.env`）→ `scp` → 服务器备份 `~/aib-backup-1029.tgz` → 解包进 `~/aib` →
+  `API_HOST_PORT=18080 docker compose -p aib up -d --build api`；**只重建 `aib-api`，`aib-tunnel` 未重启，公网地址不变**。
+- 渠道口径：`im=local / bound_identities=1`；`feishu.configured=false / mode=replay / reason=replay_mode / card_action=false`
+  （真实凭据尚未写入，接入步骤见 `docs/2026-10-27/飞书接入-配置单.md`）。
+- 公网 e2e 侧证：`settled: transfer｜审计ID db6ba7c178b5e865`、`cancelled: cancel_subscription｜审计ID 3545f62401d5ba9d`。
+
+---
+
 ## 四个数字的口径（2026-10-27 冻结）
 
 > 本节只冻结「怎么算」，**不填数**。实测值在跑数日由 `runtime/benchmark/results.json` 回填，并注明提交号与数据集哈希。

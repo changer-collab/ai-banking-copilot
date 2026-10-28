@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=15")
-    js = _get(base, "/assets/app.js?v=31")
+    workspace_css = _get(base, "/assets/workspace.css?v=16")
+    js = _get(base, "/assets/app.js?v=32")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=15" in html
-            and "/assets/app.js?v=31" in html
+            and "/assets/workspace.css?v=16" in html
+            and "/assets/app.js?v=32" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
@@ -96,6 +96,12 @@ def run(base: str) -> list[str]:
         ),
         "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
         "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
+        "js: AI 三角色链路": (
+            "function roleChainHtml(" in js and "规则风险官" in js and "规则引擎，非 LLM" in js
+        ),
+        "workspace: 三角色卡样式": (
+            ".role-chain {" in workspace_css and ".role-card--red" in workspace_css
+        ),
     }
     bad = [key for key, ok in checks.items() if not ok]
     for key, ok in checks.items():

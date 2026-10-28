@@ -291,6 +291,11 @@ A：`./runtime` 没挂数据卷。本仓库 compose 已挂；自己改过 compos
 | `GET /api/channels/health` | **200**，`im=local / bound_identities=1`、`feishu.mode=replay / reason=replay_mode / card_action=false` |
 | `POST /api/im/message {"text":"查余额"}` | **200**，「计划卡已生成（1 步，级别 GREEN）」，含飞书交互卡片体（`确认办理` 按钮） |
 
+> **口径补充（2026-10-29 升版，已上线）**：上表为 10-28 部署时的版本快照；10-29 前后端有改动，版本链已升为
+> `app.js?v=32` / `workspace.css?v=16` / `sw.js` 缓存名 `aib-static-shell-v25`，并已于 2026-10-29 重新构建
+> `aib-api`（仅重建 api，`aib-tunnel` 未重启，公网地址不变）。线上实测 `css16=True / js32=True / shell25=True`，
+> 公网 `check_served_page.py` 与 `e2e_check.py` 均全绿。不要把上表的 v31 / v15 / v24 当成当前线上值。
+
 **飞书四项验收**（`python scripts/replay_webhook.py <mode> --url https://<当日地址>/api/im/feishu --key replay-key`）：
 
 | 模式 | 结果 |

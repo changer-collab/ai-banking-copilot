@@ -1258,7 +1258,7 @@ function renderStage() {
   state.response.innerHTML = state.card
     ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
     : (state.panel || "") + state.notice;
-  state.response.innerHTML += modelMetadataHtml();
+  state.response.innerHTML += roleChainHtml();
   if (el("vcode")) el("vcode").value = code;
   if (state.task) state.task.appendChild(el("task-actions"));
   showRequestStatus();
@@ -1284,17 +1284,42 @@ function showModelMetadata(metadata) {
   state.model = metadata || null;
 }
 
-function modelMetadataHtml() {
+/* AI 三角色链路：规划器 / 审查员是模型通道，规则风险官是 PDP 规则引擎（不是 LLM）。
+   三格只回显服务端真实字段；缺数据写「未调用 / 待裁决」，不补也不猜。 */
+function roleChainHtml() {
   const metadata = state.model;
   if (!metadata) return "";
   const channels = {
     "template": "确定性模板", "bypass": "旁路诊断", "llm-strict": "真实模型严格通道",
     "template_fallback": "模板回退（真实模型不可用）", "injected": "测试注入通道",
   };
-  const name = (channel) => channels[channel] || "未调用";
+  const name = (channel) => (channel ? channels[channel] || String(channel) : "未调用");
   const tokens = metadata.usage && metadata.usage.total_tokens;
-  return `<p class="muted">意图：${esc(name(metadata.planner_channel))} · 审查：${esc(name(metadata.reviewer_channel))}
-    <br />本任务真实 HTTP ${esc(String(metadata.http_attempts || 0))} 次 · 供应商 tokens ${esc(tokens == null ? "未提供" : String(tokens))}</p>`;
+  const decision = state.decision || null;
+  const level = decision && decision.level ? String(decision.level) : "";
+  const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
+  const tone = { GREEN: "green", YELLOW: "yellow", RED: "red" }[level] || "";
+  const reviewer = metadata.reviewer_channel;
+  const reviewerNote = reviewer
+    ? (reviewer === "bypass" ? "旁路诊断通道：未逐条审查计划" : "逐条核对计划是否越权")
+    : "当前通道旁路审查，不冒充已审查";
+  return `<section class="role-chain" aria-label="AI 三角色链路">
+    <div class="role-card">
+      <span class="role-card__step">① 规划器</span>
+      <span class="role-card__value">${esc(name(metadata.planner_channel))}</span>
+      <span class="role-card__note">真实 HTTP ${esc(String(metadata.http_attempts || 0))} 次 · tokens ${esc(tokens == null ? "未提供" : String(tokens))}</span>
+    </div>
+    <div class="role-card">
+      <span class="role-card__step">② 审查员</span>
+      <span class="role-card__value">${esc(reviewer ? name(reviewer) : "未启用")}</span>
+      <span class="role-card__note">${esc(reviewerNote)}</span>
+    </div>
+    <div class="role-card${tone ? ` role-card--${tone}` : ""}">
+      <span class="role-card__step">③ 规则风险官</span>
+      <span class="role-card__value">${esc(level || "待裁决")}</span>
+      <span class="role-card__note">${esc(decision ? `命中规则 ${reasons.length} 条（规则引擎，非 LLM）` : "尚无裁决")}</span>
+    </div>
+  </section>`;
 }
 
 function appendMessage(role, text) {
@@ -1967,7 +1992,7 @@ function applyExecution(data) {
   const adviceFallback = billAdviceHtml(data.bill_advice) +
     (data.bill_advice_message ? `<p class="muted">${esc(data.bill_advice_message)}</p>` : "");
   state.notice = complete
-    ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
+    ? `<div class="takeover takeover--receipt"><p>${esc(data.message || "计划执行完成")}</p>` +
       results.map((item) => `<p>${esc(resultMessage(item))}</p>`).join("") + `</div>` +
       (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
@@ -3374,7 +3399,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=24", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=25", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
