@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
+from ai_banking_copilot.scenarios.subscriptions import upcoming_charges
 from ai_banking_copilot.web.app import AppDeps, create_app
 from ai_banking_copilot.web.session import Session
 
@@ -282,6 +283,10 @@ def test_s2_cancel_does_not_guarantee_merchant_stops_charging(
     view = http.submit(CANCEL)
     _assert_card(view, "subscription.cancel", "YELLOW")
     assert http.confirm(view).status_code == 200
+    assert all(
+        item.subscription_id != "sub_video"
+        for item in upcoming_charges(http.deps.gateway, http.deps.user_id)
+    )
     before = http.snapshot()
     followup = http.submit("取消后商户还扣吗")
     _assert_card(followup, "subscription.list", "GREEN")

@@ -74,11 +74,12 @@ def resolve_cancel_race(
 
 
 def upcoming_charges(gateway: FactGateway, user_id: str) -> tuple[Subscription, ...]:
-    """只读到期提醒事实：按 `next_charge_on` **升序**返回用户全部订阅。"""
+    """只读到期提醒事实：仅返回有效订阅，并按 `next_charge_on` 升序。"""
     records = gateway.subscriptions_of(user_id)
     return tuple(
         record.payload
         for record in sorted(records, key=lambda record: record.payload.next_charge_on)
+        if record.payload.status == "active" and record.payload.next_charge_on is not None
     )
 
 
