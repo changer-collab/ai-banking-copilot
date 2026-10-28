@@ -20,6 +20,42 @@ from ai_banking_copilot.web.app import AppDeps, create_app
 from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
+_CHANNEL_AUDIT_KEYS = {
+    "user_id",
+    "channel",
+    "direction",
+    "status",
+    "reason",
+    "event_id",
+    "external_user_id",
+    "attempt_no",
+    "http_status",
+}
+
+
+def _assert_safe_channel_payload(payload: object) -> None:
+    forbidden_keys = {
+        "raw",
+        "body",
+        "signature",
+        "token",
+        "app_id",
+        "app_secret",
+        "verification_token",
+        "encrypt_key",
+    }
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            assert forbidden_keys.isdisjoint(str(key).lower() for key in value)
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                visit(nested)
+
+    visit(payload)
+
 
 def test_im_and_web_share_the_same_state_and_level(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
@@ -110,6 +146,62 @@ def test_audit_carries_channel_and_only_a_digest(deps: AppDeps, audit: AuditLog)
     assert payload["text_length"] == len("转给李娜 500 元")
     assert payload["text_digest"]
     assert "转给李娜 500 元" not in str(payload)
+    assert _CHANNEL_AUDIT_KEYS <= payload.keys()
+    assert payload["user_id"] == deps.user_id
+    assert payload["direction"] == "inbound"
+    assert payload["status"] == "sent"
+    assert payload["reason"] == ""
+    assert payload["attempt_no"] is None
+    assert payload["http_status"] is None
+    _assert_safe_channel_payload(payload)
+
+
+def test_web_and_local_im_audits_are_visible_with_real_sources(
+    deps: AppDeps, audit: AuditLog
+) -> None:
+    client = TestClient(create_app(deps))
+    text = "查一下余额"
+
+    web = client.post("/api/submit", json={"utterance": text})
+    local = client.post("/api/im/message", json={"text": text, "event_id": "im-audit"})
+
+    assert web.status_code == local.status_code == 200
+    visible = client.get("/api/audit", params={"limit": 50}).json()["events"]
+    channel_events = [item["payload"] for item in visible if item["kind"] == KIND_CHANNEL]
+    assert {item["channel"] for item in channel_events} >= {"web", "im"}
+    web_event = next(item for item in channel_events if item["channel"] == "web")
+    im_event = next(item for item in channel_events if item["channel"] == "im")
+    assert web_event["text_digest"] == im_event["text_digest"]
+    assert all(item["user_id"] == deps.user_id for item in channel_events)
+    assert all(_CHANNEL_AUDIT_KEYS <= item.keys() for item in channel_events)
+    for item in channel_events:
+        _assert_safe_channel_payload(item)
+
+
+def test_rejected_local_identity_and_rate_limit_are_audited(
+    deps: AppDeps, audit: AuditLog
+) -> None:
+    client = TestClient(create_app(deps))
+    rejected = client.post(
+        "/api/im/message",
+        json={"text": "查一下余额", "user_id": "not-bound", "event_id": "bad-id"},
+    )
+    assert rejected.status_code == 401
+
+    for index in range(21):
+        limited = client.post(
+            "/api/im/message",
+            json={"text": "查一下余额", "event_id": f"rate-{index}"},
+        )
+    assert limited.status_code == 429
+
+    channel_events = [event.payload for event in audit.events() if event.kind == KIND_CHANNEL]
+    identity = next(item for item in channel_events if item["event_id"] == "bad-id")
+    rate = next(item for item in channel_events if item["event_id"] == "rate-20")
+    assert identity["status"] == "rejected"
+    assert identity["reason"] == "identity_unbound"
+    assert rate["status"] == "rejected"
+    assert rate["reason"] == "rate_limited"
 
 
 def test_im_confirm_executes_through_the_shared_session(deps: AppDeps) -> None:

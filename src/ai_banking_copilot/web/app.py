@@ -45,6 +45,7 @@ from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.planning.task_observations import TaskObservations
 from ai_banking_copilot.policy.audit import (
+    KIND_CHANNEL,
     KIND_OPERATOR,
     AuditEvent,
     AuditLog,
@@ -114,6 +115,7 @@ from ai_banking_copilot.web.channels.contracts import (
 from ai_banking_copilot.web.channels.dispatcher import (
     Dispatcher,
     DispatchOutcomeUnknown,
+    channel_audit_payload,
 )
 from ai_banking_copilot.web.channels.feishu import (
     FeishuAdapter,
@@ -438,6 +440,10 @@ def create_app(deps: AppDeps) -> FastAPI:
     else:
         identities = MemoryIdentityDirectory()
     feishu = FeishuAdapter(FeishuConfig.from_env())
+    feishu_audit_channel = "feishu" if feishu.config.mode == "adapter" else "replay"
+    LOGGER.info(
+        "channel_startup channel=feishu event_id= feishu=%s", feishu.config.mode
+    )
     health = HealthRegistry()
     health.register("web")
     health.register(CHANNEL_LOCAL)
@@ -464,9 +470,45 @@ def create_app(deps: AppDeps) -> FastAPI:
                 server_user_id=user_id,
                 limiter=channel_limiter,
                 feishu_configured=feishu.configured,
+                feishu_audit_channel=feishu_audit_channel,
             )
             _dispatchers[user_id] = built
             return built
+
+    def _append_channel_audit(
+        *,
+        user_id: str,
+        channel: str,
+        direction: str,
+        status: str,
+        reason: str = "",
+        event_id: str | None = None,
+        external_user_id: str | None = None,
+        attempt_no: int | None = None,
+        http_status: int | None = None,
+        text: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        deps.audit.append(
+            AuditEvent(
+                event_id=f"{KIND_CHANNEL}:{channel}:{secrets.token_hex(8)}",
+                kind=KIND_CHANNEL,
+                payload=channel_audit_payload(
+                    user_id=user_id,
+                    channel=channel,
+                    direction=direction,
+                    status=status,
+                    reason=reason,
+                    event_id=event_id,
+                    external_user_id=external_user_id,
+                    attempt_no=attempt_no,
+                    http_status=http_status,
+                    text=text,
+                    details=details,
+                ),
+                prev_hash="",
+            )
+        )
 
     @app.exception_handler(SessionPersistenceError)
     @app.exception_handler(SessionSnapshotError)
@@ -984,14 +1026,70 @@ def create_app(deps: AppDeps) -> FastAPI:
                 on_stage=on_stage,
             )
         except SessionStateError as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="web",
+                direction="inbound",
+                status="failed",
+                reason="session_state_error",
+                event_id=request.request_id,
+                text=request.utterance,
+                details={"session_id": request.session_id},
+            )
+            health.record_event("web", success=False)
+            LOGGER.warning(
+                "channel_event channel=web event_id=%s status=failed "
+                "reason=session_state_error error_type=%s",
+                request.request_id or "",
+                type(error).__name__,
+            )
             raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="web",
+                direction="inbound",
+                status="failed",
+                reason="submit_failed",
+                event_id=request.request_id,
+                text=request.utterance,
+                details={"session_id": request.session_id},
+            )
+            health.record_event("web", success=False)
+            LOGGER.warning(
+                "channel_event channel=web event_id=%s status=failed "
+                "reason=submit_failed error_type=%s",
+                request.request_id or "",
+                type(error).__name__,
+            )
+            raise
         finally:
             if request.request_id:
                 deps.progress.finish(user_id, request.session_id, request.request_id)
         _record_message(user_id, request.session_id, "user", "text", request.utterance)
         _record_answer(user_id, request.session_id, view)
         _record_life_event(user_id, request.session_id, request.utterance, request.selected, view)
-        return _response(request.session_id, user_id, _submission_payload(view))
+        payload = _submission_payload(view)
+        card = payload.get("card")
+        card_map = card if isinstance(card, dict) else {}
+        _append_channel_audit(
+            user_id=user_id,
+            channel="web",
+            direction="inbound",
+            status="sent",
+            event_id=request.request_id,
+            text=request.utterance,
+            details={
+                "session_id": request.session_id,
+                "request_kind": "message",
+                "state": str(payload.get("state", "")),
+                "level": str(card_map.get("level", "")),
+                "card_id": str(card_map.get("card_id", "")),
+                "frozen_hash": "",
+            },
+        )
+        health.record_event("web", success=True)
+        return _response(request.session_id, user_id, payload)
 
     @app.post("/api/clarify")
     def clarify(
@@ -1510,25 +1608,103 @@ def create_app(deps: AppDeps) -> FastAPI:
     ) -> None:
         try:
             outbound = _dispatcher_for(user_id).dispatch_live(material)
-        except DispatchOutcomeUnknown:
+        except DispatchOutcomeUnknown as error:
+            LOGGER.warning(
+                "channel_event channel=feishu event_id=%s status=failed "
+                "reason=dispatch_outcome_unknown error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return
-        except Exception:
+        except Exception as error:
             _release_feishu_event(event_id)
+            LOGGER.warning(
+                "channel_event channel=feishu event_id=%s status=failed "
+                "reason=dispatch_failed error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return
+
+        def record_attempt(
+            attempt_no: int, status: int | None, error_type: str | None
+        ) -> None:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="outbound",
+                status="attempt",
+                reason=error_type or "",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                attempt_no=attempt_no,
+                http_status=status,
+            )
+            LOGGER.info(
+                "channel_send channel=feishu event_id=%s status=attempt "
+                "attempt_no=%s http_status=%s reason=%s",
+                event_id or "",
+                attempt_no,
+                status if status is not None else "",
+                error_type or "",
+            )
+
+        def record_retry(attempt_no: int, _delay: float) -> None:
+            health.record_retry(CHANNEL_FEISHU)
+            LOGGER.warning(
+                "channel_send channel=feishu event_id=%s status=retry "
+                "attempt_no=%s reason=retry_scheduled",
+                event_id or "",
+                attempt_no,
+            )
 
         try:
             status = feishu.send(
                 outbound,
-                on_retry=lambda _attempt_no, _delay: health.record_retry(
-                    CHANNEL_FEISHU
-                ),
+                on_attempt=record_attempt,
+                on_retry=record_retry,
             )
-        except Exception:
+        except Exception as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="outbound",
+                status="failed",
+                reason="send_failed",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+            )
+            LOGGER.warning(
+                "channel_send channel=feishu event_id=%s status=failed "
+                "reason=send_failed error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return
-        health.record_event(CHANNEL_FEISHU, success=200 <= status < 300)
+        success = 200 <= status < 300
+        _append_channel_audit(
+            user_id=user_id,
+            channel="feishu",
+            direction="outbound",
+            status="sent" if success else "failed",
+            reason="" if success else "send_failed",
+            event_id=event_id,
+            external_user_id=material.external_user_id,
+            http_status=status,
+        )
+        LOGGER.log(
+            logging.INFO if success else logging.WARNING,
+            "channel_send channel=feishu event_id=%s status=%s "
+            "http_status=%s reason=%s",
+            event_id or "",
+            "sent" if success else "failed",
+            status,
+            "" if success else "send_failed",
+        )
+        health.record_event(CHANNEL_FEISHU, success=success)
 
     @app.post("/api/im/feishu")
     async def im_feishu(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
@@ -1540,6 +1716,18 @@ def create_app(deps: AppDeps) -> FastAPI:
         nonlocal event_ledger
         body = await request.body()
         if not feishu.verify(request.headers, body):
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="signature_invalid",
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id= status=rejected "
+                "reason=signature_invalid",
+                feishu_audit_channel,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=401,
@@ -1549,6 +1737,19 @@ def create_app(deps: AppDeps) -> FastAPI:
             payload = feishu.decode_body(body)
             event = feishu.parse_event(payload)
         except FeishuProtocolError as error:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="protocol_error",
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id= status=rejected "
+                "reason=protocol_error error_type=%s",
+                feishu_audit_channel,
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=400,
@@ -1561,6 +1762,20 @@ def create_app(deps: AppDeps) -> FastAPI:
         inbound = event.inbound
         material = command if command is not None else inbound
         if material is None:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="message_event_missing",
+                event_id=event.event_id,
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=rejected "
+                "reason=message_event_missing",
+                feishu_audit_channel,
+                event.event_id or "",
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=400,
@@ -1573,6 +1788,22 @@ def create_app(deps: AppDeps) -> FastAPI:
             else None
         )
         if binding is None:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="identity_unbound",
+                event_id=event.event_id,
+                external_user_id=external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=rejected "
+                "reason=identity_unbound",
+                feishu_audit_channel,
+                event.event_id or "",
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=401,
@@ -1611,6 +1842,21 @@ def create_app(deps: AppDeps) -> FastAPI:
             rate_key = f"{material.channel}:{rate_identity}"
             if event_id is None or not channel_limiter.reserve(rate_key, event_id):
                 _release_feishu_event(event_id)
+                _append_channel_audit(
+                    user_id=binding.user_id,
+                    channel="feishu",
+                    direction="inbound",
+                    status="rejected",
+                    reason="rate_limited",
+                    event_id=event_id,
+                    external_user_id=material.external_user_id,
+                    text=material.text if isinstance(material, InboundMessage) else None,
+                )
+                LOGGER.warning(
+                    "channel_event channel=feishu event_id=%s status=rejected "
+                    "reason=rate_limited",
+                    event_id or "",
+                )
                 raise ChannelRateLimited("消息过于频繁，请稍后再试")
             envelope = {
                 "code": 0,
@@ -1625,10 +1871,27 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
             return JSONResponse(content=envelope)
         try:
-            outbound = _dispatcher_for(binding.user_id).dispatch(material)
-        except Exception:
+            outbound = _dispatcher_for(binding.user_id).dispatch_live(material)
+        except DispatchOutcomeUnknown as error:
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=failed "
+                "reason=dispatch_outcome_unknown error_type=%s",
+                feishu_audit_channel,
+                event_id or "",
+                type(error).__name__,
+            )
+            health.record_event(CHANNEL_FEISHU, success=False)
+            raise
+        except Exception as error:
             # 未执行成功（401/429/409/状态机拒绝）不得消费事件，否则平台重投只会拿到空回放。
             _release_feishu_event(event_id)
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=failed "
+                "reason=dispatch_failed error_type=%s",
+                feishu_audit_channel,
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             raise
         health.record_event(CHANNEL_FEISHU, success=True)

@@ -17,13 +17,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from threading import Lock
 
 from ai_banking_copilot.policy.audit import KIND_CHANNEL, AuditEvent, AuditLog
+from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.web.channels.contracts import (
     CHANNEL_FEISHU,
     CHANNEL_LOCAL,
@@ -37,7 +39,14 @@ from ai_banking_copilot.web.channels.contracts import (
 )
 from ai_banking_copilot.web.channels.identity import IdentityDirectory
 from ai_banking_copilot.web.channels.ratelimit import TokenBucketRateLimiter
-from ai_banking_copilot.web.session import ExecutionView, Session, SubmissionView
+from ai_banking_copilot.web.session import (
+    ConfirmationMismatchError,
+    ExecutionView,
+    Session,
+    SessionStateError,
+    StrongVerificationRequiredError,
+    SubmissionView,
+)
 from ai_banking_copilot.web.session_manager import SessionManager
 
 RATE_LIMIT_PER_MINUTE = 20
@@ -50,9 +59,51 @@ DEFAULT_CHAT_ID = "default"
 _MAX_IDEMPOTENCY_ENTRIES = 500
 """幂等缓存条数上界：超出即淘汰最早一条（演示级，够覆盖重投窗口）。"""
 
+_KNOWN_BUSINESS_REJECTIONS = (
+    SessionStateError,
+    ConfirmationMismatchError,
+    StrongVerificationRequiredError,
+    StalePlanError,
+)
+
 
 SlidingWindowRateLimiter = TokenBucketRateLimiter
 """兼容旧导入名；实现已迁移到可靠性模块。"""
+
+LOGGER = logging.getLogger(__name__)
+
+
+def channel_audit_payload(
+    *,
+    user_id: str,
+    channel: str,
+    direction: str,
+    status: str,
+    reason: str = "",
+    event_id: str | None = None,
+    external_user_id: str | None = None,
+    attempt_no: int | None = None,
+    http_status: int | None = None,
+    text: str | None = None,
+    details: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """构造不含原文和凭据的渠道审计摘要。"""
+    payload = dict(details or {})
+    payload.update({
+        "user_id": user_id,
+        "channel": channel,
+        "direction": direction,
+        "status": status,
+        "reason": reason,
+        "event_id": event_id or "",
+        "external_user_id": external_user_id or "",
+        "attempt_no": attempt_no,
+        "http_status": http_status,
+    })
+    if text is not None:
+        payload["text_digest"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        payload["text_length"] = len(text)
+    return payload
 
 
 class DispatchOutcomeUnknown(RuntimeError):
@@ -73,6 +124,7 @@ class Dispatcher:
         server_user_id: str,
         limiter: TokenBucketRateLimiter | None = None,
         feishu_configured: bool = False,
+        feishu_audit_channel: str = CHANNEL_FEISHU,
     ) -> None:
         self._manager = manager
         self._identities = identities
@@ -82,6 +134,7 @@ class Dispatcher:
         self._server_user_id = server_user_id
         self._limiter = limiter if limiter is not None else TokenBucketRateLimiter()
         self._feishu_configured = feishu_configured
+        self._feishu_audit_channel = feishu_audit_channel
         self._cache: OrderedDict[str, OutboundMessage] = OrderedDict()
         self._cache_lock = Lock()
 
@@ -105,17 +158,44 @@ class Dispatcher:
         if cached is not None:
             return replace(cached, replayed=True)
 
-        user_id = self._resolve_user(inbound)
+        try:
+            user_id = self._resolve_user(inbound)
+        except ChannelUnauthorized:
+            self._record_failure_best_effort(
+                inbound,
+                user_id=self._server_user_id,
+                status="rejected",
+                reason="identity_unbound",
+            )
+            self._log_failure(inbound, status="rejected", reason="identity_unbound")
+            raise
+        except Exception:
+            self._record_failure_best_effort(
+                inbound,
+                user_id=self._server_user_id,
+                status="failed",
+                reason="dispatch_failed",
+            )
+            self._log_failure(inbound, status="failed", reason="dispatch_failed")
+            raise
         rate_identity = inbound.external_user_id or user_id
         if not self._limiter.allow(
             f"{inbound.channel}:{rate_identity}", reservation_id=inbound.event_id
         ):
+            self._record_failure_best_effort(
+                inbound,
+                user_id=user_id,
+                status="rejected",
+                reason="rate_limited",
+            )
+            self._log_failure(inbound, status="rejected", reason="rate_limited")
             raise ChannelRateLimited("消息过于频繁，请稍后再试")
 
         chat_id = inbound.external_chat_id or inbound.external_user_id or DEFAULT_CHAT_ID
         session_id = f"{inbound.channel}:{chat_id}"
         session = self._manager.get(user_id, session_id)
 
+        business_completed = False
         try:
             if isinstance(inbound, ConfirmCommand):
                 execution = session.confirm(
@@ -124,10 +204,12 @@ class Dispatcher:
                     verification_code=inbound.verification_code,
                     steps=inbound.steps,
                 )
+                business_completed = True
                 payload = self._execution_payload(execution)
                 kind = KIND_RECEIPT
             else:
                 submission = session.submit(inbound.text)
+                business_completed = True
                 payload = self._submission_payload(submission)
                 kind = KIND_REPLY
 
@@ -138,7 +220,18 @@ class Dispatcher:
             self._remember(inbound, outbound)
             return outbound
         except Exception as error:
-            if preserve_outcome_error:
+            if not business_completed:
+                self._record_failure_best_effort(
+                    inbound,
+                    user_id=user_id,
+                    status="failed",
+                    reason="dispatch_failed",
+                )
+                self._log_failure(inbound, status="failed", reason="dispatch_failed")
+            if business_completed or (
+                preserve_outcome_error
+                and not isinstance(error, _KNOWN_BUSINESS_REJECTIONS)
+            ):
                 raise DispatchOutcomeUnknown("dispatch_outcome_unknown") from error
             raise
 
@@ -214,25 +307,116 @@ class Dispatcher:
             card_id = str((outbound.card or {}).get("card_id", ""))
         self._audit.append(
             AuditEvent(
-                event_id=f"{KIND_CHANNEL}:{inbound.channel}:{secrets.token_hex(8)}",
+                event_id=f"{KIND_CHANNEL}:{self._audit_channel(inbound)}:{secrets.token_hex(8)}",
                 kind=KIND_CHANNEL,
-                payload={
-                    "channel": inbound.channel,
-                    "session_id": outbound.session_id,
-                    "external_user_id": inbound.external_user_id,
-                    "event_id": inbound.event_id,
-                    "request_kind": request_kind,
-                    "state": outbound.state,
-                    "level": outbound.level,
-                    "card_id": card_id,
-                    "frozen_hash": (
-                        inbound.frozen_hash if isinstance(inbound, ConfirmCommand) else ""
-                    ),
-                    "text_digest": hashlib.sha256(material.encode("utf-8")).hexdigest(),
-                    "text_length": len(material),
-                },
+                payload=channel_audit_payload(
+                    user_id=self._server_user_id,
+                    channel=self._audit_channel(inbound),
+                    direction="inbound",
+                    status="sent",
+                    event_id=inbound.event_id,
+                    external_user_id=inbound.external_user_id,
+                    text=material,
+                    details={
+                        "session_id": outbound.session_id,
+                        "request_kind": request_kind,
+                        "state": outbound.state,
+                        "level": outbound.level or "",
+                        "card_id": card_id,
+                        "frozen_hash": (
+                            inbound.frozen_hash
+                            if isinstance(inbound, ConfirmCommand)
+                            else ""
+                        ),
+                    },
+                ),
                 prev_hash="",
             )
+        )
+
+    def _record_failure(
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        *,
+        user_id: str,
+        status: str,
+        reason: str,
+    ) -> None:
+        material = (
+            f"{inbound.card_id}:{inbound.frozen_hash}"
+            if isinstance(inbound, ConfirmCommand)
+            else inbound.text
+        )
+        self._audit.append(
+            AuditEvent(
+                event_id=(
+                    f"{KIND_CHANNEL}:{self._audit_channel(inbound)}:"
+                    f"{secrets.token_hex(8)}"
+                ),
+                kind=KIND_CHANNEL,
+                payload=channel_audit_payload(
+                    user_id=user_id,
+                    channel=self._audit_channel(inbound),
+                    direction="inbound",
+                    status=status,
+                    reason=reason,
+                    event_id=inbound.event_id,
+                    external_user_id=inbound.external_user_id,
+                    text=material,
+                    details={
+                        "request_kind": (
+                            "confirm" if isinstance(inbound, ConfirmCommand) else "message"
+                        )
+                    },
+                ),
+                prev_hash="",
+            )
+        )
+
+    def _record_failure_best_effort(
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        *,
+        user_id: str,
+        status: str,
+        reason: str,
+    ) -> None:
+        try:
+            self._record_failure(
+                inbound,
+                user_id=user_id,
+                status=status,
+                reason=reason,
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=audit_failed "
+                "reason=channel_audit_failed error_type=%s",
+                self._audit_channel(inbound),
+                inbound.event_id or "",
+                type(error).__name__,
+            )
+
+    def _audit_channel(self, inbound: InboundMessage | ConfirmCommand) -> str:
+        return (
+            self._feishu_audit_channel
+            if inbound.channel == CHANNEL_FEISHU
+            else inbound.channel
+        )
+
+    def _log_failure(
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        *,
+        status: str,
+        reason: str,
+    ) -> None:
+        LOGGER.warning(
+            "channel_event channel=%s event_id=%s status=%s reason=%s",
+            self._audit_channel(inbound),
+            inbound.event_id or "",
+            status,
+            reason,
         )
 
 

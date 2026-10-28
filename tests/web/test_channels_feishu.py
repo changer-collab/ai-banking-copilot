@@ -258,6 +258,32 @@ def test_live_send_reports_each_scheduled_retry(monkeypatch) -> None:
     assert retries == [(1, 0.5), (2, 2.0), (3, 8.0)]
 
 
+def test_live_send_callbacks_never_expose_error_text(monkeypatch) -> None:
+    from ai_banking_copilot.web.channels import feishu as module
+
+    responses = iter(
+        [
+            (200, {"tenant_access_token": "secret-token", "expire": 7200}),
+            TimeoutError("request body and credentials must stay secret"),
+            (200, {"code": 0}),
+        ]
+    )
+
+    def post(*_args, **_kwargs):
+        result = next(responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(module, "_post_json", post)
+    monkeypatch.setattr(module.time, "sleep", lambda _delay: None)
+    attempts: list[tuple[int, int | None, str | None]] = []
+    adapter = _live_adapter()
+
+    assert adapter.send(_outbound(), on_attempt=lambda *args: attempts.append(args)) == 200
+    assert attempts == [(1, None, "TimeoutError"), (2, 200, None)]
+
+
 def test_live_send_reuses_token_until_refresh_window(monkeypatch) -> None:
     from ai_banking_copilot.web.channels import feishu as module
 
