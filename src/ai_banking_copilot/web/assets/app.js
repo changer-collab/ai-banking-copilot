@@ -73,6 +73,7 @@ const state = {
   verification: null,
   clarifications: [],
   options: null,
+  optionsStatus: "loading",
   busy: false,
   notice: "",
   resultCount: 0,
@@ -321,11 +322,23 @@ function optionsHtml(slot, selected = "") {
 }
 
 async function refreshOptions() {
-  const response = await fetch("/api/options", { cache: "no-store" });
-  if (!response.ok) throw new Error("无法读取可选对象");
-  state.options = await response.json();
+  state.optionsStatus = "loading";
+  renderSubscriptionDetails(state.options);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
+  try {
+    const response = await fetch("/api/options", { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取可选对象");
+    state.options = await response.json();
+    state.optionsStatus = "ready";
+  } catch (error) {
+    state.optionsStatus = "error";
+    renderSubscriptionDetails(state.options);
+    if (currentRecordTab === "charges") renderRecordsTab("charges");
+    throw error;
+  }
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
   renderSubscriptionDetails(state.options);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
     select.innerHTML = optionsHtml(slot, select.value);
@@ -725,14 +738,18 @@ async function refreshChannelHealth() {
 function subscriptionItemHtml(item) {
   const next = item.next_charge_on
     ? `${esc(item.next_charge_on)}（${item.next_charge_is_prediction ? "预测值" : "登记值"}）`
-    : "—";
+    : "未提供";
+  const price = item.price_increased_12m === true
+    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
+    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
   const external = item.external_cancel_status === "not_integrated"
     ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
   return `<article class="takeover">
     <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status))}</span>
       <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span></div>
     <p>扣费 ${yuan(item.amount_cents)} · ${esc(item.currency)} · ${esc(item.cycle_label)}扣费</p>
-    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次预计 ${next}</p>
+    <p class="subscription-price">${price}</p>
+    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次扣款日 ${next}</p>
     <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
     ${subscriptionNoticesHtml(item)}
     <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
@@ -750,6 +767,13 @@ function renderSubscriptionDetails(options) {
   const status = el("subscription-status");
   const list = el("subscription-list");
   const boundary = el("subscription-boundary");
+  if (state.optionsStatus !== "ready") {
+    status.textContent = state.optionsStatus === "error"
+      ? "订阅数据暂不可用，请稍后重试。" : "正在读取订阅识别结果…";
+    list.innerHTML = "";
+    boundary.hidden = true;
+    return;
+  }
   if (!details) {
     status.textContent = "订阅识别服务尚未接入。";
     list.innerHTML = "";
@@ -2241,9 +2265,14 @@ function renderProfile(me, audit) {
     const revoked = record.revoked ? " · 已失效" : "";
     return `<li>${esc(momentLabel(record.issued_at))} 登录 · ${esc(profileValue(record.client_ip))} · ${esc(profileValue(record.user_agent))}${revoked}</li>`;
   }).join("");
-  const trail = (audit.events || []).map((event) =>
-    `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))} <span class="tech">${esc(profileValue(event.event_id))}</span></li>`
-  ).join("");
+  const trail = (audit.events || []).map((event) => {
+    const payload = event.payload || {};
+    const channel = payload.channel || "未记录";
+    const digest = payload.text_digest;
+    return `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))}` +
+      ` · 渠道 ${esc(channel)} <span class="tech">${esc(profileValue(event.event_id))}</span>` +
+      (digest ? `<details><summary>同摘要关联</summary><p class="mono audit-digest">${esc(digest)}</p></details>` : "") + "</li>";
+  }).join("");
   const html = `
     <section class="profile-block">
       <h3>身份</h3>
@@ -2311,7 +2340,7 @@ async function openProfile() {
       body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
       return;
     }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
   } catch (_) {
     body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
   }
@@ -2846,10 +2875,42 @@ function renderRecordsTab(tab) {
   });
   const body = el("records-body");
   if (!body) return;
+  if (key === "charges") {
+    renderChargeRecords(body);
+    return;
+  }
   body.innerHTML =
     `<article class="state-card"><p class="state-card__k">${esc(spec.label)} · 暂无记录</p>` +
     `<p class="muted">${esc(spec.hint)}</p>` +
     `<p class="muted">数据接入由场景负责人补齐；当前只保证入口与三态。</p></article>`;
+}
+
+function renderChargeRecords(body) {
+  const details = state.options && state.options.subscription_details;
+  let message = "";
+  if (state.optionsStatus === "loading") message = "正在读取扣款记录…";
+  else if (state.optionsStatus === "error" || !details) message = "扣款记录暂不可用，请稍后重试。";
+  const seen = new Set();
+  const records = [];
+  if (!message) {
+    for (const item of details.insights || []) {
+      for (const txn of item.evidence || []) {
+        if (seen.has(txn.record_id)) continue;
+        seen.add(txn.record_id);
+        records.push(txn);
+      }
+    }
+    if (!records.length) message = "暂无可核对的订阅扣款记录。";
+  }
+  body.innerHTML = `<p class="muted" role="status">${esc(message || `共 ${records.length} 条订阅扣款记录`)}</p>` +
+    '<div class="btn-row"><button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button></div>';
+  if (message) return;
+  body.innerHTML += `<div class="charge-records-table-wrap" tabindex="0" aria-label="订阅扣款记录">
+    <table class="charge-records-table"><thead><tr><th>商户</th><th>金额</th><th>时间</th><th>卡尾号</th><th>渠道</th><th>记录 ID</th><th>内容哈希</th></tr></thead>
+    <tbody>${records.map((txn) => `<tr><td>${esc(txn.merchant_label)}</td><td>${yuan(Math.abs(txn.amount_cents))}</td>` +
+      `<td>${esc(txn.booked_at || txn.booked_on)}</td><td>${esc(txn.card_tail || "未提供")}</td>` +
+      `<td>${esc(txn.channel || "未记录")}</td><td class="mono">${esc(txn.record_id)}</td>` +
+      `<td class="mono" title="${esc(txn.content_hash)}">${esc(txn.content_hash.slice(0, 12))}…</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function showScene(key) {
@@ -2903,6 +2964,10 @@ function navigate(name, options) {
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  if (target.closest('[data-action="refresh-subscriptions"]')) {
+    refreshOptions().catch(() => {});
+    return;
+  }
   if (target.id === "profile-backdrop") {
     closeProfile();
     return;
@@ -3017,8 +3082,36 @@ window.addEventListener("online", () => {
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  el("btn-install").hidden = true;
+  el("install-status").hidden = false;
+  el("install-status").textContent = "应用已安装。";
+});
+el("btn-install")?.addEventListener("click", async () => {
+  const status = el("install-status");
+  status.hidden = false;
+  if (!installPrompt) {
+    status.textContent = "请在浏览器菜单选择安装应用或添加到主屏幕；若已安装，可直接打开应用。";
+    return;
+  }
+  try {
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    status.textContent = choice.outcome === "accepted" ? "已提交安装，请按浏览器提示完成。" : "已取消安装，可稍后重试。";
+    installPrompt = null;
+  } catch {
+    status.textContent = "暂时无法安装，请稍后重试或使用浏览器菜单。";
+  }
+});
+
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=19", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=20", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

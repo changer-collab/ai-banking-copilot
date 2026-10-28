@@ -40,9 +40,9 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=10")
-    js = _get(base, "/assets/app.js?v=26")
-    service_worker = _get(base, "/assets/sw.js?v=19")
+    workspace_css = _get(base, "/assets/workspace.css?v=11")
+    js = _get(base, "/assets/app.js?v=27")
+    service_worker = _get(base, "/assets/sw.js?v=20")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -69,14 +69,29 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=10" in html
-            and "/assets/app.js?v=26" in html
+            and "/assets/workspace.css?v=11" in html
+            and "/assets/app.js?v=27" in html
         ),
-        "pwa: v10/v26/v19 版本链": (
-            'const CACHE_NAME = "aib-static-shell-v19"' in service_worker
-            and '"/assets/workspace.css?v=10"' in service_worker
-            and '"/assets/app.js?v=26"' in service_worker
-            and 'register("/assets/sw.js?v=19"' in js
+        "page: 订阅扣款入口与安装入口": (
+            'data-nav="records" data-record-tab="charges"' in html
+            and 'id="btn-install"' in html and "beforeinstallprompt" in js
+        ),
+        "js: 订阅三态与扣款证据表": (
+            "item.price_increased_12m === true" in js
+            and "item.price_increased_12m === false" in js
+            and "样本不足" in js and "下次扣款日" in js
+            and 'class="charge-records-table"' in js
+            and "seen.has(txn.record_id)" in js
+        ),
+        "js: 审计真实渠道与同摘要": (
+            'payload.channel || "未记录"' in js
+            and "payload.text_digest" in js and "同摘要" in js
+        ),
+        "pwa: v11/v27/v20 版本链": (
+            'const CACHE_NAME = "aib-static-shell-v20"' in service_worker
+            and '"/assets/workspace.css?v=11"' in service_worker
+            and '"/assets/app.js?v=27"' in service_worker
+            and 'register("/assets/sw.js?v=20"' in js
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,

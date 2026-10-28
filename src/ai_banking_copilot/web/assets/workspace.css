@@ -1025,3 +1025,29 @@ html[data-view="app"] #profile-panel { width: min(520px, 92vw); max-height: 82vh
 .channel-health-table th:nth-child(6) { width: 10%; }
 .channel-health-table th:nth-child(7) { width: 14%; }
 html[data-view="app"] .channel-health-table-wrap { max-width: 100%; }
+
+.charge-records-table-wrap { width: 100%; overflow-x: auto; }
+.charge-records-table {
+  width: 100%;
+  min-width: 900px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+.charge-records-table th,
+.charge-records-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rule);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.charge-records-table th:nth-child(1) { width: 14%; }
+.charge-records-table th:nth-child(2) { width: 11%; }
+.charge-records-table th:nth-child(3) { width: 20%; }
+.charge-records-table th:nth-child(4) { width: 8%; }
+.charge-records-table th:nth-child(5) { width: 9%; }
+.charge-records-table th:nth-child(6) { width: 21%; }
+.charge-records-table th:nth-child(7) { width: 17%; }
+.audit-digest { overflow-wrap: anywhere; }
+.subscription-price { font-weight: 600; }

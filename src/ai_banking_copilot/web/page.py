@@ -22,7 +22,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=10" />
+<link rel="stylesheet" href="/assets/workspace.css?v=11" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -77,6 +77,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="top__s">今天，有什么可以帮您？</div>
       </div>
       <div class="topbar__nav">
+        <button class="btn btn--ghost" id="btn-install" type="button">安装应用</button>
         <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
                 aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
         <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
@@ -95,6 +96,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         </button>
       </div>
     </header>
+    <p class="muted" id="install-status" role="status" hidden></p>
 
     <section class="view" id="view-home" hidden>
       <header class="view__head">
@@ -300,6 +302,10 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="subscription-boundary" hidden></p>
           <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
           <div id="subscription-cancel-result" hidden></div>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">查看扣款记录</button>
+            <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button>
+          </div>
         </section>
       </div>
 
@@ -316,7 +322,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>记录与明细</h2>
-          <p class="muted">AI 做过的事都在这里查得到；渠道列区分 web / app / feishu。</p>
+          <p class="muted">订阅扣款可核对原始记录；渠道按实际记录展示。</p>
         </div>
       </header>
       <div class="tabs" id="records-tabs" role="tablist" aria-label="记录分类">
@@ -429,7 +435,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=26"></script>
+<script src="/assets/app.js?v=27"></script>
 </body>
 </html>
 """
