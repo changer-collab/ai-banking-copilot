@@ -57,7 +57,7 @@ _PAGE_HTML = """<!DOCTYPE html>
     </div>
     <div class="side__foot">
       <button class="side-user" id="btn-me-side" type="button" data-nav="me">
-        <span class="side-user__avatar" aria-hidden="true">AI</span>
+        <span class="side-user__avatar" aria-hidden="true">演示</span>
         <span class="side-user__meta">
           <span class="side-user__name" id="side-user-name">我的</span>
           <span class="side-user__sub">个人中心 · 登录身份</span>
