@@ -1108,3 +1108,9 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .records-skeleton { display: grid; gap: var(--s-2); padding: var(--s-2) 0; }
 .records-skeleton .skeleton { display: block; width: 100%; height: 14px; border-radius: 6px; }
 .state-card .btn { margin-top: var(--s-2); }
+
+/* 场景①「额度卡」进度条与记录页「详情」列（高靖雯 · 场景①；app.css 与设计仓同步，新样式一律落这里） */
+.quota__bar { display: block; margin: 0 0 var(--s-2); }
+.records-detail { font-size: var(--fs-small); }
+.records-detail summary { cursor: pointer; color: var(--blue-ink); white-space: nowrap; }
+.records-detail p { margin: var(--s-1) 0 0; min-width: 220px; white-space: normal; }

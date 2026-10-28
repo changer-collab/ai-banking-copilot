@@ -326,6 +326,7 @@ async function refreshOptions() {
   state.options = await response.json();
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
   renderSubscriptionDetails(state.options);
+  renderQuota(state.options.quota);
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
     select.innerHTML = optionsHtml(slot, select.value);
@@ -647,7 +648,7 @@ function renderTransfers(payload) {
           <span class="muted">${esc(item.booked_on)}</span>
         </summary>
         <p class="muted">${esc(kind)} · ${esc(item.account)} · 记账日 ${esc(item.booked_on)}</p>
-        <p class="muted">备注：${remark} <span class="tech mono">· 记录号 ${esc(item.record_id)}</span></p>
+        <p class="muted">备注：${remark} <span class="mono">· 记录号 ${esc(item.record_id)}</span></p>
       </details>
     </li>`;
   }).join("");
@@ -657,6 +658,38 @@ async function refreshTransfers() {
   const result = await apiFetch("GET", "/api/transfers");
   if (!result.ok) throw new Error("转账记录读取失败");
   renderTransfers(result.data);
+}
+
+/* 场景①「额度卡」：限额 / 已用 / 剩余全部读 /api/options.quota（gateway 给事实），
+   前端只做展示与进度百分比，不自行推导额度或已用。 */
+function renderQuota(quota) {
+  const status = el("quota-status");
+  const body = el("quota-body");
+  if (!status || !body) return;
+  if (!quota) {
+    status.textContent = "服务端未下发额度数据，请联系组长核对 /api/options。";
+    body.innerHTML = "";
+    return;
+  }
+  const limit = Number(quota.daily_limit_cents);
+  const used = Number(quota.daily_accumulated_cents);
+  if (!Number.isFinite(limit) || !Number.isFinite(used)) {
+    status.textContent = "额度字段缺失，按不可用处理（不猜数字）。";
+    body.innerHTML = "";
+    return;
+  }
+  const over = used > limit;
+  const remaining = limit - used;
+  const pct = limit > 0 ? Math.min(Math.round((used / limit) * 100), 100) : 0;
+  status.textContent = `业务日 ${quota.as_of || "—"} · 额度与已用均读服务端`;
+  const head = `本人日限额 <b class="quota__val">${yuanText(limit)}</b> · 已用 ` +
+    `<b class="quota__val">${yuanText(used)}</b>`;
+  const tail = over
+    ? ` · 已超额 <b class="quota__val">${yuanText(-remaining)}</b>`
+    : ` · 剩余 <b class="quota__val">${yuanText(remaining)}</b>`;
+  body.innerHTML = `<p class="quota${over ? " quota--over" : ""}">${head}${tail}</p>
+    <span class="bill__bar-track quota__bar" role="img" aria-label="今日转账额度已用 ${pct}%"><i style="width:${pct}%"></i></span>
+    <p class="muted">已用 ${pct}%。超过日限额的转账按红色（需强验证）处理；这里不在前端计算任何数字。</p>`;
 }
 
 function subscriptionStatusLabel(status) {
@@ -2877,7 +2910,7 @@ const RECORD_TAB_LOADERS = {
 };
 
 const RECORD_HEADERS = {
-  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号"],
+  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号", "详情"],
   holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益", "渠道"],
   cards: ["卡号", "类型", "状态", "日限额", "渠道"],
   suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户", "渠道"],
@@ -2934,7 +2967,13 @@ function recordsRowsFor(key, payload) {
       `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
       esc(item.status || "—"),
       esc(recordChannelLabel(item.channel)),
-      `<span class="tech">${esc(item.record_id || "—")}</span>`,
+      `<span class="mono">${esc(item.record_id || "—")}</span>`,
+      `<details class="records-detail"><summary>详情</summary>
+        <p class="muted">${esc(item.kind === "scheduled" ? "定时登记（本次不扣款）" : "即时转账")}` +
+        ` · 账户 ${esc(item.account || "—")}</p>
+        <p class="muted">备注 ${esc(item.remark || "—")}</p>
+        <p class="muted mono">记录号 ${esc(item.record_id || "—")}</p>
+      </details>`,
     ]));
   }
   if (key === "holdings") {
@@ -3248,7 +3287,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=21", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=22", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
