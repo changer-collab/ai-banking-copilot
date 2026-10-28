@@ -814,6 +814,67 @@ def create_app(deps: AppDeps) -> FastAPI:
             "scan_error": state.error if state is not None else None,
         }
 
+    @app.get("/api/transfers")
+    def transfer_records(
+        days: int = 30, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """只读转账记录（收款人脱敏）：AI 做过的事必须查得到、点得开。
+
+        状态口径：已扣款且记账日不晚于业务日 ⇒「已到账」；记账日在未来 ⇒「待到账」；
+        `scheduled_transfers` 里仍待执行的登记 ⇒「待到账」(定时)。
+        本端点**只读**，不返回任何可执行动作，也不构成执行授权。
+        """
+        if not 1 <= days <= 365:
+            raise HTTPException(status_code=400, detail="查询区间需为 1-365 天")
+        gateway = deps.gateway
+        payee_names = {
+            record.payload.payee_id: record.payload.full_name
+            for record in gateway.payees_of(user_id)
+        }
+        accounts = gateway.accounts_of(user_id)
+        kinds = {record.payload.account_id: record.payload.kind for record in accounts}
+        labels = {"savings": "储蓄账户", "current": "活期账户"}
+        start = deps.today - timedelta(days=days)
+        horizon = deps.today + timedelta(days=days)
+        items: list[dict[str, object]] = []
+        for account in accounts:
+            for txn_record in gateway.transactions_between(
+                account.payload.account_id, start, horizon
+            ):
+                txn = txn_record.payload
+                if txn.category != "转账" or txn.direction != "out":
+                    continue
+                payee_id = txn.merchant.removeprefix("转给")
+                items.append(
+                    {
+                        "kind": "transaction",
+                        "record_id": txn.txn_id,
+                        "payee": _mask_payee_name(payee_names.get(payee_id, "")),
+                        "amount_cents": -txn.amount.cents,
+                        "booked_on": txn.booked_on.isoformat(),
+                        "status": "已到账" if txn.booked_on <= deps.today else "待到账",
+                        "account": labels.get(kinds.get(account.payload.account_id, ""), "账户"),
+                        "remark": "",
+                    }
+                )
+        for booking_record in gateway.scheduled_transfers_of(user_id, status="scheduled"):
+            booking = booking_record.payload
+            items.append(
+                {
+                    "kind": "scheduled",
+                    "record_id": booking.schedule_id,
+                    "payee": _mask_payee_name(payee_names.get(booking.payee_id, "")),
+                    "amount_cents": booking.amount.cents,
+                    "booked_on": booking.booked_on.isoformat(),
+                    "status": "待到账",
+                    "account": labels.get(kinds.get(booking.account_id, ""), "账户"),
+                    "remark": booking.remark,
+                }
+            )
+        items.sort(key=lambda item: str(item["booked_on"]), reverse=True)
+        items.sort(key=lambda item: item["status"] == "已到账")
+        return {"items": items, "as_of": deps.today.isoformat(), "window_days": days}
+
     @app.post("/api/insights/budget")
     def set_insight_budget(
         request: _BudgetRequest, user_id: str = Depends(current_user)
@@ -1493,6 +1554,15 @@ def create_app(deps: AppDeps) -> FastAPI:
     return app
 
 
+def _mask_payee_name(name: str) -> str:
+    """收款人姓名脱敏：三字及以上保留首末字，两字保留首字；空名一律不显示。"""
+    if len(name) >= 3:
+        return f"{name[0]}*{name[-1]}"
+    if len(name) == 2:
+        return f"{name[0]}*"
+    return "收款人已隐藏"
+
+
 def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
     """测评状态回显：`state` / 等级 / 日期 / 来源全部如实给出（不做乐观默认）。"""
     source = deps.risk
@@ -1535,7 +1605,15 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "message": view.message,
         "questions": list(view.questions),
         "clarifications": [
-            {"slot": ask.slot, "prompt": ask.prompt} for ask in view.clarifications
+            {
+                "slot": ask.slot,
+                "prompt": ask.prompt,
+                "candidates": [
+                    {"label": choice.label, "value": choice.value}
+                    for choice in ask.candidates
+                ],
+            }
+            for ask in view.clarifications
         ],
         "card": card,
         "decision": _decision_payload(view.decision),

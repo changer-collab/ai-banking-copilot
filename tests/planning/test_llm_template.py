@@ -61,6 +61,22 @@ def test_template_model_returns_nothing_for_unknown_utterance() -> None:
     assert TemplateIntentModel().propose("今天天气不错", {}).intents == ()
 
 
+@pytest.mark.parametrize(
+    "utterance",
+    ["转 500 给李娜", "转 200 给他", "给李娜转 200 元", "给李娜打 500 块", "给李娜打五百",
+     "给老王转点钱"],
+)
+def test_template_model_understands_colloquial_transfer_verbs(utterance: str) -> None:
+    """降级通道也要接住口语动词（「给X转 / 转<金额>」），否则无模型时一句话全被拒。"""
+    assert _actions(utterance) == ["transfer.create"]
+
+
+@pytest.mark.parametrize("utterance", ["下周的转账记录", "每月给李娜转 500 元"])
+def test_colloquial_transfer_rule_does_not_steal_queries_or_recurring(utterance: str) -> None:
+    """「转账记录」是查询、「每月给」属生活事件 L2 定期出资，都不能被转账模板抢走。"""
+    assert "transfer.create" not in _actions(utterance)
+
+
 def test_template_model_is_deterministic() -> None:
     model = TemplateIntentModel()
     assert model.propose("冻结 5000 元", {}) == model.propose("冻结 5000 元", {})

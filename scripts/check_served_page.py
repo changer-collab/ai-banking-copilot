@@ -39,7 +39,7 @@ def run(base: str) -> list[str]:
     session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
-    css = _get(base, "/assets/app.css?v=6")
+    css = _get(base, "/assets/app.css?v=7")
     workspace_css = _get(base, "/assets/workspace.css?v=7")
     js = _get(base, "/assets/app.js?v=24")
 
@@ -67,7 +67,7 @@ def run(base: str) -> list[str]:
             and 'aria-controls="trace"' in html
         ),
         "page: 资源 ?v": (
-            "/assets/app.css?v=6" in html
+            "/assets/app.css?v=7" in html
             and "/assets/workspace.css?v=7" in html
             and "/assets/app.js?v=24" in html
         ),

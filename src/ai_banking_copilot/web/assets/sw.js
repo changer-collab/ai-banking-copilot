@@ -5,7 +5,7 @@ const STATIC_ASSETS = [
   "/assets/manifest.json?v=1",
   "/assets/icon.svg?v=1",
   "/assets/tokens.css?v=2",
-  "/assets/app.css?v=6",
+  "/assets/app.css?v=7",
   "/assets/workspace.css?v=7",
   "/assets/app.js?v=24",
 ];
