@@ -394,6 +394,21 @@ function wealthAssessmentLine(assessment) {
     '<p class="muted">未测评时任何产品都不能申购（服务端硬拦截），先答完这 5 道题。</p>';
 }
 
+/* 产品卡可展开解释：文案与图谱路径全部来自服务端
+   （`/api/wealth/overview` 的 `products[*].explanation`），前端只渲染、不生成任何数字。 */
+function wealthWhyHtml(item) {
+  const why = item.explanation;
+  if (!why || !why.title) return "";
+  const reasons = (why.reasons || []).map((text) => `<li>${esc(text)}</li>`).join("");
+  const path = (why.path || []).map((step) => esc(step)).join(" → ");
+  return `<details class="wealth-why">
+    <summary>${esc(why.title)}</summary>
+    <ul>${reasons}</ul>
+    ${path ? `<p class="muted">知识图谱路径：${path}</p>` : ""}
+    <p class="muted"><span class="tech">${esc(why.data_source || "")}</span> · 只读解释，不含业绩承诺</p>
+  </details>`;
+}
+
 /* 产品卡自带金额输入 + 申购按钮：点了就把 product 作为**受信任选择**随提交送上去，
    写操作仍由服务端出计划卡、确认后才执行（前端不直连任何写接口）。 */
 function wealthProductHtml(item, assessment) {
@@ -414,6 +429,7 @@ function wealthProductHtml(item, assessment) {
     <div><b>${esc(item.name)}</b> ${chip}</div>
     <p class="muted">${esc(item.risk_level)} · 期限 ${esc(item.term_days)} 天 · 起购 ${esc(item.min_amount_yuan)} 元</p>
     ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+    ${wealthWhyHtml(item)}
     ${wealthUnlockHtml(item, assessment)}
     ${action}
     <p class="muted"><span class="tech">${esc(item.product_id)}</span></p>
@@ -3036,6 +3052,9 @@ document.addEventListener("click", async (event) => {
     wealthError(trigger, "提交失败：未收到服务端回执，请稍后重试。");
   } finally {
     trigger.disabled = false;
+    /* 卡片按钮直接起办理时不经过 `action()` 包装，需在此补一次按钮态：
+       否则 `beginTask` 期间被隐藏的 #task-actions 不会恢复，确认按钮点不到。 */
+    setButtons();
   }
 });
 
@@ -3521,7 +3540,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=24", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=25", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

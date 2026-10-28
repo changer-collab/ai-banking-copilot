@@ -46,6 +46,7 @@ from ai_banking_copilot.scenarios.base import (
     intent_text,
     trusted_slot,
 )
+from ai_banking_copilot.scenarios.wealth_graph import explain_product
 
 WEALTH_ACTIONS = frozenset({"wealth.list", "wealth.subscribe", "wealth.redeem"})
 """理财域动作（README 规范动作表 #5 / #10 / #11）。"""
@@ -137,6 +138,51 @@ def describe_product(product: WealthProduct) -> str:
         f"产品 {product.name}｜风险等级 {product.risk_level}｜期限 {product.term_days} 天"
         f"｜起购金额 {product.min_amount.yuan} 元"
     )
+
+
+_ASSESSMENT_STATE_LABELS: Mapping[AssessmentState, str] = {
+    AssessmentState.VALID: "有效",
+    AssessmentState.EXPIRED: "已过期，请重新测评",
+}
+"""测评状态的中文陈述（`unassessed` 由调用方单独给出话术，不在此表）。"""
+
+
+def describe_assessment(assessment: RiskAssessment, today: date) -> str:
+    """本人风险测评事实陈述：等级 / 测评日期 / 有效期 / 来源，不做任何适配建议。
+
+    用「风险测评等级」而非「风险等级」：后者是产品属性措辞，两者不能混用
+    （既有话术断言依赖这一区分）。
+    """
+    state = assessment.state_on(today)
+    source = _RISK_SOURCE_LABELS.get(
+        assessment.source, assessment.source or "未标注"
+    )
+    return (
+        f"你的风险测评等级：{assessment.risk_profile}"
+        f"｜测评日期 {assessment.assessed_on.isoformat()}"
+        f"｜有效期 {assessment.valid_days} 天（当前{_ASSESSMENT_STATE_LABELS[state]}）"
+        f"｜来源 {source}"
+    )
+
+
+def suitability_refusal(
+    assessment: RiskAssessment | None,
+    product: WealthProduct,
+    products: Sequence[Record[WealthProduct]],
+    today: date,
+) -> str | None:
+    """**先拒后问**的确定性判定：不通过返回拒绝文案，通过返回 `None`。
+
+    与 `_build_wealth_node` 共用同一把闸门（`assess_suitability`），保证
+    「先拒绝再补金额」与「补完金额再拒绝」给出完全一致的结论。
+    """
+    try:
+        assess_suitability(assessment, product, today)
+    except SuitabilityError as error:
+        if assessment is not None and "风险等级不匹配" in str(error):
+            return blocked_suitability_message(assessment, product, products)
+        return str(error)
+    return None
 
 
 def product_comparison(gateway: FactGateway) -> tuple[str, ...]:
@@ -259,6 +305,14 @@ def product_catalog(
                 "eligible": eligible,
                 "reason": reason,
                 "data_source": PRODUCT_DATA_SOURCE,
+                "explanation": explain_product(
+                    {
+                        "product_id": product.product_id,
+                        "eligible": eligible,
+                        "reason": reason,
+                    },
+                    risk_profile,
+                ),
             }
         )
     return tuple(catalog)

@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=15")
-    js = _get(base, "/assets/app.js?v=31")
+    workspace_css = _get(base, "/assets/workspace.css?v=16")
+    js = _get(base, "/assets/app.js?v=32")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=15" in html
-            and "/assets/app.js?v=31" in html
+            and "/assets/workspace.css?v=16" in html
+            and "/assets/app.js?v=32" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,

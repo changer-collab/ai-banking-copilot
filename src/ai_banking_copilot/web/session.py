@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -34,7 +34,8 @@ from ai_banking_copilot.contracts.security import (
 )
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
-from ai_banking_copilot.gateway.models import Money, Payee
+from ai_banking_copilot.gateway.facts import Record
+from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
@@ -132,7 +133,12 @@ from ai_banking_copilot.scenarios.registry import (
 )
 from ai_banking_copilot.scenarios.wealth import (
     FORBIDDEN_HINTS,
+    WEALTH_ACTIONS,
+    RiskAssessment,
+    describe_assessment,
+    holdings_payload,
     is_recommendation_request,
+    suitability_refusal,
     to_risk_assessment,
 )
 from ai_banking_copilot.scenarios.wealth_assessment import (
@@ -714,12 +720,28 @@ class Session:
             invalid = self._invalid_selection(selected or {})
             if invalid is not None:
                 return self._refuse(invalid, utterance)
-            # 整句只问测评才直接出问卷；带第二件事（逗号 / 再 / 然后）交回意图装配，
-            # 避免「做测评，然后买 R2」被早退吞掉后半句。
-            if _is_pure_assessment_request(utterance):
-                return self._assessment_invitation()
+            # 第三人账户属于**能力边界**（不支持代他人操作），不是策略拒绝。
+            third_party = _third_party_account_refusal(utterance)
+            if third_party is not None:
+                return self._refuse(third_party, utterance, capability_boundary=True)
+            # 「改余额 + 买理财」同属**能力边界**：余额只能由真实资金变动产生，
+            # 整句拒绝，避免拿伪造的余额去生成申购卡（S6-7）。
+            balance_tamper = _balance_tamper_refusal(utterance)
+            if balance_tamper is not None:
+                return self._refuse(balance_tamper, utterance, capability_boundary=True)
+            # 明确要测评就先出问卷：测评是申购的前置，即使句子里还挂着第二件事
+            # （「先做个风险测评，再买理财」）也先测再办。第二件事由话术挂回来
+            # （「测完再发我一次」），既不静默吞掉半句，也不反过来先追问金额。
+            if _is_assessment_request(utterance):
+                return self._assessment_invitation(defer=_has_second_clause(utterance))
+            fact_answer = self._wealth_fact_answer(utterance)
+            if fact_answer is not None:
+                return fact_answer
             _notify(on_stage, "understand")
-            intents, asks, notes = self._assemble_intents(utterance, selected)
+            try:
+                intents, asks, notes = self._assemble_intents(utterance, selected)
+            except _WealthRefusal as refusal:
+                return self._refuse(str(refusal), utterance)
             if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
                 self._message = _with_notes(
@@ -1129,6 +1151,25 @@ class Session:
             intent.action for intent in proposal.intents
             if intent.confidence < CONFIDENCE_THRESHOLD
         )
+        if not candidates:
+            # 页面已受信任选中产品、用户只说「买 1000 元」：模型不给意图时，
+            # 由**受信任选中值 + 明确动词**确定性合成申购意图（不猜产品、不猜金额）。
+            synthetic = _subscribe_from_page_selection(
+                utterance, chosen,
+                tuple(
+                    record.payload for record in self._deps.gateway.wealth_products()
+                ) if chosen.get("product") else (),
+            )
+            if synthetic is not None:
+                candidates = (synthetic,)
+                # 同一动作已由确定性合成采纳，再说「另有意图未采纳」会自相矛盾。
+                dropped = [action for action in dropped if action != synthetic.action]
+        wealth_records = (
+            tuple(self._deps.gateway.wealth_products())
+            if any(intent.action in WEALTH_ACTIONS for intent in candidates)
+            else ()
+        )
+        products = tuple(record.payload for record in wealth_records)
         local_slots = _local_intent_slots(candidates)
 
         # 多动作时每个动作必须回指用户原文中的**不同片段**。模型省略 span，或把
@@ -1217,6 +1258,12 @@ class Session:
                     today=self._deps.today,
                     payees=payees,
                     selected=slot_selected,
+                    products=products,
+                    default_product=(
+                        _SUBSCRIBE_DEFAULT_PRODUCT
+                        if intent.action == "wealth.subscribe"
+                        else None
+                    ),
                 ),
             )
             if fill.negated:
@@ -1281,6 +1328,7 @@ class Session:
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
             _inject_assessment(intent.action, slots, self._deps)
+            _precheck_wealth(intent.action, slots, wealth_records, self._deps)
             asks.extend(
                 ClarificationAsk(
                     slot=(
@@ -1519,10 +1567,20 @@ class Session:
             self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
 
-    def _assessment_invitation(self) -> SubmissionView:
-        """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。"""
+    def _assessment_invitation(self, *, defer: bool = False) -> SubmissionView:
+        """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。
+
+        `defer=True`：句子里还挂着第二件事（「先做测评，再买理财」）。问卷照出，另加
+        一句把第二件事挂回来，避免半句被静默丢掉。
+        """
         self._state = SessionState.IDLE
-        self._message = invitation_message()
+        message = invitation_message()
+        if defer:
+            message = (
+                f"{message}\n"
+                "测评完成后，把你后面那句（买哪只、多少钱）再发我一次，我接着办。"
+            )
+        self._message = message
         return SubmissionView(
             self._state,
             self._message,
@@ -1532,6 +1590,27 @@ class Session:
             (),
             questionnaire=questionnaire_payload(),
         )
+
+    def _wealth_fact_answer(self, utterance: str) -> SubmissionView | None:
+        """理财**事实**直答（确定性判据，不经模型）：风险等级 / 收益 / 持仓对账。
+
+        只陈述事实，不给建议、不推算收益；命中即早退，避免被低置信度意图丢掉。
+        带动作词的句子（买 / 赎回 / 推荐 / 比较 …）一律交回意图装配，不在此接管。
+        """
+        text = utterance.strip()
+        if len(text) > _WEALTH_FACT_MAX_LENGTH:
+            return None
+        if _WEALTH_ACTION_WORDS.search(text) is not None:
+            return None
+        if _ASSESSMENT_QUESTION.search(text):
+            answer = _assessment_answer(self._deps)
+        elif _INCOME_QUESTION.search(text) or _HOLDINGS_QUESTION.search(text):
+            answer = _holdings_answer(self._deps)
+        else:
+            return None
+        self._state = SessionState.IDLE
+        self._message = answer
+        return SubmissionView(self._state, self._message, None, None, None, ())
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
         self._state = SessionState.TAKEN_OVER
@@ -2492,22 +2571,180 @@ def _guard_utterance(utterance: str) -> str | None:
     return None
 
 
+class _WealthRefusal(Exception):
+    """意图装配阶段的理财拒绝（先拒后问）：由 `_submit` 转成安全拒绝视图。"""
+
+
+_THIRD_PARTY_MARKERS = (
+    "老婆", "老公", "媳妇", "爱人", "妻子", "丈夫", "爸爸", "妈妈", "父亲", "母亲",
+    "儿子", "女儿", "朋友", "同事", "别人", "他人", "亲戚", "家人",
+)
+_ACCOUNT_MARKERS = ("账户", "帐户", "银行卡", "储蓄卡", "卡")
+_WEALTH_MARKERS = ("买", "申购", "认购", "赎回", "理财", "产品")
+_THIRD_PARTY_REFUSAL = (
+    "能力边界：仅支持操作你本人名下的账户与银行卡，不支持代他人申购或赎回理财；"
+    "如需帮家人办理，请由账户本人登录后操作。"
+)
+
+
+def _third_party_account_refusal(utterance: str) -> str | None:
+    """第三人账户的**能力边界**话术（不是策略拒绝，不计触发 4）。
+
+    三条件同时满足才算：第三人标记 + 账户 / 卡标记 + 理财动作词。只出现
+    「帮朋友转账」这类不带理财动作的句子不受影响。
+    """
+    if not any(marker in utterance for marker in _THIRD_PARTY_MARKERS):
+        return None
+    if not any(marker in utterance for marker in _ACCOUNT_MARKERS):
+        return None
+    if not any(marker in utterance for marker in _WEALTH_MARKERS):
+        return None
+    return _THIRD_PARTY_REFUSAL
+
+
+_BALANCE_MARKERS = ("余额", "存款")
+_BALANCE_TAMPER_VERBS = (
+    "改成", "改为", "改到", "改掉", "改一下",
+    "设为", "设置成", "设置",
+    "调到", "调成", "调整成", "调整到",
+    "修改成", "修改为", "修改",
+)
+_BALANCE_TAMPER_REFUSAL = (
+    "能力边界：不能修改账户余额（余额只能由真实资金变动产生）；"
+    "我只能查询余额，并按你账户里的真实可用资金申购或赎回理财。"
+)
+
+
+def _balance_tamper_refusal(utterance: str) -> str | None:
+    """「改余额 + 理财动作」的**能力边界**话术（不是策略拒绝，不计触发 4）。
+
+    三条件同时满足才算：余额 / 存款标记 + 篡改动词 + 理财动作词。只出现「改余额」
+    而没有理财动作的句子，仍按原路径落到「未知意图」（不改变他人场景的既有结论）。
+    命中的是**整句**——只有把「改余额做不到」说出来、并整句拒绝，才不会拿伪造的
+    余额去生成申购卡（S6-7 的缺陷形态）。
+    """
+    if not any(marker in utterance for marker in _BALANCE_MARKERS):
+        return None
+    if not any(verb in utterance for verb in _BALANCE_TAMPER_VERBS):
+        return None
+    if not any(marker in utterance for marker in _WEALTH_MARKERS):
+        return None
+    return _BALANCE_TAMPER_REFUSAL
+
+
+_WEALTH_FACT_MAX_LENGTH = 24
+"""理财事实直答的长度上界：超过即视为还有别的事，交回意图装配。"""
+
+_WEALTH_ACTION_WORDS = re.compile(
+    r"买|申购|认购|赎回|卖|转|付|扣|改|退|推荐|哪只|哪款|比较|对比"
+)
+_ASSESSMENT_QUESTION = re.compile(r"风险(?:测评)?(?:等级|级别)|测评等级")
+_INCOME_QUESTION = re.compile(r"(?:收益|赚|盈亏|赔)[^，,。；;]{0,6}(?:多少|几|如何|怎么样)")
+_HOLDINGS_QUESTION = re.compile(r"持仓|持有")
+
+
+def _assessment_answer(deps: AppDeps) -> str:
+    """本人风险测评事实：等级 / 日期 / 有效期 / 来源（seed 必须如实标注）。"""
+    if deps.risk is None:
+        return "当前没有可用的风险测评数据源，无法给出你的风险测评等级。"
+    assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
+    if assessment is None:
+        return "你还没有完成风险测评；未测评时不能申购理财，可以先做一次 5 题测评。"
+    return describe_assessment(assessment, deps.today)
+
+
+def _holdings_answer(deps: AppDeps) -> str:
+    """持仓与收益口径：金额与起息日来自网关，收益无净值数据 ⇒ 如实标未知。"""
+    rows = holdings_payload(deps.gateway, deps.user_id)
+    if not rows:
+        return "你当前没有理财持仓（演示数据）。"
+    lines = ["你的理财持仓（演示数据）："]
+    lines.extend(
+        f"- {row['name']}（{row['risk_level']}）{row['amount_yuan']} 元"
+        f"，申购日 {row['purchased_on']}，当前收益 {row['current_income']}"
+        for row in rows
+    )
+    return "\n".join(lines)
+
+
+_SUBSCRIBE_VERB = re.compile(r"买|申购|认购")
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _subscribe_from_page_selection(
+    utterance: str, chosen: Mapping[str, object], products: Sequence[WealthProduct],
+) -> Intent | None:
+    """页面已受信任选中产品 + 明确动词 + 金额 ⇒ 确定性合成申购意图。
+
+    **只**在模型没有给出任何可用意图时兜底，且产品必须命中目录；金额仍由槽位解析器
+    从原文读取，这里不猜金额、不猜产品。
+    """
+    product = chosen.get("product")
+    if not isinstance(product, str) or not product:
+        return None
+    if not any(item.product_id == product for item in products):
+        return None
+    if _SUBSCRIBE_VERB.search(utterance) is None or _HAS_DIGIT.search(utterance) is None:
+        return None
+    return Intent(action="wealth.subscribe", confidence=1.0, evidence=utterance)
+
+
+def _slot_str(slots: Mapping[str, object], key: str) -> str | None:
+    value = slots.get(key)
+    if isinstance(value, Value):
+        value = value.raw
+    return value if isinstance(value, str) else None
+
+
+def _precheck_wealth(
+    action: str,
+    slots: Mapping[str, object],
+    records: Sequence[Record[WealthProduct]],
+    deps: AppDeps,
+) -> None:
+    """先拒后问：产品已定但适当性不通过时，不等用户补金额就先给拒绝与替代。
+
+    只覆盖 `wealth.subscribe`（申购闸门）；赎回不做适当性判定。
+    """
+    if action != "wealth.subscribe" or not records:
+        return
+    product_id = _slot_str(slots, "product")
+    product = next(
+        (record.payload for record in records if record.payload.product_id == product_id),
+        None,
+    )
+    if product is None:
+        return
+    raw = slots.get("assessment")
+    assessment = raw if isinstance(raw, RiskAssessment) else None
+    reason = suitability_refusal(assessment, product, records, deps.today)
+    if reason is not None:
+        raise _WealthRefusal(reason)
+
+
 _MEASUREMENT_ONLY_MAX_LENGTH = 24
 """整句只问测评的长度上界：超过即视为还有别的事，交回意图装配。"""
 
 
-def _is_pure_assessment_request(utterance: str) -> bool:
-    """整句只含测评意图时才直接出问卷。
+def _is_assessment_request(utterance: str) -> bool:
+    """命中测评话术即「先做测评」（长度仍设上界，避免把整段长句当测评）。
 
-    判据：命中测评话术 + 不含第二件事的衔接词（逗号 / 再 / 然后 / 顺便 / 并且）
-    + 长度不超过上界。这样「我要做风险测评」直接出题，
-    「做测评，然后买 R2」不会被早退吞掉后半句。
+    与旧判据 `_is_pure_assessment_request` 的差别：**不再**因为句子里带第二件事的
+    衔接词（逗号 / 再 / 然后 / 顺便 / 并且）就整句交回意图装配——那样
+    「我想先做个风险测评，再买理财」会被当成申购去追问金额，把「先做测评」吞掉。
+    第二件事是否要挂回来只影响话术，由 `_has_second_clause` 决定。
     """
     if not is_assessment_request(utterance):
         return False
-    if any(marker in utterance for marker in ("，", ",", "再", "然后", "顺便", "并且")):
-        return False
     return len(utterance) <= _MEASUREMENT_ONLY_MAX_LENGTH
+
+
+_SECOND_CLAUSE_MARKERS = ("，", ",", "再", "然后", "顺便", "并且")
+
+
+def _has_second_clause(utterance: str) -> bool:
+    """句子是否还挂着第二件事（衔接词判据）：只用于在问卷话术里把它挂回来。"""
+    return any(marker in utterance for marker in _SECOND_CLAUSE_MARKERS)
 
 
 def _default_selected(deps: AppDeps) -> dict[str, object]:
@@ -2551,11 +2788,13 @@ def _scoped_intent_selected(
 def _per_intent_selected(
     action: str, chosen: Mapping[str, object], deps: AppDeps
 ) -> dict[str, object]:
-    """身份始终取服务端；申购另补默认产品，不改共享的选中对象。"""
+    """身份始终取服务端；**不再**预置默认产品。
+
+    默认产品曾在此静默覆盖「买 1000 元 R2」的等级意图（买成 R1）。现在产品槽由
+    `planning.slots` 先按原文解析，解析不到才在**申购**动作上用兜底产品（记 `server_default`）。
+    """
     selected = dict(chosen)
     selected["user_id"] = deps.user_id
-    if action == "wealth.subscribe":
-        selected.setdefault("product", _SUBSCRIBE_DEFAULT_PRODUCT)
     return selected
 
 
