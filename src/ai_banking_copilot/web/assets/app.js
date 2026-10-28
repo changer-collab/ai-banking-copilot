@@ -84,6 +84,8 @@ const state = {
   operationUnknown: false,
   insights: [],
   wealth: { products: [], holdings: [] },
+  cards: [],
+  bills: null,
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -777,6 +779,181 @@ async function refreshInsights() {
   renderInsights(await response.json());
 }
 
+/* ---------------- 卡片面板（④ 场景） ---------------- */
+
+const CARD_ACTION_UTTERANCE = {
+  lock: "锁卡",
+  unlock: "解锁卡片",
+  lost: "挂失卡片",
+};
+
+function cardsHtml(payload) {
+  const cards = (payload && payload.cards) || [];
+  if (!cards.length) return '<p class="muted">当前没有可用卡片。</p>';
+  return cards.map((card) => {
+    const id = esc(card.card_id);
+    const buttons = [];
+    if (card.status === "active") {
+      buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`);
+    }
+    if (card.status === "locked") {
+      buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="unlock" data-card-id="${id}">解锁</button>`);
+    }
+    if (card.status === "active" || card.status === "locked") {
+      buttons.push(`<button class="btn btn--danger" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`);
+      buttons.push(`<input class="input card-limit" type="number" min="1" step="100" placeholder="额度（元）" data-card-limit="${id}" />`);
+      buttons.push(`<button class="btn" type="button" data-card-action="limit" data-card-id="${id}">调额</button>`);
+    }
+    buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="virtual" data-card-id="${id}">补虚拟卡</button>`);
+    return `<article class="card-item">
+      <div class="card-item__head">
+        <strong>${esc(card.type_label)}</strong>
+        <span class="tech">${id}</span>
+        <span class="card-state card-state--${esc(card.status)}">${esc(card.status_label)}</span>
+      </div>
+      <p class="muted">日限额 ${yuan(card.daily_limit_cents)}</p>
+      <div class="btn-row card-actions">${buttons.join("")}</div>
+    </article>`;
+  }).join("");
+}
+
+async function refreshCards() {
+  if (state.offline) return;
+  const result = await apiFetch("GET", "/api/cards");
+  if (!result.ok) throw new Error("无法读取卡片");
+  const payload = result.data;
+  state.cards = payload.cards || [];
+  el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 状态与额度来自服务端（${payload.as_of || ""}）`;
+  el("cards-list").innerHTML = cardsHtml(payload);
+}
+
+function cardLimitCents(cardId) {
+  const input = document.querySelector(`[data-card-limit="${cardId}"]`);
+  const value = input ? Number(input.value) : NaN;
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.round(value * 100);
+}
+
+async function runPanelTask(text, selected, cardId) {
+  const start = () => {
+    if (cardId) {
+      const select = el("select-card");
+      if (select) select.value = cardId;
+    }
+    return submitTask(text, selected);
+  };
+  if (!requestStart(start)) return;
+  await start();
+}
+
+async function cardActionFromPanel(kind, cardId) {
+  if (CARD_ACTION_UTTERANCE[kind]) {
+    await runPanelTask(CARD_ACTION_UTTERANCE[kind], { card: cardId }, cardId);
+    return;
+  }
+  const cents = cardLimitCents(cardId);
+  if (cents === null) {
+    el("cards-status").textContent = "请先填写额度（元，正整数），再点「调额 / 补虚拟卡」。";
+    return;
+  }
+  if (kind === "limit") {
+    await runPanelTask(
+      `把这张卡额度调到 ${cents / 100} 元`,
+      { card: cardId, daily_limit: cents },
+      cardId,
+    );
+    return;
+  }
+  if (kind === "virtual") {
+    await runPanelTask("申请虚拟卡", { daily_limit: cents });
+  }
+}
+
+/* ---------------- 账单分析面板（② 场景） ---------------- */
+
+const FINDING_LABELS = {
+  "duplicate-charge": "疑似重复扣款",
+  "price-change": "价格上涨",
+  "hidden-fee": "疑似隐藏费用",
+  "recurring-subscription": "周期订阅",
+  "abnormal-spend": "异常大额",
+  "late-night": "深夜交易",
+  "remote-city": "异地交易",
+};
+const FINDING_STATUS = { confirmed: "已确认", suspected: "疑似", normal: "正常" };
+
+function findingEvidenceHtml(item) {
+  const rows = (item.evidence || []).map((evidence) => {
+    const moment = evidence.booked_at ? String(evidence.booked_at).slice(11, 16) : "";
+    return `<li>${esc(evidence.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(evidence.city || "地点未知")} · ${esc(evidence.merchant_label)} · ${yuan(evidence.amount_cents)}</li>`;
+  }).join("");
+  return rows ? `<ul class="evidence">${rows}</ul>` : "";
+}
+
+function billsFindingsHtml(payload) {
+  const findings = payload.findings || [];
+  if (!findings.length) return '<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>';
+  return findings.map((item) => `<details class="finding">
+    <summary>
+      <strong>${esc(FINDING_LABELS[item.kind] || item.kind)}</strong>
+      <span class="muted">${yuan(item.impact_cents || 0)} · 置信度 ${confidenceLabel(item.confidence)} · ${esc(FINDING_STATUS[item.status] || item.status)}</span>
+    </summary>
+    <p>${esc(item.detail)}</p>
+    <p class="muted">为什么可疑：${esc(item.assumption)}</p>
+    ${findingEvidenceHtml(item)}
+    <p class="muted">${esc(item.suggestion)}</p>
+    <button class="btn btn--danger" type="button" data-bill-lock="1">顺手锁卡</button>
+  </details>`).join("");
+}
+
+function billsTableHtml(payload) {
+  const rows = (payload.transactions || []).map((item) => {
+    const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
+    return `<tr><td>${esc(item.booked_on)}${moment ? " " + esc(moment) : ""}</td><td>${esc(item.merchant_label)}</td><td>${esc(item.category)}</td><td>${esc(item.city || "—")}</td><td>${yuan(item.amount_cents)}</td></tr>`;
+  }).join("");
+  return `<table class="mini-table"><thead><tr><th>时间</th><th>商户</th><th>分类</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows || '<tr><td colspan="5">本期无支出流水</td></tr>'}</tbody></table>`;
+}
+
+async function refreshBills() {
+  if (state.offline) return;
+  const result = await apiFetch("GET", "/api/bills/analysis");
+  if (!result.ok) throw new Error("无法读取账单分析");
+  const payload = result.data;
+  state.bills = payload;
+  const summary = payload.summary || {};
+  el("bills-status").textContent = `${payload.period} · ${summary.transaction_count || 0} 笔 · 已确认 ${summary.confirmed_count || 0} · 疑似 ${summary.suspected_count || 0}`;
+  const disclaimer = el("bills-disclaimer");
+  disclaimer.hidden = false;
+  disclaimer.textContent = `识别结果只作核对线索，不当作已确认；数据来源：${payload.data_source}`;
+  el("bills-summary").innerHTML = `<p class="muted">本期支出合计 ${yuan(summary.expense_total_cents || 0)}${payload.narrative && payload.narrative.degraded ? " · 文字解释已降级，以下按确定性明细展示" : ""}</p>`;
+  el("bills-findings").innerHTML = billsFindingsHtml(payload);
+  el("bills-table").innerHTML = billsTableHtml(payload);
+}
+
+async function lockCardFromBills() {
+  const active = (state.cards || []).find((card) => card.status === "active");
+  if (!active) {
+    el("bills-status").textContent = "当前没有可锁的卡；请先在卡片面板处理。";
+    return;
+  }
+  await runPanelTask("锁卡", { card: active.card_id }, active.card_id);
+}
+
+if (el("cards-list")) {
+  el("cards-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-card-action]");
+    if (!button) return;
+    action(() => cardActionFromPanel(button.dataset.cardAction, button.dataset.cardId))();
+  });
+}
+if (el("bills-findings")) {
+  el("bills-findings").addEventListener("click", (event) => {
+    if (!event.target.closest("[data-bill-lock]")) return;
+    action(lockCardFromBills)();
+  });
+}
+
+
 function selectedObjects() {
   const selected = {};
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
@@ -804,6 +981,16 @@ async function refreshAfterExecution() {
     await refreshWealth();
   } catch (_) {
     timelineAdd("办理已返回，但面板刷新失败；请重新加载页面后核对。", "warn");
+  }
+  try {
+    await refreshCards();
+  } catch (_) {
+    el("cards-status").textContent = "卡片状态刷新失败，请重新加载页面后核对。";
+  }
+  try {
+    await refreshBills();
+  } catch (_) {
+    el("bills-status").textContent = "账单识别刷新失败，请稍后重试。";
   }
 }
 
@@ -2788,6 +2975,12 @@ refreshTransfers().catch(() => {
 refreshWealth().catch(() => {
   showWealthFailure("理财面板读取失败，请稍后重试。");
 });
+refreshCards().catch(() => {
+  el("cards-status").textContent = "卡片读取失败，请重新加载页面。";
+});
+refreshBills().catch(() => {
+  el("bills-status").textContent = "账单识别读取失败，请稍后重试。";
+});
 refreshConversations().catch(() => {});
 refreshLifeEvents().catch(() => {});
 refreshProfileEntry().catch(() => {});
@@ -2800,6 +2993,8 @@ window.addEventListener("online", () => {
   refreshInsights().catch(() => {});
   refreshTransfers().catch(() => {});
   refreshWealth().catch(() => showWealthFailure("理财面板读取失败，请稍后重试。"));
+  refreshCards().catch(() => {});
+  refreshBills().catch(() => {});
   refreshConversations().catch(() => {});
   refreshLifeEvents().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");

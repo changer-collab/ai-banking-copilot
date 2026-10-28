@@ -250,9 +250,16 @@ _PAGE_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="scene-block" data-scene-block="bills" hidden>
-        <section class="panel">
+        <section class="panel" id="bills-panel">
           <p class="panel__title">账单分析</p>
-          <p class="muted">功能页数据待接入（负责人：林晓研）。当前可先用「去对话」查账单。</p>
+          <p class="muted" id="bills-status">正在读取账单识别结果…</p>
+          <p class="muted" id="bills-disclaimer" hidden></p>
+          <div id="bills-summary"></div>
+          <div id="bills-findings"></div>
+          <details class="bills-details" id="bills-details">
+            <summary>账单明细（本期交易）</summary>
+            <div id="bills-table"></div>
+          </details>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="suspicions">看可疑清单</button>
           </div>
@@ -276,9 +283,10 @@ _PAGE_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="scene-block" data-scene-block="cards" hidden>
-        <section class="panel">
-          <p class="panel__title">卡片</p>
-          <p class="muted">功能页数据待接入（负责人：林晓研）。当前可先用「去对话」锁卡或挂失。</p>
+        <section class="panel" id="cards-panel">
+          <p class="panel__title">卡片管理</p>
+          <p class="muted" id="cards-status">正在读取卡片…</p>
+          <div id="cards-list"></div>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="cards">看卡片状态</button>
           </div>
