@@ -1104,6 +1104,9 @@ class Session:
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
+        cards = tuple(
+            record.payload for record in self._deps.gateway.cards_of(self._deps.user_id)
+        )
         # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径（丢弃空值后
         # 按受信任默认值补齐账户），否则同一句话会白问一轮账户。
         chosen: dict[str, object] = {
@@ -1216,6 +1219,7 @@ class Session:
                     text=slot_text,
                     today=self._deps.today,
                     payees=payees,
+                    cards=cards,
                     selected=slot_selected,
                 ),
             )
