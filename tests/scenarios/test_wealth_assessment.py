@@ -87,3 +87,15 @@ def test_score_boundaries(score: int, expected: str) -> None:
 def test_score_out_of_range_is_rejected() -> None:
     with pytest.raises(AssessmentError):
         score_to_profile(MAX_SCORE + 1)
+
+
+_JARGON = ("可支配结余", "浮亏", "回撤", "净值", "夏普", "久期", "波动率", "风险等级")
+
+
+def test_questionnaire_wording_avoids_compliance_jargon() -> None:
+    """题面必须说人话：不用「可支配结余 / 浮亏 / 回撤 / 净值」这类合规术语。"""
+    for question in QUESTIONNAIRE:
+        texts = [question.prompt, *(option.label for option in question.options)]
+        for text in texts:
+            for term in _JARGON:
+                assert term not in text, f"题面出现合规术语「{term}」：{text}"

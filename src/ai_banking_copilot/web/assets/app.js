@@ -17,6 +17,8 @@ const PRESETS = [
   "订阅取消",
   "锁卡",
   "挂失卡片",
+  "我要做风险测评",
+  "看看理财产品",
   "帮我做点什么",
 ];
 
@@ -81,6 +83,7 @@ const state = {
   requestLabel: "",
   operationUnknown: false,
   insights: [],
+  wealth: { products: [], holdings: [] },
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -285,7 +288,28 @@ function optionLabel(item) {
     (name) => names[name]);
 }
 
+/* 理财产品是**目录**不是本人对象：选项来自 `/api/wealth/overview`，
+   不可申购的置灰但仍列出（原因写在卡片上），绝不隐藏。 */
+function productLabel(productId) {
+  const row = (state.wealth.products || []).find((item) => item.product_id === productId);
+  return row ? `${row.name}（${row.risk_level}）` : productId;
+}
+
+function productOptionsHtml(selected = "") {
+  const rows = state.wealth.products || [];
+  if (!rows.length) return '<option value="">暂无可用理财产品（请先加载理财面板）</option>';
+  const options = rows.map((item) => {
+    const off = item.eligible === false;
+    const label = `${item.name}（${item.risk_level} · 起购 ${item.min_amount_yuan} 元）` +
+      (off ? " · 不可申购" : "");
+    return `<option value="${esc(item.product_id)}"${off ? " disabled" : ""}` +
+      `${item.product_id === selected ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  return '<option value="">请选择理财产品</option>' + options;
+}
+
 function optionsHtml(slot, selected = "") {
+  if (slot === "product") return productOptionsHtml(selected);
   const spec = OBJECT_OPTIONS[slot];
   const records = state.options ? state.options[spec.key] || [] : [];
   const placeholder = records.length ? `请选择${spec.label}` : `暂无可用${spec.label}`;
@@ -307,6 +331,244 @@ async function refreshOptions() {
   setButtons();
   /* 生活事件面板的对象下拉依赖 options：拿到后重渲染一次，避免「展开只有占位」 */
   void refreshLifeEvents();
+}
+
+/* ---------------- 理财：风险测评 / 产品目录 / 持仓 ---------------- */
+
+/* 问卷表单：只回传「题号 → 选项号」，等级由服务端算分（前端不给分值、不填等级）。
+   `prefix` 区分面板内（panel）与聊天内（chat）两处表单，避免 radio 同名互相顶掉。 */
+function assessmentFormHtml(prefix, questionnaire) {
+  const items = questionnaire || [];
+  if (!items.length) return '<p class="muted">服务端没有下发问卷，请刷新后重试。</p>';
+  const fields = items.map((item, index) => {
+    const options = (item.options || []).map((option) =>
+      `<label class="wealth-option"><input type="radio" name="${esc(prefix)}-${esc(item.id)}"` +
+      ` value="${esc(option.id)}" data-question="${esc(item.id)}" />` +
+      `<span>${esc(option.label)}</span></label>`
+    ).join("");
+    return `<fieldset class="wealth-question"><legend>${index + 1}. ${esc(item.prompt)}</legend>${options}</fieldset>`;
+  }).join("");
+  return `<form class="wealth-form" data-assessment-form="${esc(prefix)}">
+    <p class="muted">共 ${items.length} 道题。答完由服务端算分定级（R1–R5），等级不能自填。</p>
+    ${fields}
+    <p class="muted wealth-error" data-form-error hidden></p>
+    <div class="btn-row"><button class="btn btn--primary" type="button" data-action="submit-assessment">提交测评</button></div>
+  </form>`;
+}
+
+function wealthAssessmentLine(assessment) {
+  const info = assessment || {};
+  if (info.state === "valid") {
+    const source = info.source_label ? ` · 来源：${esc(info.source_label)}` : "";
+    return `<p><b>当前等级 ${esc(info.risk_profile)}</b> <span class="chip chip--green">测评有效</span></p>` +
+      `<p class="muted">测评日 ${esc(info.assessed_on || "—")} · 有效期至 ${esc(info.expires_on || "—")}${source}</p>`;
+  }
+  if (info.state === "expired") {
+    return `<p><b>上次等级 ${esc(info.risk_profile || "—")}</b> <span class="chip">测评已过期</span></p>` +
+      `<p class="muted">有效期至 ${esc(info.expires_on || "—")}；过期后不能申购，请重新作答。</p>`;
+  }
+  return '<p><b>尚未测评</b> <span class="chip">未完成风险测评</span></p>' +
+    '<p class="muted">未测评时任何产品都不能申购（服务端硬拦截），先答完这 5 道题。</p>';
+}
+
+/* 产品卡自带金额输入 + 申购按钮：点了就把 product 作为**受信任选择**随提交送上去，
+   写操作仍由服务端出计划卡、确认后才执行（前端不直连任何写接口）。 */
+function wealthProductHtml(item) {
+  const disabled = item.eligible === false;
+  const min = esc(item.min_amount_yuan);
+  const chip = disabled
+    ? '<span class="chip chip--denied">不可申购</span>'
+    : '<span class="chip chip--green">可申购</span>';
+  const action = disabled
+    ? '<div class="wealth-action"><input class="input" type="number" disabled placeholder="当前不可申购" />' +
+      '<button class="btn" type="button" disabled>申购</button></div>'
+    : '<div class="wealth-action">' +
+      `<input class="input" type="number" inputmode="decimal" min="${min}" step="0.01"` +
+      ` placeholder="金额（元），起购 ${min}" data-amount-for="${esc(item.product_id)}" />` +
+      '<button class="btn btn--primary" type="button" data-action="wealth-subscribe"' +
+      ` data-product="${esc(item.product_id)}" data-min="${min}">申购</button></div>`;
+  return `<article class="wealth-product${disabled ? " wealth-product--disabled" : ""}">
+    <div><b>${esc(item.name)}</b> ${chip}</div>
+    <p class="muted">${esc(item.risk_level)} · 期限 ${esc(item.term_days)} 天 · 起购 ${esc(item.min_amount_yuan)} 元</p>
+    ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+    ${action}
+    <p class="muted"><span class="tech">${esc(item.product_id)}</span></p>
+    <p class="muted wealth-error" data-wealth-error hidden></p>
+  </article>`;
+}
+
+function wealthHoldingHtml(item) {
+  const max = esc(item.amount_yuan);
+  return `<article class="wealth-product">
+    <div><b>${esc(item.name)}</b> <span class="chip">${esc(item.risk_level)}</span></div>
+    <p>金额 ${max} 元 · 起息日 ${esc(item.purchased_on)}</p>
+    <p class="muted">当前收益：${esc(item.current_income)}</p>
+    <div class="wealth-action">
+      <input class="input" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01"
+        placeholder="金额（元），最多 ${max}" data-amount-for="${esc(item.product_id)}" />
+      <button class="btn" type="button" data-action="wealth-redeem"
+        data-product="${esc(item.product_id)}" data-max="${max}">赎回</button>
+    </div>
+    <p class="muted"><span class="tech">${esc(item.record_id)}</span></p>
+    <p class="muted wealth-error" data-wealth-error hidden></p>
+  </article>`;
+}
+
+function renderWealth(data) {
+  const payload = data || {};
+  /* 产品目录同时是「产品」槽的候选来源：先落到 state，再渲染 */
+  state.wealth = {
+    products: payload.products || [],
+    holdings: payload.holdings || [],
+  };
+  const assessment = payload.assessment || {};
+  const status = el("wealth-status");
+  if (status) status.innerHTML = wealthAssessmentLine(assessment);
+  const box = el("wealth-assessment");
+  /* 表单一经渲染就保留用户已选答案：只在没有表单时（首次 / 提交后）重建 */
+  if (box && !box.querySelector("[data-assessment-form]")) {
+    const open = assessment.state === "valid" ? "" : " open";
+    box.innerHTML = `<details class="wealth-retake"${open}>
+      <summary>${assessment.state === "valid" ? "重新测评（覆盖当前等级）" : "开始答题"}</summary>
+      ${assessmentFormHtml("panel", assessment.questionnaire)}
+    </details>`;
+  }
+  const products = el("wealth-products");
+  if (products) {
+    const rows = payload.products || [];
+    products.innerHTML = rows.length
+      ? rows.map(wealthProductHtml).join("")
+      : '<p class="muted">产品目录为空。</p>';
+  }
+  const holdings = el("wealth-holdings");
+  if (holdings) {
+    const rows = payload.holdings || [];
+    holdings.innerHTML = rows.length
+      ? rows.map(wealthHoldingHtml).join("")
+      : '<p class="muted">当前没有持仓。</p>';
+  }
+  const source = el("wealth-source");
+  if (source) source.textContent = payload.data_source ? `数据来源：${payload.data_source}` : "";
+}
+
+async function refreshWealth() {
+  const result = await apiFetch("GET", "/api/wealth/overview");
+  if (result.status === 404) {
+    const status = el("wealth-status");
+    if (status) status.textContent = "理财服务尚未接入（当前渠道没有该读接口）。";
+    return;
+  }
+  if (!result.ok) throw new Error("理财面板读取失败");
+  renderWealth(result.data);
+}
+
+function assessmentResultHtml(outcome) {
+  const result = (outcome && outcome.result) || {};
+  const assessment = (outcome && outcome.assessment) || {};
+  const level = result.risk_profile || assessment.risk_profile || "—";
+  const score = result.score === undefined ? "—" : `${result.score} / ${result.max_score}`;
+  return `<div class="takeover wealth-result">
+    <div><b>测评完成：${esc(level)}</b> <span class="chip chip--green">按问卷重新定级</span></div>
+    <p>得分 ${esc(score)}（等级由服务端按得分算出，不能自填）。</p>
+    <p class="muted">测评日 ${esc(assessment.assessed_on || "—")} · 有效期至 ${esc(assessment.expires_on || "—")}</p>
+    <p class="muted">产品目录已按新等级重新判定可申购范围。</p>
+  </div>`;
+}
+
+async function onAssessmentSubmit(form) {
+  const error = form.querySelector("[data-form-error]");
+  const answers = {};
+  form.querySelectorAll("input[data-question]:checked").forEach((node) => {
+    answers[node.dataset.question] = node.value;
+  });
+  const questions = Array.from(new Set(Array.from(form.querySelectorAll("input[data-question]"))
+    .map((node) => node.dataset.question)));
+  const missing = questions.filter((id) => !answers[id]);
+  if (missing.length) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = `还有 ${missing.length} 道题没有选，请逐题完成后提交。`;
+    }
+    return;
+  }
+  const result = await post("/api/risk-assessment", { answers });
+  if (result.status !== 200) {
+    if (error) {
+      error.hidden = false;
+      error.textContent = (result.data && result.data.detail) || "提交未被接受，请核对答案后重试。";
+    }
+    return;
+  }
+  const card = assessmentResultHtml(result.data);
+  const box = el("wealth-assessment");
+  if (box && box.contains(form)) {
+    box.innerHTML = "";
+  } else {
+    form.outerHTML = card;
+  }
+  await refreshWealth();
+  timelineAdd(`风险测评已提交：服务端算分定级 ${result.data.result.risk_profile}`, "done");
+}
+
+/* 面板读取失败也要说人话：三块都写清楚「没读到」，不留「正在读取…」的假运行态 */
+function showWealthFailure(message) {
+  const status = el("wealth-status");
+  if (status) status.textContent = message;
+  ["wealth-products", "wealth-holdings"].forEach((id) => {
+    const box = el(id);
+    if (box) box.innerHTML = `<p class="muted">${esc(message)}</p>`;
+  });
+}
+
+function wealthError(trigger, message) {
+  const card = trigger.closest(".wealth-product");
+  const box = card ? card.querySelector("[data-wealth-error]") : null;
+  if (box) {
+    box.hidden = false;
+    box.textContent = message;
+  } else {
+    timelineAdd(message, "stop");
+  }
+}
+
+/* 卡片上的「申购 / 赎回」：把产品作为受信任选择随文本一起提交，
+   金额与上限在本地先挡一道（服务端仍会独立复核）。 */
+async function onWealthAction(trigger) {
+  const redeem = trigger.dataset.action === "wealth-redeem";
+  const productId = trigger.dataset.product || "";
+  const card = trigger.closest(".wealth-product");
+  const input = card ? card.querySelector("[data-amount-for]") : null;
+  if (!input) return;
+  const raw = (input.value || "").trim();
+  const amount = Number(raw);
+  if (!raw || !Number.isFinite(amount) || amount <= 0) {
+    wealthError(trigger, "请输入大于 0 的金额（单位：元）。");
+    input.focus();
+    return;
+  }
+  if (!productId) {
+    wealthError(trigger, "未取到产品编号，请重新加载理财面板后再试。");
+    return;
+  }
+  const limit = Number(redeem ? trigger.dataset.max : trigger.dataset.min);
+  if (Number.isFinite(limit) && limit > 0) {
+    if (!redeem && amount < limit) {
+      wealthError(trigger, `低于起购金额 ${limit} 元，请调整金额后重试。`);
+      input.focus();
+      return;
+    }
+    if (redeem && amount > limit) {
+      wealthError(trigger, `赎回金额不能超过持仓 ${limit} 元。`);
+      input.focus();
+      return;
+    }
+  }
+  const name = card ? card.querySelector("b")?.textContent || productId : productId;
+  const text = `${redeem ? "赎回" : "申购"} ${amount} 元 ${name}`;
+  const selected = Object.assign(selectedObjects(), { product: productId });
+  const start = () => submitTask(text, selected);
+  if (!requestStart(start)) return;
+  await start();
 }
 
 function insightRuleLabel(ruleId) {
@@ -536,10 +798,12 @@ async function refreshAfterExecution() {
   } catch (_) {
     timelineAdd("业务结果已返回，对象列表刷新失败；请重新加载页面后核对。", "warn");
   }
+  /* 申购 / 赎回会改余额与持仓，转账也改余额：执行后一并刷新，避免页面停在旧数字 */
   try {
     await refreshTransfers();
+    await refreshWealth();
   } catch (_) {
-    timelineAdd("业务结果已返回，转账记录刷新失败；请重新加载页面后核对。", "warn");
+    timelineAdd("办理已返回，但面板刷新失败；请重新加载页面后核对。", "warn");
   }
 }
 
@@ -878,8 +1142,9 @@ function beginTask(text, selected = {}) {
   appendMessage("user", text);
   if (Object.keys(selected).length) {
     const objects = Object.keys(selected).map((slot) => {
+      if (slot === "product") return productLabel(selected[slot]);
       const node = el(`select-${slot}`);
-      return node.selectedOptions[0] ? node.selectedOptions[0].textContent : selected[slot];
+      return node && node.selectedOptions[0] ? node.selectedOptions[0].textContent : selected[slot];
     });
     appendMessage("user", `本次办理对象：${objects.join("；")}`);
   }
@@ -979,9 +1244,11 @@ function renderPresets() {
   const html = PRESETS.map(
     (text) => `<button class="btn btn--ghost" data-preset="${esc(text)}">${esc(text)}</button>`
   ).join("");
+  /* 理财面板在处理详情（桌面常驻 / 移动端抽屉）里，快捷场景首位给一个显式入口 */
+  const quick = '<button class="btn btn--ghost" data-action="open-wealth">理财 · 测评 / 产品 / 持仓</button>' + html;
   ["quick-scenes", "presets"].forEach((id) => {
     const container = el(id);
-    if (container) container.innerHTML = id === "presets" ? PRESETS.slice(0, 4).map((text) => `<button class="btn" data-preset="${esc(text)}">${esc(text)}</button>`).join("") : html;
+    if (container) container.innerHTML = id === "presets" ? PRESETS.slice(0, 4).map((text) => `<button class="btn" data-preset="${esc(text)}">${esc(text)}</button>`).join("") : quick;
   });
 }
 
@@ -1000,6 +1267,17 @@ async function applySubmission(data) {
     const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
     if (data.card.level === "GREEN") await onConfirm();
+    return;
+  }
+  if (data.state === "idle" && Array.isArray(data.questionnaire) && data.questionnaire.length) {
+    /* 「我要做风险测评」⇒ 聊天内直接出 5 题表单；等级仍由服务端算分，前端不填等级 */
+    state.phase = "idle";
+    state.panel = `<div class="takeover" data-assessment-host="chat">
+      <p class="wealth-invite">${esc(data.message || "风险测评")}</p>
+      ${assessmentFormHtml("chat", data.questionnaire)}
+    </div>`;
+    renderStage();
+    timelineAdd("风险测评 · 已下发 5 道题（答完由服务端算分定级）", "done");
     return;
   }
   if (data.state === "idle") {
@@ -1063,7 +1341,7 @@ function clarifyControl(ask) {
       `<span class="muted">候选来自名册与已记账流水，只列事实，不做猜测。</span>`
     );
   }
-  if (OBJECT_OPTIONS[slot]) return `<select ${attrs}>${optionsHtml(slot)}</select>`;
+  if (OBJECT_OPTIONS[slot] || slot === "product") return `<select ${attrs}>${optionsHtml(slot)}</select>`;
   if (slot === "period") {
     return `<select ${attrs}><option value="">请选择扣费周期</option>` +
       `<option value="monthly">每月</option><option value="yearly">每年</option></select>`;
@@ -2135,14 +2413,24 @@ function setMobileDrawer(name, open) {
     const isOpen = drawerName === name && open;
     el(`btn-${drawerName}-mobile`)?.setAttribute("aria-expanded", String(isOpen));
   });
+  syncRailAria();
+  if (open && name === "scenes") el("btn-reset")?.focus();
+  if (open && name === "trace") el("btn-close-trace")?.focus();
+}
+
+/* 桌面端侧栏与处理详情是常驻可见的，`aria-hidden` 不能写死 true，
+   否则读屏用户拿不到理财面板；视口变化时重算一次。 */
+function syncRailAria() {
+  if (!app) return;
   const persistentOnDesktop = window.matchMedia("(min-width: 1021px)").matches;
   el("conversation-sidebar").setAttribute(
     "aria-hidden",
     String(!app.classList.contains("is-scenes-open") && !persistentOnDesktop),
   );
-  el("trace").setAttribute("aria-hidden", String(!app.classList.contains("is-trace-open")));
-  if (open && name === "scenes") el("btn-reset")?.focus();
-  if (open && name === "trace") el("btn-close-trace")?.focus();
+  el("trace").setAttribute(
+    "aria-hidden",
+    String(!app.classList.contains("is-trace-open") && !persistentOnDesktop),
+  );
 }
 
 function isNarrowNav() {
@@ -2215,6 +2503,51 @@ el("stage").addEventListener("click", (event) => {
   if (event.target && event.target.id === "btn-clarify") action(onClarify)();
   if (event.target && event.target.id === "btn-reverify") action(requestVerification)();
   if (event.target && event.target.id === "btn-refresh-session") action(refreshSession)();
+});
+
+/* 问卷表单在「面板」和「聊天内」两处动态渲染，故用文档级事件委托 */
+document.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const trigger = target ? target.closest('[data-action="submit-assessment"]') : null;
+  if (!trigger) return;
+  const form = trigger.closest("[data-assessment-form]");
+  if (!form || form.dataset.busy === "1") return;
+  form.dataset.busy = "1";
+  trigger.disabled = true;
+  try {
+    await onAssessmentSubmit(form);
+  } catch (_) {
+    const error = form.querySelector("[data-form-error]");
+    if (error) {
+      error.hidden = false;
+      error.textContent = "提交失败：未收到服务端回执，请稍后重试。";
+    }
+  } finally {
+    form.dataset.busy = "0";
+    trigger.disabled = false;
+  }
+});
+
+/* 理财入口与卡片按钮：快捷场景和处理详情都是动态渲染，故用文档级事件委托 */
+document.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  if (target.closest('[data-action="open-wealth"]')) {
+    setMobileDrawer("trace", true);
+    const panel = el("wealth-panel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  const trigger = target.closest('[data-action="wealth-subscribe"], [data-action="wealth-redeem"]');
+  if (!trigger || trigger.disabled) return;
+  trigger.disabled = true;
+  try {
+    await onWealthAction(trigger);
+  } catch (_) {
+    wealthError(trigger, "提交失败：未收到服务端回执，请稍后重试。");
+  } finally {
+    trigger.disabled = false;
+  }
 });
 
 function readTheme() {
@@ -2452,6 +2785,9 @@ refreshInsights().catch(() => {
 refreshTransfers().catch(() => {
   el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";
 });
+refreshWealth().catch(() => {
+  showWealthFailure("理财面板读取失败，请稍后重试。");
+});
 refreshConversations().catch(() => {});
 refreshLifeEvents().catch(() => {});
 refreshProfileEntry().catch(() => {});
@@ -2463,6 +2799,7 @@ window.addEventListener("online", () => {
   refreshChannelHealth().catch(() => {});
   refreshInsights().catch(() => {});
   refreshTransfers().catch(() => {});
+  refreshWealth().catch(() => showWealthFailure("理财面板读取失败，请稍后重试。"));
   refreshConversations().catch(() => {});
   refreshLifeEvents().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");

@@ -93,6 +93,16 @@ class WealthProduct:
 
 
 @dataclass(frozen=True)
+class WealthHolding:
+    """理财持仓（只读事实）：金额与申购/赎回同源，`purchased_on` 为起息日。"""
+
+    product_id: str
+    user_id: str
+    amount: Money
+    purchased_on: date
+
+
+@dataclass(frozen=True)
 class Subscription:
     subscription_id: str
     user_id: str

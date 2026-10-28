@@ -25,6 +25,7 @@ from ai_banking_copilot.gateway.models import (
     Payee,
     Subscription,
     Transaction,
+    WealthHolding,
     WealthProduct,
 )
 from ai_banking_copilot.gateway.security_store import PasswordChangeEvent
@@ -112,6 +113,15 @@ class FactGateway:
     def wealth_products(self) -> tuple[Record[WealthProduct], ...]:
         rows = self._store.query("SELECT * FROM wealth_products ORDER BY product_id")
         return tuple(self._wealth_product(row) for row in rows)
+
+    def wealth_holdings_of(self, user_id: str) -> tuple[Record[WealthHolding], ...]:
+        """本人理财持仓（只读；金额与申购/赎回同源，供页面「操作可查」对账）。"""
+        rows = self._store.query(
+            "SELECT * FROM wealth_holdings WHERE user_id = ? AND amount_cents > 0"
+            " ORDER BY product_id",
+            (user_id,),
+        )
+        return tuple(self._wealth_holding(row) for row in rows)
 
     def transactions_between(
         self, account_id: str, start: date, end: date
@@ -365,6 +375,15 @@ class FactGateway:
             min_amount=Money(int(row["min_amount_cents"])),  # type: ignore[index]
         )
         return _record("wealth_products", payload.product_id, payload)
+
+    def _wealth_holding(self, row: object) -> Record[WealthHolding]:
+        payload = WealthHolding(
+            product_id=str(row["product_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            amount=Money(int(row["amount_cents"])),  # type: ignore[index]
+            purchased_on=date.fromisoformat(str(row["purchased_on"])),  # type: ignore[index]
+        )
+        return _record("wealth_holdings", payload.product_id, payload)
 
     def _hold(self, row: object) -> Record[Hold]:
         payload = Hold(
