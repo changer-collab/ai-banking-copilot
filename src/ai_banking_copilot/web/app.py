@@ -24,7 +24,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictInt
@@ -103,17 +103,24 @@ from ai_banking_copilot.web.channels.contracts import (
     CHANNEL_FEISHU,
     CHANNEL_LOCAL,
     ChannelError,
+    ChannelRateLimited,
     ConfirmCommand,
     InboundMessage,
     OutboundMessage,
 )
 from ai_banking_copilot.web.channels.dispatcher import Dispatcher
+from ai_banking_copilot.web.channels.feishu import (
+    FeishuAdapter,
+    FeishuConfig,
+    FeishuProtocolError,
+)
 from ai_banking_copilot.web.channels.identity import (
     IdentityDirectory,
     MemoryIdentityDirectory,
     StoreIdentityDirectory,
     init_channel_schema,
 )
+from ai_banking_copilot.web.channels.ratelimit import EventLedger, HealthRegistry
 from ai_banking_copilot.web.channels.render import render_feishu_card, render_text
 from ai_banking_copilot.web.conversation_store import ConversationStore
 from ai_banking_copilot.web.insights import InsightService
@@ -420,6 +427,11 @@ def create_app(deps: AppDeps) -> FastAPI:
         identities = StoreIdentityDirectory(deps.channel_store)
     else:
         identities = MemoryIdentityDirectory()
+    feishu = FeishuAdapter(FeishuConfig.from_env())
+    health = HealthRegistry()
+    event_ledger: EventLedger | None = None
+    memory_event_ids: set[str] = set()
+    replay_responses: dict[str, dict[str, object]] = {}
 
     _dispatchers: dict[str, Dispatcher] = {}
     """按用户缓存的渠道调度器：IM 本地渠道沿用登录者身份，不借用默认用户。"""
@@ -436,6 +448,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 execution_payload=_execution_payload,
                 audit=deps.audit,
                 server_user_id=user_id,
+                feishu_configured=feishu.configured,
             )
             _dispatchers[user_id] = built
             return built
@@ -448,11 +461,22 @@ def create_app(deps: AppDeps) -> FastAPI:
         })
 
     @app.exception_handler(ChannelError)
-    async def channel_error(_request: Request, error: ChannelError) -> JSONResponse:
+    async def channel_error(request: Request, error: ChannelError) -> JSONResponse:
         """渠道层稳定错误：直接采用错误族自带的 `status_code`，不吞成 500。"""
+        headers = {"Retry-After": "60"} if isinstance(error, ChannelRateLimited) else None
+        if isinstance(error, ChannelRateLimited):
+            channel = (
+                CHANNEL_FEISHU
+                if request.url.path == "/api/im/feishu"
+                else CHANNEL_LOCAL
+                if request.url.path.startswith("/api/im/")
+                else "web"
+            )
+            health.record_rate_limit(channel)
         return JSONResponse(
             status_code=error.status_code,
             content={"detail": error.code, "message": str(error)},
+            headers=headers,
         )
 
     @app.exception_handler(AuthError)
@@ -1325,19 +1349,141 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.get("/api/channels/health")
     def channels_health(user_id: str = Depends(current_user)) -> dict[str, object]:
         """渠道健康页：如实区分「已配置 / 未配置」，不把 stub 说成可用。"""
-        return _dispatcher_for(user_id).health()
+        body = _dispatcher_for(user_id).health()
+        channels = body["channels"]
+        if isinstance(channels, dict):
+            channels["web"] = {"configured": True, "mode": "web", "reason": ""}
+            channels[CHANNEL_FEISHU] = {
+                "configured": feishu.configured,
+                "mode": (
+                    "adapter"
+                    if feishu.configured
+                    else ("replay" if feishu.replay_mode else "stub")
+                ),
+                "reason": (
+                    ""
+                    if feishu.configured
+                    else ("replay_mode" if feishu.replay_mode else "not_configured")
+                ),
+                "card_action": feishu.configured,
+            }
+        body["health"] = health.snapshot()
+        return body
+
+    def _send_live_feishu(outbound: OutboundMessage) -> None:
+        try:
+            feishu.send(outbound)
+            health.record_event(CHANNEL_FEISHU, success=True)
+        except Exception:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            health.record_retry(CHANNEL_FEISHU)
 
     @app.post("/api/im/feishu")
-    def im_feishu() -> JSONResponse:
-        """飞书回调：**当前未接入**（M2 未完成），如实 501，不做假成功。"""
-        return JSONResponse(
-            status_code=501,
-            content={
-                "detail": "not_configured",
-                "channel": CHANNEL_FEISHU,
-                "reason": "feishu_adapter_not_integrated",
-            },
+    async def im_feishu(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+        """飞书回调：验签 → 解密 → 身份解析 → 幂等 → **按用户** dispatcher。
+
+        免登录（外部回调），但**必须**验签 + 时间戳；身份只认 `channel_identities` 绑定，
+        未绑定直接 401，**绝不**回落到 `deps.user_id`。
+        """
+        nonlocal event_ledger
+        body = await request.body()
+        if not feishu.verify(request.headers, body):
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "signature_invalid", "channel": CHANNEL_FEISHU},
+            )
+        try:
+            payload = feishu.decode_body(body)
+            event = feishu.parse_event(payload)
+        except FeishuProtocolError as error:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return JSONResponse(
+                status_code=400,
+                content={"detail": str(error), "channel": CHANNEL_FEISHU},
+            )
+        if event.challenge is not None:
+            health.record_event(CHANNEL_FEISHU, success=True)
+            return JSONResponse(content={"challenge": event.challenge})
+        command = event.command
+        inbound = event.inbound
+        material = command if command is not None else inbound
+        if material is None:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "message_event_missing", "channel": CHANNEL_FEISHU},
+            )
+        external_user_id = material.external_user_id
+        binding = (
+            identities.resolve(CHANNEL_FEISHU, external_user_id)
+            if external_user_id
+            else None
         )
+        if binding is None:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "identity_unbound",
+                    "channel": CHANNEL_FEISHU,
+                    "message": "该飞书账号尚未绑定，请先在网页个人中心完成绑定",
+                },
+            )
+        event_id = event.event_id
+        if event_id:
+            if event_ledger is None and deps.channel_store is not None:
+                event_ledger = EventLedger(deps.channel_store)
+            claimed = (
+                event_ledger.claim(event_id)
+                if event_ledger is not None
+                else event_id not in memory_event_ids
+            )
+            if event_ledger is None and claimed:
+                memory_event_ids.add(event_id)
+            if not claimed:
+                health.record_replay(CHANNEL_FEISHU)
+                cached_response = replay_responses.get(event_id)
+                if cached_response is not None:
+                    return JSONResponse(content={**cached_response, "replayed": True})
+                return JSONResponse(
+                    content={
+                        "code": 0,
+                        "channel": CHANNEL_FEISHU,
+                        "event_id": event_id,
+                        "replayed": True,
+                    }
+                )
+        try:
+            outbound = _dispatcher_for(binding.user_id).dispatch(material)
+        except Exception:
+            # 未执行成功（401/429/409/状态机拒绝）不得消费事件，否则平台重投只会拿到空回放。
+            if event_id:
+                if event_ledger is not None:
+                    event_ledger.release(event_id)
+                else:
+                    memory_event_ids.discard(event_id)
+            health.record_event(CHANNEL_FEISHU, success=False)
+            raise
+        health.record_event(CHANNEL_FEISHU, success=True)
+        response = _channel_payload(outbound)
+        response["rendered"] = {
+            "text": render_text(outbound),
+            "feishu": feishu.render(outbound),
+        }
+        if feishu.configured and not feishu.replay_mode:
+            background_tasks.add_task(_send_live_feishu, outbound)
+        envelope = {
+            "code": 0,
+            "channel": CHANNEL_FEISHU,
+            "event_id": event_id,
+            "replayed": outbound.replayed,
+            "data": response,
+            "card": feishu.render(outbound),
+        }
+        if event_id:
+            replay_responses[event_id] = envelope
+        return JSONResponse(content=envelope)
 
     @app.get("/im", response_class=HTMLResponse)
     def im_page(request: Request) -> HTMLResponse:

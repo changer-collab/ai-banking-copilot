@@ -284,6 +284,7 @@ def test_seed_report_marks_prediction_and_matches_raw_transactions(
         assert evidence.content_hash == record.content_hash
         assert evidence.amount_cents == record.payload.amount.cents
         assert evidence.booked_on == record.payload.booked_on
+        assert evidence.channel == record.payload.channel
 
 
 def test_payload_marks_demo_data_and_unintegrated_external_cancel(
@@ -299,6 +300,7 @@ def test_payload_marks_demo_data_and_unintegrated_external_cancel(
     assert video["amount_yuan"] == "25.00"
     assert video["currency"] == "CNY"
     assert video["evidence"]
+    assert cast(list[dict[str, object]], video["evidence"])[0]["channel"] == "app"
 
 
 # 9. 取消状态互不混用；失败 / 超时不得表述为已取消
