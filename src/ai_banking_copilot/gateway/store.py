@@ -16,13 +16,14 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
     ("city", "TEXT"),
+    ("card_tail", "TEXT"),
 )
-"""`transactions` 的**可空**扩展列（v2）。
+"""`transactions` 的**可空**扩展列（v3）。
 
 判据层（如账单「深夜 / 异地」）必须能跳过 `NULL`——旧库升级后历史行为 `NULL`。
 """
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     channel      TEXT NOT NULL,
     direction    TEXT NOT NULL CHECK (direction IN ('in', 'out')),
     booked_at    TEXT,
-    city         TEXT
+    city         TEXT,
+    card_tail    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wealth_products (
@@ -144,7 +146,7 @@ def init_schema(store: Store) -> None:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """v1 → v2 幂等迁移：给 `transactions` 补可空列。
+    """v1 / v2 → v3 幂等迁移：给 `transactions` 补可空列。
 
     `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
     先查 `PRAGMA table_info` 再补，重复执行零副作用。
