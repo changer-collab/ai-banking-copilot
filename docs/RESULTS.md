@@ -214,6 +214,19 @@ python -m pytest -q           # tests=1789 / failures=0 / errors=0 / skipped=0�
 - 前端静态壳：`app.css?v=7` / `workspace.css?v=7` / `app.js?v=24` / `aib-static-shell-v16` / `sw.js?v=16`。
 - `check_design_sync.py` 仍报 `app.css` 两仓既有漂移（非本轮引入）。
 
+### 10. UI 反馈版（2026-10-28，PR #30 之后）
+
+```
+python -m ruff check .        # All checks passed!
+python -m mypy                # Success: no issues found in 104 source files
+python -m pytest -q           # tests=1790 / failures=0 / errors=0 / skipped=0（退出码 0）
+```
+
+- 提交：`283bdca`（合入登录页对齐、三栏可收起、个人中心弹窗、APP 四 Tab）。
+- 较第 9 节 **1789** 增加 1 条：`auth.resolve` 时间戳损坏时 fail-closed 的用例。
+- 前端静态壳：`app.css?v=7` / `workspace.css?v=9` / `app.js?v=25` / `aib-static-shell-v18` / `sw.js?v=18`。
+- 壳 HTML 已加 `Cache-Control: no-store`，避免旧 HTML 缓存锁死旧资源版本。
+
 ---
 
 ## 四个数字的口径（2026-10-27 冻结）
