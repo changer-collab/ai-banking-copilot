@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +20,7 @@ from ai_banking_copilot.web.channels.contracts import (
     ChannelUnauthorized,
 )
 from ai_banking_copilot.web.channels.dispatcher import Dispatcher
+from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.channels.im import ImChannel
 from ai_banking_copilot.web.session import ConfirmationMismatchError
 
@@ -237,6 +239,40 @@ def test_replayed_im_message_only_increments_replay_health(deps: AppDeps) -> Non
     assert health["events"] == health["ok"] == 1
     assert health["failed"] == 0
     assert health["replayed"] == 1
+
+
+def test_replayed_im_message_rechecks_external_identity(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    init_channel_schema(rw_store)
+    rw_store.execute(
+        "INSERT INTO channel_identities(channel, external_user_id, user_id, bound_at) "
+        "VALUES ('im', 'bound-user', ?, 'now')",
+        (deps.user_id,),
+    )
+    client = TestClient(create_app(replace(deps, channel_store=rw_store)))
+    first = client.post(
+        "/api/im/message",
+        json={
+            "chat_id": "identity-replay",
+            "event_id": "identity-replay-event",
+            "user_id": "bound-user",
+            "text": "查询余额",
+        },
+    )
+    rejected = client.post(
+        "/api/im/message",
+        json={
+            "chat_id": "identity-replay",
+            "event_id": "identity-replay-event",
+            "user_id": "unbound-user",
+            "text": "查询余额",
+        },
+    )
+
+    assert first.status_code == 200
+    assert rejected.status_code == 401
+    assert rejected.json()["detail"] == "identity_unbound"
 
 
 def test_replayed_im_confirm_only_increments_replay_health_and_executes_once(

@@ -154,10 +154,6 @@ class Dispatcher:
         *,
         preserve_outcome_error: bool,
     ) -> OutboundMessage:
-        cached = self._cached(inbound)
-        if cached is not None:
-            return replace(cached, replayed=True)
-
         try:
             user_id = self._resolve_user(inbound)
         except ChannelUnauthorized:
@@ -178,6 +174,9 @@ class Dispatcher:
             )
             self._log_failure(inbound, status="failed", reason="dispatch_failed")
             raise
+        cached = self._cached(inbound)
+        if cached is not None:
+            return replace(cached, replayed=True)
         rate_identity = inbound.external_user_id or user_id
         if not self._limiter.allow(
             f"{inbound.channel}:{rate_identity}", reservation_id=inbound.event_id
