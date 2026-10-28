@@ -997,3 +997,31 @@ html[data-view="app"] #profile-panel { width: min(520px, 92vw); max-height: 82vh
   padding: 4px 6px;
   text-align: left;
 }
+.channel-health-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.channel-health-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+.channel-health-table th,
+.channel-health-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rule);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.channel-health-table th:nth-child(1) { width: 12%; }
+.channel-health-table th:nth-child(2) { width: 20%; }
+.channel-health-table th:nth-child(3) { width: 24%; }
+.channel-health-table th:nth-child(4),
+.channel-health-table th:nth-child(5),
+.channel-health-table th:nth-child(6) { width: 10%; }
+.channel-health-table th:nth-child(7) { width: 14%; }
+html[data-view="app"] .channel-health-table-wrap { max-width: 100%; }

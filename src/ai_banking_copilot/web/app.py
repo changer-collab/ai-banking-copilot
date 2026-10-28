@@ -113,6 +113,7 @@ from ai_banking_copilot.web.channels.contracts import (
     OutboundMessage,
 )
 from ai_banking_copilot.web.channels.dispatcher import (
+    DEFAULT_CHAT_ID,
     Dispatcher,
     DispatchOutcomeUnknown,
     channel_audit_payload,
@@ -380,6 +381,12 @@ class _ImMessageRequest(BaseModel):
     chat_id: str | None = None
     user_id: str | None = None
     event_id: str | None = None
+
+
+class _ImVerificationRequest(BaseModel):
+    """IM 强验证挑战：只用 chat_id 定位与待确认计划相同的 IM 会话。"""
+
+    chat_id: str | None = None
 
 
 class _ImConfirmRequest(BaseModel):
@@ -1585,7 +1592,19 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _channel_payload(_dispatcher_for(user_id).dispatch(inbound))
+        try:
+            outbound = _dispatcher_for(user_id).dispatch(inbound)
+            response = _channel_payload(outbound)
+        except ChannelRateLimited:
+            raise
+        except Exception:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise
+        if outbound.replayed:
+            health.record_replay(CHANNEL_LOCAL)
+        else:
+            health.record_event(CHANNEL_LOCAL, success=True)
+        return response
 
     @app.post("/api/im/confirm")
     def im_confirm(
@@ -1605,7 +1624,48 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _channel_payload(_dispatcher_for(user_id).dispatch(command))
+        try:
+            outbound = _dispatcher_for(user_id).dispatch(command)
+            response = _channel_payload(outbound)
+        except ChannelRateLimited:
+            raise
+        except (
+            SessionStateError,
+            ConfirmationMismatchError,
+            StrongVerificationRequiredError,
+            StalePlanError,
+        ) as error:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise
+        if outbound.replayed:
+            health.record_replay(CHANNEL_LOCAL)
+        else:
+            health.record_event(CHANNEL_LOCAL, success=True)
+        return response
+
+    @app.post("/api/im/verify/request")
+    def request_im_verification(
+        request: _ImVerificationRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """申请绑定到当前 IM 会话及冻结计划的一次性强验证挑战。"""
+        session_id = f"{CHANNEL_LOCAL}:{request.chat_id or DEFAULT_CHAT_ID}"
+        try:
+            prompt = _session_for(session_id, user_id).request_verification()
+        except (SessionStateError, StrongVerificationRequiredError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        result: dict[str, object] = {
+            "mode": prompt.mode,
+            "status": prompt.status,
+            "channel": prompt.channel,
+            "target": prompt.target,
+            "expires_in_s": prompt.expires_in_s,
+        }
+        if prompt.mode == "demo":
+            result["code"] = prompt.code
+        return result
 
     @app.get("/api/channels/health")
     def channels_health(user_id: str = Depends(current_user)) -> dict[str, object]:
@@ -2280,17 +2340,18 @@ _IM_PAGE_HTML = """<!doctype html>
   .dot.on { background: #16794a; }
   #bubbles { display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
   .bubble { max-width: 88%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
-  .bubble.user { align-self: flex-end; background: #1f4e79; color: #fff; }
-  .bubble.assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e6ea; }
-  .bubble.system { align-self: center; background: #fff7e6; color: #8a5a00; font-size: 12px; }
-  .card { align-self: flex-start; width: 100%; background: #fff; border: 1px solid #cfd6de;
+  .bubble--user { align-self: flex-end; background: #1f4e79; color: #fff; }
+  .bubble--assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e6ea; }
+  .bubble--system { align-self: center; background: #fff7e6; color: #8a5a00; font-size: 12px; }
+  .plan-card { align-self: flex-start; width: 100%; background: #fff; border: 1px solid #cfd6de;
     border-radius: 10px; padding: 12px 14px; }
-  .card h2 { margin: 0 0 8px; font-size: 13px; color: #1f4e79; font-weight: 600; }
-  .card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
-  .card dt { color: #6b7280; font-size: 12px; }
-  .card dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .card ul { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: #4b5563; }
-  .card button { margin-top: 10px; }
+  .plan-card h2 { margin: 0 0 8px; font-size: 13px; color: #1f4e79; font-weight: 600; }
+  .plan-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+  .plan-card dt { color: #6b7280; font-size: 12px; }
+  .plan-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .plan-card ul { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: #4b5563; }
+  .plan-card button { margin-top: 10px; }
+  .verification-code { display: block; width: 100%; margin-top: 10px; }
   form { display: flex; gap: 8px; margin-top: 16px; }
   input[type=text] {
     flex: 1; padding: 8px 10px; border: 1px solid #cfd6de; border-radius: 8px;
@@ -2314,7 +2375,7 @@ _IM_PAGE_HTML = """<!doctype html>
   <div id="bubbles"></div>
   <form id="composer">
     <input type="text" id="text" placeholder="例如：这个月订阅花了多少" autocomplete="off">
-    <button type="submit">发送</button>
+    <button type="submit" id="send-button">发送</button>
   </form>
   <p class="note">本页与主对话页共用同一条会话状态机与冻结校验；仅用于验证本地 IM 渠道。</p>
 </main>
@@ -2325,7 +2386,11 @@ _IM_PAGE_HTML = """<!doctype html>
   var bubbles = document.getElementById("bubbles");
   var composer = document.getElementById("composer");
   var input = document.getElementById("text");
+  var sendButton = document.getElementById("send-button");
   var health = document.getElementById("health");
+  var composerLockTimer = null;
+  var composerLockToken = 0;
+  var healthHasData = false;
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -2335,7 +2400,7 @@ _IM_PAGE_HTML = """<!doctype html>
   }
 
   function push(role, text) {
-    bubbles.appendChild(el("div", "bubble " + role, text));
+    bubbles.appendChild(el("div", "bubble bubble--" + role, text));
     bubbles.scrollTop = bubbles.scrollHeight;
   }
 
@@ -2346,7 +2411,7 @@ _IM_PAGE_HTML = """<!doctype html>
 
   function renderCard(card) {
     if (!card) { return; }
-    var box = el("section", "card");
+    var box = el("section", "plan-card");
     box.appendChild(el("h2", null, "计划卡 · " + (card.level || "")));
     var summary = card.summary || [];
     var lines = card.lines || [];
@@ -2367,15 +2432,57 @@ _IM_PAGE_HTML = """<!doctype html>
         + " · 已用 " + money(card.daily_accumulated_cents || 0));
       box.appendChild(quota);
     }
+    var requiresStrongVerification = Array.isArray(card.requires)
+      && card.requires.indexOf("strong_verify") !== -1;
+    var verificationInput = null;
+    if (requiresStrongVerification) {
+      verificationInput = el("input", "verification-code");
+      verificationInput.type = "text";
+      verificationInput.inputMode = "numeric";
+      verificationInput.autocomplete = "one-time-code";
+      verificationInput.placeholder = "输入验证渠道收到的验证码";
+      box.appendChild(verificationInput);
+      var requestButton = el("button", null, "申请强验证");
+      requestButton.type = "button";
+      requestButton.addEventListener("click", function () {
+        requestButton.disabled = true;
+        post("/api/im/verify/request", { chat_id: CHAT_ID })
+          .then(function (challenge) {
+            if (typeof challenge.code === "string" && challenge.code.trim()) {
+              verificationInput.value = challenge.code.trim();
+              push("system", "演示验证码已填入，请确认执行。");
+            } else {
+              push("system", "强验证已发起，请填写验证渠道实际收到的验证码。");
+              verificationInput.focus();
+            }
+          })
+          .catch(function (error) { showRequestError(error, "申请强验证失败"); })
+          .finally(function () { requestButton.disabled = false; });
+      });
+      box.appendChild(requestButton);
+    }
     var btn = el("button", null, "确认执行");
     btn.type = "button";
     btn.addEventListener("click", function () {
+      var verificationCode = verificationInput ? verificationInput.value.trim() : "";
+      if (requiresStrongVerification && !verificationCode) {
+        push("system", "请先申请强验证，并填写实际收到的验证码。");
+        verificationInput.focus();
+        return;
+      }
       btn.disabled = true;
-      post("/api/im/confirm", {
+      var body = {
         card_id: card.card_id,
         frozen_hash: card.frozen_hash,
         chat_id: CHAT_ID
-      }).then(render).catch(function () { btn.disabled = false; });
+      };
+      if (verificationCode) { body.verification_code = verificationCode; }
+      post("/api/im/confirm", body)
+        .then(render)
+        .catch(function (error) {
+          showRequestError(error, "确认失败");
+          btn.disabled = false;
+        });
     });
     box.appendChild(btn);
     bubbles.appendChild(box);
@@ -2401,33 +2508,86 @@ _IM_PAGE_HTML = """<!doctype html>
       return resp.json().catch(function () { return {}; }).then(function (data) {
         if (!resp.ok) {
           var detail = data.detail || data.message || ("HTTP " + resp.status);
-          throw new Error(detail);
+          var error = new Error(detail);
+          error.status = resp.status;
+          error.retryAfter = resp.headers.get("Retry-After") || "";
+          error.detail = detail;
+          throw error;
         }
         return data;
       });
     });
   }
 
+  function lockComposer() {
+    composerLockToken += 1;
+    var lockToken = composerLockToken;
+    input.disabled = true;
+    sendButton.disabled = true;
+    if (composerLockTimer !== null) { window.clearTimeout(composerLockTimer); }
+    composerLockTimer = window.setTimeout(function () {
+      if (lockToken !== composerLockToken) { return; }
+      input.disabled = false;
+      sendButton.disabled = false;
+      composerLockTimer = null;
+      input.focus();
+    }, 3000);
+  }
+
+  function showRequestError(error, prefix) {
+    if (error && error.status === 429) {
+      lockComposer();
+      push("system", "发太快了，" + (error.retryAfter || "60") + " 秒后再试");
+      return;
+    }
+    var detail = error && (error.detail || error.message);
+    push("system", prefix + "：" + (detail || "渠道暂不可用"));
+  }
+
   function loadHealth() {
     fetch("/api/channels/health", { credentials: "same-origin" })
-      .then(function (resp) { return resp.json(); })
+      .then(function (resp) {
+        if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+        return resp.json();
+      })
       .then(function (data) {
-        health.textContent = "";
         var channels = data.channels || {};
-        var names = Object.keys(channels);
-        if (!names.length) { health.appendChild(el("span", null, "无渠道信息")); }
+        var runtime = data.health || {};
+        var names = ["web", "im", "feishu"];
+        var fragment = document.createDocumentFragment();
         names.forEach(function (name) {
-          var item = channels[name] || {};
+          var config = channels[name] || {};
+          var item = runtime[name] || {};
           var chip = el("span", null, null);
-          chip.appendChild(el("i", "dot" + (item.configured ? " on" : "")));
-          var label = name + " · " + (item.configured ? "已配置" : "未配置");
+          var configured = config.configured === true;
+          chip.appendChild(el("i", "dot" + (configured ? " on" : "")));
+          var rateLimits = item.ratelimit_hits || 0;
+          var label = name + " · " + (configured ? "已接入" : "未接入")
+            + " · 成功 " + (item.ok || 0)
+            + " · 失败 " + (item.failed || 0)
+            + " · 限流 " + rateLimits;
+          if (rateLimits > 0) { label += " · 发太快了，请稍后再试"; }
           chip.appendChild(document.createTextNode(label));
-          health.appendChild(chip);
+          fragment.appendChild(chip);
         });
+        health.replaceChildren(fragment);
+        healthHasData = true;
       })
       .catch(function () {
-        health.textContent = "";
-        health.appendChild(el("span", null, "渠道健康暂不可用"));
+        var previousFailure = health.querySelector(".health-error");
+        if (previousFailure) { previousFailure.remove(); }
+        var failure = el(
+          "span",
+          "health-error",
+          healthHasData
+            ? "渠道健康暂不可用，正在显示上次结果"
+            : "渠道健康暂不可用，稍后自动重试"
+        );
+        if (healthHasData) {
+          health.appendChild(failure);
+        } else {
+          health.replaceChildren(failure);
+        }
       });
   }
 
@@ -2440,11 +2600,12 @@ _IM_PAGE_HTML = """<!doctype html>
     post("/api/im/message", { text: text, chat_id: CHAT_ID })
       .then(render)
       .catch(function (error) {
-        push("system", "发送失败：" + error.message + "；渠道暂不可用，请用主对话页。");
+        showRequestError(error, "发送失败");
       });
   });
 
   loadHealth();
+  window.setInterval(loadHealth, 5000);
 })();
 </script>
 </body>

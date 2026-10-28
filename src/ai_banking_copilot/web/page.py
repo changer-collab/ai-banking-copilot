@@ -22,7 +22,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=9" />
+<link rel="stylesheet" href="/assets/workspace.css?v=10" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -340,7 +340,24 @@ _PAGE_HTML = """<!DOCTYPE html>
       <section class="panel" id="channel-health-panel">
         <p class="panel__title">渠道状态</p>
         <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-        <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
+        <div class="channel-health-table-wrap" id="channel-health-list" tabindex="0">
+          <table class="channel-health-table">
+            <thead>
+              <tr>
+                <th>渠道</th>
+                <th>状态</th>
+                <th>最后事件</th>
+                <th>成功</th>
+                <th>失败</th>
+                <th>限流</th>
+                <th>回放模式</th>
+              </tr>
+            </thead>
+            <tbody id="channel-health-body">
+              <tr><td colspan="7" class="muted">正在读取渠道状态…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
     </section>
   </main>
@@ -412,7 +429,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=25"></script>
+<script src="/assets/app.js?v=26"></script>
 </body>
 </html>
 """

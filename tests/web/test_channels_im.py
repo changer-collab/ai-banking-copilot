@@ -14,6 +14,11 @@ from ai_banking_copilot.compose import build_deps
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.web.app import AppDeps, create_app
+from ai_banking_copilot.web.channels.contracts import (
+    ChannelRateLimited,
+    ChannelUnauthorized,
+)
+from ai_banking_copilot.web.channels.dispatcher import Dispatcher
 from ai_banking_copilot.web.channels.im import ImChannel
 from ai_banking_copilot.web.session import ConfirmationMismatchError
 
@@ -185,6 +190,86 @@ def test_im_uses_template_model_when_llm_is_explicitly_disabled(tmp_path: Path) 
         assert cast(str, card["frozen_hash"])
 
 
+def test_successful_im_message_and_confirm_each_record_one_health_event(
+    deps: AppDeps,
+) -> None:
+    client = TestClient(create_app(deps))
+    initial = client.get("/api/channels/health").json()["health"]["im"]
+    assert initial["ok"] == initial["events"] == 0
+
+    submitted = client.post(
+        "/api/im/message",
+        json={"chat_id": "health-success", "text": "转给李娜 500 元"},
+    )
+    assert submitted.status_code == 200
+    after_message = client.get("/api/channels/health").json()["health"]["im"]
+    assert after_message["ok"] == after_message["events"] == 1
+
+    card = cast(dict[str, object], submitted.json()["card"])
+    confirmed = client.post(
+        "/api/im/confirm",
+        json={
+            "chat_id": "health-success",
+            "card_id": card["card_id"],
+            "frozen_hash": card["frozen_hash"],
+        },
+    )
+    assert confirmed.status_code == 200
+    after_confirm = client.get("/api/channels/health").json()["health"]["im"]
+    assert after_confirm["ok"] == after_confirm["events"] == 2
+
+
+def test_replayed_im_message_only_increments_replay_health(deps: AppDeps) -> None:
+    client = TestClient(create_app(deps))
+    body = {
+        "chat_id": "message-replay-health",
+        "event_id": "message-event-1",
+        "text": "查询余额",
+    }
+
+    first = client.post("/api/im/message", json=body)
+    replayed = client.post("/api/im/message", json=body)
+
+    assert first.status_code == replayed.status_code == 200
+    assert first.json()["replayed"] is False
+    assert replayed.json()["replayed"] is True
+    health = client.get("/api/channels/health").json()["health"]["im"]
+    assert health["events"] == health["ok"] == 1
+    assert health["failed"] == 0
+    assert health["replayed"] == 1
+
+
+def test_replayed_im_confirm_only_increments_replay_health_and_executes_once(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    client = TestClient(create_app(deps))
+    before_balance, before_txn = _balance(rw_store), _txn_count(rw_store)
+    submitted = client.post(
+        "/api/im/message",
+        json={"chat_id": "confirm-replay-health", "text": "转给李娜 500 元"},
+    )
+    card = cast(dict[str, object], submitted.json()["card"])
+    confirmation = {
+        "chat_id": "confirm-replay-health",
+        "event_id": "confirm-event-1",
+        "card_id": card["card_id"],
+        "frozen_hash": card["frozen_hash"],
+    }
+
+    first = client.post("/api/im/confirm", json=confirmation)
+    replayed = client.post("/api/im/confirm", json=confirmation)
+
+    assert first.status_code == replayed.status_code == 200
+    assert first.json()["replayed"] is False
+    assert replayed.json()["replayed"] is True
+    assert _balance(rw_store) == before_balance - 50000
+    assert _txn_count(rw_store) == before_txn + 1
+    health = client.get("/api/channels/health").json()["health"]["im"]
+    assert health["events"] == health["ok"] == 2
+    assert health["failed"] == 0
+    assert health["replayed"] == 1
+
+
 def test_im_confirmation_survives_restart_and_executes_once(tmp_path: Path) -> None:
     db_path = tmp_path / "im-restart.db"
     chat_id = "restart"
@@ -222,3 +307,161 @@ def test_im_confirmation_survives_restart_and_executes_once(tmp_path: Path) -> N
             balance, txn_count = _stored_facts(db_path)
             assert balance == before_balance - 50000
             assert txn_count == before_txn + 1
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/im/message", {"chat_id": "limited", "text": "查询余额"}),
+        (
+            "/api/im/confirm",
+            {"chat_id": "limited", "card_id": "card_limited", "frozen_hash": "0" * 64},
+        ),
+    ],
+)
+def test_im_routes_expose_rate_limit_as_429_with_retry_after(
+    deps: AppDeps,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, object],
+) -> None:
+    def reject(_self: Dispatcher, _message: object) -> object:
+        raise ChannelRateLimited("消息过于频繁，请稍后再试")
+
+    monkeypatch.setattr(Dispatcher, "dispatch", reject)
+    client = TestClient(create_app(deps))
+    response = client.post(path, json=body)
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "60"
+    assert response.json()["message"] == "发太快了，60 秒后再试"
+    health = client.get("/api/channels/health").json()["health"]["im"]
+    assert health["events"] == health["failed"] == health["ratelimit_hits"] == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/im/message", {"chat_id": "unauthorized", "text": "查询余额"}),
+        (
+            "/api/im/confirm",
+            {
+                "chat_id": "unauthorized",
+                "card_id": "card_unauthorized",
+                "frozen_hash": "0" * 64,
+            },
+        ),
+    ],
+)
+def test_im_routes_record_non_rate_limit_dispatch_failures_once(
+    deps: AppDeps,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    body: dict[str, object],
+) -> None:
+    def reject(_self: Dispatcher, _message: object) -> object:
+        raise ChannelUnauthorized("外部身份未绑定")
+
+    monkeypatch.setattr(Dispatcher, "dispatch", reject)
+    client = TestClient(create_app(deps))
+    response = client.post(path, json=body)
+
+    assert response.status_code == 401
+    health = client.get("/api/channels/health").json()["health"]["im"]
+    assert health["events"] == health["failed"] == 1
+    assert health["ratelimit_hits"] == 0
+
+
+def test_im_red_plan_requires_its_own_verification_and_executes_once(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    client = TestClient(create_app(deps))
+    chat_id = "red-verification"
+    before_balance, before_txn = _balance(rw_store), _txn_count(rw_store)
+    submitted = client.post(
+        "/api/im/message",
+        json={"chat_id": chat_id, "text": "转给李娜 1500 元"},
+    )
+    assert submitted.status_code == 200
+    card = cast(dict[str, object], submitted.json()["card"])
+    assert card["level"] == "RED"
+
+    confirmation = {
+        "chat_id": chat_id,
+        "card_id": card["card_id"],
+        "frozen_hash": card["frozen_hash"],
+    }
+    before_denied = client.get("/api/channels/health").json()["health"]["im"]
+    denied = client.post("/api/im/confirm", json=confirmation)
+    assert denied.status_code == 409
+    after_denied = client.get("/api/channels/health").json()["health"]["im"]
+    assert after_denied["events"] == before_denied["events"] + 1
+    assert after_denied["failed"] == before_denied["failed"] + 1
+    assert after_denied["ok"] == before_denied["ok"]
+    assert _balance(rw_store) == before_balance
+    assert _txn_count(rw_store) == before_txn
+
+    other_chat_id = "red-verification-other"
+    other_submitted = client.post(
+        "/api/im/message",
+        json={"chat_id": other_chat_id, "text": "转给李娜 1500 元"},
+    )
+    assert other_submitted.status_code == 200
+    other_challenge = client.post(
+        "/api/im/verify/request", json={"chat_id": other_chat_id}
+    )
+    assert other_challenge.status_code == 200
+    wrong_session = client.post(
+        "/api/im/confirm",
+        json={**confirmation, "verification_code": other_challenge.json()["code"]},
+    )
+    assert wrong_session.status_code == 409
+    assert _balance(rw_store) == before_balance
+    assert _txn_count(rw_store) == before_txn
+
+    challenge = client.post("/api/im/verify/request", json={"chat_id": chat_id})
+    assert challenge.status_code == 200
+    assert challenge.json()["code"]
+    confirmation["verification_code"] = challenge.json()["code"]
+    completed = client.post("/api/im/confirm", json=confirmation)
+    replayed = client.post("/api/im/confirm", json=confirmation)
+
+    assert completed.status_code == replayed.status_code == 200
+    assert completed.json()["state"] == replayed.json()["state"] == "completed"
+    assert _balance(rw_store) == before_balance - 150000
+    assert _txn_count(rw_store) == before_txn + 1
+
+
+def test_im_debug_page_has_structured_errors_and_no_external_assets(deps: AppDeps) -> None:
+    html = TestClient(create_app(deps)).get("/im").text
+
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "bubble--user" in html
+    assert "bubble--assistant" in html
+    assert "plan-card" in html
+    assert "/api/im/verify/request" in html
+    assert "verification_code" in html
+    assert "error.status = resp.status" in html
+    assert "error.retryAfter" in html
+    assert "error.detail" in html
+    assert "发太快了，" in html
+    assert "window.setTimeout" in html
+    assert "window.clearTimeout(composerLockTimer)" in html
+    assert "lockToken !== composerLockToken" in html
+    assert "3000" in html
+    assert "window.setInterval(loadHealth" in html
+    assert "ratelimit_hits" in html
+    assert "item.ok" in html
+    assert "item.failed" in html
+    assert "success_count" not in html
+    assert "failure_count" not in html
+    assert "var healthHasData = false" in html
+    assert "healthHasData = true" in html
+    assert "渠道健康暂不可用，稍后自动重试" in html
+    assert "渠道健康暂不可用，正在显示上次结果" in html
+    assert "health.replaceChildren(failure)" in html
+    assert 'typeof challenge.code === "string"' in html
+    assert "请填写验证渠道实际收到的验证码" in html
+    assert "body.verification_code = verificationCode" in html
+    assert "verification_code: challenge.code" not in html

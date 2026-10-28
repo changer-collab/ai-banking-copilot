@@ -678,25 +678,48 @@ function subscriptionEvidenceHtml(item) {
     ).join("") + "</ul></details>";
 }
 
+const CHANNEL_ORDER = ["web", "im", "feishu"];
+const CHANNEL_LABELS = { web: "网页", im: "IM", feishu: "飞书" };
+
 function renderChannelHealth(data) {
   const status = el("channel-health-status");
-  const list = el("channel-health-list");
-  if (!status || !list) return;
+  const body = el("channel-health-body");
+  if (!status || !body) return;
   const channels = data && data.channels ? data.channels : {};
-  const rows = Object.entries(channels).map(([name, item]) => {
-    const state = item && item.mode ? item.mode : "unknown";
-    const configured = item && item.configured ? "已配置" : "未配置";
-    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
-      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
+  const health = data && data.health ? data.health : {};
+  const rows = CHANNEL_ORDER.map((name) => {
+    const config = channels[name] || {};
+    const runtime = health[name] || {};
+    const configured = config.configured === true;
+    const mode = config.mode || (runtime.replay_mode ? "replay" : "stub");
+    const state = configured ? mode : `未接入 · ${mode}`;
+    const lastEvent = runtime.last_event_at || "暂无事件";
+    const replay = runtime.replay_mode === true || mode === "replay" ? "是" : "否";
+    return `<tr><th scope="row">${esc(CHANNEL_LABELS[name])}</th>` +
+      `<td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
+      `<td>${Number(runtime.ok) || 0}</td><td>${Number(runtime.failed) || 0}</td>` +
+      `<td>${Number(runtime.ratelimit_hits) || 0}</td><td>${replay}</td></tr>`;
   });
-  status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
-  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
+  const hasData = Object.keys(channels).length > 0 || Object.keys(health).length > 0;
+  status.textContent = hasData ? "渠道状态已更新" : "暂无渠道状态。";
+  body.innerHTML = hasData
+    ? rows.join("")
+    : '<tr><td colspan="7" class="muted">暂无渠道状态。</td></tr>';
 }
 
 async function refreshChannelHealth() {
-  const result = await apiFetch("GET", "/api/channels/health");
-  if (!result.ok) throw new Error("无法读取渠道状态");
-  renderChannelHealth(result.data);
+  const status = el("channel-health-status");
+  const body = el("channel-health-body");
+  if (status) status.textContent = "正在读取渠道状态…";
+  if (body) body.innerHTML = '<tr><td colspan="7" class="muted">正在读取渠道状态…</td></tr>';
+  try {
+    const result = await apiFetch("GET", "/api/channels/health");
+    if (!result.ok) throw new Error("无法读取渠道状态");
+    renderChannelHealth(result.data);
+  } catch {
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
+    if (body) body.innerHTML = '<tr><td colspan="7" class="muted">渠道状态暂不可用，请稍后重试。</td></tr>';
+  }
 }
 
 function subscriptionItemHtml(item) {
@@ -2995,7 +3018,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=18", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=19", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

@@ -40,6 +40,30 @@ def test_web_layer_never_touches_the_core_bank_directly() -> None:
         assert "core_bank." not in text
 
 
+def test_channel_health_page_has_a_stable_product_table(deps: AppDeps) -> None:
+    client = TestClient(create_app(deps))
+    html = client.get("/").text
+    script = client.get("/assets/app.js?v=26").text
+    stylesheet = client.get("/assets/workspace.css?v=10").text
+
+    headers = ("渠道", "状态", "最后事件", "成功", "失败", "限流", "回放模式")
+    positions = [html.index(f"<th>{header}</th>") for header in headers]
+    assert positions == sorted(positions)
+    assert 'id="channel-health-body"' in html
+    assert 'class="channel-health-table-wrap"' in html
+
+    assert 'const CHANNEL_ORDER = ["web", "im", "feishu"]' in script
+    assert "data.health" in script
+    assert "未接入" in script
+    assert "暂无事件" in script
+    assert "渠道状态暂不可用，请稍后重试。" in script
+
+    assert ".channel-health-table" in stylesheet
+    assert "table-layout: fixed" in stylesheet
+    assert ".channel-health-table-wrap" in stylesheet
+    assert "overflow-x: auto" in stylesheet
+
+
 def test_http_end_to_end_keeps_the_audit_chain_intact(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
     submitted = client.post("/api/submit", json={"utterance": "转给李娜 500 元"}).json()
