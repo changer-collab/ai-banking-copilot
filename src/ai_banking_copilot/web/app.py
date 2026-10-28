@@ -1354,6 +1354,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         """生活事件面板：原型清单 + 组合律 + 本用户最近 5 条记录。"""
         store = deps.life_events
         records = () if store is None else store.list_for_user(user_id, limit=5)
+        budget = _life_budget_progress(deps.gateway, user_id)
         return {
             "prototypes": [
                 {
@@ -1364,6 +1365,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "triggers": list(prototype.triggers),
                     "example": prototype.example,
                     "steps": len(prototype.skeleton),
+                    "skeleton": list(prototype.skeleton),
                 }
                 for prototype in LIFE_EVENT_PROTOTYPES
             ],
@@ -1371,7 +1373,14 @@ def create_app(deps: AppDeps) -> FastAPI:
                 {"combo_id": combo.combo_id, "name": combo.name}
                 for combo in LIFE_EVENT_COMBOS
             ],
-            "records": [record.to_dict() for record in records],
+            "records": [
+                {
+                    **record.to_dict(),
+                    # 只有 L1 有可核的冻结链；其余事件不给预算块（前端不画，不造 0）
+                    "budget": budget if record.event_id == "L1" else None,
+                }
+                for record in records
+            ],
             "records_available": store is not None,
         }
 
@@ -1837,6 +1846,39 @@ def _life_event_name(event_id: str) -> str:
         if combo.combo_id == event_id:
             return combo.name
     return ""
+
+
+def _life_budget_progress(gateway: FactGateway, user_id: str) -> dict[str, object] | None:
+    """L1 预算链进度：三段状态都来自真实事实，缺数据返回 `None`（前端画空态，不造 0）。
+
+    - 冻结：`holds` 里存在 `life:L1:` 记录即已冻结（`amount_cents` 为当前冻结余额）；
+    - 下单：`merchant_occasion_completed` 命中下单回执（与 `_build_l1` 的 occasion 同口径）；
+    - 释放：冻结记录 `status == 'released'`。
+
+    `holds` 不记录会话，故取最新一条 `life:L1:` 记录（同一账户同一日只有一个，
+    hold_id 末尾即下单日）；该配对只用于展示，不参与任何资金判断。
+    """
+    candidates = [
+        record.payload
+        for account in gateway.accounts_of(user_id)
+        for record in gateway.holds_of(account.payload.account_id)
+        if record.payload.hold_id.startswith("life:L1:")
+    ]
+    if not candidates:
+        return None
+    hold = max(candidates, key=lambda item: item.hold_id)
+    order_day = hold.hold_id.rsplit(":", 1)[-1]
+    return {
+        "hold_id": hold.hold_id,
+        "amount_cents": hold.amount.cents,
+        "state": hold.status,
+        "order_on": order_day,
+        "steps": {
+            "freeze": True,
+            "order": gateway.merchant_occasion_completed(user_id, f"life:L1:{order_day}"),
+            "release": hold.status == "released",
+        },
+    }
 
 
 def _selected_amount_cents(selected: dict[str, object] | None) -> int | None:

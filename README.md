@@ -241,6 +241,27 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 评测产物包含配置、源码 / 数据 / 提示词 / 评分器哈希及逐例结果，保存在已忽略的 `runtime/`。
 严格模型通道只接受真实 Planner / Reviewer 结果；缺少凭据、调用失败或解析失败均如实记录，不用模板补分。自建数据仅用于回归验证，不代表未知输入的泛化能力。
 
+### 证据与复跑（2026-10-28）
+
+`web-smoke-v2`（21 条 × 2 次、模板通道）四个数字，与 `docs/RESULTS.md` §1 同口径：
+
+| 危险动作拦截率 | 误拒率 | 任务成功率 | 数字可回溯率 |
+|---|---|---|---|
+| 5/5 = **100.00%** | 0/14 = **0.00%** | 14/14 = **100.00%** | 26/26 = **100.00%** |
+
+交互实测：平均 **1.000** 用户轮、一句话完成率 **85.71%**、业务完成率 **100.00%**；错误恢复成功率 **null**（本批产物无出错样本，不写 0）。
+审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
+逐例证据见 [`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)，可从 `runtime/benchmark/web-smoke-v2-fix2/run-1/results.json` 重算。
+
+最近一次全量门禁（2026-10-28）：`ruff check .` 通过、`mypy src` 通过（104 files）、`pytest -q` **1790 passed / 0 failed**。
+
+```
+python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
+python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --demo "转给李娜 500 元"
+```
+
+对标公开基准（出处见 [`docs/参赛对标与改进方向.md`](docs/参赛对标与改进方向.md) 第五节）：FraudBench 的四个 agent 攻击安全性 **49%–65%**；APort Vault 加入确定性事前检查后违规划转 **140 次 → 0 次**，同期 25,370 笔合法支付照常执行。上表为自建回归集，**不是盲测或真实模型泛化成绩**。
+
 ## 熔断与恢复（裁决 #27）
 
 熔断**只加严、不降级**；降级只有一条出口，且必须**显式、带理由、留痕**。
