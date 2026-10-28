@@ -111,7 +111,10 @@ from ai_banking_copilot.web.channels.contracts import (
     InboundMessage,
     OutboundMessage,
 )
-from ai_banking_copilot.web.channels.dispatcher import Dispatcher
+from ai_banking_copilot.web.channels.dispatcher import (
+    Dispatcher,
+    DispatchOutcomeUnknown,
+)
 from ai_banking_copilot.web.channels.feishu import (
     FeishuAdapter,
     FeishuConfig,
@@ -1506,12 +1509,26 @@ def create_app(deps: AppDeps) -> FastAPI:
         event_id: str | None,
     ) -> None:
         try:
-            outbound = _dispatcher_for(user_id).dispatch(material)
-            feishu.send(outbound)
-            health.record_event(CHANNEL_FEISHU, success=True)
+            outbound = _dispatcher_for(user_id).dispatch_live(material)
+        except DispatchOutcomeUnknown:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return
         except Exception:
             _release_feishu_event(event_id)
             health.record_event(CHANNEL_FEISHU, success=False)
+            return
+
+        try:
+            status = feishu.send(
+                outbound,
+                on_retry=lambda _attempt_no, _delay: health.record_retry(
+                    CHANNEL_FEISHU
+                ),
+            )
+        except Exception:
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return
+        health.record_event(CHANNEL_FEISHU, success=200 <= status < 300)
 
     @app.post("/api/im/feishu")
     async def im_feishu(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:

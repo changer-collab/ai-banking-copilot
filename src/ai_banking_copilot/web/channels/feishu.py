@@ -13,7 +13,7 @@ import hmac
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import cast
 from urllib.error import HTTPError
@@ -529,7 +529,12 @@ class FeishuAdapter:
         )
         return rendered
 
-    def send(self, outbound: OutboundMessage) -> int:
+    def send(
+        self,
+        outbound: OutboundMessage,
+        *,
+        on_retry: Callable[[int, float], None] | None = None,
+    ) -> int:
         """向真实飞书会话发送交互卡片；回调入口可将此方法放入后台任务。"""
         if not self.config.configured or self.replay_mode:
             raise FeishuProtocolError("feishu_send_requires_live_config")
@@ -564,4 +569,9 @@ class FeishuAdapter:
                 raise FeishuProtocolError("feishu_message_send_failed")
             return status
 
-        return retry_outbound(attempt, attempts=3, sleeper=time.sleep)
+        return retry_outbound(
+            attempt,
+            attempts=3,
+            sleeper=time.sleep,
+            on_retry=on_retry,
+        )

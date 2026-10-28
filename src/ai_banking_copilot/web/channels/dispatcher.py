@@ -55,6 +55,10 @@ SlidingWindowRateLimiter = TokenBucketRateLimiter
 """兼容旧导入名；实现已迁移到可靠性模块。"""
 
 
+class DispatchOutcomeUnknown(RuntimeError):
+    """业务调用已经开始，失败时不能证明没有产生副作用。"""
+
+
 class Dispatcher:
     """渠道统一调度：`InboundMessage` / `ConfirmCommand` → `OutboundMessage`。"""
 
@@ -83,6 +87,20 @@ class Dispatcher:
 
     def dispatch(self, inbound: InboundMessage | ConfirmCommand) -> OutboundMessage:
         """执行流水线；会话层异常（状态 / 冻结校验）**继续上抛**，由路由映射 409。"""
+        return self._dispatch(inbound, preserve_outcome_error=False)
+
+    def dispatch_live(
+        self, inbound: InboundMessage | ConfirmCommand
+    ) -> OutboundMessage:
+        """为异步外部回调执行；业务开始后的异常标记为结果未知。"""
+        return self._dispatch(inbound, preserve_outcome_error=True)
+
+    def _dispatch(
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        *,
+        preserve_outcome_error: bool,
+    ) -> OutboundMessage:
         cached = self._cached(inbound)
         if cached is not None:
             return replace(cached, replayed=True)
@@ -98,24 +116,31 @@ class Dispatcher:
         session_id = f"{inbound.channel}:{chat_id}"
         session = self._manager.get(user_id, session_id)
 
-        if isinstance(inbound, ConfirmCommand):
-            execution = session.confirm(
-                inbound.card_id,
-                frozen_hash=inbound.frozen_hash,
-                verification_code=inbound.verification_code,
-                steps=inbound.steps,
-            )
-            payload = self._execution_payload(execution)
-            kind = KIND_RECEIPT
-        else:
-            submission = session.submit(inbound.text)
-            payload = self._submission_payload(submission)
-            kind = KIND_REPLY
+        try:
+            if isinstance(inbound, ConfirmCommand):
+                execution = session.confirm(
+                    inbound.card_id,
+                    frozen_hash=inbound.frozen_hash,
+                    verification_code=inbound.verification_code,
+                    steps=inbound.steps,
+                )
+                payload = self._execution_payload(execution)
+                kind = KIND_RECEIPT
+            else:
+                submission = session.submit(inbound.text)
+                payload = self._submission_payload(submission)
+                kind = KIND_REPLY
 
-        outbound = _outbound(inbound, session_id=session_id, payload=payload, kind=kind)
-        self._record_audit(inbound, outbound)
-        self._remember(inbound, outbound)
-        return outbound
+            outbound = _outbound(
+                inbound, session_id=session_id, payload=payload, kind=kind
+            )
+            self._record_audit(inbound, outbound)
+            self._remember(inbound, outbound)
+            return outbound
+        except Exception as error:
+            if preserve_outcome_error:
+                raise DispatchOutcomeUnknown("dispatch_outcome_unknown") from error
+            raise
 
     def health(self) -> dict[str, object]:
         """渠道健康页：如实区分「已配置 / 未配置」，不把 stub 说成可用。"""

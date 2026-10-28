@@ -109,6 +109,43 @@ def test_retry_outbound_does_not_retry_4xx() -> None:
     assert sender.calls == 1
 
 
+def test_retry_outbound_reports_only_scheduled_retries() -> None:
+    sender = _Sender(failures=2)
+    retries: list[tuple[int, float]] = []
+
+    result = retry_outbound(
+        sender.send,
+        sleeper=lambda _delay: None,
+        on_retry=lambda attempt_no, delay: retries.append((attempt_no, delay)),
+    )
+
+    assert result.status_code == 200
+    assert retries == [(1, 0.5), (2, 2.0)]
+
+
+def test_retry_outbound_does_not_report_retry_after_final_5xx_or_4xx() -> None:
+    server_error = _Sender(failures=3)
+    server_retries: list[tuple[int, float]] = []
+    client_error = _Sender(failures=1, status_code=400)
+    client_retries: list[tuple[int, float]] = []
+
+    server_result = retry_outbound(
+        server_error.send,
+        sleeper=lambda _delay: None,
+        on_retry=lambda attempt_no, delay: server_retries.append((attempt_no, delay)),
+    )
+    client_result = retry_outbound(
+        client_error.send,
+        sleeper=lambda _delay: None,
+        on_retry=lambda attempt_no, delay: client_retries.append((attempt_no, delay)),
+    )
+
+    assert server_result.status_code == 503
+    assert server_retries == [(1, 0.5), (2, 2.0)]
+    assert client_result.status_code == 400
+    assert client_retries == []
+
+
 def test_health_registry_reports_events_and_rate_limits() -> None:
     health = HealthRegistry()
     health.register("feishu", replay_mode=True)

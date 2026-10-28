@@ -218,3 +218,36 @@ def test_live_send_retries_server_errors_before_sending_card(monkeypatch) -> Non
 
     assert adapter.send(outbound) == 200
     assert calls == [0.5, 2.0]
+
+
+def test_live_send_reports_each_scheduled_retry(monkeypatch) -> None:
+    from ai_banking_copilot.web.channels import feishu as module
+
+    monkeypatch.setattr(module, "_post_json", lambda *_args, **_kwargs: (503, {}))
+    monkeypatch.setattr(module.time, "sleep", lambda _delay: None)
+    adapter = FeishuAdapter(
+        FeishuConfig(
+            app_id="app",
+            app_secret="secret",
+            verification_token="verify",
+            encrypt_key="encrypt",
+        )
+    )
+    outbound = OutboundMessage(
+        channel=CHANNEL_FEISHU,
+        chat_id="oc-1",
+        session_id="feishu:oc-1",
+        state="awaiting_confirm",
+        text="请确认",
+        card={"card_id": "card-1", "frozen_hash": "a" * 64, "lines": []},
+        level="YELLOW",
+    )
+    retries: list[tuple[int, float]] = []
+
+    status = adapter.send(
+        outbound,
+        on_retry=lambda attempt_no, delay: retries.append((attempt_no, delay)),
+    )
+
+    assert status == 503
+    assert retries == [(1, 0.5), (2, 2.0)]

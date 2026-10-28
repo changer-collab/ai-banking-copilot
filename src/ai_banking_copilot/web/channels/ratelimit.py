@@ -168,6 +168,7 @@ def retry_outbound(
     attempts: int = 3,
     sleeper: Callable[[float], None] = time.sleep,
     delays: tuple[float, ...] = DEFAULT_RETRY_DELAYS,
+    on_retry: Callable[[int, float], None] | None = None,
 ) -> T:
     """发送出站消息；仅对超时与 5xx 重试，最多调用 ``attempts`` 次。
 
@@ -182,10 +183,14 @@ def retry_outbound(
         except Exception as error:
             if not _retryable_exception(error) or index >= attempts - 1:
                 raise
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
             _sleep_before_retry(index, delays, sleeper)
             continue
 
         if _status_code(result) >= 500 and index < attempts - 1:
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
             _sleep_before_retry(index, delays, sleeper)
             continue
         return result
