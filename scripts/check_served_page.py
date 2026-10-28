@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=6")
-    workspace_css = _get(base, "/assets/workspace.css?v=5")
-    js = _get(base, "/assets/app.js?v=15")
+    workspace_css = _get(base, "/assets/workspace.css?v=6")
+    js = _get(base, "/assets/app.js?v=23")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -49,6 +49,11 @@ def run(base: str) -> list[str]:
         "page: 顶栏/三栏/处理详情": (
             'class="topbar"' in html and 'class="layout layout--workspace"' in html
             and 'class="side"' in html and 'class="main"' in html and 'class="trace rail"' in html
+        ),
+        "page: 视图层（首页/对话/记录/渠道/我的）": (
+            'id="view-home"' in html and 'id="view-chat"' in html
+            and 'id="view-records"' in html and 'id="view-health"' in html
+            and 'id="view-me"' in html
         ),
         "page: 对话式结构": (
             'id="conversation-sidebar"' in html
@@ -63,8 +68,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=6" in html
-            and "/assets/workspace.css?v=5" in html
-            and "/assets/app.js?v=15" in html
+            and "/assets/workspace.css?v=6" in html
+            and "/assets/app.js?v=23" in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,

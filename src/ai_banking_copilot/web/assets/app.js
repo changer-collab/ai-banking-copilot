@@ -1686,8 +1686,8 @@ function profileValue(value) {
 }
 
 function renderProfile(me, audit) {
-  const body = el("profile-body");
-  if (!body) return;
+  const targets = [el("profile-body"), el("me-body")].filter(Boolean);
+  if (!targets.length) return;
   const user = me.user || {};
   const session = me.session || {};
   const name = user.display_name || user.username || "当前用户";
@@ -1700,7 +1700,7 @@ function renderProfile(me, audit) {
   const trail = (audit.events || []).map((event) =>
     `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))} <span class="tech">${esc(profileValue(event.event_id))}</span></li>`
   ).join("");
-  body.innerHTML = `
+  const html = `
     <section class="profile-block">
       <h3>身份</h3>
       <dl>
@@ -1743,6 +1743,9 @@ function renderProfile(me, audit) {
     </section>
     ${me.auth_mode === "demo" ? '<div class="btn-row"><button class="btn btn--ghost" id="btn-logout" type="button">退出登录</button></div>' : ""}
   `;
+  targets.forEach((body) => {
+    body.innerHTML = html;
+  });
 }
 
 async function openProfile() {
@@ -1774,6 +1777,27 @@ function closeProfile() {
   panel.hidden = true;
   el("btn-profile").setAttribute("aria-expanded", "false");
   el("btn-profile").focus();
+}
+
+/* 「我的」是独立视图：首次进入时读取一次，退出登录按钮与抽屉共用同一套渲染 */
+async function refreshMeView() {
+  const body = el("me-body");
+  if (!body || body.dataset.loaded === "1") return;
+  body.innerHTML = '<p class="muted">正在读取账户信息…</p>';
+  try {
+    const [me, audit] = await Promise.all([
+      apiFetch("GET", "/api/me"),
+      apiFetch("GET", "/api/audit?limit=8"),
+    ]);
+    if (!me.ok) {
+      body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+      return;
+    }
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
+    body.dataset.loaded = "1";
+  } catch (_) {
+    body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+  }
 }
 
 /* 顶部入口只做身份标识：读不到就保留默认文案，不打断主流程 */
@@ -1989,8 +2013,8 @@ el("btn-takeover").addEventListener("click", action(onTakeover));
 el("btn-reset").addEventListener("click", action(startFreshConversation));
 el("btn-profile").addEventListener("click", openProfile);
 el("btn-close-profile").addEventListener("click", closeProfile);
-/* 个人中心内容动态渲染：退出登录按钮用事件委托 */
-el("profile-body").addEventListener("click", async (event) => {
+/* 个人中心内容动态渲染：退出登录按钮用事件委托（抽屉与「我的」视图共用） */
+async function onProfileClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target || target.id !== "btn-logout") return;
   try {
@@ -1999,7 +2023,9 @@ el("profile-body").addEventListener("click", async (event) => {
     /* 退出失败也回登录页：Cookie 可能已失效 */
   }
   window.location.replace("/");
-});
+}
+el("profile-body").addEventListener("click", onProfileClick);
+el("me-body")?.addEventListener("click", onProfileClick);
 /* 历史对话行同样动态渲染：点开 / 删除都用事件委托 */
 el("conversation-list").addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -2141,6 +2167,191 @@ if (techToggle) {
   });
 }
 
+/* ---------------- 视图路由（首页 / 对话 / 场景 / 记录 / 渠道 / 三态 / 我的） ----------------
+   示例 IA 的落地：左侧栏是全局导航，对话保留原三栏布局；其余视图只占「左栏 + 主区」。
+   场景页的内容由各场景负责人填进 `[data-scene-block]`，这里只负责切页与入口。 */
+
+const SCENES = {
+  transfer: {
+    title: "转账",
+    sub: "中文数字、完整手机号、日累计限额；大额与不可逆动作走强验证。",
+    prefill: "转给李娜 500 元",
+  },
+  bills: {
+    title: "账单分析",
+    sub: "重复扣款 / 涨价 / 隐藏费用 / 深夜 / 异地；带置信度与免责说明。",
+    prefill: "查一下上月账单",
+  },
+  wealth: {
+    title: "理财",
+    sub: "风险测评 → 适当性 → 申购 / 赎回；超等级产品灰显并写原因。",
+    prefill: "查余额",
+  },
+  cards: {
+    title: "卡片",
+    sub: "锁卡 / 挂失 / 补卡 / 调额；红动作走强验证。",
+    prefill: "锁卡",
+  },
+  subscriptions: {
+    title: "订阅",
+    sub: "涨价、下次扣款日与扣款记录可查；取消前说清本地 / 商户边界。",
+    prefill: "订阅取消",
+  },
+  life: {
+    title: "生活事件",
+    sub: "一句话串多个域，每步一张卡、逐张确认。",
+    prefill: "",
+  },
+};
+
+const RECORD_TABS = {
+  transfers: { label: "转账记录", hint: "转账完成后，这里显示收款人（脱敏）、金额、状态与渠道（web / app / feishu）。" },
+  holdings: { label: "持仓", hint: "理财申购后的持仓（产品 / 金额 / 起息日）；无净值数据时收益标「未知」。" },
+  cards: { label: "卡片状态", hint: "锁卡 / 挂失 / 补卡后的最新状态与可执行动作。" },
+  suspicions: { label: "可疑清单", hint: "账单异常标记、置信度与「不当作已确认」的免责说明。" },
+  charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 卡尾号 / 渠道。" },
+};
+
+const VIEWS = ["home", "chat", "scene", "records", "health", "states", "me"];
+let currentScene = "transfer";
+let currentRecordTab = "transfers";
+
+function parseHash() {
+  const raw = String(window.location.hash || "").replace(/^#\/?/, "");
+  const parts = raw.split("/");
+  const name = VIEWS.includes(parts[0]) ? parts[0] : "home";
+  return { name, arg: parts[1] || "" };
+}
+
+function renderRecordsTab(tab) {
+  const key = Object.prototype.hasOwnProperty.call(RECORD_TABS, tab) ? tab : "transfers";
+  currentRecordTab = key;
+  const spec = RECORD_TABS[key];
+  document.querySelectorAll("#records-tabs [data-record-tab]").forEach((button) => {
+    button.setAttribute("aria-selected", String(button.dataset.recordTab === key));
+  });
+  const body = el("records-body");
+  if (!body) return;
+  body.innerHTML =
+    `<article class="state-card"><p class="state-card__k">${esc(spec.label)} · 暂无记录</p>` +
+    `<p class="muted">${esc(spec.hint)}</p>` +
+    `<p class="muted">数据接入由场景负责人补齐；当前只保证入口与三态。</p></article>`;
+}
+
+function showScene(key) {
+  currentScene = Object.prototype.hasOwnProperty.call(SCENES, key) ? key : "transfer";
+  const spec = SCENES[currentScene];
+  const title = el("scene-title");
+  const sub = el("scene-sub");
+  if (title) title.textContent = spec.title;
+  if (sub) sub.textContent = spec.sub;
+  document.querySelectorAll("[data-scene-block]").forEach((block) => {
+    block.hidden = block.dataset.sceneBlock !== currentScene;
+  });
+}
+
+function showView(name, options) {
+  const next = VIEWS.includes(name) ? name : "home";
+  const opts = options || {};
+  const appNode = el("app");
+  if (appNode) appNode.dataset.viewName = next;
+  VIEWS.forEach((view) => {
+    const node = el(`view-${view}`);
+    if (node) node.hidden = view !== next;
+  });
+  if (next === "scene") showScene(opts.scene || currentScene);
+  document.querySelectorAll("[data-nav]").forEach((button) => {
+    const active = button.dataset.nav === next
+      && (!button.dataset.scene || button.dataset.scene === currentScene);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  if (next === "records") renderRecordsTab(opts.tab || currentRecordTab);
+  if (next === "health") refreshChannelHealth().catch(() => {});
+  if (next === "me") refreshMeView().catch(() => {});
+  if (next === "chat") {
+    const input = el("utterance");
+    if (input) window.setTimeout(() => input.focus(), 0);
+  }
+}
+
+function navigate(name, options) {
+  const opts = options || {};
+  const suffix = name === "scene"
+    ? `/${opts.scene || currentScene}`
+    : name === "records"
+      ? `/${opts.tab || currentRecordTab}`
+      : "";
+  const hash = `#/${name}${suffix}`;
+  if (window.location.hash !== hash) window.location.hash = hash;
+  showView(name, opts);
+}
+
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const nav = target.closest("[data-nav]");
+  if (nav) {
+    event.preventDefault();
+    const opts = {};
+    if (nav.dataset.scene) opts.scene = nav.dataset.scene;
+    if (nav.dataset.recordTab) opts.tab = nav.dataset.recordTab;
+    const prefill = nav.dataset.prefill;
+    if (prefill) {
+      const input = el("utterance");
+      if (input) input.value = prefill;
+    }
+    navigate(nav.dataset.nav || "home", opts);
+    if (el("app")?.classList.contains("is-scenes-open")) setMobileDrawer("scenes", false);
+    el("btn-nav-mobile")?.setAttribute("aria-expanded", "false");
+    return;
+  }
+  const tab = target.closest("#records-tabs [data-record-tab]");
+  if (tab) renderRecordsTab(tab.dataset.recordTab || "transfers");
+});
+
+window.addEventListener("hashchange", () => {
+  const { name, arg } = parseHash();
+  const opts = name === "scene" ? { scene: arg } : name === "records" ? { tab: arg } : {};
+  showView(name, opts);
+});
+
+el("btn-scene-chat")?.addEventListener("click", () => {
+  const spec = SCENES[currentScene];
+  if (spec && spec.prefill) {
+    const input = el("utterance");
+    if (input) input.value = spec.prefill;
+  }
+  navigate("chat", {});
+});
+
+el("btn-health-refresh")?.addEventListener("click", () => {
+  const status = el("channel-health-status");
+  if (status) status.textContent = "正在刷新渠道状态…";
+  refreshChannelHealth().catch(() => {
+    if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+  });
+});
+
+el("btn-nav-mobile")?.addEventListener("click", () => {
+  const appNode = el("app");
+  if (!appNode) return;
+  const open = !appNode.classList.contains("is-scenes-open");
+  setMobileDrawer("scenes", open);
+  el("btn-nav-mobile")?.setAttribute("aria-expanded", String(open));
+});
+
+const initialRoute = parseHash();
+if (!window.location.hash) window.history.replaceState(null, "", "#/home");
+showView(
+  initialRoute.name,
+  initialRoute.name === "scene"
+    ? { scene: initialRoute.arg }
+    : initialRoute.name === "records"
+      ? { tab: initialRoute.arg }
+      : {},
+);
+
 timelineReset();
 if (state.offline) setOfflineState(true);
 setButtons();
@@ -2171,7 +2382,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=14", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=15", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

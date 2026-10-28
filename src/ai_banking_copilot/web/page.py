@@ -22,65 +22,32 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=6" />
-<link rel="stylesheet" href="/assets/workspace.css?v=5" />
-<style>
-/* 本页新增组件（阶段步进器 / 个人中心抽屉 / 历史对话行）：只作用于新增元素，
-   不改动共享样式表 `app.css` / `workspace.css`。 */
-#progress-steps { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); padding: 0 var(--s-6); color: var(--ink-3); font-size: var(--fs-small); }
-#progress-steps[hidden] { display: none; }
-.progress-step { padding: 2px 10px; border: 1px solid var(--rule); border-radius: var(--r-chip); }
-.progress-step--pending { opacity: .55; }
-.progress-step--active { border-color: var(--blue-600); background: var(--blue-050); color: var(--blue-700); font-weight: 600; }
-.progress-step--done { border-color: var(--lvl-green); background: var(--lvl-green-bg); color: var(--lvl-green); }
-.progress-step__sep { color: var(--ink-3); }
-
-#profile-panel { position: fixed; z-index: 60; top: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: var(--s-4); width: min(392px, 94vw); padding: var(--s-5); overflow: auto; background: var(--voucher); border-left: 1px solid var(--rule); box-shadow: var(--sh-3); }
-#profile-panel[hidden] { display: none; }
-#profile-body { display: grid; gap: var(--s-4); min-width: 0; }
-.profile-block { display: grid; gap: var(--s-2); min-width: 0; }
-.profile-block h3 { margin: 0; font-family: var(--font-display); font-size: var(--fs-h2); }
-.profile-block dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-3); margin: 0; }
-.profile-block dt { color: var(--ink-3); }
-.profile-block dd { margin: 0; overflow-wrap: anywhere; }
-.profile-trail { display: grid; gap: 2px; margin: 0; padding-left: var(--s-4); font-size: var(--fs-small); }
-.profile-entry { max-width: 168px; }
-.profile-entry__name { display: inline-block; max-width: 132px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: bottom; }
-
-.conv-row { display: flex; align-items: center; gap: 2px; border-radius: var(--r-control); }
-.conv-row--active { background: var(--blue-050); }
-.conv-row .conversation-record { flex: 1; min-width: 0; }
-.conv-row__title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.conv-row__meta { display: block; color: var(--ink-3); font-size: 11px; }
-.conv-delete { flex: none; padding: 4px 8px; border: 0; border-radius: var(--r-control); background: transparent; color: var(--ink-3); font-size: var(--fs-small); cursor: pointer; }
-.conv-delete:hover { background: var(--lvl-red-bg); color: var(--lvl-red); }
-
-.life-grid { display: grid; gap: var(--s-2); margin-bottom: var(--s-3); }
-.life-card { display: grid; gap: 4px; padding: var(--s-2) var(--s-3); border: 1px solid var(--rule); border-radius: var(--r-control); background: var(--voucher); }
-.life-card__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
-.life-card__head b { font-size: var(--fs-body); }
-.life-card__steps { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
-.life-card__desc { margin: 0; color: var(--ink-2); font-size: var(--fs-small); }
-.life-card__foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
-.life-card__example { margin: 0; color: var(--ink-3); font-size: 11px; }
-.life-send { padding: 2px 10px; border: 1px solid var(--blue-600); border-radius: var(--r-chip); background: var(--blue-050); color: var(--blue-700); font-size: 11px; cursor: pointer; }
-.life-send:disabled { opacity: .5; cursor: default; }
-.life-form { font-size: var(--fs-small); }
-.life-form summary { cursor: pointer; color: var(--blue-700); font-size: 11px; }
-.life-form__grid { display: grid; gap: 6px; margin-top: 6px; }
-.life-form__field { display: grid; gap: 2px; color: var(--ink-3); font-size: 11px; }
-.life-form__field .input { width: 100%; }
-@media (max-width: 1020px) {
-  #progress-steps { padding: 0 var(--s-4); }
-}
-</style>
+<link rel="stylesheet" href="/assets/workspace.css?v=6" />
 </head>
 <body>
-<div class="layout layout--workspace" id="app">
+<div class="layout layout--workspace" id="app" data-view-name="home">
   <aside class="side" id="conversation-sidebar" aria-label="对话与场景" aria-hidden="false">
     <div class="side__brand topbar__brand">
       <span class="brand-mark">AI 银行<em>副驾</em></span>
       <span class="brand-sub">把想办的事说出来 · 每一步由您掌控</span>
     </div>
+    <nav class="appnav" id="app-nav" aria-label="功能导航">
+      <button class="appnav__item" type="button" data-nav="home">首页</button>
+      <p class="side__label">场景</p>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="transfer">转账</button>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="bills">账单分析</button>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="wealth">理财</button>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="cards">卡片</button>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
+      <button class="appnav__item" type="button" data-nav="scene" data-scene="life">生活事件</button>
+      <p class="side__label">办理</p>
+      <button class="appnav__item" type="button" data-nav="chat">对话</button>
+      <p class="side__label">工具</p>
+      <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
+      <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
+      <button class="appnav__item" type="button" data-nav="states">三态演示</button>
+      <button class="appnav__item" type="button" data-nav="me">我的</button>
+    </nav>
     <div class="side__pad">
       <button class="btn" id="btn-reset" type="button">＋ 新建对话</button>
     </div>
@@ -93,7 +60,77 @@ _PAGE_HTML = """<!DOCTYPE html>
     </div>
   </aside>
 
-  <main class="main" aria-label="银行办理对话">
+  <main class="main" id="main" aria-label="银行办理对话">
+    <section class="view" id="view-home">
+      <header class="view__head">
+        <div>
+          <h2>今天想办什么？</h2>
+          <p class="muted">六个场景都有入口。说一句话，AI 给计划卡，您确认后再执行。</p>
+        </div>
+        <span class="muted" id="home-note">模拟银行环境 · 不连接真实银行账户</span>
+      </header>
+      <div class="scene-grid">
+        <article class="scene-card">
+          <p class="scene-card__k">① 转账</p>
+          <p class="scene-card__d">中文数字、完整手机号、日累计限额；大额走强验证。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="transfer">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="转给李娜 500 元">去对话</button>
+          </div>
+        </article>
+        <article class="scene-card">
+          <p class="scene-card__k">② 账单分析</p>
+          <p class="scene-card__d">重复扣款 / 涨价 / 隐藏费用 / 深夜 / 异地；带置信度与免责。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="bills">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="查一下上月账单">去对话</button>
+          </div>
+        </article>
+        <article class="scene-card">
+          <p class="scene-card__k">③ 理财</p>
+          <p class="scene-card__d">风险测评 → 适当性 → 申购 / 赎回；超等级灰显并写原因。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="wealth">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="查余额">去对话</button>
+          </div>
+        </article>
+        <article class="scene-card">
+          <p class="scene-card__k">④ 卡片</p>
+          <p class="scene-card__d">锁卡 / 挂失 / 补卡 / 调额；红动作走强验证。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="cards">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="锁卡">去对话</button>
+          </div>
+        </article>
+        <article class="scene-card">
+          <p class="scene-card__k">⑤ 订阅</p>
+          <p class="scene-card__d">涨价、下次扣款日与扣款记录可查；取消前说清边界。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="subscriptions">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="订阅取消">去对话</button>
+          </div>
+        </article>
+        <article class="scene-card">
+          <p class="scene-card__k">⑥ 生活事件</p>
+          <p class="scene-card__d">一句话串多个域，每步一张卡、逐张确认。</p>
+          <div class="scene-card__row">
+            <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="life">进入功能页</button>
+            <button class="btn btn--sm" type="button" data-nav="chat">去对话</button>
+          </div>
+        </article>
+      </div>
+      <section class="panel">
+        <p class="panel__title">工具</p>
+        <div class="btn-row">
+          <button class="btn" type="button" data-nav="records">记录与明细</button>
+          <button class="btn" type="button" data-nav="health">渠道健康</button>
+          <button class="btn" type="button" data-nav="states">三态演示</button>
+          <button class="btn" type="button" data-nav="me">我的</button>
+        </div>
+      </section>
+    </section>
+
+    <section class="view view--chat" id="view-chat" hidden>
     <header class="topbar">
       <div class="top__brand">
         <div class="top__t">AI 银行副驾</div>
@@ -178,6 +215,145 @@ _PAGE_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </section>
+    </section>
+
+    <section class="view" id="view-scene" hidden>
+      <header class="view__head">
+        <div>
+          <h2 id="scene-title">场景</h2>
+          <p class="muted" id="scene-sub"></p>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn--sm" type="button" data-nav="home">返回首页</button>
+          <button class="btn btn--sm btn--primary" type="button" id="btn-scene-chat">去对话办这一笔</button>
+        </div>
+      </header>
+
+      <div class="scene-block" data-scene-block="transfer" hidden>
+        <section class="panel">
+          <p class="panel__title">转账</p>
+          <p class="muted">功能页数据待接入（负责人：高靖雯）。当前可先用「去对话」办理一句话转账。</p>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="transfers">看转账记录</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="scene-block" data-scene-block="bills" hidden>
+        <section class="panel">
+          <p class="panel__title">账单分析</p>
+          <p class="muted">功能页数据待接入（负责人：林晓研）。当前可先用「去对话」查账单。</p>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="suspicions">看可疑清单</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="scene-block" data-scene-block="wealth" hidden>
+        <section class="panel">
+          <p class="panel__title">理财</p>
+          <p class="muted">功能页数据待接入（负责人：徐思云）。当前可先用「去对话」做风险测评与申购赎回。</p>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="scene-block" data-scene-block="cards" hidden>
+        <section class="panel">
+          <p class="panel__title">卡片</p>
+          <p class="muted">功能页数据待接入（负责人：林晓研）。当前可先用「去对话」锁卡或挂失。</p>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="cards">看卡片状态</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="scene-block" data-scene-block="subscriptions" hidden>
+        <section class="panel" id="subscription-panel">
+          <p class="panel__title">订阅识别与取消状态</p>
+          <p class="muted" id="subscription-status">正在读取订阅识别结果…</p>
+          <p class="muted" id="subscription-boundary" hidden></p>
+          <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
+          <div id="subscription-cancel-result" hidden></div>
+        </section>
+      </div>
+
+      <div class="scene-block" data-scene-block="life" hidden>
+        <section class="panel" id="life-events-panel">
+          <p class="panel__title">生活事件</p>
+          <p class="muted" id="life-events-status">正在读取生活事件原型…</p>
+          <div id="life-events-list"><p class="muted">尚未读取生活事件。</p></div>
+        </section>
+      </div>
+    </section>
+
+    <section class="view" id="view-records" hidden>
+      <header class="view__head">
+        <div>
+          <h2>记录与明细</h2>
+          <p class="muted">AI 做过的事都在这里查得到；渠道列区分 web / app / feishu。</p>
+        </div>
+      </header>
+      <div class="tabs" id="records-tabs" role="tablist" aria-label="记录分类">
+        <button class="tab" type="button" role="tab" data-record-tab="transfers" aria-selected="true">转账记录</button>
+        <button class="tab" type="button" role="tab" data-record-tab="holdings" aria-selected="false">持仓</button>
+        <button class="tab" type="button" role="tab" data-record-tab="cards" aria-selected="false">卡片状态</button>
+        <button class="tab" type="button" role="tab" data-record-tab="suspicions" aria-selected="false">可疑清单</button>
+        <button class="tab" type="button" role="tab" data-record-tab="charges" aria-selected="false">扣款记录</button>
+      </div>
+      <div id="records-body"></div>
+    </section>
+
+    <section class="view" id="view-health" hidden>
+      <header class="view__head">
+        <div>
+          <h2>渠道健康</h2>
+          <p class="muted">未接入的渠道如实显示 stub；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
+        </div>
+        <button class="btn btn--sm" type="button" id="btn-health-refresh">刷新</button>
+      </header>
+      <section class="panel" id="channel-health-panel">
+        <p class="panel__title">渠道状态</p>
+        <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
+        <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
+      </section>
+    </section>
+
+    <section class="view" id="view-states" hidden>
+      <header class="view__head">
+        <div>
+          <h2>三态演示</h2>
+          <p class="muted">空 / 加载 / 失败三种标准态；失败一律写人话，不出现 Error / 500。</p>
+        </div>
+      </header>
+      <div class="state-grid">
+        <article class="state-card">
+          <p class="state-card__k">空</p>
+          <p class="muted">还没有记录。完成一次办理后会出现在这里。</p>
+        </article>
+        <article class="state-card">
+          <p class="state-card__k">加载</p>
+          <p class="muted">正在读取…</p>
+          <div class="skeleton"></div>
+        </article>
+        <article class="state-card">
+          <p class="state-card__k">失败</p>
+          <p class="muted">读取失败，请稍后重试；已完成的办理不受影响。</p>
+          <button class="btn btn--sm" type="button" data-nav="records">重试</button>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="view-me" hidden>
+      <header class="view__head">
+        <div>
+          <h2>我的</h2>
+          <p class="muted">登录身份、关联数据与操作轨迹。</p>
+        </div>
+      </header>
+      <div id="me-body"><p class="muted">正在读取账户信息…</p></div>
+    </section>
   </main>
 
   <aside class="trace rail" id="trace" aria-label="处理详情" aria-hidden="true">
@@ -190,26 +366,6 @@ _PAGE_HTML = """<!DOCTYPE html>
       <p class="panel__title">主动洞察</p>
       <p class="muted" id="insights-status">正在读取站内洞察…</p>
       <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
-    </section>
-
-    <section class="panel" id="life-events-panel">
-      <p class="panel__title">生活事件</p>
-      <p class="muted" id="life-events-status">正在读取生活事件原型…</p>
-      <div id="life-events-list"><p class="muted">尚未读取生活事件。</p></div>
-    </section>
-
-    <section class="panel" id="subscription-panel">
-      <p class="panel__title">订阅识别与取消状态</p>
-      <p class="muted" id="subscription-status">正在读取订阅识别结果…</p>
-      <p class="muted" id="subscription-boundary" hidden></p>
-      <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
-      <div id="subscription-cancel-result" hidden></div>
-    </section>
-
-    <section class="panel" id="channel-health-panel">
-      <p class="panel__title">渠道健康</p>
-      <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-      <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
     </section>
 
     <section class="panel">
@@ -257,9 +413,16 @@ _PAGE_HTML = """<!DOCTYPE html>
     </div>
     <div id="profile-body"><p class="muted">正在读取账户信息…</p></div>
   </aside>
+  <button class="nav-fab" id="btn-nav-mobile" type="button"
+          aria-controls="conversation-sidebar" aria-expanded="false">导航</button>
+  <nav class="tabbar" id="app-tabbar" aria-label="底部导航">
+    <button class="tabbar__item" type="button" data-nav="home">首页</button>
+    <button class="tabbar__item" type="button" data-nav="chat">对话</button>
+    <button class="tabbar__item" type="button" data-nav="me">我的</button>
+  </nav>
 </div>
 
-<script src="/assets/app.js?v=22"></script>
+<script src="/assets/app.js?v=23"></script>
 </body>
 </html>
 """
