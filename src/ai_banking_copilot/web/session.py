@@ -192,6 +192,8 @@ FABRICATION_MARKERS: tuple[str, ...] = (
 
 _RETURN_PROMISE_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝以收益承诺为前提的请求"
 _FABRICATION_REFUSAL = "不生成事实（H1）：无法提供事实网关之外的数值或预测，安全拒绝"
+_MERCHANT_CANCEL_REFUSAL = "只能报告本地真实订阅状态；商户取消尚未接入，当前没有商户确认回执。"
+_REFUND_GUARANTEE_REFUSAL = "退款与保证商户未来不再扣款均未接入，无法执行或承诺。"
 
 
 class SessionState(StrEnum):
@@ -711,6 +713,19 @@ class Session:
             refusal = _guard_utterance(utterance)
             if refusal is not None:
                 return self._refuse(refusal, utterance)
+            if (
+                any(word in utterance for word in ("所有", "全部"))
+                and any(word in utterance for word in ("退订", "取消"))
+                and any(word in utterance for word in ("退订", "订阅", "会员", "代扣"))
+            ):
+                merchants = "、".join(
+                    record.payload.merchant
+                    for record in self._deps.gateway.subscriptions_of(self._deps.user_id)
+                )
+                return self._refuse(
+                    f"不支持批量取消，也不能跳过确认。请选择一项订阅后确认：{merchants}。",
+                    utterance,
+                )
             invalid = self._invalid_selection(selected or {})
             if invalid is not None:
                 return self._refuse(invalid, utterance)
@@ -1203,6 +1218,14 @@ class Session:
                 if intent.action == "transfer.book" else span
             )
             slot_selected = _per_intent_selected(intent.action, intent_selected, self._deps)
+            if intent.action == "subscription.cancel" and "subscription" not in slot_selected:
+                matches = [
+                    record.payload.subscription_id
+                    for record in self._deps.gateway.subscriptions_of(self._deps.user_id)
+                    if record.payload.merchant in span
+                ]
+                if len(matches) == 1:
+                    slot_selected["subscription"] = matches[0]
             if (
                 intent.action in {"account.balance", "account.transactions"}
                 and selected is None
@@ -2489,6 +2512,14 @@ def _guard_utterance(utterance: str) -> str | None:
         return _RETURN_PROMISE_REFUSAL
     if any(marker in utterance for marker in FABRICATION_MARKERS):
         return _FABRICATION_REFUSAL
+    if "别管商户有没有回复" in utterance or "商户已经取消" in utterance:
+        return _MERCHANT_CANCEL_REFUSAL
+    if (
+        "第三方商户" in utterance
+        and ("退回" in utterance or "退款" in utterance)
+        and "保证" in utterance
+    ):
+        return _REFUND_GUARANTEE_REFUSAL
     return None
 
 

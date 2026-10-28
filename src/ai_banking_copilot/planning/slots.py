@@ -290,7 +290,20 @@ def _resolve_slot(
         }
         if len(periods) == 1:
             return periods.pop(), None, tuple(notes)
+    if slot == "merchant":
+        # 只取明确的「给某商户开通」原文，商户缺失或修改指令仍需澄清。
+        match = re.search(r"给(?P<merchant>[^，,。；;]{1,30}?)开通", inputs.text)
+        if match is not None:
+            return match["merchant"].strip(), None, tuple(notes)
     if slot == "next_charge_on":
+        match = re.search(r"下个?月\s*(?P<day>\d{1,2})\s*[号日]", inputs.text)
+        if match is not None:
+            next_month = inputs.today.month % 12 + 1
+            year = inputs.today.year + (inputs.today.month == 12)
+            try:
+                return date(year, next_month, int(match["day"])).isoformat(), None, tuple(notes)
+            except ValueError:
+                return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
         parsed = parse_temporal(inputs.text, inputs.today)
         if parsed.matched and parsed.when is not None:
             return parsed.when.isoformat(), None, tuple(notes)
