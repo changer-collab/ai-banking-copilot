@@ -135,6 +135,11 @@ from ai_banking_copilot.scenarios.wealth import (
     is_recommendation_request,
     to_risk_assessment,
 )
+from ai_banking_copilot.scenarios.wealth_assessment import (
+    invitation_message,
+    is_assessment_request,
+    questionnaire_payload,
+)
 from ai_banking_copilot.tools.registry import ToolCall
 from ai_banking_copilot.web.plan_card import (
     PROMPT_STRONG_VERIFY,
@@ -338,6 +343,9 @@ class SubmissionView:
 
     clarifications: tuple[ClarificationAsk, ...] = ()
     """待澄清的**结构化**提问（槽位 + 文案）：渠道层据此渲染「回答即可继续」的闭环输入。"""
+
+    questionnaire: tuple[dict[str, object], ...] = ()
+    """风险测评问卷（题号 / 题干 / 选项，不含分值）：仅「我要做风险测评」时下发。"""
 
 
 @dataclass(frozen=True)
@@ -706,6 +714,10 @@ class Session:
             invalid = self._invalid_selection(selected or {})
             if invalid is not None:
                 return self._refuse(invalid, utterance)
+            # 整句只问测评才直接出问卷；带第二件事（逗号 / 再 / 然后）交回意图装配，
+            # 避免「做测评，然后买 R2」被早退吞掉后半句。
+            if _is_pure_assessment_request(utterance):
+                return self._assessment_invitation()
             _notify(on_stage, "understand")
             intents, asks, notes = self._assemble_intents(utterance, selected)
             if asks:
@@ -1506,6 +1518,20 @@ class Session:
         if not capability_boundary:
             self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
+
+    def _assessment_invitation(self) -> SubmissionView:
+        """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。"""
+        self._state = SessionState.IDLE
+        self._message = invitation_message()
+        return SubmissionView(
+            self._state,
+            self._message,
+            None,
+            None,
+            None,
+            (),
+            questionnaire=questionnaire_payload(),
+        )
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
         self._state = SessionState.TAKEN_OVER
@@ -2464,6 +2490,24 @@ def _guard_utterance(utterance: str) -> str | None:
     if any(marker in utterance for marker in FABRICATION_MARKERS):
         return _FABRICATION_REFUSAL
     return None
+
+
+_MEASUREMENT_ONLY_MAX_LENGTH = 24
+"""整句只问测评的长度上界：超过即视为还有别的事，交回意图装配。"""
+
+
+def _is_pure_assessment_request(utterance: str) -> bool:
+    """整句只含测评意图时才直接出问卷。
+
+    判据：命中测评话术 + 不含第二件事的衔接词（逗号 / 再 / 然后 / 顺便 / 并且）
+    + 长度不超过上界。这样「我要做风险测评」直接出题，
+    「做测评，然后买 R2」不会被早退吞掉后半句。
+    """
+    if not is_assessment_request(utterance):
+        return False
+    if any(marker in utterance for marker in ("，", ",", "再", "然后", "顺便", "并且")):
+        return False
+    return len(utterance) <= _MEASUREMENT_ONLY_MAX_LENGTH
 
 
 def _default_selected(deps: AppDeps) -> dict[str, object]:

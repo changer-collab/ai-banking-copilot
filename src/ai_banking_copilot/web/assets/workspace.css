@@ -828,3 +828,60 @@ html[data-view="app"] #app > .main > .view:not(.view--chat) { padding-bottom: 64
 }
 
 
+
+
+/* ---------- 理财：风险测评 / 产品目录 / 持仓 ---------------------------- */
+.panel__title--sub {
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--rule);
+}
+
+#wealth-status { display: grid; gap: 2px; margin-bottom: var(--s-2); }
+#wealth-status p { margin: 0; }
+
+.wealth-retake { margin-top: var(--s-2); }
+.wealth-retake > summary { cursor: pointer; color: var(--ink-2); font-size: var(--fs-small); }
+
+.wealth-form { display: grid; gap: var(--s-3); margin-top: var(--s-2); }
+.wealth-question {
+  display: grid;
+  gap: var(--s-1);
+  margin: 0;
+  padding: var(--s-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+}
+.wealth-question legend { padding: 0 var(--s-1); font-size: var(--fs-small); color: var(--ink-2); }
+.wealth-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.wealth-option input { flex: none; margin-top: 2px; }
+.wealth-error { color: var(--lvl-denied); }
+.wealth-invite { margin: 0 0 var(--s-2); white-space: pre-line; }
+
+.wealth-product {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--s-2) 0;
+  border-top: 1px dashed var(--rule);
+}
+.wealth-product:first-child { border-top: 0; }
+.wealth-product p { margin: 0; overflow-wrap: anywhere; }
+.wealth-product--disabled { opacity: 0.62; }
+.wealth-reason { color: var(--lvl-denied); font-size: var(--fs-small); }
+.wealth-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.wealth-action .input { flex: 1 1 8rem; min-width: 0; }
+.wealth-action .btn { flex: none; }
+.wealth-result { margin-top: 0; }

@@ -59,52 +59,52 @@ class AssessmentResult:
 QUESTIONNAIRE: tuple[AssessmentQuestion, ...] = (
     AssessmentQuestion(
         id="q1_surplus",
-        prompt="您每月的可支配结余（收入减去必要支出）大致占收入的比例？",
+        prompt="每个月发完工资、交完房租和日常开销，您大概还能剩下多少？",
         options=(
-            AssessmentOption("q1_a", "10% 以下", 0),
-            AssessmentOption("q1_b", "10%–30%", 1),
-            AssessmentOption("q1_c", "30%–50%", 2),
-            AssessmentOption("q1_d", "50% 以上", 3),
+            AssessmentOption("q1_a", "基本剩不下，有时还要动用存款", 0),
+            AssessmentOption("q1_b", "能剩下一点，不到收入的三成", 1),
+            AssessmentOption("q1_c", "能剩下收入的三成到一半", 2),
+            AssessmentOption("q1_d", "能剩下收入的一半以上", 3),
         ),
     ),
     AssessmentQuestion(
         id="q2_experience",
-        prompt="您参与银行理财、基金等投资的时间有多久？",
+        prompt="您买过银行理财或者基金吗？大概买了多久？",
         options=(
-            AssessmentOption("q2_a", "没有相关经验", 0),
-            AssessmentOption("q2_b", "1 年以内", 1),
-            AssessmentOption("q2_c", "1–3 年", 2),
-            AssessmentOption("q2_d", "3 年以上", 3),
+            AssessmentOption("q2_a", "没买过，不太了解", 0),
+            AssessmentOption("q2_b", "买过，不到 1 年", 1),
+            AssessmentOption("q2_c", "买了 1–3 年", 2),
+            AssessmentOption("q2_d", "买了 3 年以上", 3),
         ),
     ),
     AssessmentQuestion(
         id="q3_drawdown",
-        prompt="如果持有的产品出现浮亏，您最多能承受多大的回撤？",
+        prompt="假设您买的理财暂时亏了，最多亏多少您还能接受？",
         options=(
-            AssessmentOption("q3_a", "不能接受任何亏损", 0),
-            AssessmentOption("q3_b", "5% 以内", 1),
-            AssessmentOption("q3_c", "5%–15%", 2),
-            AssessmentOption("q3_d", "15% 以上", 3),
+            AssessmentOption("q3_a", "一点亏损都不能接受", 0),
+            AssessmentOption("q3_b", "亏 5% 以内", 1),
+            AssessmentOption("q3_c", "亏 5%–15%", 2),
+            AssessmentOption("q3_d", "亏 15% 以上也能接受", 3),
         ),
     ),
     AssessmentQuestion(
         id="q4_horizon",
-        prompt="这笔资金大概多久之内不需要动用？",
+        prompt="这笔钱大概多久之内您不会用到？",
         options=(
-            AssessmentOption("q4_a", "3 个月以内", 0),
-            AssessmentOption("q4_b", "3 个月–1 年", 1),
+            AssessmentOption("q4_a", "3 个月内就要用", 0),
+            AssessmentOption("q4_b", "3 个月到 1 年", 1),
             AssessmentOption("q4_c", "1–3 年", 2),
-            AssessmentOption("q4_d", "3 年以上", 3),
+            AssessmentOption("q4_d", "3 年以上都用不到", 3),
         ),
     ),
     AssessmentQuestion(
         id="q5_reaction",
-        prompt="买入后产品净值下跌 10%，您通常会怎么做？",
+        prompt="刚买没多久就跌了 10%，您通常会怎么做？",
         options=(
-            AssessmentOption("q5_a", "立即全部赎回", 0),
-            AssessmentOption("q5_b", "赎回一部分", 1),
-            AssessmentOption("q5_c", "继续持有观察", 2),
-            AssessmentOption("q5_d", "逢低加仓", 3),
+            AssessmentOption("q5_a", "马上全部卖出", 0),
+            AssessmentOption("q5_b", "先卖出一部分", 1),
+            AssessmentOption("q5_c", "先放着，继续观察", 2),
+            AssessmentOption("q5_d", "趁跌了再买一些", 3),
         ),
     ),
 )
@@ -112,6 +112,32 @@ QUESTIONNAIRE: tuple[AssessmentQuestion, ...] = (
 
 MAX_SCORE = sum(max(option.score for option in question.options) for question in QUESTIONNAIRE)
 """问卷满分（由题库推导，改题自动跟随）。"""
+
+ASSESSMENT_REQUEST_HINTS = (
+    "风险测评",
+    "风险评测",
+    "重新测评",
+    "做测评",
+    "做一次测评",
+    "测一下风险",
+)
+"""「我要做风险测评」类请求的确定性判据：命中即出问卷，**绝不反问用户等级**。"""
+
+
+def is_assessment_request(text: str) -> bool:
+    """文本是否在要求做风险测评（字符串判据，不经过模型）。"""
+    return any(hint in text for hint in ASSESSMENT_REQUEST_HINTS)
+
+
+def invitation_message() -> str:
+    """出题话术：把 5 道题原文带出来，用户不必再去找入口。"""
+    lines = ["风险测评一共 5 道题，答完由系统算分定级（R1–R5），等级不能自填。"]
+    lines.extend(
+        f"{index}. {question.prompt}"
+        for index, question in enumerate(QUESTIONNAIRE, start=1)
+    )
+    lines.append("在下方逐题选好提交即可（右侧「理财 · 测评与持仓」面板里也能答）。")
+    return "\n".join(lines)
 
 
 def questionnaire_payload() -> tuple[dict[str, object], ...]:

@@ -260,11 +260,17 @@ _PAGE_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="scene-block" data-scene-block="wealth" hidden>
-        <section class="panel">
-          <p class="panel__title">理财</p>
-          <p class="muted">功能页数据待接入（负责人：徐思云）。当前可先用「去对话」做风险测评与申购赎回。</p>
+        <section class="panel" id="wealth-panel">
+          <p class="panel__title">理财 · 测评与持仓</p>
+          <div class="muted" id="wealth-status">正在读取测评状态与持仓…</div>
+          <div id="wealth-assessment"><p class="muted">尚未读取风险测评问卷。</p></div>
+          <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定</span></p>
+          <div id="wealth-products"><p class="muted">尚未读取产品目录。</p></div>
+          <p class="panel__title panel__title--sub">我的持仓</p>
+          <div id="wealth-holdings"><p class="muted">尚未读取持仓。</p></div>
+          <p class="muted" id="wealth-source"></p>
           <div class="btn-row">
-            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓</button>
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>
           </div>
         </section>
       </div>
