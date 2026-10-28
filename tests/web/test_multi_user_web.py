@@ -129,6 +129,20 @@ def test_transfer_records_are_scoped_to_the_logged_in_user(
     )
 
 
+def test_cards_are_scoped_to_the_logged_in_user(
+    client: TestClient, auth_deps: AppDeps
+) -> None:
+    """`/api/cards` 必须按登录用户查表：两个账号的卡片集合不得有交集。"""
+    _login(client, "chenming")
+    primary = {card["card_id"] for card in client.get("/api/cards").json()["cards"]}
+
+    secondary = TestClient(create_app(auth_deps))
+    _login(secondary, "linjing")
+    other = {card["card_id"] for card in secondary.get("/api/cards").json()["cards"]}
+    assert primary and other
+    assert not primary & other
+
+
 def test_cross_site_write_is_rejected_before_any_state_change(client: TestClient) -> None:
     _login(client, "chenming")
     response = client.post(

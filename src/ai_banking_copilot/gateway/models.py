@@ -78,6 +78,10 @@ class Transaction:
     category: str
     channel: str
     direction: str
+    booked_at: str | None = None
+    """发生时刻（`YYYY-MM-DDTHH:MM:SS`，可空）。「深夜」判据的唯一时间来源。"""
+    city: str | None = None
+    """消费发生地城市（可空）。「异地」判据的唯一地点来源。"""
 
 
 @dataclass(frozen=True)
