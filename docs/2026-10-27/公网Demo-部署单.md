@@ -131,10 +131,10 @@ https://random-words-1234.trycloudflare.com
 | 用途 | 地址 |
 |---|---|
 | 网页端 | `https://<隧道域名>/` |
-| APP 端（窄屏 PWA） | `https://<隧道域名>/m` |
+| 手机 / APP 端（可安装 PWA） | `https://<隧道域名>/`（≤600px 自动切底部四 Tab，无 `/m` 入口） |
 | 本地联调页（不算产品页） | `https://<隧道域名>/im` |
 | 渠道健康 | `https://<隧道域名>/api/channels/health` |
-| 飞书回调（M2 完成后生效） | `https://<隧道域名>/api/im/feishu` |
+| 飞书回调（已接线，待配置凭据） | `https://<隧道域名>/api/im/feishu` |
 
 ### 3.3 Windows 本机（没服务器时先跑通）
 
@@ -150,10 +150,10 @@ Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/lates
 ## 4. 验收清单（照这个点一遍）
 
 - [ ] `https://<隧道域名>/` 手机 4G 打开，首页 3 秒内可操作
-- [ ] `https://<隧道域名>/m` 是窄屏 App 观感，四个 Tab 都在
+- [ ] 同一地址缩到 ≤600px，自动切成 App 观感（底部四个 Tab 都在）
 - [ ] `https://<隧道域名>/im` 断网也能打开（零外链），能走完一次「文本进 → 计划卡 → 确认 → 回执」
 - [ ] `https://<隧道域名>/api/channels/health` 返回三渠道状态，`feishu` 未配置时如实写 `not_configured`
-- [ ] `POST https://<隧道域名>/api/im/feishu` 在 M2 完成前返回 **501 + `feishu_adapter_not_integrated`**（如实，不是假成功）
+- [ ] `POST https://<隧道域名>/api/im/feishu` 在**未配置 `AIB_FEISHU_*`** 时返回 **401 `signature_invalid`**（fail-closed，不是假成功）；配置后可跑 `scripts/replay_webhook.py normal`
 - [ ] 日志通道是 `llm`；拔掉 key 后自动是 `fallback`（两种都验一次）
 - [ ] `runtime/copilot.db` 在重建容器后仍在（数据卷生效）
 
@@ -250,7 +250,9 @@ A：`./runtime` 没挂数据卷。本仓库 compose 已挂；自己改过 compos
    ```
 3. **服务器 8000 端口被占** → compose 的宿主端口改成可配 `API_HOST_PORT`（默认仍是 8000，不影响本地）。
 
-**公网实测（从本机访问隧道地址）**：
+**公网实测（2026-10-27 快照）**：
+
+> 下表是 10-27 的实测记录。10-28 已合入飞书适配器、`/m` 并入响应式 PWA，**重新部署后以 §4 验收清单为准**；`GET /m` 不再存在（404 属预期）。
 
 | 检查项 | 结果 |
 |---|---|
@@ -273,6 +275,34 @@ A：`./runtime` 没挂数据卷。本仓库 compose 已挂；自己改过 compos
   - **以后每次部署后建议顺手跑一次**：`docker builder prune -af`（只删构建缓存，不影响运行中的容器）。
   - 还剩 12.8G 镜像，都是运行中容器在用的（其中 `expert-managementsystem-app:latest` 4.07G、`napcat` 2.12G、`medicine-process-api` 2.17G、两个 `mysql` 共 2.4G）——**这些不是我们的，别删**，要清得先问对应的人。
 - 这台机器上还跑着 `expert-managementsystem-*`、`komari`、`qq_feishu_bot`、`qq_napcat` 等**别人的服务**，部署与重启**只操作 `aib-*`**，不要 `docker compose down` 全局、不要改 80/443 的占用。
+
+### 10.4 2026-10-28 重新部署与飞书四项验收（**replay 模式**）
+
+**部署**：本机 `tar -czf aib-deploy.tar.gz --exclude=.git --exclude=runtime --exclude=.env ...`（10.78MB）→ `scp` 到 `/home/aistock/` → 备份旧目录为 `aib-backup-.tgz` → 解包进 `~/aib` → `API_HOST_PORT=18080 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker compose -p aib up -d --build api`。**只重建 `aib-api`，`aib-tunnel` 未重启**，故地址不变；服务器 `docker-compose.yml` md5 与仓库一致（`6132ca36…`），未改编排。
+
+**公网实测（2026-10-28）**：
+
+| 检查项 | 结果 |
+|---|---|
+| `GET /` | **200**，页面引用 `app.js?v=31`、`workspace.css?v=15` |
+| `GET /assets/sw.js` | **200**，`aib-static-shell-v24`（Service Worker 在 `/assets/` 下，`/sw.js` 404 属预期） |
+| `GET /m` | **404**（`/m` 已并入响应式 PWA，属预期） |
+| `GET /im` | **200** |
+| `GET /api/channels/health` | **200**，`im=local / bound_identities=1`、`feishu.mode=replay / reason=replay_mode / card_action=false` |
+| `POST /api/im/message {"text":"查余额"}` | **200**，「计划卡已生成（1 步，级别 GREEN）」，含飞书交互卡片体（`确认办理` 按钮） |
+
+**飞书四项验收**（`python scripts/replay_webhook.py <mode> --url https://<当日地址>/api/im/feishu --key replay-key`）：
+
+| 模式 | 结果 |
+|---|---|
+| `normal` | **200**，GREEN 计划卡 + 卡片渲染体（`header.template=green`，按钮 `value.action=confirm`） |
+| `tamper` | **401** `{"detail":"signature_invalid","channel":"feishu"}` |
+| `replay` | 首次 `replayed: false`，第二次 **`replayed: true`**（同 `event_id`，幂等生效、不重复执行业务） |
+| `burst` | 21 连发 → 前 20 次 **200**，第 21 次 **429**，响应头 **`Retry-After: 60`** |
+
+> **口径边界**：服务器**没有真实 `AIB_FEISHU_*` 凭据**，以上是 **replay 模式**（回放密钥 + 回放事件），**不等于真实飞书回调验收**。验收前手工往 `channel_identities` 写了一条演示绑定 `feishu / ou-replay → u_demo`（仓库内暂无发码/绑定 HTTP 入口）；未绑定时正常回放会返回 **401 `identity_unbound`**，属预期。
+
+**当日故障与处置**：部署后 `/api/im/message` 返回 **409「会话存储或恢复失败」**。容器内 `probe_snapshot.py` 定位为 `SessionSnapshotError: snapshot_decode_failed:invalid_snapshot_fields`——10-27 旧代码写入的 `('u_demo','im:default')` 快照在新 codec 下无法解码。处置：整表备份到 `/app/runtime/stale-snapshots-20261028.json` → 删除该行 → `docker restart aib-api-1`（清掉内存中已 `_persistence_failed` 的会话）→ 复测恢复 200。**这是代码侧残留**（旧快照无兼容迁移），不是部署问题。
 
 ---
 
@@ -329,26 +359,27 @@ docker restart aib-tunnel && sleep 10 && docker logs aib-tunnel 2>&1 | grep tryc
 |---|---|
 | **回调地址** | `https://<当日隧道域名>/api/im/feishu`。域名每天可能变，**找尹辰要当天那条**（或等尹辰发群里），不要自己猜 |
 | **四个凭据变量名** | `AIB_FEISHU_APP_ID` / `AIB_FEISHU_APP_SECRET` / `AIB_FEISHU_VERIFICATION_TOKEN` / `AIB_FEISHU_ENCRYPT_KEY`。**值只私发给尹辰**，由他写进服务器 `.env` 并重启 `aib-api`；**群里/文档/截图里都不写值** |
-| **服务是否可达** | 浏览器打开 `https://<当日隧道域名>/api/channels/health`，`feishu` 那段应是 `stub / not_configured`（你接好之后应变成 `adapter`） |
+| **服务是否可达** | 浏览器打开 `https://<当日隧道域名>/api/channels/health`，`feishu` 那段现在是 `replay / replay_mode`（**未配凭据**）；你接好之后应变成 `configured: true`，`mode` 不再是 `replay` |
 
 ### 12.2 现在能不能填飞书后台
 
-**先别填。** 现在 `POST /api/im/feishu` 是 **501 + `feishu_adapter_not_integrated`**（M2 还没做），飞书后台点「保存」会报**请求地址校验失败**——不是你配错，是后端还没实现。
+**适配器已合入，但服务器还没配凭据。** `POST /api/im/feishu` 不再返回 501；未配 `AIB_FEISHU_*` 时服务处于 **`replay` 模式**（用回放密钥校验，只对 `replay_webhook.py` 有效），此时**在飞书后台点「保存」仍会校验失败**——真实验签/解密要等凭据写入并重启 `aib-api`。
 
 **正确顺序**：
 
-1. 先在本机把 `web/channels/feishu.py` 写完（验签 / AES 解密 / `url_verification` 回声 / `event_id` 幂等 / 3 秒内 ACK / 出交互卡片 / 出站发消息）；
-2. 本机四开关全过：`replay_webhook.py --tamper`→401、`--replay`→只执行一次、`--burst 30`→429、正常→出计划卡；
-3. 找尹辰要**当日回调地址**，同时把四个凭据私发给他（他写进服务器、重启 `aib-api`）；
+1. ~~先在本机把 `web/channels/feishu.py` 写完~~ 已完成（验签 / AES 解密 / `url_verification` 回声 / `event_id` 幂等 / ACK / 交互卡片 / 出站发消息）；
+2. 四项回放已过（2026-10-28，公网地址实测，见 §10.4）：`tamper`→401、`replay`→只执行一次、`burst`→429 + `Retry-After: 60`、正常→出计划卡；
+3. 找尹辰要**当日回调地址**，同时把四个凭据私发给他（他写进服务器 `.env`、重启 `aib-api`）；
 4. 再回飞书后台填地址 → 订阅 `im.message.receive_v1` → 保存（这时校验才会通过）；
-5. 在飞书里发一句「给李娜转500」，找尹辰看 `docker logs aib-api-1` 是否收到、`/api/channels/health` 的 `feishu` 是否变 `adapter`；
+5. 在飞书里发一句「给李娜转500」，找尹辰看 `docker logs aib-api-1` 是否收到、`/api/channels/health` 的 `feishu` 是否不再是 `replay`；
 6. 同一句话再走一遍网页 `/`，比对 `state`、三色等级、`card_id` 结构**逐字段相同**（M1 的双端一致）。
+7. **真实用户要先绑定身份**：首次回调若返回 `401 identity_unbound`，说明该飞书 `open_id` 未绑定；仓库内**还没有发码/绑定的 HTTP 入口**，目前只能手工往 `channel_identities` 写一条 `('feishu', '<open_id>', '<user_id>')`。
 
 ### 12.3 填后台时容易踩的点
 
 | 现象 | 原因 |
 |---|---|
-| 保存时「请求地址校验失败」 | 后端还是 501（M2 未完成），或地址少写 `/api/im/feishu`，或用了昨天的旧域名 |
+| 保存时「请求地址校验失败」 | 界面报了这句，但根本原因是**没配凭据**（服务仍是 `replay` 模式，不认飞书真实验签）；或地址少写 `/api/im/feishu`，或用了昨天的旧域名 |
 | 飞书发消息没反应 | 没订阅 `im.message.receive_v1`；或后端在 3 秒内没 ACK 被飞书重试；看 `docker logs aib-api-1` |
 | 收到 401 | 签名算法/`X-Lark-Signature` 拼错，或 `ENCRYPT_KEY` 与实际配置不一致 |
 | 同一条消息执行了两次 | `event_id` 幂等没做（必须命中幂等表直接 200，不重放业务） |
@@ -371,6 +402,7 @@ docker restart aib-tunnel && sleep 10 && docker logs aib-tunnel 2>&1 | grep tryc
 | 日期 | 隧道地址 | 备注 |
 |---|---|---|
 | 2026-10-27 | `https://speeches-plant-confidence-constantly.trycloudflare.com` | 首次部署（18080 + aib-tunnel），五项实测全绿 |
+| 2026-10-28 | 同上（**地址未变**） | 只重建 `aib-api`（未重启隧道）；`feishu=replay`，四项验收全过；旧快照 409 已备份删除（见 §10.4） |
 
 > 地址变了就在这张表加一行，并同步给王昌泽。
 

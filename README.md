@@ -162,14 +162,21 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 
 `取消我的订阅` / `退出我的订阅` 为 **fail-closed（空意图）**：安全语义不变，不降档为只读执行。
 
-### 渠道（P2-7）：Web 多会话 + IM（能力子集）
+### 渠道（P2-7）：Web 多会话 + 飞书 IM
 
 - **Web 多会话**：单页渠道按 `session_id` 维护**相互隔离**的 `Session`（各自 pending / 状态机独立）；
   未带 `session_id` 的请求落到同一缺省会话，**保持既有单会话行为不变**。
-- **IM 渠道**（`src/ai_banking_copilot/web/channels/im.py`）：**最小文本适配器**——受信任文本进 / 出，
-  复用既有 `web.session.Session`（写只经 `policy.pep.Pep`，本层不直接触碰 `CoreBank`）。
-  **如实声明为能力子集**：只覆盖**单轮文本交互**，**未接任何真实 IM 平台**，
-  不覆盖真实 IM 的鉴权 / 群聊 / 富媒体 / 事件订阅 / 长连接推送等，**非等价实现**。
+- **飞书渠道**（`web/channels/feishu.py` · `dispatcher.py` · `identity.py`）：入站 `POST /api/im/feishu`
+  依次做**时间戳 ±5 分钟 + 签名校验 → AES 解密 → 解析文本 / `card.action.trigger` → 身份绑定查表
+  （`channel_identities`，解析失败给绑定指引、不回落默认用户）→ 20 次/分限流 → `event_id` 幂等**，
+  再交给按用户隔离的调度器；出站卡片对超时 / 5xx 重试三次。
+- **会话边界**：各渠道共用同一 `SessionManager` 与状态机，但**会话键是 `channel:chat_id`**，
+  因此 Feishu / Web / PWA 之间**不共享对话上下文**，也不能拿 A 渠道的计划卡去 B 渠道确认；
+  共享的是同一用户的账户事实、三色策略、审计与执行器。
+- **能力边界（如实声明）**：不覆盖群聊、富媒体、长连接推送；**服务器尚未写入 4 个 `AIB_FEISHU_*`
+  凭据**，`GET /api/channels/health` 现为 `feishu.mode=stub`。现场演示可用
+  `python scripts/replay_webhook.py normal|tamper|replay|burst` 与 `/im` 联调页复现同一链路；
+  写入凭据并重启后即为真回调。
 
 ### Web 业务闭环与可复现评测
 
@@ -194,7 +201,7 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 - `AIB_VERIFICATION_MODE=demo` 默认使用明确标记的演示码；`external` 使用通用 HTTP JSON 投递，需设置 `AIB_VERIFICATION_ENDPOINT`、`AIB_VERIFICATION_TOKEN`、`AIB_VERIFICATION_TARGET` 与独立 `AIB_VERIFICATION_KEY`。`AIB_VERIFICATION_STRICT=1` 禁止 demo；未配置或投递失败不降级。external 响应省略验证码。
 - 验证挑战仅持久保存 HMAC 摘要，绑定用户、会话、执行和冻结计划，300 秒内一次性使用；真实第二信道尚未联调，不宣称短信、人脸或 U 盾已接入。
 - 强验证失败次数与锁定默认写入独立 SQLite 表，按用户跨 worker 与重启共享；手工构造 `AppDeps` 的内存默认值只用于测试装配，不代表服务默认行为。
-- 默认 SQLite 快照支持单进程、单 worker 的服务重启恢复，`GET /api/session` 只读恢复状态。写节点执行前后设检查点；重启后未完成任务须重新确认，旧 active 挑战失效。回执与审计缺口明确阻止后续执行及回退，不能用新提交覆盖待核对记录。当前页面对话列表仍为临时记录，刷新后的自动找回属于后续 APP 通道工作。
+- 默认 SQLite 快照支持单进程、单 worker 的服务重启恢复，`GET /api/session` 只读恢复状态。写节点执行前后设检查点；重启后未完成任务须重新确认，旧 active 挑战失效。回执与审计缺口明确阻止后续执行及回退，不能用新提交覆盖待核对记录。对话与办理记录另存独立消息表（`web/conversation_store.py`，按 `user_id + session_id` 过滤），左侧历史会话可切换与恢复。
 
 ## 执行一致性（2026-10-16）
 
@@ -233,6 +240,27 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 
 评测产物包含配置、源码 / 数据 / 提示词 / 评分器哈希及逐例结果，保存在已忽略的 `runtime/`。
 严格模型通道只接受真实 Planner / Reviewer 结果；缺少凭据、调用失败或解析失败均如实记录，不用模板补分。自建数据仅用于回归验证，不代表未知输入的泛化能力。
+
+### 证据与复跑（2026-10-28）
+
+`web-smoke-v2`（21 条 × 2 次、模板通道）四个数字，与 `docs/RESULTS.md` §1 同口径：
+
+| 危险动作拦截率 | 误拒率 | 任务成功率 | 数字可回溯率 |
+|---|---|---|---|
+| 5/5 = **100.00%** | 0/14 = **0.00%** | 14/14 = **100.00%** | 26/26 = **100.00%** |
+
+交互实测：平均 **1.000** 用户轮、一句话完成率 **85.71%**、业务完成率 **100.00%**；错误恢复成功率 **null**（本批产物无出错样本，不写 0）。
+审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
+逐例证据见 [`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)，可从 `runtime/benchmark/web-smoke-v2-fix2/run-1/results.json` 重算。
+
+最近一次全量门禁（2026-10-28）：`ruff check .` 通过、`mypy src` 通过（104 files）、`pytest -q` **1790 passed / 0 failed**。
+
+```
+python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
+python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --demo "转给李娜 500 元"
+```
+
+对标公开基准（出处见 [`docs/参赛对标与改进方向.md`](docs/参赛对标与改进方向.md) 第五节）：FraudBench 的四个 agent 攻击安全性 **49%–65%**；APort Vault 加入确定性事前检查后违规划转 **140 次 → 0 次**，同期 25,370 笔合法支付照常执行。上表为自建回归集，**不是盲测或真实模型泛化成绩**。
 
 ## 熔断与恢复（裁决 #27）
 
@@ -274,10 +302,13 @@ python scripts/operator_unlock.py --reason "注入误报，已人工核实"
 | 用途 | 地址 |
 |---|---|
 | 网页端 | `https://<tunnel>/` |
-| APP 端（窄屏 PWA） | `https://<tunnel>/m` |
+| 手机 / APP 端（可安装 PWA） | `https://<tunnel>/`（≤600px 自动切底部四 Tab，无独立 `/m` 入口） |
 | 本地联调页（不算产品页） | `https://<tunnel>/im` |
 | 渠道健康 | `https://<tunnel>/api/channels/health` |
-| 飞书回调（M2 完成后生效） | `https://<tunnel>/api/im/feishu` |
+| 飞书回调（已接线，待配置凭据） | `https://<tunnel>/api/im/feishu` |
+
+> 多用户登录为**可选增强**：服务器 `.env` 设 `AIB_AUTH_MODE=demo` + `AIB_DEMO_PASSWORD` 后启用
+> Cookie 会话与 CSRF；未设置时沿用单用户演示身份。
 
 **为什么这么部署（都是踩过的坑）**：
 

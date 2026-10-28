@@ -40,22 +40,23 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=11")
-    js = _get(base, "/assets/app.js?v=27")
-    service_worker = _get(base, "/assets/sw.js?v=20")
+    workspace_css = _get(base, "/assets/workspace.css?v=15")
+    js = _get(base, "/assets/app.js?v=31")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
-        "page: 技术详情开关": 'id="tech-toggle"' in html and "技术详情" in html,
         "page: 顶栏/三栏/处理详情": (
             'class="topbar"' in html and 'class="layout layout--workspace"' in html
             and 'class="side"' in html and 'class="main"' in html and 'class="trace rail"' in html
         ),
-        "page: 视图层（首页/对话/记录/渠道/个人中心弹窗）": (
+        "page: 视图层（首页/对话/记录/渠道/我的）": (
             'id="view-home"' in html and 'id="view-chat"' in html
             and 'id="view-records"' in html and 'id="view-health"' in html
-            and 'id="profile-panel"' in html and 'id="profile-backdrop"' in html
+            and 'id="view-me"' in html and 'id="profile-panel"' in html
         ),
+        "page: 窄屏首页列表容器": 'id="home-scene-list"' in html,
+        "page: 左栏无「常用办理」": "常用办理" not in html and 'id="quick-scenes"' not in html,
+        "page: 右栏无三色分级图例": "三色分级（官方口径）" not in html,
         "page: 对话式结构": (
             'id="conversation-sidebar"' in html
             and 'id="conversation-welcome"' in html
@@ -69,35 +70,19 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=11" in html
-            and "/assets/app.js?v=27" in html
+            and "/assets/workspace.css?v=15" in html
+            and "/assets/app.js?v=31" in html
         ),
-        "page: 订阅扣款入口与安装入口": (
-            'data-nav="records" data-record-tab="charges"' in html
-            and 'id="btn-install"' in html and "beforeinstallprompt" in js
-        ),
-        "js: 订阅三态与扣款证据表": (
-            "item.price_increased_12m === true" in js
-            and "item.price_increased_12m === false" in js
-            and "样本不足" in js and "下次扣款日" in js
-            and 'class="charge-records-table"' in js
-            and "seen.has(txn.record_id)" in js
-        ),
-        "js: 审计真实渠道与同摘要": (
-            'payload.channel || "未记录"' in js
-            and "payload.text_digest" in js and "同摘要" in js
-        ),
-        "pwa: v11/v27/v20 版本链": (
-            'const CACHE_NAME = "aib-static-shell-v20"' in service_worker
-            and '"/assets/workspace.css?v=11"' in service_worker
-            and '"/assets/app.js?v=27"' in service_worker
-            and 'register("/assets/sw.js?v=20"' in js
+        "page: PWA 安装与订阅入口": (
+            'id="btn-install"' in html
+            and 'id="install-status"' in html
+            and 'data-record-tab="charges"' in html
+            and 'data-action="refresh-subscriptions"' in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
         "css: .tech 默认收起": ".tech {" in css and "display: none;" in css,
-        "css: data-tech 展开": 'html[data-tech="on"] .tech' in css,
         "workspace: 三栏/抽屉样式": (
             ".layout.layout--workspace" in workspace_css
             and ".shell.is-trace-open .trace" in workspace_css
@@ -108,12 +93,36 @@ def run(base: str) -> list[str]:
         "js: 读额度字段": "daily_limit_cents" in js and "daily_accumulated_cents" in js,
         "js: 链节点中文+tech": "function chainAdd(label, tech)" in js and "node.label" in js,
         "js: 中文级别名": 'name: "黄色"' in js,
-        "js: techToggle": "techToggle" in js,
+        "js: 窄屏我的为页面": 'isAppShell()' in js and 'navigate("me"' in js,
         "js: 规则字典（真实枚举）": "AMOUNT_OVER_DAILY_LIMIT:" in js and "QUERY_ONLY:" in js,
         "js: 要求字典": "user_confirm: " in js and "strong_verify: " in js,
         "js: 凭证号替代哈希": "function receiptNo(" in js,
         "js: 红色强验证挑战": (
             "strong-verify" in js and "申请强验证" in js and "/api/verify/request" in js
+        ),
+        "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
+        "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
+        "js: 订阅价格与下次扣款": (
+            "item.price_increased_12m === true" in js
+            and "item.price_increased_12m === false" in js
+            and "样本不足" in js
+            and "下次扣款日" in js
+        ),
+        "js: 订阅扣款证据表": (
+            'if (key === "charges")' in js
+            and 'class="charge-records-table"' in js
+            and "seen.has(txn.record_id)" in js
+            and "内容哈希" in js
+        ),
+        "js: 审计渠道与摘要": (
+            'payload.channel || "未记录"' in js
+            and "payload.text_digest" in js
+            and "同摘要关联" in js
+        ),
+        "js: PWA 安装交互": (
+            "beforeinstallprompt" in js
+            and "appinstalled" in js
+            and 'register("/assets/sw.js?v=24"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]

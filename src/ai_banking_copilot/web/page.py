@@ -1,7 +1,8 @@
-"""Web 渠道内联单页（版式对齐设计仓 `product-web.html` / `product-app.html`）。
+"""Web 渠道内联单页（版式对齐设计仓 `product-web.html` / `前端示例-APP端.html`）。
 
-- 骨架：左侧栏（品牌 / 新建 / 本页记录 / 常用办理）+ 主区（顶栏 / 对话流 / 输入区）
-  + 右侧「处理详情」栏；窄屏与 `data-view="app"` 切换为 APP 端手机框版式。
+- 骨架：左侧栏（品牌 / 新建对话 / 导航 / 历史对话 / 我的）+ 主区（常驻顶栏 / 各视图）
+  + 右侧「处理详情」栏；**同一份 HTML 按窗口宽度自适应**：≤600px 自动切 APP 版式
+  （底部四 Tab、首页竖排场景列表、对话整屏），因此 PWA 安装后即是 APP，不需要 `/m` 入口。
 - 样式与设计令牌**随包分发**：`web/assets/{tokens.css,app.css}`（取自设计仓，同一套令牌），
   页面层版式在本项目 `workspace.css` 中实现。
 - 交互由**真实 API** 驱动：`web/assets/app.js`（本项目自有实现，非设计仓的 mock 脚本）。
@@ -22,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=11" />
+<link rel="stylesheet" href="/assets/workspace.css?v=15" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -47,16 +48,12 @@ _PAGE_HTML = """<!DOCTYPE html>
         <button class="appnav__item" type="button" data-nav="scene" data-scene="cards">卡片</button>
         <button class="appnav__item" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
         <button class="appnav__item" type="button" data-nav="scene" data-scene="life">生活事件</button>
-        <p class="side__label">办理</p>
-        <button class="appnav__item" type="button" data-nav="chat">对话</button>
         <p class="side__label">工具</p>
         <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
         <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
       </nav>
       <p class="side__label">历史对话</p>
       <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，对话会保存在这里。</p></div>
-      <p class="side__label">常用办理</p>
-      <section class="convs convs--scenes" id="quick-scenes" aria-label="快捷场景列表"></section>
     </div>
     <div class="side__foot">
       <button class="side-user" id="btn-me-side" type="button" data-nav="me">
@@ -82,10 +79,6 @@ _PAGE_HTML = """<!DOCTYPE html>
                 aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
         <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
                 aria-controls="trace" aria-expanded="true">处理详情</button>
-        <label class="switch">
-          <input type="checkbox" id="tech-toggle" />
-          技术详情
-        </label>
         <label class="switch">
           <input type="checkbox" id="theme-toggle" />
           夜航主题
@@ -156,6 +149,12 @@ _PAGE_HTML = """<!DOCTYPE html>
           </div>
         </article>
       </div>
+      <!-- 窄屏（≤600px，PWA 安装态）用竖排列表，和「前端示例-APP端」一致；桌面隐藏 -->
+      <div class="home-scene-list" id="home-scene-list" aria-label="场景列表"></div>
+      <section class="home-recent" id="home-recent" hidden>
+        <p class="side__label">最近对话</p>
+        <div class="convs" id="home-recent-list"></div>
+      </section>
       <section class="panel">
         <p class="panel__title">工具</p>
         <div class="btn-row">
@@ -176,6 +175,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <p>查账单、办转账、管理卡片与订阅。缺少的信息，我会向您确认；需要授权的操作，会先给您<b>计划卡</b>。</p>
         <div class="btn-row" id="presets"></div>
         <p class="muted welcome-note">演示环境 · 模拟资金与演示商户订单</p>
+        <p class="muted welcome-note">绿＝仅自动查询 · 黄＝由您确认 · 红＝需要强验证</p>
       </section>
     </div>
 
@@ -322,7 +322,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>记录与明细</h2>
-          <p class="muted">订阅扣款可核对原始记录；渠道按实际记录展示。</p>
+          <p class="muted">AI 做过的事都在这里查得到；渠道列区分 web / app / feishu。</p>
         </div>
       </header>
       <div class="tabs" id="records-tabs" role="tablist" aria-label="记录分类">
@@ -346,25 +346,19 @@ _PAGE_HTML = """<!DOCTYPE html>
       <section class="panel" id="channel-health-panel">
         <p class="panel__title">渠道状态</p>
         <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-        <div class="channel-health-table-wrap" id="channel-health-list" tabindex="0">
-          <table class="channel-health-table">
-            <thead>
-              <tr>
-                <th>渠道</th>
-                <th>状态</th>
-                <th>最后事件</th>
-                <th>成功</th>
-                <th>失败</th>
-                <th>限流</th>
-                <th>回放模式</th>
-              </tr>
-            </thead>
-            <tbody id="channel-health-body">
-              <tr><td colspan="7" class="muted">正在读取渠道状态…</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
       </section>
+    </section>
+
+    <section class="view" id="view-me" hidden>
+      <header class="view__head">
+        <div>
+          <h2>我的</h2>
+          <p class="muted">身份、登录安全与关联数据。</p>
+        </div>
+        <button class="btn btn--sm" type="button" data-nav="home">返回首页</button>
+      </header>
+      <div id="view-me-body"><p class="muted">正在读取账户信息…</p></div>
     </section>
   </main>
 
@@ -378,33 +372,6 @@ _PAGE_HTML = """<!DOCTYPE html>
       <p class="panel__title">主动洞察</p>
       <p class="muted" id="insights-status">正在读取站内洞察…</p>
       <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
-    </section>
-
-    <section class="panel">
-      <p class="panel__title">三色分级（官方口径）</p>
-      <ul class="legend">
-        <li class="legend__item">
-          <span class="legend__dot" style="background:#0f8a5f"></span>
-          <span>
-            <span class="legend__name">绿色 · 自动执行</span><br />
-            <span class="legend__desc">仅纯查询</span>
-          </span>
-        </li>
-        <li class="legend__item">
-          <span class="legend__dot" style="background:#a8710f"></span>
-          <span>
-            <span class="legend__name">黄色 · 用户确认</span><br />
-            <span class="legend__desc">日累计 ≤ ¥1,000</span>
-          </span>
-        </li>
-        <li class="legend__item">
-          <span class="legend__dot" style="background:#b3362a"></span>
-          <span>
-            <span class="legend__name">红色 · 强验证</span><br />
-            <span class="legend__desc">强验证 · 大额 / 不可逆 / 理财申购 · 解挂</span>
-          </span>
-        </li>
-      </ul>
     </section>
 
     <section class="panel">
@@ -435,19 +402,12 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=27"></script>
+<script src="/assets/app.js?v=31"></script>
 </body>
 </html>
 """
 
 INDEX_HTML = _PAGE_HTML
-
-# APP 端：同一份骨架 + `data-view="app"`，由 workspace.css 切换为手机框版式。
-APP_HTML = _PAGE_HTML.replace(
-    '<html lang="zh-CN" data-theme="light">',
-    '<html lang="zh-CN" data-theme="light" data-view="app">',
-    1,
-)
 
 # 登录页：独立自包含页面（无外链资源、无设计仓依赖），仅同源调用 `/api/auth/login`。
 LOGIN_HTML = """<!DOCTYPE html>

@@ -4,6 +4,7 @@
 1. **对话轮数**：完成一件事需要用户说几句话（`/api/submit` + `/api/clarify` 计为用户轮）。
 2. **通道差分**：同一数据集在模板通道与严格模型通道下的轮数/成功率差异。
 3. **二次澄清**：有多少任务需要用户第二次开口（缺槽追问）。
+4. **错误恢复**：出错（4xx 或拒绝/接管/已提交未核实）后最终完成的比例；无样本输出 `null`。
 
 另附「手机银行 N 步 vs 本产品 1 句」的对照：手机银行步数取自
 `MOBILE_BANKING_STEPS`（打开 App → 找入口 → 选账户 → 选收款人 → 填金额 → 验证），
@@ -11,10 +12,10 @@
 
 用法：
 
-    python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2
+    python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2/run-1
     python scripts/measure_interaction.py --demo "转给李娜 500 元"
-    python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2 \\
-        --compare runtime/benchmark-llm/web-smoke-v2
+    python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2/run-1 \\
+        --compare runtime/benchmark-llm/web-smoke-v2/run-1
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -32,6 +33,11 @@ Json = dict[str, Any]
 
 _USER_ENDPOINTS = frozenset({"/api/submit", "/api/clarify"})
 _CONFIRM_ENDPOINTS = frozenset({"/api/confirm", "/api/due"})
+
+_ERROR_HTTP_STATUS = 400
+_FAILURE_STATES = frozenset({"rejected", "failed", "taken_over", "committed_unverified"})
+"""只要 trace 里出现 4xx / 上述状态，就算这一例「出过错」；`committed_unverified` 计失败，
+不美化成成功（口径见 `docs/2026-10-26/冲刺方案-2026-10-26.md` §6 第 6 项）。"""
 
 MOBILE_BANKING_STEPS: dict[str, int] = {
     "transfer": 7,
@@ -68,6 +74,7 @@ class TurnStat:
     confirm_turns: int
     clarify_turns: int
     completed: bool
+    error_events: int
 
 
 def _load_report(directory: Path) -> Json:
@@ -83,7 +90,7 @@ def _stats(report: Json, *, legitimate_only: bool = True) -> list[TurnStat]:
     for case in report.get("cases", []):
         if legitimate_only and case.get("metric_group") != "legitimate":
             continue
-        trace: Iterable[Json] = case.get("trace", [])
+        trace: list[Json] = list(case.get("trace", []) or [])
         user_turns = sum(1 for item in trace if item.get("endpoint") in _USER_ENDPOINTS)
         clarify_turns = sum(1 for item in trace if item.get("endpoint") == "/api/clarify")
         confirm_turns = sum(1 for item in trace if item.get("endpoint") in _CONFIRM_ENDPOINTS)
@@ -95,9 +102,18 @@ def _stats(report: Json, *, legitimate_only: bool = True) -> list[TurnStat]:
                 confirm_turns=confirm_turns,
                 clarify_turns=clarify_turns,
                 completed=case.get("state") == "completed",
+                error_events=sum(1 for item in trace if _is_error(item)),
             )
         )
     return stats
+
+
+def _is_error(item: Json) -> bool:
+    """trace 单步是否算「出错」：4xx 状态码，或明确的拒绝 / 失败 / 接管 / 已提交未核实。"""
+    status = item.get("http_status")
+    if isinstance(status, int) and status >= _ERROR_HTTP_STATUS:
+        return True
+    return item.get("state") in _FAILURE_STATES
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -108,6 +124,8 @@ def _summary(stats: Sequence[TurnStat]) -> Json:
     if not stats:
         return {"cases": 0}
     utterances = [item.user_turns for item in stats]
+    errored = [item for item in stats if item.error_events > 0]
+    recovery = _rate(sum(item.completed for item in errored), len(errored))
     return {
         "cases": len(stats),
         "mean_user_turns": round(mean(utterances), 3),
@@ -122,6 +140,9 @@ def _summary(stats: Sequence[TurnStat]) -> Json:
             _rate(sum(item.user_turns == 0 for item in stats), len(stats)) or 0.0, 4
         ),
         "completed_rate": round(_rate(sum(item.completed for item in stats), len(stats)) or 0.0, 4),
+        # 无样本不写 0：0 会被误读成「恢复全失败」，null 表示这批产物里没有出错样本
+        "recovery_rate": None if recovery is None else round(recovery, 4),
+        "recovery_samples": len(errored),
     }
 
 
@@ -178,6 +199,11 @@ def _demo_row(text: str) -> Json:
     }
 
 
+def _pct(value: float | None) -> str:
+    """无样本显示「null」，避免把「没样本」读成「0%」。"""
+    return "null（本批产物无出错样本）" if value is None else f"{value:.2%}"
+
+
 def _print_markdown(payload: Json) -> None:
     primary = payload["primary"]
     print("## 交互指标（实测）\n")
@@ -187,7 +213,12 @@ def _print_markdown(payload: Json) -> None:
     print(f"- 需二次澄清占比：{primary['clarification_case_rate']:.2%}")
     print(f"- 平均确认次数：{primary['mean_confirms']}")
     print(f"- 系统发起占比（`/api/due`，用户未开口）：{primary['system_initiated_rate']:.2%}")
-    print(f"- 业务完成率：{primary['completed_rate']:.2%}\n")
+    print(f"- 业务完成率：{primary['completed_rate']:.2%}")
+    print(
+        f"- 错误恢复成功率：{_pct(primary['recovery_rate'])}"
+        f"（样本 {primary['recovery_samples']} 例，口径：出错后最终 completed；"
+        "4xx / 拒绝 / 接管 / `committed_unverified` 均计出错）\n"
+    )
     print("| 场景 | 手机银行步数 | 本产品用户轮数 | 步数降幅 |")
     print("|---|---|---|---|")
     for scenario, row in payload["steps_vs_utterances"].items():
@@ -221,7 +252,9 @@ def _print_markdown(payload: Json) -> None:
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="统计交互轮数并对照手机银行步数")
-    parser.add_argument("--input", type=Path, default=Path("runtime/benchmark/web-smoke-v2"))
+    parser.add_argument(
+        "--input", type=Path, default=Path("runtime/benchmark/web-smoke-v2/run-1")
+    )
     parser.add_argument(
         "--compare",
         type=Path,

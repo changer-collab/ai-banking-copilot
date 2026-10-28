@@ -160,6 +160,27 @@ const LIFE_EVENT_STATUS = {
   failed: "失败",
 };
 
+/* 生活事件 DAG 节点展示名：只做「动作 → 中文」的展示映射，动作名仍以原始文本挂 title */
+const LIFE_STEP_LABEL = {
+  "funds.freeze": "冻结预算",
+  "funds.release": "解冻剩余",
+  "merchant.order": "下单结算",
+  "transfer.schedule": "按期转出",
+  "transfer.create": "转出",
+  "transfer.request_collection": "发起分摊",
+  "subscription.list": "代扣清单",
+  "card.set_limit": "调整限额",
+  "card.lock": "锁卡",
+  "card.report_lost": "挂失",
+  "card.apply_virtual": "补虚拟卡",
+  "password.change": "改密码",
+  "account.balance": "查余额",
+  "account.transactions": "查交易",
+  "wealth.redeem": "赎回",
+  "bills.yearly": "年度账单",
+  "bills.monthly": "月度账单",
+};
+
 function newRequestId() {
   try {
     if (window.crypto && crypto.randomUUID) return "req-" + crypto.randomUUID();
@@ -531,7 +552,12 @@ function showWealthFailure(message) {
   if (status) status.textContent = message;
   ["wealth-products", "wealth-holdings"].forEach((id) => {
     const box = el(id);
-    if (box) box.innerHTML = `<p class="muted">${esc(message)}</p>`;
+    if (!box) return;
+    box.innerHTML = `<article class="state-card">
+      <p class="state-card__k">读取失败</p>
+      <p class="muted">${esc(message)}</p>
+      ${id === "wealth-products" ? '<button class="btn btn--sm" type="button" data-panel-retry="wealth">重试</button>' : ""}
+    </article>`;
   });
 }
 
@@ -604,7 +630,7 @@ function renderInsights(data) {
     list.innerHTML = `<p class="muted">${esc(payload.scan_error)}；未修改既有洞察。</p>`;
     return;
   }
-  status.textContent = `最近扫描：${payload.scanned_at || "服务端时间"}`;
+  status.textContent = `最近扫描：${payload.scanned_at || "服务端时间"} · ${state.insights.length} 条`;
   if (!state.insights.length) {
     list.innerHTML = '<p class="muted">当前没有待处理洞察。</p>';
     return;
@@ -614,13 +640,15 @@ function renderInsights(data) {
       `<li class="mono"><span class="tech">${esc(source.record_id)} · ${esc(source.content_hash)}</span></li>`
     ).join("");
     const value = item.value === undefined ? "—" : JSON.stringify(item.value);
-    return `<article class="takeover insight-item">
-      <div><b>${esc(insightRuleLabel(item.rule_id))}</b>` +
+    return `<article class="insight-row">
+      <div class="insight-row__head"><b>${esc(insightRuleLabel(item.rule_id))}</b>` +
       ` <span class="chip">${esc(item.status === "needs_setup" ? "待设置" : "待查看")}</span></div>
-      <p>${esc(item.suggestion || "请查看来源后自行决定")}</p>
-      <p class="muted">业务日 ${esc(item.business_day || "—")} · 窗口 ${esc(item.window_start || "—")} 至 ${esc(item.window_end || "—")}</p>
-      <p class="muted">计算式：<span class="mono">${esc(item.formula || "—")}</span> · 值：<span class="mono">${esc(value)}</span></p>
-      ${refs ? `<details><summary>来源（${(item.source_refs || []).length}）</summary><ul>${refs}</ul></details>` : "<p class=\"muted\">暂无来源记录（预算尚未设置）。</p>"}
+      <p class="insight-row__sug">${esc(item.suggestion || "请查看来源后自行决定")}</p>
+      <details class="insight-row__more"><summary>依据</summary>
+        <p class="muted">业务日 ${esc(item.business_day || "—")} · 窗口 ${esc(item.window_start || "—")} 至 ${esc(item.window_end || "—")}</p>
+        <p class="muted">计算式：<span class="mono">${esc(item.formula || "—")}</span> · 值：<span class="mono">${esc(value)}</span></p>
+        ${refs ? `<ul>${refs}</ul>` : '<p class="muted">暂无来源记录（预算尚未设置）。</p>'}
+      </details>
     </article>`;
   }).join("");
 }
@@ -653,7 +681,7 @@ function renderTransfers(payload) {
           <span class="muted">${esc(item.booked_on)}</span>
         </summary>
         <p class="muted">${esc(kind)} · ${esc(item.account)} · 记账日 ${esc(item.booked_on)}</p>
-        <p class="muted">备注：${remark} · 记录号 <span class="mono">${esc(item.record_id)}</span></p>
+        <p class="muted">备注：${remark} <span class="tech mono">· 记录号 ${esc(item.record_id)}</span></p>
       </details>
     </li>`;
   }).join("");
@@ -692,48 +720,27 @@ function subscriptionEvidenceHtml(item) {
     ).join("") + "</ul></details>";
 }
 
-const CHANNEL_ORDER = ["web", "im", "feishu"];
-const CHANNEL_LABELS = { web: "网页", im: "IM", feishu: "飞书" };
-
 function renderChannelHealth(data) {
   const status = el("channel-health-status");
-  const body = el("channel-health-body");
-  if (!status || !body) return;
+  const list = el("channel-health-list");
+  if (!status || !list) return;
   const channels = data && data.channels ? data.channels : {};
-  const health = data && data.health ? data.health : {};
-  const rows = CHANNEL_ORDER.map((name) => {
-    const config = channels[name] || {};
-    const runtime = health[name] || {};
-    const configured = config.configured === true;
-    const mode = config.mode || (runtime.replay_mode ? "replay" : "stub");
-    const state = configured ? mode : `未接入 · ${mode}`;
-    const lastEvent = runtime.last_event_at || "暂无事件";
-    const replay = runtime.replay_mode === true || mode === "replay" ? "是" : "否";
-    return `<tr><th scope="row">${esc(CHANNEL_LABELS[name])}</th>` +
-      `<td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
-      `<td>${Number(runtime.ok) || 0}</td><td>${Number(runtime.failed) || 0}</td>` +
-      `<td>${Number(runtime.ratelimit_hits) || 0}</td><td>${replay}</td></tr>`;
+  const rows = Object.entries(channels).map(([name, item]) => {
+    const state = item && item.mode ? item.mode : "unknown";
+    const configured = item && item.configured ? "已配置" : "未配置";
+    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
+      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
   });
-  const hasData = Object.keys(channels).length > 0 || Object.keys(health).length > 0;
-  status.textContent = hasData ? "渠道状态已更新" : "暂无渠道状态。";
-  body.innerHTML = hasData
-    ? rows.join("")
-    : '<tr><td colspan="7" class="muted">暂无渠道状态。</td></tr>';
+  status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
+  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
 }
 
 async function refreshChannelHealth() {
   const status = el("channel-health-status");
-  const body = el("channel-health-body");
   if (status) status.textContent = "正在读取渠道状态…";
-  if (body) body.innerHTML = '<tr><td colspan="7" class="muted">正在读取渠道状态…</td></tr>';
-  try {
-    const result = await apiFetch("GET", "/api/channels/health");
-    if (!result.ok) throw new Error("无法读取渠道状态");
-    renderChannelHealth(result.data);
-  } catch {
-    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
-    if (body) body.innerHTML = '<tr><td colspan="7" class="muted">渠道状态暂不可用，请稍后重试。</td></tr>';
-  }
+  const result = await apiFetch("GET", "/api/channels/health");
+  if (!result.ok) throw new Error("无法读取渠道状态");
+  renderChannelHealth(result.data);
 }
 
 function subscriptionItemHtml(item) {
@@ -1173,6 +1180,27 @@ function traceHtml(trace) {
     </div>`;
 }
 
+/* 执行前预演：三块全部回显服务端计划卡字段（summary / balance_trace / decision.reasons），
+   绿卡不预演；缺字段就不画那一块，不估算、不补 0。 */
+function previewHtml(card) {
+  if (!card || !card.level || card.level === "GREEN") return "";
+  const rows = card.summary || [];
+  const trace = card.balance_trace || [];
+  const reasons = state.decision ? state.decision.reasons || [] : [];
+  const impact = rows.length
+    ? `<dl class="preview__grid">${rows
+        .map((row) => `<dt>${esc(row.label)}</dt><dd${row.emphasis ? ' class="preview__val--strong"' : ""}>${esc(row.value)}</dd>`)
+        .join("")}</dl>`
+    : "";
+  return `<details class="preview">
+    <summary>确认后会发生什么</summary>
+    ${impact ? `<div class="preview__block"><span class="preview__title">影响面</span>${impact}</div>` : ""}
+    ${trace.length ? `<div class="preview__block"><span class="preview__title">可用余额轨迹</span><ol class="preview__list">${trace.map((row) => `<li>${esc(row)}</li>`).join("")}</ol></div>` : ""}
+    <div class="preview__block"><span class="preview__title">命中规则</span><p class="preview__rules">${rulesHtml(reasons)}</p></div>
+    <p class="muted preview__note">以上数字均取自服务端计划卡，前端未做二次计算。</p>
+  </details>`;
+}
+
 function voucherHtml() {
   const card = state.card;
   const lines = card.lines || [];
@@ -1199,15 +1227,19 @@ function voucherHtml() {
       </dl>
       <div class="amount">
         <span class="amount__value">${lines.length} 步</span>
-        <span class="amount__note">确认绑定 cfhash · 经计划级 + 节点级双层执行门</span>
+        <span class="amount__note">确认即锁定本计划 · 计划级 + 节点级双层执行门</span>
       </div>
     </div>
 
     ${quotaHtml(card)}
 
+    ${previewHtml(card)}
+
     ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
 
     ${traceHtml(card.balance_trace)}
+
+    ${card.expires_at ? `<p class="muted voucher__expiry">有效期至 ${esc(momentLabel(card.expires_at))}；过期后需重新生成计划。</p>` : ""}
 
     <p class="muted" style="margin-top: var(--s-3)">
       命中规则<span class="rules">${rulesHtml(state.decision ? state.decision.reasons || [] : [])}</span>
@@ -1441,12 +1473,18 @@ function setButtons() {
   const clarifyButton = el("btn-clarify");
   if (clarifyButton) clarifyButton.disabled = offline || busy;
   const redPending = state.card && state.card.level === "RED" && !strongPhase;
-  el("btn-confirm").textContent = strongPhase
-    ? "提交验证码并执行"
-    : redPending
-      ? "申请强验证"
-      : "确认并执行";
-  el("btn-confirm").disabled = operationUnknown || offline || !(awaiting || strongPhase) || busy;
+  /* 服务端已校验过期；前端只做「不让人白点」，不改服务端语义 */
+  const expired = Boolean(
+    state.card && state.card.expires_at && Date.now() >= Date.parse(state.card.expires_at),
+  );
+  el("btn-confirm").textContent = expired
+    ? "计划已过期 · 重新发起"
+    : strongPhase
+      ? "提交验证码并执行"
+      : redPending
+        ? "申请强验证"
+        : "确认并执行";
+  el("btn-confirm").disabled = operationUnknown || offline || expired || !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = operationUnknown || offline || state.busy || !(state.phase === "executing" || awaiting);
   el("btn-resume").disabled = operationUnknown || offline || busy || !state.card || state.phase !== "interrupted";
   el("btn-reject").disabled = operationUnknown || offline || busy || !state.card || !(awaiting || state.phase === "interrupted");
@@ -1476,15 +1514,11 @@ function reset(keepUtterance) {
 }
 
 function renderPresets() {
-  const html = PRESETS.map(
-    (text) => `<button class="btn btn--ghost" data-preset="${esc(text)}">${esc(text)}</button>`
-  ).join("");
-  /* 理财面板在处理详情（桌面常驻 / 移动端抽屉）里，快捷场景首位给一个显式入口 */
-  const quick = '<button class="btn btn--ghost" data-action="open-wealth">理财 · 测评 / 产品 / 持仓</button>' + html;
-  ["quick-scenes", "presets"].forEach((id) => {
-    const container = el(id);
-    if (container) container.innerHTML = id === "presets" ? PRESETS.slice(0, 4).map((text) => `<button class="btn" data-preset="${esc(text)}">${esc(text)}</button>`).join("") : quick;
-  });
+  const container = el("presets");
+  if (!container) return;
+  container.innerHTML = PRESETS.slice(0, 6)
+    .map((text) => `<button class="btn" data-preset="${esc(text)}">${esc(text)}</button>`)
+    .join("");
 }
 
 /* ---------------- 交互 ---------------- */
@@ -1962,11 +1996,42 @@ function applyExecution(data) {
   state.notice = complete
     ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
       results.map((item) => `<p>${esc(resultMessage(item))}</p>`).join("") + `</div>` +
-      (billHtml || adviceFallback)
+      (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
   renderStage();
+  if (complete) void loadProvenance();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
   setButtons();
+}
+
+/* 数值溯源：只读审计里该用户最近一条 execution 事件的 provenance（record_id + content_hash），
+   没有就如实说没有，绝不补哈希。 */
+function provenancePanelHtml() {
+  return `<details class="provenance" id="provenance-panel">
+    <summary>数值溯源（record_id + content_hash）</summary>
+    <p class="muted">读取审计…</p>
+  </details>`;
+}
+
+async function loadProvenance() {
+  const panel = el("provenance-panel");
+  if (!panel) return;
+  const head = "<summary>数值溯源（record_id + content_hash）</summary>";
+  try {
+    const result = await apiFetch("GET", "/api/audit?limit=20");
+    if (!result.ok) throw new Error(String(result.status));
+    const events = Array.isArray(result.data.events) ? result.data.events : [];
+    const latest = events.find((event) => event.kind === "execution");
+    const payload = latest && latest.payload ? latest.payload : {};
+    const rows = Array.isArray(payload.provenance) ? payload.provenance : [];
+    panel.innerHTML = head + (rows.length
+      ? `<ul class="provenance__rows">${rows
+          .map((row) => `<li><span class="mono">${esc(String(row.record_id || ""))}</span><span class="mono">${esc(String(row.content_hash || ""))}</span></li>`)
+          .join("")}</ul>`
+      : '<p class="muted">本次执行未产生可溯源记录（审计中没有 provenance），不展示哈希。</p>');
+  } catch (_) {
+    panel.innerHTML = head + '<p class="muted">审计暂不可读，溯源未展示。</p>';
+  }
 }
 
 async function onInterrupt() {
@@ -2101,20 +2166,24 @@ async function refreshConversations() {
     result = await apiFetch("GET", "/api/conversations");
   } catch (_) {
     list.innerHTML = '<p class="muted convs__empty">历史对话读取失败，请稍后重试。</p>';
+    renderHomeRecent([]);
     return;
   }
   if (!result.ok) {
     list.innerHTML = '<p class="muted convs__empty">历史对话读取失败，请稍后重试。</p>';
+    renderHomeRecent([]);
     return;
   }
   const payload = result.data || {};
   if (payload.available === false) {
     list.innerHTML = '<p class="muted convs__empty">当前部署未启用历史保存。</p>';
+    renderHomeRecent([]);
     return;
   }
   const conversations = Array.isArray(payload.conversations) ? payload.conversations : [];
   if (!conversations.length) {
     list.innerHTML = '<p class="muted convs__empty">开始办理后，对话会保存在这里。</p>';
+    renderHomeRecent([]);
     return;
   }
   list.innerHTML = conversations.map((item) => {
@@ -2133,6 +2202,24 @@ async function refreshConversations() {
       <button class="conv-delete" type="button" data-delete-session="${esc(item.session_id)}"
               aria-label="删除对话：${esc(title)}">删除</button>
     </div>`;
+  }).join("");
+  renderHomeRecent(conversations.slice(0, 4));
+}
+
+/* 窄屏首页的「最近对话」：与左栏同源，只保留可点开的标题行 */
+function renderHomeRecent(items) {
+  const host = el("home-recent");
+  const list = el("home-recent-list");
+  if (!host || !list) return;
+  if (!items.length) {
+    host.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  host.hidden = false;
+  list.innerHTML = items.map((item) => {
+    const title = item.title || "未命名会话";
+    return `<button class="conversation-record" type="button" data-open-session="${esc(item.session_id)}">${esc(title)}</button>`;
   }).join("");
 }
 
@@ -2254,14 +2341,18 @@ function profileValue(value) {
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
 
+const AUTH_MODE_LABELS = { demo: "演示登录", off: "单用户演示" };
+
 function renderProfile(me, audit) {
-  const targets = [el("profile-body")].filter(Boolean);
+  const targets = [el("profile-body"), el("view-me-body")].filter(Boolean);
   if (!targets.length) return;
   const user = me.user || {};
   const session = me.session || {};
   const name = user.display_name || user.username || "当前用户";
   const entry = el("profile-entry-name");
   if (entry) entry.textContent = name;
+  const initial = name.trim().slice(0, 1) || "用";
+  const authMode = AUTH_MODE_LABELS[me.auth_mode] || "演示环境";
   const logins = (me.recent_logins || []).map((record) => {
     const revoked = record.revoked ? " · 已失效" : "";
     return `<li>${esc(momentLabel(record.issued_at))} 登录 · ${esc(profileValue(record.client_ip))} · ${esc(profileValue(record.user_agent))}${revoked}</li>`;
@@ -2271,42 +2362,53 @@ function renderProfile(me, audit) {
     const channel = payload.channel || "未记录";
     const digest = payload.text_digest;
     return `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))}` +
-      ` · 渠道 ${esc(channel)} <span class="tech">${esc(profileValue(event.event_id))}</span>` +
+      ` · 渠道 ${esc(channel)} <span class="tech mono">${esc(profileValue(event.event_id))}</span>` +
       (digest ? `<details><summary>同摘要关联</summary><p class="mono audit-digest">${esc(digest)}</p></details>` : "") + "</li>";
   }).join("");
   const html = `
-    <section class="profile-block">
-      <h3>身份</h3>
-      <dl>
-        <dt>姓名</dt><dd>${esc(name)}</dd>
-        <dt>账号</dt><dd class="mono">${esc(profileValue(user.username))}</dd>
-        <dt>用户号</dt><dd class="mono">${esc(profileValue(user.user_id))}</dd>
-        <dt>手机</dt><dd>${esc(user.phone_tail ? `尾号 ${user.phone_tail}` : "—")}</dd>
-      </dl>
+    <section class="profile-head">
+      <span class="profile-avatar" aria-hidden="true">${esc(initial)}</span>
+      <span class="profile-id">
+        <b>${esc(name)}</b>
+        <span class="profile-id__sub">${esc(user.username ? "@" + user.username : "")}${
+          user.phone_tail ? ` · 手机尾号 ${esc(user.phone_tail)}` : ""
+        }</span>
+      </span>
+      <span class="profile-chips">
+        <span class="chip">${session.authenticated ? "已登录" : "演示环境"}</span>
+        <span class="chip">${esc(authMode)}</span>
+      </span>
     </section>
-    <section class="profile-block">
-      <h3>本次登录</h3>
+    <div class="profile-grid">
+      <section class="profile-card">
+        <h3>身份</h3>
+        <dl>
+          <dt>姓名</dt><dd>${esc(name)}</dd>
+          <dt>账号</dt><dd class="mono">${esc(profileValue(user.username))}</dd>
+          <dt>手机</dt><dd>${user.phone_tail ? `尾号 ${esc(user.phone_tail)}` : "—"}</dd>
+          <dt>用户号</dt><dd class="mono tech">${esc(profileValue(user.user_id))}</dd>
+        </dl>
+      </section>
+      <section class="profile-card">
+        <h3>关联数据</h3>
+        <dl>
+          <dt>账户</dt><dd>${esc(String(me.accounts ?? 0))} 个</dd>
+          <dt>收款人</dt><dd>${esc(String(me.payees ?? 0))} 个</dd>
+          <dt>渠道绑定</dt><dd>${esc(String(me.channel_bindings ?? 0))} 个</dd>
+        </dl>
+      </section>
+    </div>
+    <section class="profile-card">
+      <h3>登录安全</h3>
       <dl>
-        <dt>状态</dt><dd>${session.authenticated ? "已登录" : "未启用登录（单用户演示）"}</dd>
-        <dt>登录时间</dt><dd>${esc(momentLabel(session.issued_at))}</dd>
-        <dt>失效时间</dt><dd>${esc(momentLabel(session.expires_at))}</dd>
+        <dt>本次登录</dt><dd>${esc(momentLabel(session.issued_at))}</dd>
+        <dt>有效至</dt><dd>${esc(momentLabel(session.expires_at))}</dd>
       </dl>
-    </section>
-    <section class="profile-block">
-      <h3>最近登录</h3>
+      <h4>最近登录</h4>
       ${logins ? `<ul class="profile-trail">${logins}</ul>` : '<p class="muted">暂无可查看的登录记录。</p>'}
     </section>
-    <section class="profile-block">
-      <h3>关联数据</h3>
-      <dl>
-        <dt>账户</dt><dd>${esc(String(me.accounts ?? 0))} 个</dd>
-        <dt>收款人</dt><dd>${esc(String(me.payees ?? 0))} 个</dd>
-        <dt>渠道绑定</dt><dd>${esc(String(me.channel_bindings ?? 0))} 个</dd>
-        <dt>鉴权模式</dt><dd>${esc(profileValue(me.auth_mode))}</dd>
-      </dl>
-    </section>
-    <section class="profile-block">
-      <h3>我的操作轨迹</h3>
+    <details class="profile-card profile-card--fold">
+      <summary>我的操作轨迹</summary>
       ${
         audit.available === false
           ? '<p class="muted">审计链读取失败，轨迹暂不可用。</p>'
@@ -2314,12 +2416,30 @@ function renderProfile(me, audit) {
             ? `<ul class="profile-trail">${trail}</ul>`
             : '<p class="muted">暂无可查看的操作。</p>'
       }
-    </section>
+    </details>
     ${me.auth_mode === "demo" ? '<div class="btn-row"><button class="btn btn--ghost" id="btn-logout" type="button">退出登录</button></div>' : ""}
   `;
   targets.forEach((body) => {
     body.innerHTML = html;
   });
+}
+
+/* 读一次账户信息并渲染：弹窗（桌面）与「我的」页（窄屏）共用 */
+async function loadProfile(target, loadingText) {
+  if (target) target.innerHTML = `<p class="muted">${loadingText}</p>`;
+  try {
+    const [me, audit] = await Promise.all([
+      apiFetch("GET", "/api/me"),
+      apiFetch("GET", "/api/audit?limit=8"),
+    ]);
+    if (!me.ok) {
+      if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+      return;
+    }
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
+  } catch (_) {
+    if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
+  }
 }
 
 async function openProfile() {
@@ -2330,21 +2450,8 @@ async function openProfile() {
   panel.hidden = false;
   if (backdrop) backdrop.hidden = false;
   el("btn-profile").setAttribute("aria-expanded", "true");
-  body.innerHTML = '<p class="muted">正在读取账户信息…</p>';
   el("btn-close-profile").focus();
-  try {
-    const [me, audit] = await Promise.all([
-      apiFetch("GET", "/api/me"),
-      apiFetch("GET", "/api/audit?limit=8"),
-    ]);
-    if (!me.ok) {
-      body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
-      return;
-    }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
-  } catch (_) {
-    body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
-  }
+  await loadProfile(body, "正在读取账户信息…");
 }
 
 function closeProfile() {
@@ -2361,18 +2468,25 @@ function closeProfile() {
 async function refreshProfileEntry() {
   const entry = el("profile-entry-name");
   const sideName = el("side-user-name");
-  if (!entry && !sideName) return;
+  const avatar = document.querySelector(".side-user__avatar");
+  if (!entry && !sideName && !avatar) return;
   try {
     const result = await apiFetch("GET", "/api/me");
-    if (!result.ok) return;
+    if (!result.ok) {
+      if (avatar) avatar.textContent = "演示";
+      return;
+    }
     const user = (result.data || {}).user || {};
     const name = user.display_name || user.username || "当前用户";
     if (name) {
       if (entry) entry.textContent = name;
       if (sideName) sideName.textContent = name;
+      /* 头像只取首字做视觉标识，无障碍名仍由 #side-user-name 提供 */
+      if (avatar) avatar.textContent = Array.from(name)[0] || "示";
     }
   } catch (_) {
     /* 只影响入口文案，静默保留默认值 */
+    if (avatar) avatar.textContent = "演示";
   }
 }
 
@@ -2425,6 +2539,39 @@ function lifeFieldHtml(eventId, field) {
   return `<input ${attrs} type="${field.type}" inputmode="${field.type === "number" ? "decimal" : "text"}" placeholder="${esc(field.placeholder || "")}" />`;
 }
 
+/* 横向 DAG 步骤条：节点与顺序全部来自服务端下发的 skeleton，前端不拼步骤、不猜动作 */
+function lifeDagHtml(skeleton) {
+  const steps = Array.isArray(skeleton) ? skeleton.filter((step) => typeof step === "string" && step) : [];
+  if (!steps.length) return "";
+  const nodes = steps.map((step, index) => {
+    const label = LIFE_STEP_LABEL[step] || step;
+    return `<li class="life-dag__node" title="${esc(step)}"><span class="life-dag__index tech mono">${index + 1}</span>${esc(label)}</li>`;
+  });
+  return `<ol class="life-dag" aria-label="链路步骤">${nodes.join('<li class="life-dag__arrow" aria-hidden="true">→</li>')}</ol>`;
+}
+
+const LIFE_BUDGET_STEPS = [
+  ["freeze", "冻结"],
+  ["order", "下单"],
+  ["release", "释放"],
+];
+
+/* 预算执行进度：三段是否点亮由服务端按 holds / 下单回执算出，无数据即不画 */
+function lifeBudgetHtml(budget) {
+  if (!budget || typeof budget !== "object") return "";
+  const steps = budget.steps || {};
+  const segments = LIFE_BUDGET_STEPS.map(
+    ([key, label]) => `<li class="life-budget__seg${steps[key] ? " is-done" : ""}">${label}</li>`,
+  ).join("");
+  const state = budget.state === "released" ? "已释放" : "冻结中";
+  const amount = typeof budget.amount_cents === "number" ? ` · 冻结余额 ${yuan(budget.amount_cents)}` : "";
+  const holdId = budget.hold_id ? ` · 冻结单 <span class="tech">${esc(budget.hold_id)}</span>` : "";
+  return `<div class="life-budget">
+        <ol class="life-budget__bar" aria-label="预算执行进度">${segments}</ol>
+        <p class="muted life-budget__meta">${esc(state)}${esc(amount)}${holdId}</p>
+      </div>`;
+}
+
 function lifeValues(form) {
   const values = {};
   Array.from(form.querySelectorAll("[data-life-field]")).forEach((node) => {
@@ -2470,10 +2617,12 @@ async function refreshLifeEvents() {
     result = await apiFetch("GET", "/api/life-events");
   } catch (_) {
     status.textContent = "生活事件读取失败，请稍后重试。";
+    panelFailure("life-events-list", "生活事件读取失败，请稍后重试。", "life");
     return;
   }
   if (!result.ok) {
     status.textContent = "生活事件读取失败，请稍后重试。";
+    panelFailure("life-events-list", "生活事件读取失败，请稍后重试。", "life");
     return;
   }
   const payload = result.data || {};
@@ -2491,6 +2640,7 @@ async function refreshLifeEvents() {
     const description = typeof prototype.description === "string" ? prototype.description : "";
     const example = typeof prototype.example === "string" ? prototype.example : "";
     const steps = typeof prototype.steps === "number" ? `${prototype.steps} 步` : "";
+    const dag = lifeDagHtml(prototype.skeleton);
     const fields = LIFE_FORMS[eventId] || [];
     const form = fields.length
       ? `<details class="life-form"><summary>填写参数</summary><div class="life-form__grid">
@@ -2498,8 +2648,9 @@ async function refreshLifeEvents() {
         </div></details>`
       : "";
     return `<article class="life-card" data-event="${esc(eventId)}">
-      <div class="life-card__head"><b>${esc(eventId)} · ${esc(name)}</b><span class="life-card__steps">${esc(steps)}</span></div>
+      <div class="life-card__head"><b>${esc(name || eventId)}<span class="tech mono"> · ${esc(eventId)}</span></b><span class="life-card__steps">${esc(steps)}</span></div>
       <p class="life-card__desc">${esc(description)}</p>
+      ${dag}
       <p class="life-card__example">示例：${esc(example)}</p>
       ${form}
       <div class="life-card__foot">
@@ -2515,13 +2666,14 @@ async function refreshLifeEvents() {
       return `<article class="takeover insight-item">
       <div><b>${esc(record.event_name || record.event_id)}</b> <span class="chip">${esc(label)}</span></div>
       <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
+      ${lifeBudgetHtml(record.budget)}
       <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span>
         <button class="life-send" type="button" data-life-open="${esc(record.session_id)}">打开会话</button></p>
     </article>`;
     }).join("")
     : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
 
-  list.innerHTML = `<div class="life-grid">${cards}</div>
+  list.innerHTML = `<div class="life-grid">${cards || '<article class="state-card"><p class="state-card__k">生活事件 · 暂无原型</p><p class="muted">服务端未下发原型，请稍后重试。</p></article>'}</div>
     <p class="side__label">我的生活事件</p>
     <div class="life-records">${recordRows}</div>`;
   /* 对象槽默认取第一个真实选项，避免「填了金额却卡在选卡片」 */
@@ -2540,10 +2692,7 @@ function onPresetClick(event) {
   const utterance = el("utterance");
   if (button && utterance) utterance.value = button.dataset.preset;
 }
-["quick-scenes", "presets"].forEach((id) => {
-  const container = el(id);
-  if (container) container.addEventListener("click", onPresetClick);
-});
+el("presets")?.addEventListener("click", onPresetClick);
 /* 生活事件卡片：面板参数 → 同一 `/api/submit`；仍缺槽位时用同一份参数自动续答 */
 el("life-events-list").addEventListener("click", async (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -2587,11 +2736,12 @@ async function onProfileClick(event) {
 }
 el("profile-body").addEventListener("click", onProfileClick);
 /* 历史对话行同样动态渲染：点开 / 删除都用事件委托 */
-el("conversation-list").addEventListener("click", (event) => {
+function onConversationClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
   const openButton = target.closest("[data-open-session]");
   if (openButton) {
+    if (openButton.closest("#home-recent-list")) navigate("chat", {});
     openConversation(openButton.dataset.openSession).catch(() => {
       timelineAdd("历史对话读取失败，请稍后重试。", "warn");
     });
@@ -2603,7 +2753,9 @@ el("conversation-list").addEventListener("click", (event) => {
       timelineAdd("删除失败，请稍后重试。", "warn");
     });
   }
-});
+}
+el("conversation-list").addEventListener("click", onConversationClick);
+el("home-recent-list")?.addEventListener("click", onConversationClick);
 el("btn-continue-task").addEventListener("click", () => {
   state.pendingStart = null;
   el("task-guard").hidden = true;
@@ -2641,22 +2793,29 @@ function setMobileDrawer(name, open) {
 }
 
 /* 桌面端侧栏与处理详情是常驻可见的，`aria-hidden` 不能写死 true，
-   否则读屏用户拿不到理财面板；视口变化时重算一次。 */
+   否则读屏用户拿不到理财面板；视口变化时重算一次。
+   左栏在 >600px 是真实一列；右栏在 >900px 才是常驻列（≤900 走抽屉）。 */
 function syncRailAria() {
   if (!app) return;
-  const persistentOnDesktop = window.matchMedia("(min-width: 961px)").matches;
+  const navPersistent = window.matchMedia("(min-width: 601px)").matches;
+  const tracePersistent = window.matchMedia("(min-width: 901px)").matches;
   el("conversation-sidebar").setAttribute(
     "aria-hidden",
-    String(!app.classList.contains("is-scenes-open") && !persistentOnDesktop),
+    String(!app.classList.contains("is-scenes-open") && !navPersistent),
   );
   el("trace").setAttribute(
     "aria-hidden",
-    String(!app.classList.contains("is-trace-open") && !persistentOnDesktop),
+    String(!app.classList.contains("is-trace-open") && !tracePersistent),
   );
 }
 
 function isNarrowNav() {
-  return window.matchMedia("(max-width: 960px)").matches;
+  return isAppShell();
+}
+
+/* APP 版式（≤600px）与网页版式的分界，和 workspace.css 的媒体查询保持一致 */
+function isAppShell() {
+  return window.matchMedia("(max-width: 600px)").matches;
 }
 
 function isNarrowTrace() {
@@ -2799,19 +2958,7 @@ themeToggle.addEventListener("change", () => {
   saveTheme(theme);
 });
 
-/* 技术详情：默认收起机器标识（cfhash / 记录号 / 审计 ID / 动作标识） */
-const techToggle = el("tech-toggle");
-if (techToggle) {
-  techToggle.addEventListener("change", () => {
-    if (techToggle.checked) {
-      document.documentElement.dataset.tech = "on";
-    } else {
-      delete document.documentElement.dataset.tech;
-    }
-  });
-}
-
-/* ---------------- 视图路由（首页 / 对话 / 场景 / 记录 / 渠道 / 三态 / 我的） ----------------
+/* ---------------- 视图路由（首页 / 对话 / 场景 / 记录 / 渠道 / 我的） ----------------
    示例 IA 的落地：左侧栏是全局导航，对话保留原三栏布局；其余视图只占「左栏 + 主区」。
    场景页的内容由各场景负责人填进 `[data-scene-block]`，这里只负责切页与入口。 */
 
@@ -2819,44 +2966,204 @@ const SCENES = {
   transfer: {
     title: "转账",
     sub: "中文数字、完整手机号、日累计限额；大额与不可逆动作走强验证。",
+    short: "额度、收款人；说一句话去对话",
     prefill: "转给李娜 500 元",
   },
   bills: {
     title: "账单分析",
     sub: "重复扣款 / 涨价 / 隐藏费用 / 深夜 / 异地；带置信度与免责说明。",
+    short: "异常打标 + 置信度与免责",
     prefill: "查一下上月账单",
   },
   wealth: {
     title: "理财",
     sub: "风险测评 → 适当性 → 申购 / 赎回；超等级产品灰显并写原因。",
+    short: "测评、按等级灰显与持仓",
     prefill: "查余额",
   },
   cards: {
     title: "卡片",
     sub: "锁卡 / 挂失 / 补卡 / 调额；红动作走强验证。",
+    short: "锁卡 / 挂失 / 补卡 / 调额",
     prefill: "锁卡",
   },
   subscriptions: {
     title: "订阅",
     sub: "涨价、下次扣款日与扣款记录可查；取消前说清本地 / 商户边界。",
+    short: "涨价与下次扣款可查",
     prefill: "订阅取消",
   },
   life: {
     title: "生活事件",
     sub: "一句话串多个域，每步一张卡、逐张确认。",
+    short: "一句话串多个域，逐张确认",
     prefill: "",
   },
 };
 
+/* 窄屏首页的竖排场景列表（与「前端示例-APP端」一致）：图标 + 名称 + 一句说明 + 箭头 */
+function renderHomeSceneList() {
+  const host = el("home-scene-list");
+  if (!host) return;
+  host.innerHTML = Object.keys(SCENES).map((key) => {
+    const spec = SCENES[key];
+    return `<button type="button" data-nav="scene" data-scene="${esc(key)}">
+      <span class="home-row__ico" aria-hidden="true">${esc(spec.title.slice(0, 1))}</span>
+      <span class="home-row__text">${esc(spec.title)}<small>${esc(spec.short)}</small></span>
+      <span class="home-row__go" aria-hidden="true">›</span>
+    </button>`;
+  }).join("");
+}
+renderHomeSceneList();
+
 const RECORD_TABS = {
-  transfers: { label: "转账记录", hint: "转账完成后，这里显示收款人（脱敏）、金额、状态与渠道（web / app / feishu）。" },
+  transfers: { label: "转账记录", hint: "转账完成后，这里显示收款人（脱敏）、金额、状态与业务流水渠道。" },
   holdings: { label: "持仓", hint: "理财申购后的持仓（产品 / 金额 / 起息日）；无净值数据时收益标「未知」。" },
   cards: { label: "卡片状态", hint: "锁卡 / 挂失 / 补卡后的最新状态与可执行动作。" },
   suspicions: { label: "可疑清单", hint: "账单异常标记、置信度与「不当作已确认」的免责说明。" },
-  charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 卡尾号 / 渠道。" },
+  charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 渠道 / 记录号。" },
 };
 
-const VIEWS = ["home", "chat", "scene", "records", "health"];
+const RECORD_TAB_LOADERS = {
+  transfers: () => apiFetch("GET", "/api/transfers"),
+  holdings: () => apiFetch("GET", "/api/wealth/overview"),
+  cards: () => apiFetch("GET", "/api/cards"),
+  suspicions: () => apiFetch("GET", "/api/bills/analysis"),
+  charges: () => (state.options
+    ? Promise.resolve({ ok: true, status: 200, data: state.options })
+    : apiFetch("GET", "/api/options")),
+};
+
+const RECORD_HEADERS = {
+  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号"],
+  holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益", "渠道"],
+  cards: ["卡号", "类型", "状态", "日限额", "渠道"],
+  suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户", "渠道"],
+  charges: ["商户", "金额", "扣费日", "渠道", "记录号"],
+};
+
+let recordsRequestToken = 0;
+
+/* 业务流水当前只记 agent / 历史 seed 渠道；web / app / feishu 的逐次区分以审计事件为准。 */
+function recordChannelLabel(value) {
+  const channel = String(value || "").trim();
+  if (!channel) return "—";
+  return ({ web: "网页", app: "手机", feishu: "飞书", agent: "AI 办理" })[channel] || channel;
+}
+
+function recordsRow(cells) {
+  return `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
+}
+
+function recordsTableHtml(headers, rows) {
+  return `<div class="records-table-wrap"><table class="records-table">
+    <thead><tr>${headers.map((item) => `<th>${esc(item)}</th>`).join("")}</tr></thead>
+    <tbody>${rows.join("")}</tbody></table></div>`;
+}
+
+function recordsLoadingHtml(spec) {
+  return `<div class="records-skeleton" role="status" aria-live="polite">
+    <p class="muted">正在读取${esc(spec.label)}…</p>
+    <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+  </div>`;
+}
+
+function recordsEmptyHtml(spec) {
+  return `<article class="state-card">
+    <p class="state-card__k">${esc(spec.label)} · 暂无记录</p>
+    <p class="muted">${esc(spec.hint)}</p>
+  </article>`;
+}
+
+function recordsErrorHtml(message) {
+  return `<article class="state-card">
+    <p class="state-card__k">读取失败</p>
+    <p class="muted">${esc(message)}</p>
+    <button class="btn btn--sm" type="button" data-records-retry="1">重试</button>
+  </article>`;
+}
+
+function recordsRowsFor(key, payload) {
+  const data = payload || {};
+  if (key === "transfers") {
+    return (data.items || []).map((item) => recordsRow([
+      `<span class="mono">${esc(item.booked_on || "—")}</span>`,
+      esc(item.payee || "—"),
+      `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
+      esc(item.status || "—"),
+      esc(recordChannelLabel(item.channel)),
+      `<span class="tech">${esc(item.record_id || "—")}</span>`,
+    ]));
+  }
+  if (key === "holdings") {
+    return (data.holdings || []).map((item) => recordsRow([
+      esc(item.name || "—"),
+      esc(item.risk_level || "—"),
+      `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
+      `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
+      esc(item.current_income || "未知"),
+      "—",
+    ]));
+  }
+  if (key === "cards") {
+    return (data.cards || []).map((item) => recordsRow([
+      `<span class="tech mono">${esc(item.card_id || "—")}</span>`,
+      esc(item.type_label || "—"),
+      esc(item.status_label || "—"),
+      `<span class="mono">${yuan(item.daily_limit_cents || 0)}</span>`,
+      "—",
+    ]));
+  }
+  if (key === "suspicions") {
+    return (data.findings || []).map((item) => {
+      const labels = (item.evidence || [])
+        .map((row) => row.merchant_label)
+        .filter(Boolean);
+      return recordsRow([
+        esc(FINDING_LABELS[item.kind] || item.kind),
+        esc(FINDING_STATUS[item.status] || item.status),
+        esc(confidenceLabel(item.confidence)),
+        `<span class="mono">${yuan(item.impact_cents || 0)}</span>`,
+        esc(Array.from(new Set(labels)).join(" / ") || "—"),
+        "—",
+      ]);
+    });
+  }
+  const rows = [];
+  (data.subscription_details || []).forEach((item) => {
+    (item.evidence || []).forEach((evidence) => {
+      rows.push(recordsRow([
+        esc(item.merchant || "—"),
+        `<span class="mono">${yuan(Math.abs(Number(evidence.amount_cents) || 0))}</span>`,
+        `<span class="mono">${esc(evidence.booked_on || "—")}</span>`,
+        esc(recordChannelLabel(evidence.channel)),
+        `<span class="tech">${esc(evidence.record_id || "—")}</span>`,
+      ]));
+    });
+  });
+  return rows;
+}
+
+const PANEL_RETRY = {
+  transfers: () => refreshTransfers(),
+  wealth: () => refreshWealth(),
+  cards: () => refreshCards(),
+  bills: () => refreshBills(),
+  subscriptions: () => refreshOptions(),
+  life: () => refreshLifeEvents(),
+};
+
+function panelFailure(containerId, message, retryKey) {
+  const box = el(containerId);
+  if (!box) return;
+  box.innerHTML = `<article class="state-card">
+    <p class="state-card__k">读取失败</p>
+    <p class="muted">${esc(message)}</p>
+    <button class="btn btn--sm" type="button" data-panel-retry="${esc(retryKey)}">重试</button>
+  </article>`;
+}
+
+const VIEWS = ["home", "chat", "scene", "records", "health", "me"];
 let currentScene = "transfer";
 let currentRecordTab = "transfers";
 
@@ -2867,7 +3174,7 @@ function parseHash() {
   return { name, arg: parts[1] || "" };
 }
 
-function renderRecordsTab(tab) {
+async function renderRecordsTab(tab) {
   const key = Object.prototype.hasOwnProperty.call(RECORD_TABS, tab) ? tab : "transfers";
   currentRecordTab = key;
   const spec = RECORD_TABS[key];
@@ -2880,10 +3187,27 @@ function renderRecordsTab(tab) {
     renderChargeRecords(body);
     return;
   }
-  body.innerHTML =
-    `<article class="state-card"><p class="state-card__k">${esc(spec.label)} · 暂无记录</p>` +
-    `<p class="muted">${esc(spec.hint)}</p>` +
-    `<p class="muted">数据接入由场景负责人补齐；当前只保证入口与三态。</p></article>`;
+  const token = ++recordsRequestToken;
+  body.innerHTML = recordsLoadingHtml(spec);
+  let result;
+  try {
+    result = await RECORD_TAB_LOADERS[key]();
+  } catch (_) {
+    if (token === recordsRequestToken) {
+      body.innerHTML = recordsErrorHtml(`${spec.label}读取失败，请稍后重试。`);
+    }
+    return;
+  }
+  if (token !== recordsRequestToken) return;
+  if (!result.ok) {
+    body.innerHTML = recordsErrorHtml(`${spec.label}读取失败，请稍后重试。`);
+    return;
+  }
+  const rows = recordsRowsFor(key, result.data || {});
+  body.innerHTML = rows.length
+    ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
+      recordsTableHtml(RECORD_HEADERS[key], rows)
+    : recordsEmptyHtml(spec);
 }
 
 function renderChargeRecords(body) {
@@ -2908,7 +3232,7 @@ function renderChargeRecords(body) {
   if (message) return;
   body.innerHTML += `<div class="charge-records-table-wrap" tabindex="0" aria-label="订阅扣款记录">
     <table class="charge-records-table"><thead><tr><th>商户</th><th>金额</th><th>时间</th><th>卡尾号</th><th>渠道</th><th>记录 ID</th><th>内容哈希</th></tr></thead>
-    <tbody>${records.map((txn) => `<tr><td>${esc(txn.merchant_label)}</td><td>${yuan(Math.abs(txn.amount_cents))}</td>` +
+    <tbody>${records.map((txn) => `<tr><td>${esc(txn.merchant_label)}</td><td>${yuan(Math.abs(Number(txn.amount_cents) || 0))}</td>` +
       `<td>${esc(txn.booked_at || txn.booked_on)}</td><td>${esc(txn.card_tail || "未提供")}</td>` +
       `<td>${esc(txn.channel || "未记录")}</td><td class="mono">${esc(txn.record_id)}</td>` +
       `<td class="mono" title="${esc(txn.content_hash)}">${esc(txn.content_hash.slice(0, 12))}…</td></tr>`).join("")}</tbody></table></div>`;
@@ -2944,6 +3268,8 @@ function showView(name, options) {
   });
   if (next === "records") renderRecordsTab(opts.tab || currentRecordTab);
   if (next === "health") refreshChannelHealth().catch(() => {});
+  /* 窄屏「我的」是独立一页；桌面仍走弹窗，这里只在页面视图可见时补数据 */
+  if (next === "me") loadProfile(el("view-me-body"), "正在读取账户信息…");
   if (next === "chat") {
     const input = el("utterance");
     if (input) window.setTimeout(() => input.focus(), 0);
@@ -2978,7 +3304,9 @@ document.addEventListener("click", (event) => {
     event.preventDefault();
     const name = nav.dataset.nav || "home";
     if (name === "me") {
-      openProfile();
+      /* 窄屏（PWA 安装态）把「我的」做成整页；宽屏仍是居中弹窗 */
+      if (isAppShell()) navigate("me", {});
+      else openProfile();
       if (el("app")?.classList.contains("is-scenes-open")) {
         setMobileDrawer("scenes", false);
         syncColumnButtons();
@@ -3001,7 +3329,22 @@ document.addEventListener("click", (event) => {
     return;
   }
   const tab = target.closest("#records-tabs [data-record-tab]");
-  if (tab) renderRecordsTab(tab.dataset.recordTab || "transfers");
+  if (tab) {
+    renderRecordsTab(tab.dataset.recordTab || "transfers");
+    return;
+  }
+  if (target.closest("[data-records-retry]")) {
+    renderRecordsTab(currentRecordTab);
+    return;
+  }
+  const retry = target.closest("[data-panel-retry]");
+  if (retry) {
+    const fn = PANEL_RETRY[retry.dataset.panelRetry];
+    if (fn) {
+      retry.disabled = true;
+      Promise.resolve(fn()).catch(() => {});
+    }
+  }
 });
 
 window.addEventListener("hashchange", () => {
@@ -3023,7 +3366,7 @@ el("btn-health-refresh")?.addEventListener("click", () => {
   const status = el("channel-health-status");
   if (status) status.textContent = "正在刷新渠道状态…";
   refreshChannelHealth().catch(() => {
-    if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
   });
 });
 
@@ -3043,26 +3386,32 @@ if (state.offline) setOfflineState(true);
 setButtons();
 refreshOptions().catch(() => {
   el("business-date").textContent = "演示数据读取失败，请重新加载页面。";
+  const status = el("subscription-status");
+  if (status) status.textContent = "订阅识别读取失败，请稍后重试。";
+  panelFailure("subscription-list", "订阅识别读取失败，请稍后重试。", "subscriptions");
   timelineAdd("可选对象读取失败，请重新加载页面。", "stop");
 });
 refreshChannelHealth().catch(() => {
   const status = el("channel-health-status");
-  if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
 });
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
 });
 refreshTransfers().catch(() => {
   el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";
+  panelFailure("transfers-list", "转账记录读取失败，请稍后重试。", "transfers");
 });
 refreshWealth().catch(() => {
   showWealthFailure("理财面板读取失败，请稍后重试。");
 });
 refreshCards().catch(() => {
-  el("cards-status").textContent = "卡片读取失败，请重新加载页面。";
+  el("cards-status").textContent = "卡片读取失败，请稍后重试。";
+  panelFailure("cards-list", "卡片读取失败，请稍后重试。", "cards");
 });
 refreshBills().catch(() => {
   el("bills-status").textContent = "账单识别读取失败，请稍后重试。";
+  panelFailure("bills-findings", "账单识别读取失败，请稍后重试。", "bills");
 });
 refreshConversations().catch(() => {});
 refreshLifeEvents().catch(() => {});
@@ -3074,15 +3423,25 @@ window.addEventListener("online", () => {
   refreshOptions().catch(() => {});
   refreshChannelHealth().catch(() => {});
   refreshInsights().catch(() => {});
-  refreshTransfers().catch(() => {});
+  refreshTransfers().catch(() => {
+    el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";
+    panelFailure("transfers-list", "转账记录读取失败，请稍后重试。", "transfers");
+  });
   refreshWealth().catch(() => showWealthFailure("理财面板读取失败，请稍后重试。"));
-  refreshCards().catch(() => {});
-  refreshBills().catch(() => {});
+  refreshCards().catch(() => {
+    el("cards-status").textContent = "卡片读取失败，请稍后重试。";
+    panelFailure("cards-list", "卡片读取失败，请稍后重试。", "cards");
+  });
+  refreshBills().catch(() => {
+    el("bills-status").textContent = "账单识别读取失败，请稍后重试。";
+    panelFailure("bills-findings", "账单识别读取失败，请稍后重试。", "bills");
+  });
   refreshConversations().catch(() => {});
   refreshLifeEvents().catch(() => {});
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
+
 let installPrompt = null;
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -3090,29 +3449,34 @@ window.addEventListener("beforeinstallprompt", (event) => {
 });
 window.addEventListener("appinstalled", () => {
   installPrompt = null;
-  el("btn-install").hidden = true;
-  el("install-status").hidden = false;
-  el("install-status").textContent = "应用已安装。";
+  const button = el("btn-install");
+  const status = el("install-status");
+  if (button) button.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = "应用已安装。";
+  }
 });
 el("btn-install")?.addEventListener("click", async () => {
   const status = el("install-status");
-  status.hidden = false;
+  if (status) status.hidden = false;
   if (!installPrompt) {
-    status.textContent = "请在浏览器菜单选择安装应用或添加到主屏幕；若已安装，可直接打开应用。";
+    if (status) status.textContent = "请在浏览器菜单选择安装应用或添加到主屏幕；若已安装，可直接打开应用。";
     return;
   }
   try {
     await installPrompt.prompt();
     const choice = await installPrompt.userChoice;
-    status.textContent = choice.outcome === "accepted" ? "已提交安装，请按浏览器提示完成。" : "已取消安装，可稍后重试。";
+    if (status) status.textContent = choice.outcome === "accepted"
+      ? "已提交安装，请按浏览器提示完成。" : "已取消安装，可稍后重试。";
     installPrompt = null;
   } catch {
-    status.textContent = "暂时无法安装，请稍后重试或使用浏览器菜单。";
+    if (status) status.textContent = "暂时无法安装，请稍后重试或使用浏览器菜单。";
   }
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=20", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=24", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
