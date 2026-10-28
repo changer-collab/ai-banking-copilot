@@ -6,15 +6,18 @@
 - 同一 `event_id` 第二次直接回放（`replayed=True`）；
 - 审计带 `channel` 且只落摘要；
 - `/api/im/confirm` 能真正完成执行；
-- 飞书回调与健康页**如实**报告「未接入」。
+- 飞书回调与健康页**如实**报告 replay 适配器状态。
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
 from ai_banking_copilot.policy.audit import KIND_CHANNEL, AuditLog
 from ai_banking_copilot.web.app import AppDeps, create_app
+from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
 
 def test_im_and_web_share_the_same_state_and_level(deps: AppDeps) -> None:
@@ -95,11 +98,35 @@ def test_im_confirm_executes_through_the_shared_session(deps: AppDeps) -> None:
     assert body["record_ids"]
 
 
-def test_feishu_callback_is_honestly_not_configured(deps: AppDeps) -> None:
+def test_plan_card_confirmation_survives_app_restart(deps: AppDeps, rw_store) -> None:
+    init_session_schema(rw_store)
+    persistent = replace(deps, session_repository=SQLiteSessionRepository(rw_store))
+    first_client = TestClient(create_app(persistent))
+    submitted = first_client.post(
+        "/api/submit", json={"utterance": "转给李娜 500 元", "session_id": "restart"}
+    ).json()
+    first_client.close()
+
+    second_client = TestClient(create_app(persistent))
+    confirmed = second_client.post(
+        "/api/confirm",
+        json={
+            "session_id": "restart",
+            "card_id": submitted["card"]["card_id"],
+            "frozen_hash": submitted["card"]["frozen_hash"],
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["state"] == "completed"
+    assert confirmed.json()["record_ids"]
+    second_client.close()
+
+
+def test_feishu_callback_rejects_unsigned_request(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
     response = client.post("/api/im/feishu", json={})
-    assert response.status_code == 501
-    assert response.json()["detail"] == "not_configured"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "signature_invalid"
 
 
 def test_health_reports_feishu_as_not_configured(deps: AppDeps) -> None:
@@ -107,5 +134,6 @@ def test_health_reports_feishu_as_not_configured(deps: AppDeps) -> None:
     body = client.get("/api/channels/health").json()
     assert body["channels"]["im"]["configured"] is True
     assert body["channels"]["feishu"]["configured"] is False
-    assert body["channels"]["feishu"]["reason"] == "not_configured"
+    assert body["channels"]["feishu"]["mode"] == "replay"
+    assert body["channels"]["feishu"]["reason"] == "replay_mode"
     assert body["rate_limit"]["limit"] == 20
