@@ -40,11 +40,26 @@ def test_transfer_slots_are_filled_from_deterministic_resolvers(payees: tuple[Pa
     }
 
 
-def test_amount_without_unit_is_not_guessed(payees: tuple[Payee, ...]) -> None:
+def test_amount_without_unit_is_filled_when_the_number_is_unambiguous(
+    payees: tuple[Payee, ...]
+) -> None:
+    """「转给李娜 500」：数字唯一、不是收款人尾号 ⇒ 直接当金额，不再追问。
+
+    （旧口径要求必须带单位，验收时「转 200 给他」被判缺金额；只放宽这一种无歧义情形，
+    有歧义仍追问。）
+    """
     fill = fill_control_slots("transfer.create", _transfer_inputs("转给李娜 500", payees))
-    assert fill.complete is False
+    assert fill.complete is True
+    assert fill.slots["amount"] == 50000
+
+
+def test_bare_number_equal_to_a_payee_tail_is_still_clarified(
+    payees: tuple[Payee, ...]
+) -> None:
+    """「转给 9021」里的 9021 是李娜卡号尾号：只能当收款人，金额仍要追问。"""
+    fill = fill_control_slots("transfer.create", _transfer_inputs("转给 9021", payees))
+    assert fill.slots["payee"] == "p_lina"
     assert [question.slot for question in fill.questions] == ["amount"]
-    assert "payee" in fill.slots
 
 
 def test_daily_limit_is_parsed_from_text_with_a_unit() -> None:

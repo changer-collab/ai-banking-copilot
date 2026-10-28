@@ -38,7 +38,7 @@ def test_service_worker_keeps_api_network_only(deps: object) -> None:
     assert 'const CACHE_NAME = "aib-static-shell-v16"' in worker.text
     assert '"/assets/workspace.css?v=7"' in worker.text
     assert '"/assets/app.js?v=24"' in worker.text
-    assert '"/assets/app.css?v=6"' in worker.text
+    assert '"/assets/app.css?v=7"' in worker.text
     app_js = client.get("/assets/app.js?v=24")
     assert 'register("/assets/sw.js?v=16"' in app_js.text
     assert 'url.pathname.startsWith("/api/")' in worker.text

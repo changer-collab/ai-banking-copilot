@@ -21,7 +21,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <title>AI 银行副驾 · 对话办理</title>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
-<link rel="stylesheet" href="/assets/app.css?v=6" />
+<link rel="stylesheet" href="/assets/app.css?v=7" />
 <link rel="stylesheet" href="/assets/workspace.css?v=7" />
 </head>
 <body>
@@ -239,11 +239,12 @@ _PAGE_HTML = """<!DOCTYPE html>
       </header>
 
       <div class="scene-block" data-scene-block="transfer" hidden>
-        <section class="panel">
-          <p class="panel__title">转账</p>
-          <p class="muted">功能页数据待接入（负责人：高靖雯）。当前可先用「去对话」办理一句话转账。</p>
+        <section class="panel" id="transfers-panel">
+          <p class="panel__title">转账记录</p>
+          <p class="muted" id="transfers-status">正在读取最近转账…</p>
+          <ul class="records" id="transfers-list"></ul>
           <div class="btn-row">
-            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="transfers">看转账记录</button>
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="transfers">看全部转账记录</button>
           </div>
         </section>
       </div>

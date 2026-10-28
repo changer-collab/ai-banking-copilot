@@ -34,7 +34,7 @@ from ai_banking_copilot.contracts.security import (
 )
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
-from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.models import Money, Payee
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
@@ -64,6 +64,8 @@ from ai_banking_copilot.planning.slots import (
     REQUIRED_SLOTS,
     SLOT_PARAMS,
     SlotInputs,
+    SlotQuestion,
+    _payee_label,
     fill_control_slots,
 )
 from ai_banking_copilot.policy.audit import (
@@ -224,6 +226,9 @@ PLAN_TTL_S = 300
 MAX_CONFIRM_STEPS = 20
 """`confirm(steps=...)` 的上界：仅用于「分步执行 / 中断恢复」演示，不得借它改变授权语义。"""
 
+_PAYEE_HISTORY_DAYS = 365
+"""同名候选上「最近一次转账」的回看窗口（天）：只查已记账流水，没有就说「暂无」。"""
+
 
 class SessionRiskSource(Protocol):
     """**服务端**可信会话风控信号源（G-03）：认证会话 + 请求行为 + 可信风控结果。
@@ -294,11 +299,28 @@ class DailyQuota:
 
 
 @dataclass(frozen=True)
+class ClarificationChoice:
+    """一条**可点选**的澄清候选：`label` 给人看，`value` 回填输入框后提交。
+
+    标签里的信息全部来自名册与已记账流水（手机尾号 / 账号尾号 / 最近一次转账日期），
+    不补全号码中间位——名册只存后四位，编造前半段就是生成事实。
+    """
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
 class ClarificationAsk:
-    """一条待澄清提问：`slot` 为需补齐的槽位名（与 `selected` 同口径），`prompt` 为文案。"""
+    """一条待澄清提问：`slot` 为需补齐的槽位名（与 `selected` 同口径），`prompt` 为文案。
+
+    `candidates` 只在一句话能落到**有限几个名册对象**时给出（当前是同名收款人），
+    用户点一下就答完，不必回头查自己的账号尾号。
+    """
 
     slot: str
     prompt: str
+    candidates: tuple[ClarificationChoice, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1070,9 +1092,13 @@ class Session:
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
-        chosen: dict[str, object] = (
-            dict(selected) if selected is not None else _default_selected(self._deps)
-        )
+        # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径（丢弃空值后
+        # 按受信任默认值补齐账户），否则同一句话会白问一轮账户。
+        chosen: dict[str, object] = {
+            key: value for key, value in (selected or {}).items() if value is not None
+        }
+        for key, value in _default_selected(self._deps).items():
+            chosen.setdefault(key, value)
         # `action` / `intent_spans` 是会话澄清用的元数据，不能作为场景槽位透传。
         extras = {
             key: value for key, value in chosen.items()
@@ -1253,6 +1279,7 @@ class Session:
                         f"第 {index + 1} 项{_intent_label(intent.action)}：{question.prompt}"
                         if len(candidates) > 1 else question.prompt
                     ),
+                    candidates=self._clarification_choices(question),
                 )
                 for question in fill.questions
             )
@@ -1265,6 +1292,64 @@ class Session:
                 )
             )
         return tuple(intents), tuple(asks), _dropped_notes(dropped)
+
+    def _clarification_choices(
+        self, question: SlotQuestion
+    ) -> tuple[ClarificationChoice, ...]:
+        """同名候选的可点选版本：补「手机尾号 / 账号尾号 / 最近一次转账」，回填值用 `payee_id`。
+
+        `planning.slots` 已判定「必须澄清」并给出候选标签，本层只补事实（名册 + 已记账流水），
+        **不改判定**。名册只存后四位，故不渲染完整号码——补全中间位就是生成事实。
+
+        回填值必须是人名册里的 `payee_id`：`_invalid_selection` 只认本人事实列表中的对象 ID，
+        自由文本（哪怕是「王伟 8812」）会被当成越权选择拒绝。
+        """
+        if not question.candidates:
+            return ()
+        roster = {
+            _payee_label(record.payload): record.payload
+            for record in self._deps.gateway.payees_of(self._deps.user_id)
+        }
+        choices: list[ClarificationChoice] = []
+        for label in question.candidates:
+            payee = roster.get(label)
+            if payee is None:
+                continue
+            last = self._last_transfer_on(payee)
+            when = f"最近一次转账 {last.isoformat()}" if last is not None else "暂无转账记录"
+            choices.append(
+                ClarificationChoice(
+                    label=(
+                        f"{payee.full_name} · 手机尾号 {payee.phone_tail}"
+                        f" · 账号尾号 {payee.account_tail} · {when}"
+                    ),
+                    value=payee.payee_id,
+                )
+            )
+        return tuple(choices)
+
+    def _last_transfer_on(self, payee: Payee) -> date | None:
+        """该收款人最近一次**已记账**的转出日期（事实来自 01 网关；没有记录返回 `None`）。
+
+        只认 `category=转账 / direction=out` 且有对应商户标记的流水：定时登记（未执行）
+        不算「转过」，避免把「计划」说成「事实」。
+        """
+        merchants = {f"转给{payee.payee_id}", f"转给{payee.full_name}"}
+        latest: date | None = None
+        start = self._deps.today - timedelta(days=_PAYEE_HISTORY_DAYS)
+        for account in self._deps.gateway.accounts_of(payee.user_id):
+            for record in self._deps.gateway.transactions_between(
+                account.payload.account_id, start, self._deps.today
+            ):
+                txn = record.payload
+                if (
+                    txn.category == "转账"
+                    and txn.direction == "out"
+                    and txn.merchant in merchants
+                    and (latest is None or txn.booked_on > latest)
+                ):
+                    latest = txn.booked_on
+        return latest
 
     def _render_card(
         self, plan: Plan, decision: Decision, *, now: datetime | None = None,

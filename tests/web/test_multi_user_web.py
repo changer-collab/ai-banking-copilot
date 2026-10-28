@@ -106,6 +106,29 @@ def test_options_and_me_only_contain_the_logged_in_users_facts(
     assert secondary.get("/api/me").json()["user"]["user_id"] == SECONDARY_USER_ID
 
 
+def test_transfer_records_are_scoped_to_the_logged_in_user(
+    client: TestClient, auth_deps: AppDeps
+) -> None:
+    """`/api/transfers` 必须按登录用户查表：第二用户看不到第一用户的转账记录。"""
+    _login(client, "chenming")
+    submitted = client.post("/api/submit", json={"utterance": "转给李娜 500 元"}).json()
+    card = submitted["card"]
+    confirmed = client.post(
+        "/api/confirm",
+        json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},
+    )
+    assert confirmed.status_code == 200
+    primary_items = client.get("/api/transfers").json()["items"]
+    assert any(item["amount_cents"] == 50000 for item in primary_items)
+
+    secondary = TestClient(create_app(auth_deps))
+    _login(secondary, "linjing")
+    secondary_items = secondary.get("/api/transfers").json()["items"]
+    assert not any(item["amount_cents"] == 50000 for item in secondary_items), (
+        "第二用户不得看到第一用户的转账记录"
+    )
+
+
 def test_cross_site_write_is_rejected_before_any_state_change(client: TestClient) -> None:
     _login(client, "chenming")
     response = client.post(
