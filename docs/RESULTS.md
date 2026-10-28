@@ -186,6 +186,20 @@ python -m pytest -q           # tests=1671 / failures=0 / errors=0 / skipped=0�
 - 前端静态壳：`app.js?v=21` / `app.css?v=6` / `workspace.css?v=5` / `aib-static-shell-v11`（三处版本断言同步）。
 - 合并窗口内其余 PR 合入后需再跑一次全量并回填本节。
 
+### 8. #14 合入后基线（2026-10-28，PR #22 合入 `sprint/1026` 后）
+
+```
+python -m ruff check .        # All checks passed!
+python -m mypy                # Success: no issues found in 104 source files
+python -m pytest -q           # tests=1692 / failures=0 / errors=0 / skipped=0（退出码 0）
+```
+
+- 提交：`1455bb3`（合入 #22，即 `merge/wang` 解冲突后的 #14）。
+- 较第 7 节 **1671** 增加 21 条：#14 自带飞书适配器/路由/可靠性用例，另加 3 条代改用例（陈旧时间戳拒绝、`card.action` 解析、未绑定身份可重投）。
+- 计数口径：`pytest --collect-only -q` 汇总 1692；全量 `pytest -q` 退出码 0（未记录秒数）。
+- 前端静态壳：`app.js?v=22` / `aib-static-shell-v14` / `sw.js?v=14`（三处版本断言同步）。
+- `pytest` 秒数未采；如需对外引用时长，重跑一次带 `--junitxml` 再回填。
+
 ---
 
 ## 四个数字的口径（2026-10-27 冻结）
