@@ -88,6 +88,21 @@ def test_resolve_rejects_expired_token(store: Store) -> None:
     assert service.resolve(result.session.token, now=result.session.expires_at) is None
 
 
+def test_resolve_treats_corrupt_expiry_as_unauthenticated(store: Store) -> None:
+    """台账里的 expiry 不是合法 ISO 时间时按未登录处理，不能抛 500。"""
+    from ai_banking_copilot.web.auth import _token_hash
+
+    service = _service(store)
+    result = service.login("chenming", _PASSWORD, now=_T0)
+    with store.transaction() as conn:
+        conn.execute(
+            "UPDATE auth_sessions SET expires_at = 'None' WHERE token_hash = ?",
+            (_token_hash(result.session.token),),
+        )
+
+    assert service.resolve(result.session.token, now=_T0) is None
+
+
 def test_resolve_slides_expiry_when_close_to_timeout(store: Store) -> None:
     service = _service(store)
     result = service.login("chenming", _PASSWORD, now=_T0)

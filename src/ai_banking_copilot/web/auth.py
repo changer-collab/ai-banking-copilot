@@ -385,7 +385,12 @@ class AuthService:
         row = rows[0]
         if row["revoked_at"] is not None:
             return None
-        expires_at = datetime.fromisoformat(str(row["expires_at"]))
+        try:
+            expires_at = datetime.fromisoformat(str(row["expires_at"]))
+            issued_at = datetime.fromisoformat(str(row["issued_at"]))
+        except (TypeError, ValueError):
+            # 台账里的时间戳损坏（如 NULL）不能 500，按未登录处理（fail-closed）。
+            return None
         if moment >= expires_at:
             return None
         renewed = expires_at
@@ -399,7 +404,7 @@ class AuthService:
         return AuthSession(
             token=token,
             user_id=str(row["user_id"]),
-            issued_at=datetime.fromisoformat(str(row["issued_at"])),
+            issued_at=issued_at,
             expires_at=renewed,
         )
 

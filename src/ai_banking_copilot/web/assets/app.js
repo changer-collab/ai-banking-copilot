@@ -2207,7 +2207,7 @@ function profileValue(value) {
 }
 
 function renderProfile(me, audit) {
-  const targets = [el("profile-body"), el("me-body")].filter(Boolean);
+  const targets = [el("profile-body")].filter(Boolean);
   if (!targets.length) return;
   const user = me.user || {};
   const session = me.session || {};
@@ -2272,8 +2272,10 @@ function renderProfile(me, audit) {
 async function openProfile() {
   const panel = el("profile-panel");
   const body = el("profile-body");
+  const backdrop = el("profile-backdrop");
   if (!panel || !body) return;
   panel.hidden = false;
+  if (backdrop) backdrop.hidden = false;
   el("btn-profile").setAttribute("aria-expanded", "true");
   body.innerHTML = '<p class="muted">正在读取账户信息…</p>';
   el("btn-close-profile").focus();
@@ -2294,31 +2296,12 @@ async function openProfile() {
 
 function closeProfile() {
   const panel = el("profile-panel");
+  const backdrop = el("profile-backdrop");
   if (!panel || panel.hidden) return;
   panel.hidden = true;
+  if (backdrop) backdrop.hidden = true;
   el("btn-profile").setAttribute("aria-expanded", "false");
   el("btn-profile").focus();
-}
-
-/* 「我的」是独立视图：首次进入时读取一次，退出登录按钮与抽屉共用同一套渲染 */
-async function refreshMeView() {
-  const body = el("me-body");
-  if (!body || body.dataset.loaded === "1") return;
-  body.innerHTML = '<p class="muted">正在读取账户信息…</p>';
-  try {
-    const [me, audit] = await Promise.all([
-      apiFetch("GET", "/api/me"),
-      apiFetch("GET", "/api/audit?limit=8"),
-    ]);
-    if (!me.ok) {
-      body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
-      return;
-    }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
-    body.dataset.loaded = "1";
-  } catch (_) {
-    body.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
-  }
 }
 
 /* 顶部入口只做身份标识：读不到就保留默认文案，不打断主流程 */
@@ -2550,7 +2533,6 @@ async function onProfileClick(event) {
   window.location.replace("/");
 }
 el("profile-body").addEventListener("click", onProfileClick);
-el("me-body")?.addEventListener("click", onProfileClick);
 /* 历史对话行同样动态渲染：点开 / 删除都用事件委托 */
 el("conversation-list").addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -2609,7 +2591,7 @@ function setMobileDrawer(name, open) {
    否则读屏用户拿不到理财面板；视口变化时重算一次。 */
 function syncRailAria() {
   if (!app) return;
-  const persistentOnDesktop = window.matchMedia("(min-width: 1021px)").matches;
+  const persistentOnDesktop = window.matchMedia("(min-width: 961px)").matches;
   el("conversation-sidebar").setAttribute(
     "aria-hidden",
     String(!app.classList.contains("is-scenes-open") && !persistentOnDesktop),
@@ -2621,11 +2603,11 @@ function syncRailAria() {
 }
 
 function isNarrowNav() {
-  return window.matchMedia("(max-width: 1180px)").matches;
+  return window.matchMedia("(max-width: 960px)").matches;
 }
 
 function isNarrowTrace() {
-  return window.matchMedia("(max-width: 1020px)").matches;
+  return window.matchMedia("(max-width: 900px)").matches;
 }
 
 /* 顶栏两个按钮：宽屏收起整列，窄屏走抽屉；状态同步到 aria-expanded */
@@ -2821,7 +2803,7 @@ const RECORD_TABS = {
   charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 卡尾号 / 渠道。" },
 };
 
-const VIEWS = ["home", "chat", "scene", "records", "health", "me"];
+const VIEWS = ["home", "chat", "scene", "records", "health"];
 let currentScene = "transfer";
 let currentRecordTab = "transfers";
 
@@ -2877,7 +2859,6 @@ function showView(name, options) {
   });
   if (next === "records") renderRecordsTab(opts.tab || currentRecordTab);
   if (next === "health") refreshChannelHealth().catch(() => {});
-  if (next === "me") refreshMeView().catch(() => {});
   if (next === "chat") {
     const input = el("utterance");
     if (input) window.setTimeout(() => input.focus(), 0);
@@ -2899,9 +2880,22 @@ function navigate(name, options) {
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  if (target.id === "profile-backdrop") {
+    closeProfile();
+    return;
+  }
   const nav = target.closest("[data-nav]");
   if (nav) {
     event.preventDefault();
+    const name = nav.dataset.nav || "home";
+    if (name === "me") {
+      openProfile();
+      if (el("app")?.classList.contains("is-scenes-open")) {
+        setMobileDrawer("scenes", false);
+        syncColumnButtons();
+      }
+      return;
+    }
     const opts = {};
     if (nav.dataset.scene) opts.scene = nav.dataset.scene;
     if (nav.dataset.recordTab) opts.tab = nav.dataset.recordTab;
@@ -3001,7 +2995,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=16", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=18", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

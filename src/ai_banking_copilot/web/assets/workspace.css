@@ -6,13 +6,13 @@
   --pg-bg: var(--paper);
   --pg-panel: var(--voucher);
   --pg-line: var(--rule);
-  --side-w: 252px;
-  --trace-w: 344px;
+  --side-w: clamp(216px, 21vw, 252px);
+  --trace-w: clamp(288px, 27vw, 344px);
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
-body { background: var(--pg-bg); }
+body { background: var(--pg-bg); line-height: 1.52; }
 
 /* 视觉隐藏：保留给读屏与表单关联（输入区标签等） */
 .sr-only {
@@ -211,7 +211,7 @@ body { background: var(--pg-bg); }
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: var(--s-5);
+  gap: var(--s-4);
   min-height: 0;
   padding: var(--s-6) var(--s-6) var(--s-4);
   overflow: auto;
@@ -276,7 +276,7 @@ body { background: var(--pg-bg); }
 .chat-task {
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: var(--s-3);
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
@@ -423,7 +423,7 @@ body { background: var(--pg-bg); }
 #btn-trace-mobile[aria-expanded="false"] { opacity: .6; }
 
 /* ---------- 窄屏：侧栏与处理详情变抽屉 ---------------------------------- */
-@media (max-width: 1180px) {
+@media (max-width: 960px) {
   #app.layout.layout--workspace { grid-template-columns: minmax(0, 1fr) 320px; }
   #app > .side { display: none; }
   #app.is-scenes-open > .side {
@@ -439,7 +439,7 @@ body { background: var(--pg-bg); }
   #btn-scenes-mobile { display: inline-flex; }
 }
 
-@media (max-width: 1020px) {
+@media (max-width: 900px) {
   #app.layout.layout--workspace { grid-template-columns: minmax(0, 1fr); }
   #app > #trace { display: none; }
   #app.is-trace-open > #trace,
@@ -588,31 +588,40 @@ html[data-view="app"] .trace__head { padding-bottom: var(--s-2); border-bottom: 
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: var(--s-3);
   min-height: 0;
   padding: var(--s-5) var(--s-6) var(--s-6);
   overflow: auto;
 }
 #app > .main > .view--chat { padding: 0; overflow: hidden; }
 
-@media (max-width: 1020px) {
+@media (max-width: 900px) {
   /* 右栏抽屉从顶栏下方展开，避免盖住自己的开关与顶栏右侧控件 */
   #app.is-trace-open > #trace,
   .shell.is-trace-open .trace { top: 72px; }
 }
 html[data-view="app"] #app.is-trace-open > #trace { inset: 92px 0 0 0; }
 
-/* 宽屏：左/右栏可收起（窄屏走抽屉，不套用这两条） */
-@media (min-width: 1181px) {
-  #app.is-nav-collapsed { grid-template-columns: 0 minmax(0, 1fr) var(--trace-w); }
-  #app.is-nav-collapsed > .side { display: none; }
-  #app.is-trace-collapsed { grid-template-columns: var(--side-w) minmax(0, 1fr) 0; }
-  #app.is-trace-collapsed > #trace { display: none; }
-  #app.is-nav-collapsed.is-trace-collapsed { grid-template-columns: minmax(0, 1fr); }
+/* 宽屏：左/右栏可收起（窄屏走抽屉，不套用这两条）
+   选择器要和基础规则 `#app.layout.layout--workspace` 同样高，否则列宽改不动。 */
+@media (min-width: 961px) {
+  #app.layout.layout--workspace.is-nav-collapsed { grid-template-columns: 0 minmax(0, 1fr) var(--trace-w); }
+  /* 不能 display:none：侧栏退出网格后，主区会掉进第 1 列（0px）。
+     保留占位、只把宽度和可见性收掉，主区才继续落在第 2 列。 */
+  #app.layout.layout--workspace.is-nav-collapsed > .side {
+    visibility: hidden;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+  }
+  #app.layout.layout--workspace.is-nav-collapsed.is-trace-collapsed > .side { display: none; }
+  #app.layout.layout--workspace.is-trace-collapsed { grid-template-columns: var(--side-w) minmax(0, 1fr) 0; }
+  #app.layout.layout--workspace.is-trace-collapsed > #trace { display: none; }
+  #app.layout.layout--workspace.is-nav-collapsed.is-trace-collapsed { grid-template-columns: minmax(0, 1fr); }
 }
-@media (min-width: 1021px) and (max-width: 1180px) {
-  #app.is-trace-collapsed { grid-template-columns: minmax(0, 1fr); }
-  #app.is-trace-collapsed > #trace { display: none; }
+@media (min-width: 901px) and (max-width: 960px) {
+  #app.layout.layout--workspace.is-trace-collapsed { grid-template-columns: minmax(0, 1fr); }
+  #app.layout.layout--workspace.is-trace-collapsed > #trace { display: none; }
 }
 
 .view__head {
@@ -742,16 +751,31 @@ html[data-view="app"] .tabbar {
 }
 .tabbar__item {
   flex: 1;
-  padding: 10px 6px;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 8px 4px 6px;
   border: 0;
   background: transparent;
   color: var(--ink-2);
   font-size: 12px;
   cursor: pointer;
 }
+.tabbar__icon {
+  width: 17px;
+  height: 17px;
+  border: 1.6px solid currentColor;
+  border-radius: 5px;
+  opacity: .7;
+}
 .tabbar__item[aria-current="page"] { color: var(--blue-700); font-weight: 600; }
-html[data-view="app"] #view-chat .composer { padding-bottom: 58px; }
+.tabbar__item[aria-current="page"] .tabbar__icon { background: currentColor; opacity: 1; }
+html[data-view="app"] #view-chat .composer { padding-bottom: 68px; }
 html[data-view="app"] #app > .main > .view:not(.view--chat) { padding-bottom: 64px; }
+html[data-view="app"] #view-records .tabs { flex-wrap: nowrap; overflow-x: auto; }
+html[data-view="app"] #records-body table,
+html[data-view="app"] .mini-table { display: block; overflow-x: auto; }
+html[data-view="app"] #profile-panel { width: min(520px, 92vw); max-height: 82vh; }
 
 /* ---------- 原 page.py 内联组件迁入（阶段步进器 / 个人中心 / 历史对话 / 生活事件） ---------- */
 #progress-steps {
@@ -772,23 +796,41 @@ html[data-view="app"] #app > .main > .view:not(.view--chat) { padding-bottom: 64
 
 #profile-panel {
   position: fixed;
-  z-index: 60;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  z-index: 70;
+  top: 50%;
+  left: 50%;
   display: flex;
   flex-direction: column;
-  gap: var(--s-4);
-  width: min(392px, 94vw);
+  gap: var(--s-3);
+  width: min(560px, 92vw);
+  max-height: min(720px, 86vh);
   padding: var(--s-5);
   overflow: auto;
   background: var(--voucher);
-  border-left: 1px solid var(--rule);
-  box-shadow: var(--sh-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-card);
+  box-shadow: 0 24px 64px -20px rgba(10, 27, 46, 0.45);
+  transform: translate(-50%, -50%);
 }
 #profile-panel[hidden] { display: none; }
-#profile-body,
-#me-body { display: grid; gap: var(--s-4); min-width: 0; }
+.profile-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--pg-line);
+}
+.profile-modal__head .panel__title { margin: 0; }
+.modal-backdrop {
+  position: fixed;
+  z-index: 65;
+  inset: 0;
+  background: rgba(12, 24, 44, 0.42);
+  backdrop-filter: blur(1px);
+}
+.modal-backdrop[hidden] { display: none; }
+#profile-body { display: grid; gap: var(--s-3); min-width: 0; }
 .profile-block { display: grid; gap: var(--s-2); min-width: 0; }
 .profile-block h3 { margin: 0; font-family: var(--font-display); font-size: var(--fs-h2); }
 .profile-block dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-3); margin: 0; }
@@ -822,7 +864,7 @@ html[data-view="app"] #app > .main > .view:not(.view--chat) { padding-bottom: 64
 .life-form__field { display: grid; gap: 2px; color: var(--ink-3); font-size: 11px; }
 .life-form__field .input { width: 100%; }
 
-@media (max-width: 1180px) {
+@media (max-width: 960px) {
   #app > .main > .view { padding: var(--s-4); }
   #progress-steps { padding: 0 var(--s-4); }
 }

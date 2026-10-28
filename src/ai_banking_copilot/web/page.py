@@ -22,7 +22,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=7" />
+<link rel="stylesheet" href="/assets/workspace.css?v=9" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -343,16 +343,6 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
       </section>
     </section>
-
-    <section class="view" id="view-me" hidden>
-      <header class="view__head">
-        <div>
-          <h2>我的</h2>
-          <p class="muted">登录身份、关联数据与操作轨迹。</p>
-        </div>
-      </header>
-      <div id="me-body"><p class="muted">正在读取账户信息…</p></div>
-    </section>
   </main>
 
   <aside class="trace rail" id="trace" aria-label="处理详情" aria-hidden="true">
@@ -405,21 +395,24 @@ _PAGE_HTML = """<!DOCTYPE html>
     </section>
   </aside>
 
-  <aside class="profile-panel" id="profile-panel" aria-label="个人中心" hidden>
-    <div class="trace__head">
-      <p class="panel__title">个人中心</p>
+  <div class="modal-backdrop" id="profile-backdrop" hidden></div>
+  <section class="profile-modal" id="profile-panel" role="dialog" aria-modal="true"
+           aria-labelledby="profile-title" hidden>
+    <div class="profile-modal__head">
+      <p class="panel__title" id="profile-title">个人中心</p>
       <button class="btn btn--ghost" id="btn-close-profile" type="button">关闭</button>
     </div>
     <div id="profile-body"><p class="muted">正在读取账户信息…</p></div>
-  </aside>
+  </section>
   <nav class="tabbar" id="app-tabbar" aria-label="底部导航">
-    <button class="tabbar__item" type="button" data-nav="home">首页</button>
-    <button class="tabbar__item" type="button" data-nav="chat">对话</button>
-    <button class="tabbar__item" type="button" data-nav="me">我的</button>
+    <button class="tabbar__item" type="button" data-nav="home"><i class="tabbar__icon" aria-hidden="true"></i>首页</button>
+    <button class="tabbar__item" type="button" data-nav="chat"><i class="tabbar__icon" aria-hidden="true"></i>对话</button>
+    <button class="tabbar__item" type="button" data-nav="records" data-record-tab="transfers"><i class="tabbar__icon" aria-hidden="true"></i>记录</button>
+    <button class="tabbar__item" type="button" data-nav="me"><i class="tabbar__icon" aria-hidden="true"></i>我的</button>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=24"></script>
+<script src="/assets/app.js?v=25"></script>
 </body>
 </html>
 """
@@ -446,38 +439,38 @@ LOGIN_HTML = """<!DOCTYPE html>
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(1200px 600px at 20% -10%, #dfe8ff 0%, #f6f8fc 55%, #eef1f7 100%);
+    background: radial-gradient(900px 520px at 50% 0%, #e8f0ff 0%, #f2f6fc 55%, #eef2f9 100%);
     color: #16233a; padding: 24px;
     font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   }
   .login-card {
-    width: 100%; max-width: 400px; background: #fff; border-radius: 18px; padding: 32px 28px;
-    box-shadow: 0 18px 48px rgba(16, 38, 84, .14); border: 1px solid rgba(16, 38, 84, .06);
+    width: 100%; max-width: 340px; background: #fff; border-radius: 16px; padding: 30px 26px;
+    box-shadow: 0 20px 50px rgba(16, 38, 84, .12); border: 1px solid rgba(16, 38, 84, .05);
   }
-  .brand { font-size: 20px; font-weight: 700; letter-spacing: .5px; margin: 0 0 6px; }
+  .brand { font-size: 22px; font-weight: 700; letter-spacing: .3px; margin: 0 0 6px; }
   .brand em { font-style: normal; color: #0b4fd8; }
-  .sub { margin: 0 0 24px; font-size: 13px; color: #6b7a90; }
-  label { display: block; font-size: 13px; color: #40506b; margin: 14px 0 6px; }
+  .sub { margin: 0 0 22px; font-size: 13px; line-height: 1.5; color: #6b7a90; }
+  label { display: block; font-size: 12px; color: #40506b; margin: 12px 0 6px; }
   input {
-    width: 100%; height: 44px; padding: 0 12px; font-size: 15px; color: #16233a;
-    border: 1px solid #cfd8e6; border-radius: 10px; background: #fbfcfe; outline: none;
+    width: 100%; height: 40px; padding: 0 12px; font-size: 14px; color: #16233a;
+    border: 1px solid #d5ddea; border-radius: 8px; background: #fff; outline: none;
   }
-  input:focus { border-color: #0b4fd8; background: #fff; box-shadow: 0 0 0 3px rgba(11, 79, 216, .12); }
+  input:focus { border-color: #0b4fd8; box-shadow: 0 0 0 3px rgba(11, 79, 216, .12); }
   button {
-    width: 100%; height: 46px; margin-top: 22px; border: 0; border-radius: 10px; cursor: pointer;
-    background: #0b4fd8; color: #fff; font-size: 15px; font-weight: 600;
+    width: 100%; height: 40px; margin-top: 20px; border: 0; border-radius: 8px; cursor: pointer;
+    background: #0b4fd8; color: #fff; font-size: 14px; font-weight: 600;
   }
   button:disabled { opacity: .6; cursor: default; }
   .err {
-    margin-top: 14px; padding: 10px 12px; border-radius: 10px; font-size: 13px;
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
     background: #fdecea; color: #b3362a; border: 1px solid #f5c6c1;
   }
   .demo {
-    margin-top: 22px; padding: 12px 14px; border-radius: 10px; font-size: 12px; line-height: 1.7;
-    background: #f4f7fd; color: #55637a; border: 1px dashed #cfd8e6;
+    margin-top: 20px; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
+    background: #f2f6fc; color: #55637a; border: 1px solid #e3ebf7;
   }
   .demo b { color: #16233a; font-weight: 600; }
-  .foot { margin-top: 18px; font-size: 12px; color: #93a0b4; text-align: center; }
+  .foot { margin-top: 16px; font-size: 12px; color: #93a0b4; text-align: center; }
 </style>
 </head>
 <body>
