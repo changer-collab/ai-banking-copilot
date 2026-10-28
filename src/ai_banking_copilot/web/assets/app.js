@@ -720,19 +720,27 @@ function subscriptionEvidenceHtml(item) {
     ).join("") + "</ul></details>";
 }
 
+const CHANNEL_ORDER = ["web", "im", "feishu"];
+
 function renderChannelHealth(data) {
   const status = el("channel-health-status");
-  const list = el("channel-health-list");
-  if (!status || !list) return;
+  const body = el("channel-health-body");
+  if (!status || !body) return;
   const channels = data && data.channels ? data.channels : {};
-  const rows = Object.entries(channels).map(([name, item]) => {
-    const state = item && item.mode ? item.mode : "unknown";
-    const configured = item && item.configured ? "已配置" : "未配置";
-    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
-      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
+  const health = data && data.health ? data.health : {};
+  const rows = CHANNEL_ORDER.map((name) => {
+    const item = channels[name] || {};
+    const stats = health[name] || {};
+    const configured = item.configured !== false;
+    const state = configured ? (item.mode || stats.status || "unknown") : "未接入";
+    const lastEvent = stats.last_event_at || "暂无事件";
+    const replay = stats.replay_mode || item.mode === "replay" ? "是" : "否";
+    return `<tr><td>${esc(name)}</td><td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
+      `<td>${esc(String(stats.ok || 0))}</td><td>${esc(String(stats.failed || 0))}</td>` +
+      `<td>${esc(String(stats.ratelimit_hits || 0))}</td><td>${replay}</td></tr>`;
   });
   status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
-  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
+  body.innerHTML = rows.length ? rows.join("\n") : '<tr><td colspan="7">暂无渠道状态。</td></tr>';
 }
 
 async function refreshChannelHealth() {

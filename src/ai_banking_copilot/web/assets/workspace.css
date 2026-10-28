@@ -1160,3 +1160,18 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .charge-records-table td { color: #16233a; word-break: break-word; }
 .subscription-price { color: var(--blue-700); font-weight: 600; }
 .audit-digest { margin: 4px 0 0; word-break: break-all; }
+.channel-health-table-wrap { overflow-x: auto; }
+.channel-health-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.channel-health-table th,
+.channel-health-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-line);
+  text-align: left;
+}
+.channel-health-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
