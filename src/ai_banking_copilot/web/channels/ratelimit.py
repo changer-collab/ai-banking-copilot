@@ -18,6 +18,8 @@ from typing import Any, TypeVar
 from ai_banking_copilot.gateway.store import Store
 
 T = TypeVar("T")
+AttemptCallback = Callable[[int, int | None, str | None], None]
+RetryCallback = Callable[[int, float], None]
 
 EVENT_LEDGER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS channel_events (
@@ -165,14 +167,16 @@ class EventLedger:
 def retry_outbound(
     send: Callable[[], T],
     *,
-    attempts: int = 3,
+    attempts: int = 4,
     sleeper: Callable[[float], None] = time.sleep,
     delays: tuple[float, ...] = DEFAULT_RETRY_DELAYS,
-    on_retry: Callable[[int, float], None] | None = None,
+    on_attempt: AttemptCallback | None = None,
+    on_retry: RetryCallback | None = None,
 ) -> T:
     """发送出站消息；仅对超时与 5xx 重试，最多调用 ``attempts`` 次。
 
     发送函数可以返回带 ``status_code`` 属性的响应对象，也可以返回整数状态码。
+    每次实际调用都报告尝试结果；异常只报告稳定类型名，不包含异常正文。
     4xx 或其他成功结果立即返回；最后一次 5xx 也原样返回，交由上层记录失败。
     """
     if attempts < 1:
@@ -181,6 +185,8 @@ def retry_outbound(
         try:
             result = send()
         except Exception as error:
+            if on_attempt is not None:
+                on_attempt(index + 1, None, type(error).__name__)
             if not _retryable_exception(error) or index >= attempts - 1:
                 raise
             if on_retry is not None:
@@ -188,7 +194,10 @@ def retry_outbound(
             _sleep_before_retry(index, delays, sleeper)
             continue
 
-        if _status_code(result) >= 500 and index < attempts - 1:
+        status = _status_code(result)
+        if on_attempt is not None:
+            on_attempt(index + 1, status, None)
+        if status >= 500 and index < attempts - 1:
             if on_retry is not None:
                 on_retry(index + 1, delays[min(index, len(delays) - 1)])
             _sleep_before_retry(index, delays, sleeper)

@@ -15,6 +15,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from typing import cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -25,7 +26,11 @@ from ai_banking_copilot.web.channels.contracts import (
     InboundMessage,
     OutboundMessage,
 )
-from ai_banking_copilot.web.channels.ratelimit import retry_outbound
+from ai_banking_copilot.web.channels.ratelimit import (
+    AttemptCallback,
+    RetryCallback,
+    retry_outbound,
+)
 from ai_banking_copilot.web.channels.render import render_feishu_card
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -334,8 +339,17 @@ class FeishuAdapter:
 
     name = CHANNEL_FEISHU
 
-    def __init__(self, config: FeishuConfig) -> None:
+    def __init__(
+        self,
+        config: FeishuConfig,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.config = config
+        self._clock = clock
+        self._token: str | None = None
+        self._token_refresh_at = 0.0
+        self._token_lock = Lock()
 
     @property
     def configured(self) -> bool:
@@ -533,7 +547,8 @@ class FeishuAdapter:
         self,
         outbound: OutboundMessage,
         *,
-        on_retry: Callable[[int, float], None] | None = None,
+        on_attempt: AttemptCallback | None = None,
+        on_retry: RetryCallback | None = None,
     ) -> int:
         """向真实飞书会话发送交互卡片；回调入口可将此方法放入后台任务。"""
         if not self.config.configured or self.replay_mode:
@@ -542,18 +557,9 @@ class FeishuAdapter:
         app_secret = self.config.app_secret
         if app_id is None or app_secret is None:
             raise FeishuProtocolError("feishu_credentials_missing")
+        token = self._tenant_token(app_id, app_secret)
 
         def attempt() -> int:
-            token_status, token_body = _post_json(
-                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                {"app_id": app_id, "app_secret": app_secret},
-                {},
-            )
-            if token_status >= 500:
-                return token_status
-            token = token_body.get("tenant_access_token")
-            if token_status != 200 or not isinstance(token, str) or not token:
-                raise FeishuProtocolError("feishu_token_request_failed")
             status, response = _post_json(
                 "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
                 {
@@ -569,9 +575,46 @@ class FeishuAdapter:
                 raise FeishuProtocolError("feishu_message_send_failed")
             return status
 
-        return retry_outbound(
+        status = retry_outbound(
             attempt,
-            attempts=3,
             sleeper=time.sleep,
+            on_attempt=on_attempt,
             on_retry=on_retry,
         )
+        if status >= 500:
+            raise FeishuProtocolError("feishu_message_send_failed")
+        return status
+
+    def _tenant_token(self, app_id: str, app_secret: str) -> str:
+        now = self._clock()
+        if self._token is not None and now < self._token_refresh_at:
+            return self._token
+        with self._token_lock:
+            now = self._clock()
+            if self._token is not None and now < self._token_refresh_at:
+                return self._token
+
+            token_body: Mapping[str, object] = {}
+
+            def request_token() -> int:
+                nonlocal token_body
+                status, token_body = _post_json(
+                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                    {"app_id": app_id, "app_secret": app_secret},
+                    {},
+                )
+                return status
+
+            token_status = retry_outbound(request_token, sleeper=time.sleep)
+            token = token_body.get("tenant_access_token")
+            if token_status != 200 or not isinstance(token, str) or not token:
+                raise FeishuProtocolError("feishu_token_request_failed")
+            expire = token_body.get("expire")
+            expire_seconds = (
+                float(expire)
+                if isinstance(expire, (int, float)) and not isinstance(expire, bool)
+                else 0.0
+            )
+            self._token = token
+            self._token_refresh_at = now + max(0.0, expire_seconds - 300.0)
+            return token
