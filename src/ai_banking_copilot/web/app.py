@@ -524,10 +524,14 @@ def create_app(deps: AppDeps) -> FastAPI:
         return session.user_id
 
     def _page_or_login(request: Request, html: str) -> HTMLResponse:
-        """页面入口：`demo` 模式未登录时先给登录页，不把应用骨架发出去。"""
+        """页面入口：`demo` 模式未登录时先给登录页，不把应用骨架发出去。
+
+        壳 HTML 内嵌资源版本号，**必须 no-store**：否则浏览器缓存旧 HTML 后会一直引用
+        旧的 `workspace.css?v=*`，出现「代码已更新、页面还是旧版」的假象。
+        """
         if auth_enabled and _auth().resolve(request.cookies.get(AUTH_COOKIE_NAME, "")) is None:
-            return HTMLResponse(LOGIN_HTML)
-        return HTMLResponse(html)
+            return HTMLResponse(LOGIN_HTML, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     def _session_for(session_id: str, user_id: str) -> Session:
         return manager.get(user_id, session_id)
