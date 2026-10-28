@@ -639,6 +639,14 @@ class Session:
         """当前待确认的计划卡（无则 `None`）。"""
         return self._pending.card if self._pending is not None else None
 
+    def last_utterance(self) -> str | None:
+        """尚待澄清的原指令（无则 `None`）。
+
+        只读投影：`clarify` 成功后原指令会被清空，因此渠道层需要在调用前取用，
+        用于把「续答后成卡」的同一次生活事件也登记到记录表（不读信前端自称）。
+        """
+        return self._last_utterance
+
     def confirmation(self) -> ConfirmationRecord | None:
         """确认记录（未确认则 `None`）。"""
         return self._confirmation
@@ -654,11 +662,15 @@ class Session:
         *,
         selected: Mapping[str, object] | None = None,
         now: datetime | None = None,
+        on_stage: Callable[[str], None] | None = None,
     ) -> SubmissionView:
-        """一次新的用户意图拥有独立执行身份，即使内容完全相同。"""
+        """一次新的用户意图拥有独立执行身份，即使内容完全相同。
+
+        `on_stage` 是**旁路观测**回调（阶段可见），不参与任何判定，异常一律吞掉。
+        """
         return self._submit(
             utterance, selected=selected, now=now,
-            execution_id=secrets.token_hex(16),
+            execution_id=secrets.token_hex(16), on_stage=on_stage,
         )
 
     def _submit(
@@ -669,70 +681,83 @@ class Session:
         now: datetime | None = None,
         execution_id: str,
         clarification_keys: frozenset[str] = frozenset(),
+        on_stage: Callable[[str], None] | None = None,
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
         会话风控信号（G-03）**只**来自服务端可信源 `AppDeps.session_risk`，本方法不接受任何
         客户端风控入参。
         """
-        self._reset()
-        self._execution_id = execution_id
-        moment = now if now is not None else datetime.now()
-        self._last_utterance = utterance
-        self._last_selected = dict(selected) if selected is not None else None
-        self._clarification_keys = clarification_keys
-        # 注入是提交入口的系统性信号；即使后续在意图装配前被拒绝，也必须触发全局熔断。
-        injection_detected = detect_injection(utterance)
-        if injection_detected:
-            self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
-        refusal = _guard_utterance(utterance)
-        if refusal is not None:
-            return self._refuse(refusal, utterance)
-        invalid = self._invalid_selection(selected or {})
-        if invalid is not None:
-            return self._refuse(invalid, utterance)
-        intents, asks, notes = self._assemble_intents(utterance, selected)
-        if asks:
-            self._state = SessionState.NEEDS_CLARIFICATION
-            self._message = _with_notes(
-                "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
-            )
-            return SubmissionView(
-                self._state, self._message, None, None, None,
-                tuple(ask.prompt for ask in asks), clarifications=asks,
-            )
-        if not intents:
-            return self._refuse(
-                _with_notes("未知意图：无法匹配任何场景", notes),
-                utterance,
-                capability_boundary=True,
-            )
         try:
-            handler = select_handler(intents)
-        except UnknownScenarioError:
-            return self._refuse(
-                _with_notes("未知意图：无法匹配任何场景", notes),
+            _notify(on_stage, "guard")
+            self._reset()
+            self._execution_id = execution_id
+            moment = now if now is not None else datetime.now()
+            self._last_utterance = utterance
+            self._last_selected = dict(selected) if selected is not None else None
+            self._clarification_keys = clarification_keys
+            # 注入是提交入口的系统性信号；即使后续在意图装配前被拒绝，也必须触发全局熔断。
+            injection_detected = detect_injection(utterance)
+            if injection_detected:
+                self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
+            refusal = _guard_utterance(utterance)
+            if refusal is not None:
+                return self._refuse(refusal, utterance)
+            invalid = self._invalid_selection(selected or {})
+            if invalid is not None:
+                return self._refuse(invalid, utterance)
+            _notify(on_stage, "understand")
+            intents, asks, notes = self._assemble_intents(utterance, selected)
+            if asks:
+                self._state = SessionState.NEEDS_CLARIFICATION
+                self._message = _with_notes(
+                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+                )
+                return SubmissionView(
+                    self._state, self._message, None, None, None,
+                    tuple(ask.prompt for ask in asks), clarifications=asks,
+                )
+            if not intents:
+                return self._refuse(
+                    _with_notes("未知意图：无法匹配任何场景", notes),
+                    utterance,
+                    capability_boundary=True,
+                )
+            try:
+                handler = select_handler(intents)
+            except UnknownScenarioError:
+                return self._refuse(
+                    _with_notes("未知意图：无法匹配任何场景", notes),
+                    utterance,
+                    capability_boundary=True,
+                )
+            _notify(on_stage, "plan")
+            outcome = run_scenario(handler, intents, self._deps.gateway)
+            if outcome.plan is not None:
+                self._note_risky_activity(
+                    now=moment, risky=not plan_is_pure_query(outcome.plan)
+                )
+            _notify(on_stage, "review")
+            return self._after_outcome(
+                outcome,
                 utterance,
-                capability_boundary=True,
+                asks,
+                candidate_actions=tuple(intent.action for intent in intents),
+                accepted_intents=intents,
+                notes=notes,
+                now=moment,
+                injection_already_tripped=injection_detected,
             )
-        outcome = run_scenario(handler, intents, self._deps.gateway)
-        if outcome.plan is not None:
-            self._note_risky_activity(
-                now=moment, risky=not plan_is_pure_query(outcome.plan)
-            )
-        return self._after_outcome(
-            outcome,
-            utterance,
-            asks,
-            candidate_actions=tuple(intent.action for intent in intents),
-            accepted_intents=intents,
-            notes=notes,
-            now=moment,
-            injection_already_tripped=injection_detected,
-        )
+        finally:
+            _notify(on_stage, "done")
 
     @_serialized
-    def clarify(self, answers: Mapping[str, object]) -> SubmissionView:
+    def clarify(
+        self,
+        answers: Mapping[str, object],
+        *,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> SubmissionView:
         """澄清闭环：用**补充答案**重跑上一次的指令（用户不必整句重述）。
 
         `answers` 是「槽位名 → 值」，与 `selected` 同口径——因此模板通道与 LLM 通道都能用，
@@ -746,6 +771,7 @@ class Session:
         return self._submit(
             self._last_utterance, selected=merged, execution_id=execution_id,
             clarification_keys=self._clarification_keys | frozenset(answers),
+            on_stage=on_stage,
         )
 
     @_serialized
@@ -2419,6 +2445,17 @@ def extract_remark(utterance: str) -> str | None:
 def _plan_has_outflow(plan: Plan) -> bool:
     """计划是否含 ≥1 流出节点：金额档（及额度行）只对流出型计划有意义。"""
     return any(ACTION_KINDS.get(node.action) is ActionKind.OUTFLOW for node in plan.nodes)
+
+
+def _notify(on_stage: Callable[[str], None] | None, stage: str) -> None:
+    """阶段旁路通知：进度写失败不得影响状态机（观测层永远是从属的）。"""
+
+    if on_stage is None:
+        return
+    try:
+        on_stage(stage)
+    except Exception:  # noqa: BLE001 - 观测失败必须静默
+        return
 
 
 def _guard_utterance(utterance: str) -> str | None:
