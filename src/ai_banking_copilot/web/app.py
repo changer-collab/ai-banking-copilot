@@ -175,6 +175,25 @@ REVERIFY_HEADER = "X-Reverify-Ticket"
 
 LOGGER = logging.getLogger(__name__)
 
+
+class _BestEffortAuditDispatcher(Dispatcher):
+    """成功结果已构造后，渠道审计故障不得改变业务与幂等结果。"""
+
+    def _record_audit(
+        self, inbound: InboundMessage | ConfirmCommand, outbound: OutboundMessage
+    ) -> None:
+        try:
+            super()._record_audit(inbound, outbound)
+        except Exception as error:
+            LOGGER.warning(
+                "channel_audit channel=%s event_id=%s status=failed "
+                "reason=audit_failed audit_status=sent error_type=%s",
+                self._audit_channel(inbound),
+                inbound.event_id or "",
+                type(error).__name__,
+            )
+
+
 _CSRF_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 """需要同源校验的写方法（含 `DELETE`：删除对话历史）。"""
 
@@ -461,7 +480,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             existing = _dispatchers.get(user_id)
             if existing is not None:
                 return existing
-            built = Dispatcher(
+            built = _BestEffortAuditDispatcher(
                 manager=manager,
                 identities=identities,
                 submission_payload=_submission_payload,
@@ -488,27 +507,40 @@ def create_app(deps: AppDeps) -> FastAPI:
         http_status: int | None = None,
         text: str | None = None,
         details: dict[str, object] | None = None,
+        best_effort: bool = False,
     ) -> None:
-        deps.audit.append(
-            AuditEvent(
-                event_id=f"{KIND_CHANNEL}:{channel}:{secrets.token_hex(8)}",
-                kind=KIND_CHANNEL,
-                payload=channel_audit_payload(
-                    user_id=user_id,
-                    channel=channel,
-                    direction=direction,
-                    status=status,
-                    reason=reason,
-                    event_id=event_id,
-                    external_user_id=external_user_id,
-                    attempt_no=attempt_no,
-                    http_status=http_status,
-                    text=text,
-                    details=details,
-                ),
-                prev_hash="",
-            )
+        event = AuditEvent(
+            event_id=f"{KIND_CHANNEL}:{channel}:{secrets.token_hex(8)}",
+            kind=KIND_CHANNEL,
+            payload=channel_audit_payload(
+                user_id=user_id,
+                channel=channel,
+                direction=direction,
+                status=status,
+                reason=reason,
+                event_id=event_id,
+                external_user_id=external_user_id,
+                attempt_no=attempt_no,
+                http_status=http_status,
+                text=text,
+                details=details,
+            ),
+            prev_hash="",
         )
+        try:
+            deps.audit.append(event)
+        except Exception as error:
+            if not best_effort:
+                raise
+            LOGGER.warning(
+                "channel_audit channel=%s event_id=%s status=failed "
+                "reason=audit_failed audit_status=%s audit_reason=%s error_type=%s",
+                channel,
+                event_id or "",
+                status,
+                reason,
+                type(error).__name__,
+            )
 
     @app.exception_handler(SessionPersistenceError)
     @app.exception_handler(SessionSnapshotError)
@@ -521,6 +553,11 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def channel_error(request: Request, error: ChannelError) -> JSONResponse:
         """渠道层稳定错误：直接采用错误族自带的 `status_code`，不吞成 500。"""
         headers = {"Retry-After": "60"} if isinstance(error, ChannelRateLimited) else None
+        message = (
+            "发太快了，60 秒后再试"
+            if isinstance(error, ChannelRateLimited)
+            else str(error)
+        )
         if isinstance(error, ChannelRateLimited):
             channel = (
                 CHANNEL_FEISHU
@@ -530,9 +567,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                 else "web"
             )
             health.record_rate_limit(channel)
+            health.record_event(channel, success=False)
         return JSONResponse(
             status_code=error.status_code,
-            content={"detail": error.code, "message": str(error)},
+            content={"detail": error.code, "message": message},
             headers=headers,
         )
 
@@ -1609,6 +1647,17 @@ def create_app(deps: AppDeps) -> FastAPI:
         try:
             outbound = _dispatcher_for(user_id).dispatch_live(material)
         except DispatchOutcomeUnknown as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="inbound",
+                status="failed",
+                reason="dispatch_outcome_unknown",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+                best_effort=True,
+            )
             LOGGER.warning(
                 "channel_event channel=feishu event_id=%s status=failed "
                 "reason=dispatch_outcome_unknown error_type=%s",
@@ -1641,6 +1690,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 external_user_id=material.external_user_id,
                 attempt_no=attempt_no,
                 http_status=status,
+                best_effort=True,
             )
             LOGGER.info(
                 "channel_send channel=feishu event_id=%s status=attempt "
@@ -1675,6 +1725,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 reason="send_failed",
                 event_id=event_id,
                 external_user_id=material.external_user_id,
+                best_effort=True,
             )
             LOGGER.warning(
                 "channel_send channel=feishu event_id=%s status=failed "
@@ -1694,6 +1745,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             event_id=event_id,
             external_user_id=material.external_user_id,
             http_status=status,
+            best_effort=True,
         )
         LOGGER.log(
             logging.INFO if success else logging.WARNING,
@@ -1810,7 +1862,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 content={
                     "detail": "identity_unbound",
                     "channel": CHANNEL_FEISHU,
-                    "message": "该飞书账号尚未绑定，请先在网页个人中心完成绑定",
+                    "message": "该飞书账号尚未绑定，请先在 Web 端输入 6 位绑定码完成绑定",
                 },
             )
         event_id = event.event_id
@@ -1851,6 +1903,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                     event_id=event_id,
                     external_user_id=material.external_user_id,
                     text=material.text if isinstance(material, InboundMessage) else None,
+                    best_effort=True,
                 )
                 LOGGER.warning(
                     "channel_event channel=feishu event_id=%s status=rejected "
@@ -1862,10 +1915,8 @@ def create_app(deps: AppDeps) -> FastAPI:
                 "code": 0,
                 "channel": CHANNEL_FEISHU,
                 "event_id": event_id,
-                "replayed": False,
+                "accepted": True,
             }
-            if event_id:
-                replay_responses[event_id] = envelope
             background_tasks.add_task(
                 _dispatch_live_feishu, material, binding.user_id, event_id
             )
@@ -1873,6 +1924,17 @@ def create_app(deps: AppDeps) -> FastAPI:
         try:
             outbound = _dispatcher_for(binding.user_id).dispatch_live(material)
         except DispatchOutcomeUnknown as error:
+            _append_channel_audit(
+                user_id=binding.user_id,
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="failed",
+                reason="dispatch_outcome_unknown",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+                best_effort=True,
+            )
             LOGGER.warning(
                 "channel_event channel=%s event_id=%s status=failed "
                 "reason=dispatch_outcome_unknown error_type=%s",
@@ -1892,7 +1954,8 @@ def create_app(deps: AppDeps) -> FastAPI:
                 event_id or "",
                 type(error).__name__,
             )
-            health.record_event(CHANNEL_FEISHU, success=False)
+            if not isinstance(error, ChannelRateLimited):
+                health.record_event(CHANNEL_FEISHU, success=False)
             raise
         health.record_event(CHANNEL_FEISHU, success=True)
         response = _channel_payload(outbound)
