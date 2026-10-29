@@ -53,6 +53,7 @@ from ai_banking_copilot.policy.audit import (
 )
 from ai_banking_copilot.policy.breaker import CircuitBreaker
 from ai_banking_copilot.policy.gate import StalePlanError
+from ai_banking_copilot.policy.pdp import DAILY_LIMIT_YUAN
 from ai_banking_copilot.policy.pep import Pep
 from ai_banking_copilot.policy.reversal import ReversalService
 from ai_banking_copilot.policy.verification import (
@@ -780,6 +781,18 @@ def create_app(deps: AppDeps) -> FastAPI:
         statuses = {"active": "正常", "locked": "已锁定", "lost": "已挂失", "cancelled": "已取消"}
         return {
             "today": deps.today.isoformat(),
+            # 场景①「额度卡」只读数据：限额取官方 1000 元与客户分档的较小者
+            # （同 policy/execution.py 口径），已用取当日已记账转出合计。
+            # 两者都由 gateway 给事实，前端不计算。
+            "quota": {
+                "as_of": deps.today.isoformat(),
+                "daily_limit_cents": min(
+                    DAILY_LIMIT_YUAN * 100, gateway.daily_transfer_limit(user_id).cents
+                ),
+                "daily_accumulated_cents": gateway.daily_transfer_total(
+                    user_id, deps.today
+                ).cents,
+            },
             "accounts": [
                 {"id": record.payload.account_id,
                  "label": f"{account_kinds.get(record.payload.kind, record.payload.kind)}账户"

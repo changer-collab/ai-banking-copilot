@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=20" />
+<link rel="stylesheet" href="/assets/workspace.css?v=21" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -250,6 +250,11 @@ _PAGE_HTML = """<!DOCTYPE html>
       </header>
 
       <div class="scene-block" data-scene-block="transfer" hidden>
+        <section class="panel" id="quota-panel">
+          <p class="panel__title">今日转账额度</p>
+          <p class="muted" id="quota-status">正在读取额度…</p>
+          <div id="quota-body"></div>
+        </section>
         <section class="panel" id="transfers-panel">
           <p class="panel__title">转账记录</p>
           <p class="muted" id="transfers-status">正在读取最近转账…</p>
@@ -436,7 +441,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=39"></script>
+<script src="/assets/app.js?v=40"></script>
 </body>
 </html>
 """
