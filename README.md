@@ -174,7 +174,8 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
   因此 Feishu / Web / PWA 之间**不共享对话上下文**，也不能拿 A 渠道的计划卡去 B 渠道确认；
   共享的是同一用户的账户事实、三色策略、审计与执行器。
 - **能力边界（如实声明）**：不覆盖群聊、富媒体、长连接推送；**服务器尚未写入 4 个 `AIB_FEISHU_*`
-  凭据**，`GET /api/channels/health` 现为 `feishu.mode=stub`。现场演示可用
+  凭据**，`GET /api/channels/health` 无凭据时显示 `feishu.mode=replay`；显式设置
+  `AIB_FEISHU_REPLAY_MODE=1` 时，即使凭据齐全也仍显示 `replay`。现场演示可用
   `python scripts/replay_webhook.py normal|tamper|replay|burst` 与 `/im` 联调页复现同一链路；
   写入凭据并重启后即为真回调。
 

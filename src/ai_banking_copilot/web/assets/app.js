@@ -73,6 +73,7 @@ const state = {
   verification: null,
   clarifications: [],
   options: null,
+  optionsStatus: "loading",
   busy: false,
   notice: "",
   resultCount: 0,
@@ -342,12 +343,24 @@ function optionsHtml(slot, selected = "") {
 }
 
 async function refreshOptions() {
-  const response = await fetch("/api/options", { cache: "no-store" });
-  if (!response.ok) throw new Error("无法读取可选对象");
-  state.options = await response.json();
+  state.optionsStatus = "loading";
+  renderSubscriptionDetails(state.options);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
+  try {
+    const response = await fetch("/api/options", { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取可选对象");
+    state.options = await response.json();
+    state.optionsStatus = "ready";
+  } catch (error) {
+    state.optionsStatus = "error";
+    renderSubscriptionDetails(state.options);
+    if (currentRecordTab === "charges") renderRecordsTab("charges");
+    throw error;
+  }
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
   renderSubscriptionDetails(state.options);
   renderQuota(state.options.quota);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
     select.innerHTML = optionsHtml(slot, select.value);
@@ -395,9 +408,24 @@ function wealthAssessmentLine(assessment) {
     '<p class="muted">未测评时任何产品都不能申购（服务端硬拦截），先答完这 5 道题。</p>';
 }
 
+/* 产品卡可展开解释：文案与图谱路径全部来自服务端
+   （`/api/wealth/overview` 的 `products[*].explanation`），前端只渲染、不生成任何数字。 */
+function wealthWhyHtml(item) {
+  const why = item.explanation;
+  if (!why || !why.title) return "";
+  const reasons = (why.reasons || []).map((text) => `<li>${esc(text)}</li>`).join("");
+  const path = (why.path || []).map((step) => esc(step)).join(" → ");
+  return `<details class="wealth-why">
+    <summary>${esc(why.title)}</summary>
+    <ul>${reasons}</ul>
+    ${path ? `<p class="muted">知识图谱路径：${path}</p>` : ""}
+    <p class="muted"><span class="tech">${esc(why.data_source || "")}</span> · 只读解释，不含业绩承诺</p>
+  </details>`;
+}
+
 /* 产品卡自带金额输入 + 申购按钮：点了就把 product 作为**受信任选择**随提交送上去，
    写操作仍由服务端出计划卡、确认后才执行（前端不直连任何写接口）。 */
-function wealthProductHtml(item) {
+function wealthProductHtml(item, assessment) {
   const disabled = item.eligible === false;
   const min = esc(item.min_amount_yuan);
   const chip = disabled
@@ -415,6 +443,8 @@ function wealthProductHtml(item) {
     <div><b>${esc(item.name)}</b> ${chip}</div>
     <p class="muted">${esc(item.risk_level)} · 期限 ${esc(item.term_days)} 天 · 起购 ${esc(item.min_amount_yuan)} 元</p>
     ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+    ${wealthWhyHtml(item)}
+    ${wealthUnlockHtml(item, assessment)}
     ${action}
     <p class="muted"><span class="tech">${esc(item.product_id)}</span></p>
     <p class="muted wealth-error" data-wealth-error hidden></p>
@@ -438,6 +468,125 @@ function wealthHoldingHtml(item) {
   </article>`;
 }
 
+/* ---------------- 理财：场景页可视化（阶梯 / 占比 / 收益） ---------------- */
+
+/* R1 最保守 → R5 最激进（口径见 scenarios/wealth_assessment.py） */
+const RISK_SCALE = ["R1", "R2", "R3", "R4", "R5"];
+
+function riskRank(level) {
+  return RISK_SCALE.indexOf(String(level || "").toUpperCase());
+}
+
+/* 灰显产品的「解锁路径」：只依据产品等级与当前测评状态给下一步，不承诺结果。 */
+function wealthUnlockHtml(item, assessment) {
+  if (item.eligible !== false) return "";
+  if (!assessment || assessment.state !== "valid") {
+    return '<p class="muted wealth-unlock">解锁路径：先完成风险测评；等级由服务端算分后，才判定可申购范围。</p>';
+  }
+  return `<p class="muted wealth-unlock">解锁路径：本只要求 ${esc(item.risk_level)}；` +
+    `你当前 ${esc(assessment.risk_profile)}，可在上方「重新测评」重答（等级仍由服务端算分）。</p>`;
+}
+
+function wealthLadderHtml(assessment) {
+  const info = assessment || {};
+  const current = info.state === "valid" ? riskRank(info.risk_profile) : -1;
+  const steps = RISK_SCALE.map((level, index) => {
+    const hit = index === current;
+    return `<li class="wealth-ladder__step${hit ? " is-current" : ""}"${hit ? ' aria-current="true"' : ""}>` +
+      `<span class="wealth-ladder__code">${level}</span>` +
+      `${hit ? '<span class="wealth-ladder__flag">当前</span>' : ""}</li>`;
+  }).join("");
+  const note = current >= 0
+    ? `当前 ${esc(info.risk_profile)} · 有效期至 ${esc(info.expires_on || "—")}`
+    : "尚未取得有效等级：先完成测评，产品才按等级判定。";
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">风险等级阶梯 <span class="tech">R1 最保守 → R5 最激进</span></p>
+    <ol class="wealth-ladder">${steps}</ol>
+    <p class="muted">${note}</p>
+  </div>`;
+}
+
+/* 持仓占比：金额全部来自接口，只做本人持仓内部的相对占比（合计 100%）。 */
+function holdingsShareHtml(holdings) {
+  const rows = (holdings || []).map((item) => ({
+    name: item.name || "—",
+    amount: Number(item.amount_yuan) || 0,
+  }));
+  const total = rows.reduce((sum, item) => sum + item.amount, 0);
+  if (!rows.length) {
+    return `<div class="wealth-viz__block">
+      <p class="wealth-viz__k">持仓占比</p>
+      <p class="muted">当前没有持仓，暂无可计算的占比。</p>
+    </div>`;
+  }
+  const bars = rows.map((item) => {
+    const pct = (total > 0 ? (item.amount / total) * 100 : 0).toFixed(1);
+    return `<li class="wealth-share__row">
+      <span class="wealth-share__name">${esc(item.name)}</span>
+      <span class="wealth-share__track" role="img" aria-label="${esc(item.name)} 占 ${pct}%">
+        <span class="wealth-share__fill" style="width:${pct}%"></span>
+      </span>
+      <span class="wealth-share__pct mono">${pct}%</span>
+      <span class="wealth-share__amt mono">${esc(item.amount.toFixed(2))} 元</span>
+    </li>`;
+  }).join("");
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">持仓占比 <span class="tech">合计 ${total.toFixed(2)} 元</span></p>
+    <ul class="wealth-share">${bars}</ul>
+  </div>`;
+}
+
+function incomeUnknown(row) {
+  return /未知/.test(String((row && row.current_income) || ""));
+}
+
+/* 收益：服务端没有净值数据就标「未知」，前端不补零、不推算盈亏。 */
+function wealthIncomeHtml(holdings) {
+  const rows = holdings || [];
+  if (!rows.length) {
+    return `<div class="wealth-viz__block">
+      <p class="wealth-viz__k">收益</p>
+      <p class="muted">当前没有持仓，暂无收益。</p>
+    </div>`;
+  }
+  const unknown = rows.filter(incomeUnknown).length;
+  const allUnknown = unknown === rows.length;
+  const text = allUnknown
+    ? `全部 ${rows.length} 笔持仓均无净值数据，收益标「未知」，不推算盈亏。`
+    : `${unknown} / ${rows.length} 笔持仓无净值数据，收益标「未知」。`;
+  return `<div class="wealth-viz__block">
+    <p class="wealth-viz__k">收益</p>
+    <p class="wealth-income"><b>${allUnknown ? "未知" : "部分未知"}</b></p>
+    <p class="muted">${esc(text)}</p>
+  </div>`;
+}
+
+function wealthVizHtml(payload) {
+  const data = payload || {};
+  return wealthLadderHtml(data.assessment) +
+    holdingsShareHtml(data.holdings) +
+    wealthIncomeHtml(data.holdings);
+}
+
+function wealthLoadingHtml(label) {
+  return `<div class="wealth-loading" role="status" aria-live="polite">
+    <p class="muted">正在读取${esc(label)}…</p>
+    <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+  </div>`;
+}
+
+/* 首次读取 / 失败重试时先把骨架摆回来，不留「正在读取…」的假运行态。 */
+function showWealthLoading() {
+  const viz = el("wealth-viz");
+  if (viz) viz.innerHTML = wealthLoadingHtml("风险等级与持仓占比");
+  ["wealth-products", "wealth-holdings"].forEach((id) => {
+    const box = el(id);
+    if (box) box.innerHTML = wealthLoadingHtml(id === "wealth-products" ? "产品目录" : "持仓");
+  });
+}
+
+let wealthRendered = false;
+
 function renderWealth(data) {
   const payload = data || {};
   /* 产品目录同时是「产品」槽的候选来源：先落到 state，再渲染 */
@@ -445,9 +594,12 @@ function renderWealth(data) {
     products: payload.products || [],
     holdings: payload.holdings || [],
   };
+  wealthRendered = true;
   const assessment = payload.assessment || {};
   const status = el("wealth-status");
   if (status) status.innerHTML = wealthAssessmentLine(assessment);
+  const viz = el("wealth-viz");
+  if (viz) viz.innerHTML = wealthVizHtml(payload);
   const box = el("wealth-assessment");
   /* 表单一经渲染就保留用户已选答案：只在没有表单时（首次 / 提交后）重建 */
   if (box && !box.querySelector("[data-assessment-form]")) {
@@ -461,25 +613,42 @@ function renderWealth(data) {
   if (products) {
     const rows = payload.products || [];
     products.innerHTML = rows.length
-      ? rows.map(wealthProductHtml).join("")
-      : '<p class="muted">产品目录为空。</p>';
+      ? rows.map((item) => wealthProductHtml(item, assessment)).join("")
+      : `<article class="state-card">
+        <p class="state-card__k">产品目录 · 暂无产品</p>
+        <p class="muted">服务端当前没有下发任何理财产品，目录更新后会自动出现。</p>
+      </article>`;
   }
   const holdings = el("wealth-holdings");
   if (holdings) {
     const rows = payload.holdings || [];
     holdings.innerHTML = rows.length
       ? rows.map(wealthHoldingHtml).join("")
-      : '<p class="muted">当前没有持仓。</p>';
+      : `<article class="state-card">
+        <p class="state-card__k">持仓 · 暂无持仓</p>
+        <p class="muted">还没有理财申购记录；在上方产品卡输入金额申购后，这里会出现持仓。</p>
+      </article>`;
   }
   const source = el("wealth-source");
   if (source) source.textContent = payload.data_source ? `数据来源：${payload.data_source}` : "";
 }
 
 async function refreshWealth() {
+  if (!wealthRendered) showWealthLoading();
   const result = await apiFetch("GET", "/api/wealth/overview");
   if (result.status === 404) {
+    const message = "理财服务尚未接入（当前渠道没有该读接口）。";
     const status = el("wealth-status");
-    if (status) status.textContent = "理财服务尚未接入（当前渠道没有该读接口）。";
+    if (status) status.textContent = message;
+    ["wealth-viz", "wealth-products", "wealth-holdings"].forEach((id) => {
+      const box = el(id);
+      if (box) {
+        box.innerHTML = `<article class="state-card">
+          <p class="state-card__k">未接入</p>
+          <p class="muted">${esc(message)}</p>
+        </article>`;
+      }
+    });
     return;
   }
   if (!result.ok) throw new Error("理财面板读取失败");
@@ -538,13 +707,13 @@ async function onAssessmentSubmit(form) {
 function showWealthFailure(message) {
   const status = el("wealth-status");
   if (status) status.textContent = message;
-  ["wealth-products", "wealth-holdings"].forEach((id) => {
+  ["wealth-viz", "wealth-products", "wealth-holdings"].forEach((id) => {
     const box = el(id);
     if (!box) return;
     box.innerHTML = `<article class="state-card">
       <p class="state-card__k">读取失败</p>
       <p class="muted">${esc(message)}</p>
-      ${id === "wealth-products" ? '<button class="btn btn--sm" type="button" data-panel-retry="wealth">重试</button>' : ""}
+      ${id === "wealth-viz" ? '<button class="btn btn--sm" type="button" data-panel-retry="wealth">重试</button>' : ""}
     </article>`;
   });
 }
@@ -713,8 +882,9 @@ function renderQuota(quota) {
     <p class="muted">已用 ${pct}%。超过日限额的转账按红色（需强验证）处理；这里不在前端计算任何数字。</p>`;
 }
 
-function subscriptionStatusLabel(status) {
-  return { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
+function subscriptionStatusLabel(status, registeredStatus = "") {
+  const local = { cancelled: "已取消订阅", locked: "已锁定", lost: "已挂失" };
+  return local[registeredStatus] || { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
 }
 
 function confidenceLabel(value) {
@@ -739,22 +909,32 @@ function subscriptionEvidenceHtml(item) {
     ).join("") + "</ul></details>";
 }
 
+const CHANNEL_ORDER = ["web", "im", "feishu"];
+
 function renderChannelHealth(data) {
   const status = el("channel-health-status");
-  const list = el("channel-health-list");
-  if (!status || !list) return;
+  const body = el("channel-health-body");
+  if (!status || !body) return;
   const channels = data && data.channels ? data.channels : {};
-  const rows = Object.entries(channels).map(([name, item]) => {
-    const state = item && item.mode ? item.mode : "unknown";
-    const configured = item && item.configured ? "已配置" : "未配置";
-    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
-      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
+  const health = data && data.health ? data.health : {};
+  const rows = CHANNEL_ORDER.map((name) => {
+    const item = channels[name] || {};
+    const stats = health[name] || {};
+    const configured = item.configured !== false;
+    const state = configured ? (item.mode || stats.status || "unknown") : "未接入";
+    const lastEvent = stats.last_event_at || "暂无事件";
+    const replay = stats.replay_mode || item.mode === "replay" ? "是" : "否";
+    return `<tr><td>${esc(name)}</td><td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
+      `<td>${esc(String(stats.ok || 0))}</td><td>${esc(String(stats.failed || 0))}</td>` +
+      `<td>${esc(String(stats.ratelimit_hits || 0))}</td><td>${replay}</td></tr>`;
   });
   status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
-  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
+  body.innerHTML = rows.length ? rows.join("\n") : '<tr><td colspan="7">暂无渠道状态。</td></tr>';
 }
 
 async function refreshChannelHealth() {
+  const status = el("channel-health-status");
+  if (status) status.textContent = "正在读取渠道状态…";
   const result = await apiFetch("GET", "/api/channels/health");
   if (!result.ok) throw new Error("无法读取渠道状态");
   renderChannelHealth(result.data);
@@ -763,14 +943,18 @@ async function refreshChannelHealth() {
 function subscriptionItemHtml(item) {
   const next = item.next_charge_on
     ? `${esc(item.next_charge_on)}（${item.next_charge_is_prediction ? "预测值" : "登记值"}）`
-    : "—";
+    : "未提供";
+  const price = item.price_increased_12m === true
+    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
+    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
   const external = item.external_cancel_status === "not_integrated"
     ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
   return `<article class="takeover">
-    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status))}</span>
+    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status, item.registered_status))}</span>
       <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span></div>
     <p>扣费 ${yuan(item.amount_cents)} · ${esc(item.currency)} · ${esc(item.cycle_label)}扣费</p>
-    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次预计 ${next}</p>
+    <p class="subscription-price">${price}</p>
+    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次扣款日 ${next}</p>
     <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
     ${subscriptionNoticesHtml(item)}
     <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
@@ -788,6 +972,13 @@ function renderSubscriptionDetails(options) {
   const status = el("subscription-status");
   const list = el("subscription-list");
   const boundary = el("subscription-boundary");
+  if (state.optionsStatus !== "ready") {
+    status.textContent = state.optionsStatus === "error"
+      ? "订阅数据暂不可用，请稍后重试。" : "正在读取订阅识别结果…";
+    list.innerHTML = "";
+    boundary.hidden = true;
+    return;
+  }
   if (!details) {
     status.textContent = "订阅识别服务尚未接入。";
     list.innerHTML = "";
@@ -850,42 +1041,98 @@ const CARD_ACTION_UTTERANCE = {
 
 function cardsHtml(payload) {
   const cards = (payload && payload.cards) || [];
-  if (!cards.length) return '<p class="muted">当前没有可用卡片。</p>';
+  if (!cards.length) {
+    return `<article class="state-card">
+      <p class="state-card__k">暂无卡片</p>
+      <p class="muted">当前账户下没有可用卡片；补卡后可在这里看到状态与额度。</p>
+    </article>`;
+  }
   return cards.map((card) => {
     const id = esc(card.card_id);
     const buttons = [];
     if (card.status === "active") {
       buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`);
     }
-    if (card.status === "locked") {
-      buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="unlock" data-card-id="${id}">解锁</button>`);
-    }
     if (card.status === "active" || card.status === "locked") {
-      buttons.push(`<button class="btn btn--danger" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`);
+      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">挂失</button>`);
       buttons.push(`<input class="input card-limit" type="number" min="1" step="100" placeholder="额度（元）" data-card-limit="${id}" />`);
-      buttons.push(`<button class="btn" type="button" data-card-action="limit" data-card-id="${id}">调额</button>`);
+      buttons.push(`<button class="btn" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">调额</button>`);
+    }
+    if (card.status === "locked") {
+      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作：解卡需强验证（计划卡确认时输入演示验证码）">解锁</button>`);
     }
     buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="virtual" data-card-id="${id}">补虚拟卡</button>`);
     return `<article class="card-item">
       <div class="card-item__head">
         <strong>${esc(card.type_label)}</strong>
-        <span class="tech">${id}</span>
+        <span class="mono">${id}</span>
         <span class="card-state card-state--${esc(card.status)}">${esc(card.status_label)}</span>
       </div>
       <p class="muted">日限额 ${yuan(card.daily_limit_cents)}</p>
-      <div class="btn-row card-actions">${buttons.join("")}</div>
+      <div class="btn-row card-actions">${buttons.join("")}
+        <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="挂失卡片">去对话办理</button>
+      </div>
     </article>`;
-  }).join("");
+  }).join("") + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：点「去对话办理」生成计划卡，确认时输入演示验证码；灰显按钮不在面板直接执行。</p>`;
+}
+
+function cardsVisualHtml(cards) {
+  if (!cards.length) return "";
+  const statuses = [
+    ["active", "正常"],
+    ["locked", "已锁定"],
+    ["lost", "已挂失"],
+    ["cancelled", "已取消"],
+  ];
+  const total = cards.length || 1;
+  const statusRows = statuses
+    .map(([key, label]) => {
+      const count = cards.filter((card) => card.status === key).length;
+      const width = Math.round((count / total) * 100);
+      return `<li><span class="cards-bar__label">${esc(label)}</span>
+        <span class="cards-bar"><i style="width:${width}%"></i></span>
+        <span class="mono">${count} 张</span></li>`;
+    })
+    .join("");
+  const maxLimit = Math.max(...cards.map((card) => card.daily_limit_cents || 0), 1);
+  const limitRows = cards
+    .map((card) => {
+      const width = Math.round(((card.daily_limit_cents || 0) / maxLimit) * 100);
+      return `<li><span class="cards-bar__label">${esc(card.type_label)}</span>
+        <span class="cards-bar"><i style="width:${width}%"></i></span>
+        <span class="mono">${yuan(card.daily_limit_cents || 0)}</span></li>`;
+    })
+    .join("");
+  return `<div class="cards-visual">
+    <p class="panel__title panel__title--sub">状态分布</p>
+    <ul class="cards-bars">${statusRows}</ul>
+    <p class="panel__title panel__title--sub">日限额上限</p>
+    <ul class="cards-bars">${limitRows}</ul>
+    <p class="muted">流水未记录卡号，暂无法按卡统计当日已用；此处展示状态分布与日限额上限。</p>
+  </div>`;
 }
 
 async function refreshCards() {
   if (state.offline) return;
-  const result = await apiFetch("GET", "/api/cards");
-  if (!result.ok) throw new Error("无法读取卡片");
+  const status = el("cards-status");
+  if (status) status.textContent = "正在读取卡片…";
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/cards");
+  } catch (error) {
+    panelFailure("cards-list", "卡片读取失败，请检查网络后重试。", "cards");
+    throw error;
+  }
+  if (!result.ok) {
+    panelFailure("cards-list", "卡片读取失败，请稍后重试。", "cards");
+    throw new Error("无法读取卡片");
+  }
   const payload = result.data;
   state.cards = payload.cards || [];
   el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 状态与额度来自服务端（${payload.as_of || ""}）`;
   el("cards-list").innerHTML = cardsHtml(payload);
+  const visual = el("cards-visual");
+  if (visual) visual.innerHTML = cardsVisualHtml(state.cards);
 }
 
 function cardLimitCents(cardId) {
@@ -963,7 +1210,6 @@ function billsFindingsHtml(payload) {
     <p class="muted">为什么可疑：${esc(item.assumption)}</p>
     ${findingEvidenceHtml(item)}
     <p class="muted">${esc(item.suggestion)}</p>
-    <button class="btn btn--danger" type="button" data-bill-lock="1">顺手锁卡</button>
   </details>`).join("");
 }
 
@@ -975,10 +1221,138 @@ function billsTableHtml(payload) {
   return `<table class="mini-table"><thead><tr><th>时间</th><th>商户</th><th>分类</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows || '<tr><td colspan="5">本期无支出流水</td></tr>'}</tbody></table>`;
 }
 
+function billsAnomalyChipsHtml(payload) {
+  const counts = {};
+  (payload.findings || []).forEach((item) => {
+    if (item.status === "normal") return;
+    counts[item.kind] = (counts[item.kind] || 0) + 1;
+  });
+  const entries = Object.entries(counts);
+  if (!entries.length) return '<p class="muted">本期未命中异常类型。</p>';
+  return `<p class="panel__title panel__title--sub">异常类型计数</p>
+    <ul class="bills-chips">${entries.map(([kind, count]) => `<li>${esc(FINDING_LABELS[kind] || kind)} · ${count}</li>`).join("")}</ul>`;
+}
+
+function billsProfileHtml(profile) {
+  const item = profile || {};
+  const top = item.top_category
+    ? `${esc(item.top_category)} · ${Math.round(Number(item.top_category_share || 0) * 100)}%`
+    : "本期无分类支出";
+  const topAmount = item.top_category_cents ? yuan(item.top_category_cents) : "—";
+  const subscription = item.subscription_monthly_cents
+    ? `${yuan(item.subscription_monthly_cents)}/月`
+    : "¥0.00/月";
+  const suspicious = item.suspicious_count ? `${item.suspicious_count} 条` : "0 条";
+  const maxImpact = item.max_suspicious_cents ? yuan(item.max_suspicious_cents) : "—";
+  return `<article class="profile-card">
+    <p class="panel__title panel__title--sub">用户画像 <span class="tech">只读 · 账单与订阅事实</span></p>
+    <ul class="profile-grid">
+      <li><span class="muted">消费结构</span><strong>${top}</strong><small class="mono">${topAmount}</small></li>
+      <li><span class="muted">订阅负担</span><strong>${subscription}</strong><small class="muted">在用订阅折算到每月</small></li>
+      <li><span class="muted">大额风险</span><strong>${suspicious}</strong><small class="mono">最大 ${maxImpact}</small></li>
+    </ul>
+  </article>`;
+}
+
+function billsTrendSvg(trend) {
+  const points = trend || [];
+  if (!points.length) return '<p class="muted">暂无趋势数据。</p>';
+  const width = 320;
+  const height = 120;
+  const baseline = height - 22;
+  const slot = width / points.length;
+  const barWidth = Math.max(14, Math.floor(slot * 0.55));
+  const max = Math.max(...points.map((point) => point.expense_cents || 0), 1);
+  const bars = points.map((point, index) => {
+    const barHeight = Math.round(((point.expense_cents || 0) / max) * (baseline - 8));
+    const x = Math.round(index * slot + (slot - barWidth) / 2);
+    const y = baseline - barHeight;
+    return `<rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="4" fill="#0b4fd8" opacity="0.85"></rect>
+      <text x="${x + barWidth / 2}" y="${height - 6}" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.65">${esc(String(point.period).slice(5))}月</text>`;
+  }).join("");
+  const last = points[points.length - 1];
+  return `<p class="panel__title panel__title--sub">近 6 月支出趋势</p>
+    <svg class="bills-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="近 6 月支出趋势">${bars}</svg>
+    <p class="muted">最近一月 ${yuan(last.expense_cents || 0)}（数字来自 /api/bills/analysis.trend）</p>`;
+}
+
+function billsShareHtml(items) {
+  const rows = (items || []).slice(0, 6);
+  if (!rows.length) return '<p class="muted">本期无分类支出。</p>';
+  return `<p class="panel__title panel__title--sub">分类占比</p>
+    <ul class="share-list">${rows.map((item) => {
+      const pct = Math.round(Number(item.share || 0) * 100);
+      return `<li><span>${esc(item.category)}</span><span class="share-bar"><i style="width:${pct}%"></i></span><span class="mono">${pct}%</span></li>`;
+    }).join("")}</ul>`;
+}
+
+function billsChartsHtml(payload) {
+  return `<div class="bills-charts">${billsTrendSvg(payload.trend)}${billsShareHtml(payload.category_share)}${billsAnomalyChipsHtml(payload)}</div>`;
+}
+
+function billsTop3Html(payload) {
+  const risky = (payload.findings || [])
+    .filter((item) => item.status !== "normal")
+    .sort((a, b) => (b.impact_cents || 0) - (a.impact_cents || 0))
+    .slice(0, 3);
+  if (!risky.length) {
+    return '<p class="panel__title panel__title--sub">可疑前 3</p><p class="muted">暂无需要优先核对的可疑项。</p>';
+  }
+  return `<p class="panel__title panel__title--sub">可疑前 3 <span class="tech">不当作已确认</span></p>` +
+    risky.map((item) => `<article class="bills-top">
+      <strong>${esc(FINDING_LABELS[item.kind] || item.kind)}</strong>
+      <span class="muted">${yuan(item.impact_cents || 0)} · 置信度 ${confidenceLabel(item.confidence)}</span>
+      <p class="muted">${esc(item.detail || "")}</p>
+    </article>`).join("");
+}
+
+function billsLoading() {
+  const status = el("bills-status");
+  if (status) status.textContent = "正在读取账单识别结果…";
+  const skeleton = '<span class="skeleton"></span><span class="skeleton"></span>';
+  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-findings"].forEach((id) => {
+    const node = el(id);
+    if (node) node.innerHTML = skeleton;
+  });
+  const table = el("bills-table");
+  if (table) table.innerHTML = "";
+}
+
+function billsFailure(message) {
+  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-table"].forEach((id) => {
+    const node = el(id);
+    if (node) node.innerHTML = "";
+  });
+  panelFailure("bills-findings", message, "bills");
+}
+
+function billsEmpty(payload) {
+  const card = `<article class="state-card">
+    <p class="state-card__k">本期无支出流水</p>
+    <p class="muted">${esc(payload.period)} 没有支出交易，暂不生成画像与图表。</p>
+  </article>`;
+  el("bills-summary").innerHTML = card;
+  el("bills-profile").innerHTML = "";
+  el("bills-charts").innerHTML = "";
+  el("bills-top3").innerHTML = "";
+  el("bills-findings").innerHTML = '<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>';
+  el("bills-table").innerHTML = billsTableHtml(payload);
+}
+
 async function refreshBills() {
   if (state.offline) return;
-  const result = await apiFetch("GET", "/api/bills/analysis");
-  if (!result.ok) throw new Error("无法读取账单分析");
+  billsLoading();
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/bills/analysis");
+  } catch (error) {
+    billsFailure("账单识别读取失败，请检查网络后重试。");
+    throw error;
+  }
+  if (!result.ok) {
+    billsFailure("账单识别读取失败，请稍后重试。");
+    throw new Error("无法读取账单分析");
+  }
   const payload = result.data;
   state.bills = payload;
   const summary = payload.summary || {};
@@ -986,18 +1360,16 @@ async function refreshBills() {
   const disclaimer = el("bills-disclaimer");
   disclaimer.hidden = false;
   disclaimer.textContent = `识别结果只作核对线索，不当作已确认；数据来源：${payload.data_source}`;
-  el("bills-summary").innerHTML = `<p class="muted">本期支出合计 ${yuan(summary.expense_total_cents || 0)}${payload.narrative && payload.narrative.degraded ? " · 文字解释已降级，以下按确定性明细展示" : ""}</p>`;
-  el("bills-findings").innerHTML = billsFindingsHtml(payload);
-  el("bills-table").innerHTML = billsTableHtml(payload);
-}
-
-async function lockCardFromBills() {
-  const active = (state.cards || []).find((card) => card.status === "active");
-  if (!active) {
-    el("bills-status").textContent = "当前没有可锁的卡；请先在卡片面板处理。";
+  if (!(payload.transactions || []).length) {
+    billsEmpty(payload);
     return;
   }
-  await runPanelTask("锁卡", { card: active.card_id }, active.card_id);
+  el("bills-summary").innerHTML = `<p class="muted">本期支出合计 ${yuan(summary.expense_total_cents || 0)}${payload.narrative && payload.narrative.degraded ? " · 文字解释已降级，以下按确定性明细展示" : ""}</p>`;
+  el("bills-profile").innerHTML = billsProfileHtml(payload.profile);
+  el("bills-charts").innerHTML = billsChartsHtml(payload);
+  el("bills-top3").innerHTML = billsTop3Html(payload);
+  el("bills-findings").innerHTML = billsFindingsHtml(payload);
+  el("bills-table").innerHTML = billsTableHtml(payload);
 }
 
 if (el("cards-list")) {
@@ -1005,12 +1377,6 @@ if (el("cards-list")) {
     const button = event.target.closest("[data-card-action]");
     if (!button) return;
     action(() => cardActionFromPanel(button.dataset.cardAction, button.dataset.cardId))();
-  });
-}
-if (el("bills-findings")) {
-  el("bills-findings").addEventListener("click", (event) => {
-    if (!event.target.closest("[data-bill-lock]")) return;
-    action(lockCardFromBills)();
   });
 }
 
@@ -2363,9 +2729,14 @@ function renderProfile(me, audit) {
     const revoked = record.revoked ? " · 已失效" : "";
     return `<li>${esc(momentLabel(record.issued_at))} 登录 · ${esc(profileValue(record.client_ip))} · ${esc(profileValue(record.user_agent))}${revoked}</li>`;
   }).join("");
-  const trail = (audit.events || []).map((event) =>
-    `<li>${esc(momentLabel(event.timestamp))} · ${esc(profileValue(event.kind))} <span class="tech mono">${esc(profileValue(event.event_id))}</span></li>`
-  ).join("");
+  const trail = (audit.events || []).map((event) => {
+    const payload = event.payload || {};
+    const channel = payload.channel || "未记录";
+    const digest = payload.text_digest;
+    return `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))}` +
+      ` · 渠道 ${esc(channel)} <span class="tech mono">${esc(profileValue(event.event_id))}</span>` +
+      (digest ? `<details><summary>同摘要关联</summary><p class="mono audit-digest">${esc(digest)}</p></details>` : "") + "</li>";
+  }).join("");
   const html = `
     <section class="profile-head">
       <span class="profile-avatar" aria-hidden="true">${esc(initial)}</span>
@@ -2437,7 +2808,7 @@ async function loadProfile(target, loadingText) {
       if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
       return;
     }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
   } catch (_) {
     if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
   }
@@ -2929,6 +3300,9 @@ document.addEventListener("click", async (event) => {
     wealthError(trigger, "提交失败：未收到服务端回执，请稍后重试。");
   } finally {
     trigger.disabled = false;
+    /* 卡片按钮直接起办理时不经过 `action()` 包装，需在此补一次按钮态：
+       否则 `beginTask` 期间被隐藏的 #task-actions 不会恢复，确认按钮点不到。 */
+    setButtons();
   }
 });
 
@@ -3103,18 +3477,25 @@ function recordsRowsFor(key, payload) {
     ]));
   }
   if (key === "holdings") {
-    return (data.holdings || []).map((item) => recordsRow([
-      esc(item.name || "—"),
-      esc(item.risk_level || "—"),
-      `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
-      `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
-      esc(item.current_income || "未知"),
-      "—",
-    ]));
+    return (data.holdings || []).map((item) => {
+      const income = String(item.current_income || "");
+      /* 收益列只给短标；「无净值数据」的完整口径放进 title，不占列宽 */
+      const incomeCell = incomeUnknown(item)
+        ? `<span title="${esc(income)}">未知</span>`
+        : esc(income || "—");
+      return recordsRow([
+        esc(item.name || "—"),
+        esc(item.risk_level || "—"),
+        `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
+        `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
+        incomeCell,
+        esc(recordChannelLabel(item.channel)),
+      ]);
+    });
   }
   if (key === "cards") {
     return (data.cards || []).map((item) => recordsRow([
-      `<span class="tech mono">${esc(item.card_id || "—")}</span>`,
+      `<span class="mono">${esc(item.card_id || "—")}</span>`,
       esc(item.type_label || "—"),
       esc(item.status_label || "—"),
       `<span class="mono">${yuan(item.daily_limit_cents || 0)}</span>`,
@@ -3123,15 +3504,16 @@ function recordsRowsFor(key, payload) {
   }
   if (key === "suspicions") {
     return (data.findings || []).map((item) => {
-      const labels = (item.evidence || [])
-        .map((row) => row.merchant_label)
-        .filter(Boolean);
+      const evidenceLines = (item.evidence || []).map((row) => {
+        const moment = row.booked_at ? String(row.booked_at).slice(11, 16) : "";
+        return `${esc(row.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(row.city || "地点未知")} · ${esc(row.merchant_label || "—")}`;
+      }).join("<br>");
       return recordsRow([
         esc(FINDING_LABELS[item.kind] || item.kind),
         esc(FINDING_STATUS[item.status] || item.status),
         esc(confidenceLabel(item.confidence)),
         `<span class="mono">${yuan(item.impact_cents || 0)}</span>`,
-        esc(Array.from(new Set(labels)).join(" / ") || "—"),
+        `<span class="mono">${evidenceLines || "—"}</span>`,
         "—",
       ]);
     });
@@ -3190,6 +3572,10 @@ async function renderRecordsTab(tab) {
   });
   const body = el("records-body");
   if (!body) return;
+  if (key === "charges") {
+    renderChargeRecords(body);
+    return;
+  }
   const token = ++recordsRequestToken;
   body.innerHTML = recordsLoadingHtml(spec);
   let result;
@@ -3207,10 +3593,41 @@ async function renderRecordsTab(tab) {
     return;
   }
   const rows = recordsRowsFor(key, result.data || {});
+  const note = key === "suspicions"
+    ? `<p class="muted records-note">识别结果只作核对线索，不当作已确认；渠道列无来源时显示「—」。数据来源：${esc((result.data || {}).data_source || "服务端事实")}。</p>`
+    : "";
   body.innerHTML = rows.length
     ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
-      recordsTableHtml(RECORD_HEADERS[key], rows)
+      recordsTableHtml(RECORD_HEADERS[key], rows) + note
     : recordsEmptyHtml(spec);
+}
+
+function renderChargeRecords(body) {
+  const details = state.options && state.options.subscription_details;
+  let message = "";
+  if (state.optionsStatus === "loading") message = "正在读取扣款记录…";
+  else if (state.optionsStatus === "error" || !details) message = "扣款记录暂不可用，请稍后重试。";
+  const seen = new Set();
+  const records = [];
+  if (!message) {
+    for (const item of details.insights || []) {
+      for (const txn of item.evidence || []) {
+        if (seen.has(txn.record_id)) continue;
+        seen.add(txn.record_id);
+        records.push(txn);
+      }
+    }
+    if (!records.length) message = "暂无可核对的订阅扣款记录。";
+  }
+  body.innerHTML = `<p class="muted" role="status">${esc(message || `共 ${records.length} 条订阅扣款记录`)}</p>` +
+    '<div class="btn-row"><button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button></div>';
+  if (message) return;
+  body.innerHTML += `<div class="charge-records-table-wrap" tabindex="0" aria-label="订阅扣款记录">
+    <table class="charge-records-table"><thead><tr><th>商户</th><th>金额</th><th>时间</th><th>卡尾号</th><th>渠道</th><th>记录 ID</th><th>内容哈希</th></tr></thead>
+    <tbody>${records.map((txn) => `<tr><td>${esc(txn.merchant_label)}</td><td>${yuan(Math.abs(Number(txn.amount_cents) || 0))}</td>` +
+      `<td>${esc(txn.booked_at || txn.booked_on)}</td><td>${esc(txn.card_tail || "未提供")}</td>` +
+      `<td>${esc(txn.channel || "未记录")}</td><td class="mono">${esc(txn.record_id)}</td>` +
+      `<td class="mono" title="${esc(txn.content_hash)}">${esc(txn.content_hash.slice(0, 12))}…</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function showScene(key) {
@@ -3266,6 +3683,10 @@ function navigate(name, options) {
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  if (target.closest('[data-action="refresh-subscriptions"]')) {
+    refreshOptions().catch(() => {});
+    return;
+  }
   if (target.id === "profile-backdrop") {
     closeProfile();
     return;
@@ -3337,7 +3758,7 @@ el("btn-health-refresh")?.addEventListener("click", () => {
   const status = el("channel-health-status");
   if (status) status.textContent = "正在刷新渠道状态…";
   refreshChannelHealth().catch(() => {
-    if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
   });
 });
 
@@ -3364,7 +3785,7 @@ refreshOptions().catch(() => {
 });
 refreshChannelHealth().catch(() => {
   const status = el("channel-health-status");
-  if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
 });
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
@@ -3412,8 +3833,42 @@ window.addEventListener("online", () => {
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
+
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  const button = el("btn-install");
+  const status = el("install-status");
+  if (button) button.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = "应用已安装。";
+  }
+});
+el("btn-install")?.addEventListener("click", async () => {
+  const status = el("install-status");
+  if (status) status.hidden = false;
+  if (!installPrompt) {
+    if (status) status.textContent = "请在浏览器菜单选择安装应用或添加到主屏幕；若已安装，可直接打开应用。";
+    return;
+  }
+  try {
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (status) status.textContent = choice.outcome === "accepted"
+      ? "已提交安装，请按浏览器提示完成。" : "已取消安装，可稍后重试。";
+    installPrompt = null;
+  } catch {
+    if (status) status.textContent = "暂时无法安装，请稍后重试或使用浏览器菜单。";
+  }
+});
+
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=25", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=31", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

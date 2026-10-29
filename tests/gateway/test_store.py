@@ -44,6 +44,60 @@ def test_init_schema_records_version_and_is_idempotent(tmp_path: Path) -> None:
     store.close()
 
 
+def test_init_schema_migrates_v2_transactions_to_v3_idempotently(tmp_path: Path) -> None:
+    db_path = tmp_path / "v2.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta(key, value) VALUES('schema_version', '2');
+        CREATE TABLE transactions (
+            txn_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            booked_on TEXT NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            merchant TEXT NOT NULL,
+            category TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            booked_at TEXT,
+            city TEXT
+        );
+        INSERT INTO transactions VALUES(
+            'txn_old', 'u_old', 'acc_old', '2026-09-18', -2500,
+            '视频会员', '娱乐', 'app', 'out', '2026-09-18T20:30:00', '杭州'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = Store(db_path)
+    init_schema(store)
+    init_schema(store)
+    columns = {
+        row["name"]: row["type"]
+        for row in store.query("SELECT name, type FROM pragma_table_info('transactions')")
+    }
+    old_row = store.query(
+        "SELECT txn_id, booked_at, city, card_tail FROM transactions WHERE txn_id = 'txn_old'"
+    )[0]
+    version = store.query(
+        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+    )[0]["value"]
+
+    assert columns["card_tail"] == "TEXT"
+    assert version == "3"
+    assert dict(old_row) == {
+        "txn_id": "txn_old",
+        "booked_at": "2026-09-18T20:30:00",
+        "city": "杭州",
+        "card_tail": None,
+    }
+    store.close()
+
+
 def test_query_rejects_write_sql(tmp_path: Path) -> None:
     store = Store(tmp_path / "demo.db")
     init_schema(store)

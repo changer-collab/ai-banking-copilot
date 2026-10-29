@@ -141,7 +141,13 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "wealth.list",
         "命中『理财推荐 / 比较』模板（只读，服务端硬筛选）",
     ),
-    (re.compile(r"申购|买理财|理财.*买"), "wealth.subscribe", "命中『理财申购』模板"),
+    (
+        # 「我想买 R4」这类口述没有「理财」二字：按「买 + 风险等级」识别申购，
+        # 否则整句会掉进未知意图，适当性闸门根本没机会先拒。
+        re.compile(r"申购|买理财|理财.*买|买.{0,8}R[1-5]"),
+        "wealth.subscribe",
+        "命中『理财申购』模板",
+    ),
     (
         re.compile(r"理财产品|产品对比|产品列表|理财列表|有哪些产品|看看理财"),
         "wealth.list",
@@ -159,9 +165,28 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "命中『卡片列表』模板",
     ),
     (
-        re.compile(r"取消订阅|退订|取消代扣|关掉自动续费"),
+        re.compile(r"取消后商户还扣吗|取消后.*(?:状态|还扣|扣款)"),
+        "subscription.list",
+        "命中『取消后状态查询』模板",
+    ),
+    (
+        re.compile(r"(?:不想|不愿|不会|不能|能|能否|是否|可以|能不能).{0,12}(?:取消|退订)"),
+        "subscription.list",
+        "命中『取消能力/意愿查询』模板",
+    ),
+    (
+        re.compile(
+            r"取消订阅|退订|取消代扣|关掉自动续费"
+            r"|取消.{0,12}(?:会员|订阅|自动续费|代扣)"
+            r"|(?:会员|订阅|自动续费|代扣).{0,4}取消"
+        ),
         "subscription.cancel",
         "命中『取消订阅』模板",
+    ),
+    (
+        re.compile(r"这个月扣了几次|本月扣了几次|涨价了吗|是否涨价|下次什么时候扣|下个月.*订阅.*扣款"),
+        "subscription.list",
+        "命中『订阅扣费事实查询』模板",
     ),
     (
         re.compile(
@@ -171,7 +196,7 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "subscription.list",
         "命中『订阅列表/续费提醒』模板",
     ),
-    (re.compile(r"签约|代扣|自动续费|续费"), "subscription.sign", "命中『代扣签约』模板"),
+    (re.compile(r"签约|代扣|自动续费|自动扣款|续费"), "subscription.sign", "命中『代扣签约』模板"),
     (re.compile(r"解冻|解除冻结|释放冻结"), "funds.release", "命中『解冻资金』模板"),
     (re.compile(r"冻结|锁定.*资金|锁.*元"), "funds.freeze", "命中『冻结资金』模板"),
     (

@@ -57,6 +57,22 @@ def test_assessment_request_returns_questionnaire(
     assert "风险等级" not in payload["message"]
 
 
+def test_assessment_request_with_a_second_clause_still_gets_the_questionnaire(
+    deps: AppDeps,
+) -> None:
+    """「我想先做个风险测评，再买理财」：先出问卷，并把后半句挂回来（不追问金额）。"""
+    payload = _client(deps).post(
+        "/api/submit", json={"utterance": "我想先做个风险测评，再买理财"}
+    ).json()
+    assert payload["state"] == "idle", payload
+    assert payload["card"] is None
+    assert payload["clarifications"] == []
+    questionnaire = payload["questionnaire"]
+    assert len(questionnaire) == len(QUESTIONNAIRE) == 5
+    # 后半句不静默丢掉：话术里明确「测完再把买的部分发我一次」
+    assert "再发我一次" in payload["message"]
+
+
 def test_assessment_request_never_asks_for_a_level(deps: AppDeps) -> None:
     view = Session(deps).submit("我要做风险测评")
     assert view.state is SessionState.IDLE

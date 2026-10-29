@@ -21,7 +21,7 @@ from datetime import date
 from typing import Protocol
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
-from ai_banking_copilot.gateway.models import Payee
+from ai_banking_copilot.gateway.models import Card, Payee
 from ai_banking_copilot.gateway.resolvers import (
     parse_amount,
     parse_temporal,
@@ -98,7 +98,7 @@ _PROMPTS: Mapping[str, str] = {
     "when": "请给出执行时间（例如 明天 / 2026-12-25）。",
     "product": "请选择理财产品。",
     "subscription": "请选择要处理的订阅。",
-    "card": "请选择要处理的卡片。",
+    "card": "请选择要处理的卡片（一次一张）。",
     "daily_limit": "请给出额度（必须带单位，例如 2 万元）。",
     "hold": "请选择要解冻的冻结记录。",
     "user_id": "请确认要操作的用户身份（由受信任调用方提供）。",
@@ -154,24 +154,49 @@ class SlotFill:
         return not self.questions and not self.negated
 
 
+class _ProductView(Protocol):
+    """`_resolve_product` 的入参形状：网关 `WealthProduct` 满足（不为依赖 gateway 而耦合）。"""
+
+    @property
+    def product_id(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def risk_level(self) -> str: ...
+
+
 @dataclass(frozen=True)
 class SlotInputs:
-    """补全输入：文本 + 受信任上下文（日期 / 名册 / 已选对象）。"""
+    """补全输入：文本 + 受信任上下文（日期 / 名册 / 已选对象 / 产品目录）。"""
 
     text: str
     today: date
     payees: Sequence[Payee] = ()
+    cards: Sequence[Card] = ()
+    """本人卡片名册（只读）：仅用于把**卡类型词**（信用卡 / 借记卡）解析成唯一卡 id。"""
     selected: Mapping[str, object] = field(default_factory=dict)
     scope_text: str | None = None
     """当前意图的完整原文子句；模型截短的 text 不能消除对象限定。"""
+    products: Sequence[_ProductView] = ()
+    """受信任产品目录（`gateway.wealth_products()`）；只用于**原文匹配**，不新增实体。"""
+    default_product: str | None = None
+    """兜底产品（仅申购）：原文没点名 / 没给等级时才用，且必须记 `default product:<id>`。"""
 
 
-_BARE_AMOUNT_ACTIONS = frozenset({"transfer.create", "transfer.schedule", "transfer.book"})
-"""允许**无歧义裸数字**当金额的动作：只有转账族（「转给李娜 500」）。
+_BARE_AMOUNT_ACTIONS = frozenset(
+    {"transfer.create", "transfer.schedule", "transfer.book", "wealth.subscribe", "wealth.redeem"}
+)
+"""允许**无歧义裸数字**当金额的动作：转账族（「转给李娜 500」）与理财申购 / 赎回
+（「赎回 500」）。
 
-其余动作（冻结 / 额度 / 代扣签约）保持「必须带单位」：这些金额一旦读错方向更坏，
-且 2026-10-27 验收只批准放宽转账金额槽。
+其余动作（冻结 / 额度 / 代扣签约）保持「必须带单位」：这些金额一旦读错方向更坏。
+理财侧额外遮蔽 `R1`–`R5` 风险等级词，避免把等级里的数字读成金额。
 """
+
+_RISK_LEVEL_TOKEN = re.compile(r"(?<![A-Za-z0-9])R\s*([1-5])(?![0-9])", re.IGNORECASE)
+"""风险等级词（`R2` / `r 3`）：既是产品选择依据，也不能被金额解析器当成数字。"""
 
 
 def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
@@ -278,8 +303,12 @@ def _resolve_slot(
         return _resolve_payee(inputs, notes)
     if slot in {"amount", "amount_cents"}:
         return _resolve_amount(inputs, notes, slot, bare_amount=bare_amount)
+    if slot == "product":
+        return _resolve_product(inputs, notes)
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
+    if slot == "card":
+        return _resolve_card(inputs, notes)
     if slot == "when":
         return _resolve_when(inputs, notes)
     if slot == "period":
@@ -290,7 +319,20 @@ def _resolve_slot(
         }
         if len(periods) == 1:
             return periods.pop(), None, tuple(notes)
+    if slot == "merchant":
+        # 只取明确的「给某商户开通」原文，商户缺失或修改指令仍需澄清。
+        match = re.search(r"给(?P<merchant>[^，,。；;]{1,30}?)开通", inputs.text)
+        if match is not None:
+            return match["merchant"].strip(), None, tuple(notes)
     if slot == "next_charge_on":
+        match = re.search(r"下个?月\s*(?P<day>\d{1,2})\s*[号日]", inputs.text)
+        if match is not None:
+            next_month = inputs.today.month % 12 + 1
+            year = inputs.today.year + (inputs.today.month == 12)
+            try:
+                return date(year, next_month, int(match["day"])).isoformat(), None, tuple(notes)
+            except ValueError:
+                return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
         parsed = parse_temporal(inputs.text, inputs.today)
         if parsed.matched and parsed.when is not None:
             return parsed.when.isoformat(), None, tuple(notes)
@@ -346,12 +388,56 @@ def _resolve_payee(
     return chosen.payee_id, None, tuple(notes)
 
 
+_CARD_KIND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("credit", re.compile(r"信用卡|贷记卡")),
+    ("debit", re.compile(r"借记卡|储蓄卡")),
+)
+"""卡类型词 → `cards.card_type`。只做词面映射：库内未存卡号 / 尾号，尾号一律不猜。"""
+
+_CARD_BULK = re.compile(r"都|全部|所有|每张|各张|两张|多张|逐一|一并")
+"""批量 / 全量语义（「把可疑的都锁卡」）：一次只能处理一张卡，命中即说明做不到。"""
+
+CARD_BULK_PROMPT = (
+    "一次只能锁定一张卡：交易流水未记录卡号，无法从可疑交易反推是哪张卡。"
+    "请指定要处理的卡片（借记卡 / 信用卡），或到记录页逐笔核对。"
+)
+
+
+def _resolve_card(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """卡片槽：全量语义先说明边界；卡类型词唯一命中则绑定，否则追问。
+
+    这里的两种「不猜」都是硬约束：
+    - 「都 / 全部」类请求**不挑一张顶替**——那会把批量止损伪装成已完成；
+    - 类型词命中多张（同类型两张）仍追问，不按 id / 顺序取第一张。
+    """
+    text = inputs.text
+    if _CARD_BULK.search(text):
+        notes.append("card:bulk request unsupported")
+        return None, SlotQuestion("card", CARD_BULK_PROMPT), tuple(notes)
+    kinds = {kind for kind, pattern in _CARD_KIND_ALIASES if pattern.search(text)}
+    if len(kinds) == 1:
+        kind = kinds.pop()
+        matches = [item for item in inputs.cards if item.card_type == kind]
+        if len(matches) == 1:
+            notes.append(f"resolved card:{matches[0].card_id}")
+            return matches[0].card_id, None, tuple(notes)
+        notes.append(f"ambiguous card kind:{kind}")
+    return None, SlotQuestion("card", _PROMPTS["card"]), tuple(notes)
+
+
 def _resolve_amount(
     inputs: SlotInputs, notes: list[str], slot: str, *, bare_amount: bool = False
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
-    """金额槽：转账族允许**无歧义的裸数字**（「转给李娜 500」）；尾号 / 日期 / 序数仍不当金额。"""
+    """金额槽：转账族 / 理财允许**无歧义的裸数字**（「转给李娜 500」「赎回 500」）。
+
+    `R2` 这类**风险等级词**在理财句子里不是金额：裸数字放宽时先遮蔽等级词，
+    再交给共享解析器（不在 `gateway/resolvers.py` 里硬编码理财词汇）。
+    """
+    text = _RISK_LEVEL_TOKEN.sub(" ", inputs.text) if bare_amount else inputs.text
     parsed = parse_amount(
-        inputs.text,
+        text,
         bare_amounts=bare_amount,
         reserved_digits=_reserved_digits(inputs.payees),
     )
@@ -360,6 +446,68 @@ def _resolve_amount(
         return None, SlotQuestion(slot, _PROMPTS[slot]), tuple(notes)
     notes.append(f"resolved {slot}:{parsed.value.cents}")
     return parsed.value.cents, None, tuple(notes)
+
+
+def _squash(text: str) -> str:
+    """去空白后比对：目录里的「稳利债券 A」与口述「稳利债券A」是同一只。"""
+    return re.sub(r"\s+", "", text)
+
+
+def _resolve_product(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """产品槽：只做**原文匹配 + 目录兜底**，绝不凭语义猜产品。
+
+    顺序：① 原文出现 `product_id`；② 原文出现产品全名（最长优先）；
+    ③ 原文出现唯一的 `R1`–`R5` 等级且目录内该等级只有一只；④ 申购兜底产品；
+    ⑤ 否则追问并列出目录（不隐藏被拒产品）。
+    """
+    text = inputs.text
+    lowered = text.lower()
+    for product in inputs.products:
+        if product.product_id and product.product_id.lower() in lowered:
+            notes.append(f"resolved product:{product.product_id} (id)")
+            return product.product_id, None, tuple(notes)
+    squashed = _squash(text)
+    named = sorted(
+        (item for item in inputs.products if _squash(item.name) and _squash(item.name) in squashed),
+        key=lambda item: len(_squash(item.name)),
+        reverse=True,
+    )
+    if named:
+        notes.append(f"resolved product:{named[0].product_id} (name)")
+        return named[0].product_id, None, tuple(notes)
+    levels = {f"R{level}" for level in _RISK_LEVEL_TOKEN.findall(text)}
+    if len(levels) == 1:
+        level = levels.pop()
+        matched = [
+            item for item in inputs.products if item.risk_level.upper() == level
+        ]
+        if len(matched) == 1:
+            notes.append(f"resolved product:{matched[0].product_id} (risk {level})")
+            return matched[0].product_id, None, tuple(notes)
+        if len(matched) > 1:
+            notes.append(f"clarify product:risk {level}")
+            return None, _product_question(inputs, tuple(matched)), tuple(notes)
+    if inputs.default_product:
+        notes.append(f"default product:{inputs.default_product}")
+        return inputs.default_product, None, tuple(notes)
+    notes.append("missing product")
+    return None, _product_question(inputs, ()), tuple(notes)
+
+
+def _product_question(
+    inputs: SlotInputs, candidates: Sequence[_ProductView]
+) -> SlotQuestion:
+    pool = candidates or inputs.products
+    if not pool:
+        return SlotQuestion("product", _PROMPTS["product"])
+    labels = tuple(f"{item.name}（{item.risk_level}）" for item in pool)
+    return SlotQuestion(
+        "product",
+        f"{_PROMPTS['product']}可选：" + "、".join(labels),
+        labels,
+    )
 
 
 def _reserved_digits(payees: Sequence[Payee]) -> frozenset[str]:

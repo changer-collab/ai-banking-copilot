@@ -398,6 +398,127 @@ def report_payload(report: BillFindingsReport) -> dict[str, object]:
     }
 
 
+# --------------------------------------------------------------------------- 画像 / 趋势
+
+TREND_MONTHS = 6
+"""场景页「近 6 月支出趋势」窗口（含本期）。"""
+
+
+@dataclass(frozen=True)
+class BillTrendPoint:
+    """一个账期的支出合计（正数，单位分）。"""
+
+    period: str
+    expense_cents: int
+
+
+@dataclass(frozen=True)
+class CategoryShare:
+    """本期分类结构：分类支出与占比（占比由服务端计算，前端不除）。"""
+
+    category: str
+    expense_cents: int
+    share: Decimal
+
+
+@dataclass(frozen=True)
+class BillProfile:
+    """用户画像（只读、可回读）：消费结构 / 订阅负担 / 大额风险。"""
+
+    top_category: str | None
+    top_category_cents: int
+    top_category_share: Decimal | None
+    subscription_monthly_cents: int
+    suspicious_count: int
+    max_suspicious_cents: int
+
+
+def _month_sequence(year: int, month: int, months: int) -> tuple[tuple[int, int], ...]:
+    """自目标账期向前取 `months` 个账期，按时间升序返回。"""
+    if months <= 0:
+        raise ValueError(f"months 必须为正：{months}")
+    sequence = [(year, month)]
+    for _ in range(months - 1):
+        if month == 1:
+            year, month = year - 1, 12
+        else:
+            month -= 1
+        sequence.append((year, month))
+    return tuple(reversed(sequence))
+
+
+def expense_trend(
+    gateway: FactGateway, user_id: str, year: int, month: int, *, months: int = TREND_MONTHS
+) -> tuple[BillTrendPoint, ...]:
+    """近 N 月支出趋势：全部来自事实网关 `monthly_bill`，不含任何估算。"""
+    points: list[BillTrendPoint] = []
+    for point_year, point_month in _month_sequence(year, month, months):
+        summary = gateway.monthly_bill(user_id, point_year, point_month).payload
+        points.append(
+            BillTrendPoint(
+                period=f"{point_year:04d}-{point_month:02d}",
+                expense_cents=summary.total_expense.cents,
+            )
+        )
+    return tuple(points)
+
+
+def category_shares(
+    gateway: FactGateway, user_id: str, year: int, month: int
+) -> tuple[CategoryShare, ...]:
+    """本期分类占比：分母 = 各分类支出合计（不含收入），由服务端一次性算好。"""
+    summary = gateway.monthly_bill(user_id, year, month).payload
+    expenses = [
+        (item.category, -item.total.cents)
+        for item in summary.by_category
+        if item.total.cents < 0 and -item.total.cents > 0
+    ]
+    total = sum(cents for _, cents in expenses)
+    if total <= 0:
+        return ()
+    shares = [
+        CategoryShare(
+            category=category,
+            expense_cents=cents,
+            share=(Decimal(cents) / Decimal(total)).quantize(Decimal("0.0001")),
+        )
+        for category, cents in expenses
+    ]
+    return tuple(sorted(shares, key=lambda item: (-item.expense_cents, item.category)))
+
+
+def bill_profile(
+    gateway: FactGateway, user_id: str, report: BillFindingsReport
+) -> BillProfile:
+    """账单 → 用户画像（只读）：消费结构 / 订阅负担 / 大额风险。
+
+    - 消费结构：本期占比最高的分类与占比（来自 `monthly_bill`）；
+    - 订阅负担：在用订阅折算到「每月」的固定扣款（年付按 12 个月均摊）；
+    - 大额风险：确认 / 疑似发现项的条数与最大单笔影响金额。
+    """
+    year, month = (int(part) for part in report.period.split("-", 1))
+    shares = category_shares(gateway, user_id, year, month)
+    top = shares[0] if shares else None
+    subscriptions = [
+        record.payload
+        for record in gateway.subscriptions_of(user_id)
+        if record.payload.user_id == user_id and record.payload.status == "active"
+    ]
+    monthly_cents = sum(
+        item.amount.cents // 12 if item.period == "yearly" else item.amount.cents
+        for item in subscriptions
+    )
+    risky = [item for item in report.findings if item.status in {"confirmed", "suspected"}]
+    return BillProfile(
+        top_category=top.category if top is not None else None,
+        top_category_cents=top.expense_cents if top is not None else 0,
+        top_category_share=top.share if top is not None else None,
+        subscription_monthly_cents=monthly_cents,
+        suspicious_count=len(risky),
+        max_suspicious_cents=max((item.impact_cents for item in risky), default=0),
+    )
+
+
 # --------------------------------------------------------------------------- 规则
 
 

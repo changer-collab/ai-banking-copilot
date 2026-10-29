@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from fastapi.testclient import TestClient
 
+from ai_banking_copilot.gateway.store import Store
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 CANCEL_STATES = {
@@ -62,6 +63,40 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
         assert item["content_hash"] == record.content_hash
         assert item["amount_cents"] == record.payload.amount.cents
         assert item["booked_on"] == record.payload.booked_on.isoformat()
+        assert item["booked_at"] == record.payload.booked_at
+        assert item["card_tail"] == record.payload.card_tail
+        assert item["channel"] == record.payload.channel
+
+    assert video["price_increased_12m"] is True
+    assert video["price_change_12m_from_cents"] == 2125
+    assert video["price_change_12m_to_cents"] == 2500
+    latest = video["evidence"][-1]
+    assert latest["booked_at"] == "2026-09-18T20:30:00"
+    assert latest["card_tail"] == "4821"
+    assert latest["channel"] == "app"
+    music = by_id["subscription:sub_music"]
+    assert music["price_increased_12m"] is None
+    assert music["price_change_12m_from_cents"] is None
+    assert music["price_change_12m_to_cents"] is None
+
+
+def test_options_keep_missing_charge_time_and_card_tail_null(
+    deps: AppDeps, rw_store: Store,
+) -> None:
+    with rw_store.transaction():
+        rw_store.execute(
+            "UPDATE transactions SET booked_at = NULL, card_tail = NULL "
+            "WHERE merchant = ?",
+            ("视频会员",),
+        )
+    details = _client(deps).get("/api/options").json()["subscription_details"]
+    video = next(
+        item for item in details["insights"] if item["insight_id"] == "subscription:sub_video"
+    )
+    assert video["evidence"]
+    for item in video["evidence"]:
+        assert item["booked_at"] is None
+        assert item["card_tail"] is None
 
 
 def test_options_disclose_subscription_cancel_capabilities(deps: AppDeps) -> None:
@@ -72,6 +107,26 @@ def test_options_disclose_subscription_cancel_capabilities(deps: AppDeps) -> Non
     assert capabilities["can_local_cancel"] is True
     assert "尚未接入" in capabilities["boundary"]
     assert {item["state"] for item in capabilities["states"]} == CANCEL_STATES
+
+
+def test_options_expose_false_price_state_without_changing_evidence_contract(
+    deps: AppDeps, rw_store: Store,
+) -> None:
+    with rw_store.transaction():
+        rw_store.execute(
+            "UPDATE transactions SET amount_cents = -2500 WHERE merchant = ?",
+            ("视频会员",),
+        )
+    details = _client(deps).get("/api/options").json()["subscription_details"]
+    video = next(item for item in details["insights"]
+                 if item["insight_id"] == "subscription:sub_video")
+    assert video["price_increased_12m"] is False
+    assert video["price_change_12m_from_cents"] == 2500
+    assert video["price_change_12m_to_cents"] == 2500
+    assert video["next_charge_on"]
+    for evidence in video["evidence"]:
+        assert {"merchant_label", "amount_cents", "booked_at", "booked_on", "card_tail",
+                "channel", "record_id", "content_hash"} <= evidence.keys()
 
 
 def test_cancel_reports_local_simulation_not_merchant_confirmation(deps: AppDeps) -> None:

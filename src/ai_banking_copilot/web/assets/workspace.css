@@ -895,6 +895,61 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-action .btn { flex: none; }
 .wealth-result { margin-top: 0; }
 
+/* 场景页可视化：风险等级阶梯 / 持仓占比 / 收益（数据全部来自接口） */
+#wealth-viz { display: grid; gap: var(--s-3); margin: var(--s-2) 0 var(--s-3); }
+.wealth-viz__block { display: grid; gap: var(--s-1); }
+.wealth-viz__k { margin: 0; font-size: var(--fs-small); color: var(--ink-3); }
+
+.wealth-ladder { display: flex; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+.wealth-ladder__step {
+  flex: 1 1 0;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 6px 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+}
+.wealth-ladder__step.is-current {
+  border-color: var(--blue-600);
+  color: var(--ink);
+  font-weight: 600;
+}
+.wealth-ladder__code { font-family: var(--font-mono); }
+.wealth-ladder__flag { font-size: 10px; }
+
+.wealth-share { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+.wealth-share__row {
+  display: grid;
+  grid-template-columns: minmax(4rem, 1fr) 2fr auto auto;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--fs-small);
+}
+.wealth-share__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wealth-share__track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--rule);
+}
+.wealth-share__fill { display: block; height: 100%; border-radius: 3px; background: var(--blue-600); }
+.wealth-share__pct,
+.wealth-share__amt { color: var(--ink-3); white-space: nowrap; }
+
+.wealth-income { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; }
+.wealth-unlock { font-size: var(--fs-small); }
+
+.wealth-loading { display: grid; gap: 6px; padding: var(--s-2) 0; }
+.wealth-loading p { margin: 0; }
+
+@media (max-width: 640px) {
+  .wealth-share__row { grid-template-columns: minmax(3rem, 1fr) 1.5fr auto; }
+  .wealth-share__amt { display: none; }
+}
+
 
 /* ④ 卡片面板 / ② 账单分析面板（场景自有样式，不改既有面板） */
 #cards-list,
@@ -1145,3 +1200,88 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .records-detail { font-size: var(--fs-small); }
 .records-detail summary { cursor: pointer; color: var(--blue-ink); white-space: nowrap; }
 .records-detail p { margin: var(--s-1) 0 0; min-width: 220px; white-space: normal; }
+
+/* 订阅证据表：在窄屏上保留完整字段，允许横向查看。 */
+.charge-records-table-wrap { overflow-x: auto; }
+.charge-records-table {
+  width: 100%;
+  min-width: 900px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.charge-records-table th,
+.charge-records-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-line);
+  text-align: left;
+  vertical-align: top;
+}
+.charge-records-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
+.charge-records-table td { color: #16233a; word-break: break-word; }
+.subscription-price { color: var(--blue-700); font-weight: 600; }
+.audit-digest { margin: 4px 0 0; word-break: break-all; }
+.channel-health-table-wrap { overflow-x: auto; }
+.channel-health-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.channel-health-table th,
+.channel-health-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-line);
+  text-align: left;
+}
+.channel-health-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
+/* ---------------- ② 账单：画像 / 图表 / 可疑前 3（2026-10-28） ---------------- */
+.bills-charts { display: grid; gap: var(--s-3); margin: var(--s-3) 0; }
+.bills-trend { width: 100%; height: auto; color: #16233a; }
+.bills-chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
+.bills-chips li {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(179, 54, 42, 0.1);
+  color: #b3362a;
+  font-size: 12px;
+}
+.share-list { display: grid; gap: 6px; list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.share-list li { display: grid; grid-template-columns: 64px 1fr 44px; gap: 8px; align-items: center; }
+.share-bar,
+.cards-bar {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: #e8eefc;
+  overflow: hidden;
+}
+.share-bar i,
+.cards-bar i { display: block; height: 100%; background: #0b4fd8; border-radius: 999px; }
+.profile-card {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-radius: 12px;
+  background: #fbfdff;
+}
+.profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
+.profile-grid li { display: grid; gap: 2px; font-size: 12px; }
+.profile-grid strong { font-size: 14px; color: #16233a; }
+.bills-top {
+  padding: var(--s-2) 0;
+  border-bottom: 1px dashed var(--pg-line);
+  font-size: 13px;
+}
+.bills-top span { margin-left: 6px; }
+.bills-top p { margin: 4px 0 0; }
+
+/* ---------------- ④ 卡片：状态分布 / 额度条 / 红动作说明（2026-10-28） ---------------- */
+.cards-visual { display: grid; gap: var(--s-2); margin: var(--s-3) 0; }
+.cards-bars { display: grid; gap: 6px; list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.cards-bars li { display: grid; grid-template-columns: 56px 1fr 88px; gap: 8px; align-items: center; }
+.cards-bar__label { color: #6b7a90; }
+.cards-hint { margin: var(--s-2) 0 0; font-size: 12px; }
+.card-actions .btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.records-note { margin-top: var(--s-2); font-size: 12px; }

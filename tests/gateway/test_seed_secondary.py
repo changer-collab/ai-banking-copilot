@@ -79,6 +79,16 @@ def test_secondary_user_covers_twelve_months(store: Store) -> None:
     ]
 
 
+def test_secondary_seed_leaves_unknown_card_tails_null(store: Store) -> None:
+    seed_secondary_user(store)
+
+    tails = store.query(
+        "SELECT DISTINCT card_tail FROM transactions WHERE user_id = ?",
+        (SECONDARY_USER_ID,),
+    )
+    assert [row["card_tail"] for row in tails] == [None]
+
+
 def test_secondary_payees_and_profile_are_distinct(store: Store) -> None:
     seed_secondary_user(store)
 
