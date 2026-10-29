@@ -1664,7 +1664,8 @@ function cardsHtml(payload) {
     </article>`;
   }
   const maxLimit = Math.max(...cards.map((card) => Number(card.daily_limit_cents) || 0), 1);
-  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`;
+  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`
+    + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：计划卡确认时输入演示验证码。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能补卡。</p>`;
 }
 
 /* 额度饼图：各卡日限额占全部卡片合计的比例（真实数字，仅用于横向对比） */
@@ -4989,7 +4990,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=54", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=55", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

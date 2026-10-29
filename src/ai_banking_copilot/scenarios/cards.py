@@ -108,6 +108,7 @@ def _build_card_node(
     if intent.action in _CARD_SCOPED_ACTIONS:
         card_id = as_str(trusted_slot(intent, ("card", "card_id"), "card"), "card")
         _require_card(gateway, card_id)
+        _reject_unlock_of_lost_card(intent.action, gateway, card_id)
         params = {"card_id": card_id}
     if intent.action in _LIMIT_ACTIONS:
         limit = as_money(
@@ -134,6 +135,22 @@ def _require_card(gateway: FactGateway, card_id: str) -> None:
         gateway.card(card_id)
     except GatewayNotFoundError as error:
         raise ScenarioRefused(f"卡片不存在：{card_id}") from error
+
+
+def _reject_unlock_of_lost_card(action: str, gateway: FactGateway, card_id: str) -> None:
+    """挂失**不可逆**：已挂失的卡不允许「解锁」回 active（想继续用卡只能补卡）。
+
+    口径来源：04 三色基准表把 `card.report_lost` 列为不可逆（PDP 的 `irreversible` 修饰），
+    手动实测清单 CRD-06 也要求「挂失后不能再解锁」。此前只有面板不显示解锁按钮，
+    对话通道仍可把 lost 改回 active，属**面板与后端能力不一致**，这里在场景层堵住。
+    """
+    if action != "card.unlock":
+        return
+    if gateway.card(card_id).payload.status != "lost":
+        return
+    raise ScenarioRefused(
+        "卡片已挂失，不支持解锁：挂失是不可逆操作；如仍需用卡，请申请补卡（补虚拟卡）。"
+    )
 
 
 def _card_status_handler(status: str) -> WriteHandler:
