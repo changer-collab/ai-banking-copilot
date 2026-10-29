@@ -141,7 +141,13 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "wealth.list",
         "命中『理财推荐 / 比较』模板（只读，服务端硬筛选）",
     ),
-    (re.compile(r"申购|买理财|理财.*买"), "wealth.subscribe", "命中『理财申购』模板"),
+    (
+        # 「我想买 R4」这类口述没有「理财」二字：按「买 + 风险等级」识别申购，
+        # 否则整句会掉进未知意图，适当性闸门根本没机会先拒。
+        re.compile(r"申购|买理财|理财.*买|买.{0,8}R[1-5]"),
+        "wealth.subscribe",
+        "命中『理财申购』模板",
+    ),
     (
         re.compile(r"理财产品|产品对比|产品列表|理财列表|有哪些产品|看看理财"),
         "wealth.list",

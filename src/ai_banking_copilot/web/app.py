@@ -898,7 +898,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         return {
             "assessment": assessment,
             "products": list(product_catalog(deps.gateway.wealth_products(), risk_profile)),
-            "holdings": list(holdings_payload(deps.gateway, deps.user_id)),
+            "holdings": list(holdings_payload(deps.gateway, user_id)),
             "data_source": PRODUCT_DATA_SOURCE,
         }
 
