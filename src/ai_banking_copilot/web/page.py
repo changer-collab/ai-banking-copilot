@@ -436,7 +436,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=39"></script>
+<script src="/assets/app.js?v=40"></script>
 </body>
 </html>
 """

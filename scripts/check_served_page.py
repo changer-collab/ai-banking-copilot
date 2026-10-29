@@ -41,7 +41,7 @@ def run(base: str) -> list[str]:
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
     workspace_css = _get(base, "/assets/workspace.css?v=20")
-    js = _get(base, "/assets/app.js?v=39")
+    js = _get(base, "/assets/app.js?v=40")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -71,7 +71,7 @@ def run(base: str) -> list[str]:
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
             and "/assets/workspace.css?v=20" in html
-            and "/assets/app.js?v=39" in html
+            and "/assets/app.js?v=40" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -128,7 +128,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=32"' in js
+            and 'register("/assets/sw.js?v=33"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]

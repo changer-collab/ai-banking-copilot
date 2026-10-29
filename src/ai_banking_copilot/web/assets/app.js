@@ -1021,7 +1021,7 @@ function cardsHtml(payload) {
       buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`);
     }
     if (card.status === "active" || card.status === "locked") {
-      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">挂失</button>`);
+      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作且不可逆：需强验证（计划卡确认时输入演示验证码）；挂失后不可解锁">挂失</button>`);
       buttons.push(`<input class="input card-limit" type="number" min="1" step="100" placeholder="额度（元）" data-card-limit="${id}" />`);
       buttons.push(`<button class="btn" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">调额</button>`);
     }
@@ -1040,7 +1040,7 @@ function cardsHtml(payload) {
         <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="挂失卡片">去对话办理</button>
       </div>
     </article>`;
-  }).join("") + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：点「去对话办理」生成计划卡，确认时输入演示验证码；灰显按钮不在面板直接执行。</p>`;
+  }).join("") + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：点「去对话办理」生成计划卡，确认时输入演示验证码；灰显按钮不在面板直接执行。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能补卡。</p>`;
 }
 
 function cardsVisualHtml(cards) {
@@ -2098,14 +2098,6 @@ async function onConfirm() {
   await refreshAfterExecution();
 }
 
-const BILL_KIND_LABELS = {
-  "duplicate-charge": "疑似重复扣费",
-  "price-change": "商户价格变化",
-  "hidden-fee": "未登记扣费",
-  "recurring-subscription": "周期性订阅",
-  "abnormal-spend": "异常消费",
-};
-
 const BILL_STATUS_LABELS = {
   confirmed: "已确认",
   suspected: "疑似",
@@ -2155,6 +2147,7 @@ function billConclusionHtml(payload) {
     <p class="bill__note">${total
       ? `确定节省只统计可核实为已发生的金额，当前为 ${yuan(confirmedSaving)}；潜在节省是识别口径下的估算上限，尚未实现，不能当作已到账金额。`
       : "本期没有支出流水，节省金额与异常数量均无法计算。"}</p>
+    <p class="bill__note">识别结果只作核对线索，不当作已确认；未发现不等于不存在，请照下方证据逐条核对。</p>
     <details class="bill__limits" open>
       <summary>数据来源与分析局限</summary>
       <p>数据来源：${esc(payload.data_source)}${demo ? "（演示数据，非真实账单）" : ""}</p>
@@ -2181,7 +2174,7 @@ function billFindingHtml(item) {
   );
   return `<article class="bill__finding">
     <div class="bill__finding-head">
-      <b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>
+      <b>${esc(FINDING_LABELS[item.kind] || item.kind)}</b>
       <span class="chip">${esc(status)}</span>
       <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span>
     </div>
@@ -2217,7 +2210,7 @@ function billAdviceItemHtml(item) {
 
 function billActionsHtml(findings, advice, adviceMessage, hasSubscription) {
   const items = findings.map((item) =>
-    `<li><b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>：${esc(item.suggestion || "请核对交易明细后自行决定。")}</li>`
+    `<li><b>${esc(FINDING_LABELS[item.kind] || item.kind)}</b>：${esc(item.suggestion || "请核对交易明细后自行决定。")}</li>`
   );
   const adviceItems = (Array.isArray(advice) ? advice : []).map(billAdviceItemHtml);
   return `<section class="bill__block">
@@ -3903,7 +3896,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=32", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=33", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

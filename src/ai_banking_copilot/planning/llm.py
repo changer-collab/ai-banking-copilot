@@ -232,7 +232,10 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         re.compile(r"(?:查看|查询)(?:账单)?分类趋势"),
         "bills.category_trend", "命中『明确分类趋势』模板",
     ),
-    (re.compile(r"账单|消费分析|花了多少|消费明细"), "bills.monthly", "命中『账单分析』模板"),
+    (
+        re.compile(r"账单|消费分析|花了多少|花哪了|钱花哪|消费明细"),
+        "bills.monthly", "命中『账单分析』模板",
+    ),
     (
         re.compile(r"异常交易|可疑交易|大额交易|交易记录|交易明细|交易流水|有没有异常|异常流水"),
         "account.transactions",
