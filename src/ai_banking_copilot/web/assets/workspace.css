@@ -1230,3 +1230,52 @@ body { background: var(--pg-bg); line-height: 1.52; }
   text-align: left;
 }
 .channel-health-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
+/* ---------------- ② 账单：画像 / 图表 / 可疑前 3（2026-10-28） ---------------- */
+.bills-charts { display: grid; gap: var(--s-3); margin: var(--s-3) 0; }
+.bills-trend { width: 100%; height: auto; color: #16233a; }
+.bills-chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
+.bills-chips li {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(179, 54, 42, 0.1);
+  color: #b3362a;
+  font-size: 12px;
+}
+.share-list { display: grid; gap: 6px; list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.share-list li { display: grid; grid-template-columns: 64px 1fr 44px; gap: 8px; align-items: center; }
+.share-bar,
+.cards-bar {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: #e8eefc;
+  overflow: hidden;
+}
+.share-bar i,
+.cards-bar i { display: block; height: 100%; background: #0b4fd8; border-radius: 999px; }
+.profile-card {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-radius: 12px;
+  background: #fbfdff;
+}
+.profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
+.profile-grid li { display: grid; gap: 2px; font-size: 12px; }
+.profile-grid strong { font-size: 14px; color: #16233a; }
+.bills-top {
+  padding: var(--s-2) 0;
+  border-bottom: 1px dashed var(--pg-line);
+  font-size: 13px;
+}
+.bills-top span { margin-left: 6px; }
+.bills-top p { margin: 4px 0 0; }
+
+/* ---------------- ④ 卡片：状态分布 / 额度条 / 红动作说明（2026-10-28） ---------------- */
+.cards-visual { display: grid; gap: var(--s-2); margin: var(--s-3) 0; }
+.cards-bars { display: grid; gap: 6px; list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.cards-bars li { display: grid; grid-template-columns: 56px 1fr 88px; gap: 8px; align-items: center; }
+.cards-bar__label { color: #6b7a90; }
+.cards-hint { margin: var(--s-2) 0 0; font-size: 12px; }
+.card-actions .btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.records-note { margin-top: var(--s-2); font-size: 12px; }

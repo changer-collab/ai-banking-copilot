@@ -62,6 +62,9 @@ from ai_banking_copilot.policy.verification import (
 from ai_banking_copilot.scenarios.bill_findings import (
     BillNarrator,
     analyze_bill,
+    bill_profile,
+    category_shares,
+    expense_trend,
     narrate_bill_findings,
     report_payload,
 )
@@ -922,8 +925,33 @@ def create_app(deps: AppDeps) -> FastAPI:
             deps.gateway, user_id, target_year, target_month, as_of=deps.today,
         )
         narrative = narrate_bill_findings(report, deps.bill_narrator)
+        profile = bill_profile(deps.gateway, user_id, report)
         return {
             **report_payload(report),
+            "trend": [
+                {"period": point.period, "expense_cents": point.expense_cents}
+                for point in expense_trend(deps.gateway, user_id, target_year, target_month)
+            ],
+            "category_share": [
+                {
+                    "category": item.category,
+                    "expense_cents": item.expense_cents,
+                    "share": str(item.share),
+                }
+                for item in category_shares(deps.gateway, user_id, target_year, target_month)
+            ],
+            "profile": {
+                "top_category": profile.top_category,
+                "top_category_cents": profile.top_category_cents,
+                "top_category_share": (
+                    str(profile.top_category_share)
+                    if profile.top_category_share is not None
+                    else None
+                ),
+                "subscription_monthly_cents": profile.subscription_monthly_cents,
+                "suspicious_count": profile.suspicious_count,
+                "max_suspicious_cents": profile.max_suspicious_cents,
+            },
             "narrative": {
                 "summary": narrative.summary,
                 "findings": [

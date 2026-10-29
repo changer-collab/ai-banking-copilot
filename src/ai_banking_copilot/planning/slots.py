@@ -21,7 +21,7 @@ from datetime import date
 from typing import Protocol
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
-from ai_banking_copilot.gateway.models import Payee
+from ai_banking_copilot.gateway.models import Card, Payee
 from ai_banking_copilot.gateway.resolvers import (
     parse_amount,
     parse_temporal,
@@ -98,7 +98,7 @@ _PROMPTS: Mapping[str, str] = {
     "when": "请给出执行时间（例如 明天 / 2026-12-25）。",
     "product": "请选择理财产品。",
     "subscription": "请选择要处理的订阅。",
-    "card": "请选择要处理的卡片。",
+    "card": "请选择要处理的卡片（一次一张）。",
     "daily_limit": "请给出额度（必须带单位，例如 2 万元）。",
     "hold": "请选择要解冻的冻结记录。",
     "user_id": "请确认要操作的用户身份（由受信任调用方提供）。",
@@ -174,6 +174,8 @@ class SlotInputs:
     text: str
     today: date
     payees: Sequence[Payee] = ()
+    cards: Sequence[Card] = ()
+    """本人卡片名册（只读）：仅用于把**卡类型词**（信用卡 / 借记卡）解析成唯一卡 id。"""
     selected: Mapping[str, object] = field(default_factory=dict)
     scope_text: str | None = None
     """当前意图的完整原文子句；模型截短的 text 不能消除对象限定。"""
@@ -305,6 +307,8 @@ def _resolve_slot(
         return _resolve_product(inputs, notes)
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
+    if slot == "card":
+        return _resolve_card(inputs, notes)
     if slot == "when":
         return _resolve_when(inputs, notes)
     if slot == "period":
@@ -382,6 +386,45 @@ def _resolve_payee(
     chosen = resolution.candidates[0]
     notes.append(f"resolved payee:{chosen.payee_id}")
     return chosen.payee_id, None, tuple(notes)
+
+
+_CARD_KIND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("credit", re.compile(r"信用卡|贷记卡")),
+    ("debit", re.compile(r"借记卡|储蓄卡")),
+)
+"""卡类型词 → `cards.card_type`。只做词面映射：库内未存卡号 / 尾号，尾号一律不猜。"""
+
+_CARD_BULK = re.compile(r"都|全部|所有|每张|各张|两张|多张|逐一|一并")
+"""批量 / 全量语义（「把可疑的都锁卡」）：一次只能处理一张卡，命中即说明做不到。"""
+
+CARD_BULK_PROMPT = (
+    "一次只能锁定一张卡：交易流水未记录卡号，无法从可疑交易反推是哪张卡。"
+    "请指定要处理的卡片（借记卡 / 信用卡），或到记录页逐笔核对。"
+)
+
+
+def _resolve_card(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """卡片槽：全量语义先说明边界；卡类型词唯一命中则绑定，否则追问。
+
+    这里的两种「不猜」都是硬约束：
+    - 「都 / 全部」类请求**不挑一张顶替**——那会把批量止损伪装成已完成；
+    - 类型词命中多张（同类型两张）仍追问，不按 id / 顺序取第一张。
+    """
+    text = inputs.text
+    if _CARD_BULK.search(text):
+        notes.append("card:bulk request unsupported")
+        return None, SlotQuestion("card", CARD_BULK_PROMPT), tuple(notes)
+    kinds = {kind for kind, pattern in _CARD_KIND_ALIASES if pattern.search(text)}
+    if len(kinds) == 1:
+        kind = kinds.pop()
+        matches = [item for item in inputs.cards if item.card_type == kind]
+        if len(matches) == 1:
+            notes.append(f"resolved card:{matches[0].card_id}")
+            return matches[0].card_id, None, tuple(notes)
+        notes.append(f"ambiguous card kind:{kind}")
+    return None, SlotQuestion("card", _PROMPTS["card"]), tuple(notes)
 
 
 def _resolve_amount(

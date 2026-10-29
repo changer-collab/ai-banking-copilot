@@ -1008,42 +1008,98 @@ const CARD_ACTION_UTTERANCE = {
 
 function cardsHtml(payload) {
   const cards = (payload && payload.cards) || [];
-  if (!cards.length) return '<p class="muted">当前没有可用卡片。</p>';
+  if (!cards.length) {
+    return `<article class="state-card">
+      <p class="state-card__k">暂无卡片</p>
+      <p class="muted">当前账户下没有可用卡片；补卡后可在这里看到状态与额度。</p>
+    </article>`;
+  }
   return cards.map((card) => {
     const id = esc(card.card_id);
     const buttons = [];
     if (card.status === "active") {
       buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`);
     }
-    if (card.status === "locked") {
-      buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="unlock" data-card-id="${id}">解锁</button>`);
-    }
     if (card.status === "active" || card.status === "locked") {
-      buttons.push(`<button class="btn btn--danger" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`);
+      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">挂失</button>`);
       buttons.push(`<input class="input card-limit" type="number" min="1" step="100" placeholder="额度（元）" data-card-limit="${id}" />`);
-      buttons.push(`<button class="btn" type="button" data-card-action="limit" data-card-id="${id}">调额</button>`);
+      buttons.push(`<button class="btn" type="button" disabled title="红色动作：需强验证（计划卡确认时输入演示验证码）">调额</button>`);
+    }
+    if (card.status === "locked") {
+      buttons.push(`<button class="btn btn--danger" type="button" disabled title="红色动作：解卡需强验证（计划卡确认时输入演示验证码）">解锁</button>`);
     }
     buttons.push(`<button class="btn btn--ghost" type="button" data-card-action="virtual" data-card-id="${id}">补虚拟卡</button>`);
     return `<article class="card-item">
       <div class="card-item__head">
         <strong>${esc(card.type_label)}</strong>
-        <span class="tech">${id}</span>
+        <span class="mono">${id}</span>
         <span class="card-state card-state--${esc(card.status)}">${esc(card.status_label)}</span>
       </div>
       <p class="muted">日限额 ${yuan(card.daily_limit_cents)}</p>
-      <div class="btn-row card-actions">${buttons.join("")}</div>
+      <div class="btn-row card-actions">${buttons.join("")}
+        <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="挂失卡片">去对话办理</button>
+      </div>
     </article>`;
-  }).join("");
+  }).join("") + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：点「去对话办理」生成计划卡，确认时输入演示验证码；灰显按钮不在面板直接执行。</p>`;
+}
+
+function cardsVisualHtml(cards) {
+  if (!cards.length) return "";
+  const statuses = [
+    ["active", "正常"],
+    ["locked", "已锁定"],
+    ["lost", "已挂失"],
+    ["cancelled", "已取消"],
+  ];
+  const total = cards.length || 1;
+  const statusRows = statuses
+    .map(([key, label]) => {
+      const count = cards.filter((card) => card.status === key).length;
+      const width = Math.round((count / total) * 100);
+      return `<li><span class="cards-bar__label">${esc(label)}</span>
+        <span class="cards-bar"><i style="width:${width}%"></i></span>
+        <span class="mono">${count} 张</span></li>`;
+    })
+    .join("");
+  const maxLimit = Math.max(...cards.map((card) => card.daily_limit_cents || 0), 1);
+  const limitRows = cards
+    .map((card) => {
+      const width = Math.round(((card.daily_limit_cents || 0) / maxLimit) * 100);
+      return `<li><span class="cards-bar__label">${esc(card.type_label)}</span>
+        <span class="cards-bar"><i style="width:${width}%"></i></span>
+        <span class="mono">${yuan(card.daily_limit_cents || 0)}</span></li>`;
+    })
+    .join("");
+  return `<div class="cards-visual">
+    <p class="panel__title panel__title--sub">状态分布</p>
+    <ul class="cards-bars">${statusRows}</ul>
+    <p class="panel__title panel__title--sub">日限额上限</p>
+    <ul class="cards-bars">${limitRows}</ul>
+    <p class="muted">流水未记录卡号，暂无法按卡统计当日已用；此处展示状态分布与日限额上限。</p>
+  </div>`;
 }
 
 async function refreshCards() {
   if (state.offline) return;
-  const result = await apiFetch("GET", "/api/cards");
-  if (!result.ok) throw new Error("无法读取卡片");
+  const status = el("cards-status");
+  if (status) status.textContent = "正在读取卡片…";
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/cards");
+  } catch (error) {
+    panelFailure("cards-list", "卡片读取失败，请检查网络后重试。", "cards");
+    throw error;
+  }
+  if (!result.ok) {
+    panelFailure("cards-list", "卡片读取失败，请稍后重试。", "cards");
+    throw new Error("无法读取卡片");
+  }
   const payload = result.data;
   state.cards = payload.cards || [];
   el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 状态与额度来自服务端（${payload.as_of || ""}）`;
   el("cards-list").innerHTML = cardsHtml(payload);
+  const visual = el("cards-visual");
+  if (visual) visual.innerHTML = cardsVisualHtml(state.cards);
 }
 
 function cardLimitCents(cardId) {
@@ -1121,7 +1177,6 @@ function billsFindingsHtml(payload) {
     <p class="muted">为什么可疑：${esc(item.assumption)}</p>
     ${findingEvidenceHtml(item)}
     <p class="muted">${esc(item.suggestion)}</p>
-    <button class="btn btn--danger" type="button" data-bill-lock="1">顺手锁卡</button>
   </details>`).join("");
 }
 
@@ -1133,10 +1188,138 @@ function billsTableHtml(payload) {
   return `<table class="mini-table"><thead><tr><th>时间</th><th>商户</th><th>分类</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows || '<tr><td colspan="5">本期无支出流水</td></tr>'}</tbody></table>`;
 }
 
+function billsAnomalyChipsHtml(payload) {
+  const counts = {};
+  (payload.findings || []).forEach((item) => {
+    if (item.status === "normal") return;
+    counts[item.kind] = (counts[item.kind] || 0) + 1;
+  });
+  const entries = Object.entries(counts);
+  if (!entries.length) return '<p class="muted">本期未命中异常类型。</p>';
+  return `<p class="panel__title panel__title--sub">异常类型计数</p>
+    <ul class="bills-chips">${entries.map(([kind, count]) => `<li>${esc(FINDING_LABELS[kind] || kind)} · ${count}</li>`).join("")}</ul>`;
+}
+
+function billsProfileHtml(profile) {
+  const item = profile || {};
+  const top = item.top_category
+    ? `${esc(item.top_category)} · ${Math.round(Number(item.top_category_share || 0) * 100)}%`
+    : "本期无分类支出";
+  const topAmount = item.top_category_cents ? yuan(item.top_category_cents) : "—";
+  const subscription = item.subscription_monthly_cents
+    ? `${yuan(item.subscription_monthly_cents)}/月`
+    : "¥0.00/月";
+  const suspicious = item.suspicious_count ? `${item.suspicious_count} 条` : "0 条";
+  const maxImpact = item.max_suspicious_cents ? yuan(item.max_suspicious_cents) : "—";
+  return `<article class="profile-card">
+    <p class="panel__title panel__title--sub">用户画像 <span class="tech">只读 · 账单与订阅事实</span></p>
+    <ul class="profile-grid">
+      <li><span class="muted">消费结构</span><strong>${top}</strong><small class="mono">${topAmount}</small></li>
+      <li><span class="muted">订阅负担</span><strong>${subscription}</strong><small class="muted">在用订阅折算到每月</small></li>
+      <li><span class="muted">大额风险</span><strong>${suspicious}</strong><small class="mono">最大 ${maxImpact}</small></li>
+    </ul>
+  </article>`;
+}
+
+function billsTrendSvg(trend) {
+  const points = trend || [];
+  if (!points.length) return '<p class="muted">暂无趋势数据。</p>';
+  const width = 320;
+  const height = 120;
+  const baseline = height - 22;
+  const slot = width / points.length;
+  const barWidth = Math.max(14, Math.floor(slot * 0.55));
+  const max = Math.max(...points.map((point) => point.expense_cents || 0), 1);
+  const bars = points.map((point, index) => {
+    const barHeight = Math.round(((point.expense_cents || 0) / max) * (baseline - 8));
+    const x = Math.round(index * slot + (slot - barWidth) / 2);
+    const y = baseline - barHeight;
+    return `<rect x="${x}" y="${y}" width="${barWidth}" height="${barHeight}" rx="4" fill="#0b4fd8" opacity="0.85"></rect>
+      <text x="${x + barWidth / 2}" y="${height - 6}" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.65">${esc(String(point.period).slice(5))}月</text>`;
+  }).join("");
+  const last = points[points.length - 1];
+  return `<p class="panel__title panel__title--sub">近 6 月支出趋势</p>
+    <svg class="bills-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="近 6 月支出趋势">${bars}</svg>
+    <p class="muted">最近一月 ${yuan(last.expense_cents || 0)}（数字来自 /api/bills/analysis.trend）</p>`;
+}
+
+function billsShareHtml(items) {
+  const rows = (items || []).slice(0, 6);
+  if (!rows.length) return '<p class="muted">本期无分类支出。</p>';
+  return `<p class="panel__title panel__title--sub">分类占比</p>
+    <ul class="share-list">${rows.map((item) => {
+      const pct = Math.round(Number(item.share || 0) * 100);
+      return `<li><span>${esc(item.category)}</span><span class="share-bar"><i style="width:${pct}%"></i></span><span class="mono">${pct}%</span></li>`;
+    }).join("")}</ul>`;
+}
+
+function billsChartsHtml(payload) {
+  return `<div class="bills-charts">${billsTrendSvg(payload.trend)}${billsShareHtml(payload.category_share)}${billsAnomalyChipsHtml(payload)}</div>`;
+}
+
+function billsTop3Html(payload) {
+  const risky = (payload.findings || [])
+    .filter((item) => item.status !== "normal")
+    .sort((a, b) => (b.impact_cents || 0) - (a.impact_cents || 0))
+    .slice(0, 3);
+  if (!risky.length) {
+    return '<p class="panel__title panel__title--sub">可疑前 3</p><p class="muted">暂无需要优先核对的可疑项。</p>';
+  }
+  return `<p class="panel__title panel__title--sub">可疑前 3 <span class="tech">不当作已确认</span></p>` +
+    risky.map((item) => `<article class="bills-top">
+      <strong>${esc(FINDING_LABELS[item.kind] || item.kind)}</strong>
+      <span class="muted">${yuan(item.impact_cents || 0)} · 置信度 ${confidenceLabel(item.confidence)}</span>
+      <p class="muted">${esc(item.detail || "")}</p>
+    </article>`).join("");
+}
+
+function billsLoading() {
+  const status = el("bills-status");
+  if (status) status.textContent = "正在读取账单识别结果…";
+  const skeleton = '<span class="skeleton"></span><span class="skeleton"></span>';
+  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-findings"].forEach((id) => {
+    const node = el(id);
+    if (node) node.innerHTML = skeleton;
+  });
+  const table = el("bills-table");
+  if (table) table.innerHTML = "";
+}
+
+function billsFailure(message) {
+  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-table"].forEach((id) => {
+    const node = el(id);
+    if (node) node.innerHTML = "";
+  });
+  panelFailure("bills-findings", message, "bills");
+}
+
+function billsEmpty(payload) {
+  const card = `<article class="state-card">
+    <p class="state-card__k">本期无支出流水</p>
+    <p class="muted">${esc(payload.period)} 没有支出交易，暂不生成画像与图表。</p>
+  </article>`;
+  el("bills-summary").innerHTML = card;
+  el("bills-profile").innerHTML = "";
+  el("bills-charts").innerHTML = "";
+  el("bills-top3").innerHTML = "";
+  el("bills-findings").innerHTML = '<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>';
+  el("bills-table").innerHTML = billsTableHtml(payload);
+}
+
 async function refreshBills() {
   if (state.offline) return;
-  const result = await apiFetch("GET", "/api/bills/analysis");
-  if (!result.ok) throw new Error("无法读取账单分析");
+  billsLoading();
+  let result;
+  try {
+    result = await apiFetch("GET", "/api/bills/analysis");
+  } catch (error) {
+    billsFailure("账单识别读取失败，请检查网络后重试。");
+    throw error;
+  }
+  if (!result.ok) {
+    billsFailure("账单识别读取失败，请稍后重试。");
+    throw new Error("无法读取账单分析");
+  }
   const payload = result.data;
   state.bills = payload;
   const summary = payload.summary || {};
@@ -1144,18 +1327,16 @@ async function refreshBills() {
   const disclaimer = el("bills-disclaimer");
   disclaimer.hidden = false;
   disclaimer.textContent = `识别结果只作核对线索，不当作已确认；数据来源：${payload.data_source}`;
-  el("bills-summary").innerHTML = `<p class="muted">本期支出合计 ${yuan(summary.expense_total_cents || 0)}${payload.narrative && payload.narrative.degraded ? " · 文字解释已降级，以下按确定性明细展示" : ""}</p>`;
-  el("bills-findings").innerHTML = billsFindingsHtml(payload);
-  el("bills-table").innerHTML = billsTableHtml(payload);
-}
-
-async function lockCardFromBills() {
-  const active = (state.cards || []).find((card) => card.status === "active");
-  if (!active) {
-    el("bills-status").textContent = "当前没有可锁的卡；请先在卡片面板处理。";
+  if (!(payload.transactions || []).length) {
+    billsEmpty(payload);
     return;
   }
-  await runPanelTask("锁卡", { card: active.card_id }, active.card_id);
+  el("bills-summary").innerHTML = `<p class="muted">本期支出合计 ${yuan(summary.expense_total_cents || 0)}${payload.narrative && payload.narrative.degraded ? " · 文字解释已降级，以下按确定性明细展示" : ""}</p>`;
+  el("bills-profile").innerHTML = billsProfileHtml(payload.profile);
+  el("bills-charts").innerHTML = billsChartsHtml(payload);
+  el("bills-top3").innerHTML = billsTop3Html(payload);
+  el("bills-findings").innerHTML = billsFindingsHtml(payload);
+  el("bills-table").innerHTML = billsTableHtml(payload);
 }
 
 if (el("cards-list")) {
@@ -1163,12 +1344,6 @@ if (el("cards-list")) {
     const button = event.target.closest("[data-card-action]");
     if (!button) return;
     action(() => cardActionFromPanel(button.dataset.cardAction, button.dataset.cardId))();
-  });
-}
-if (el("bills-findings")) {
-  el("bills-findings").addEventListener("click", (event) => {
-    if (!event.target.closest("[data-bill-lock]")) return;
-    action(lockCardFromBills)();
   });
 }
 
@@ -3281,7 +3456,7 @@ function recordsRowsFor(key, payload) {
   }
   if (key === "cards") {
     return (data.cards || []).map((item) => recordsRow([
-      `<span class="tech mono">${esc(item.card_id || "—")}</span>`,
+      `<span class="mono">${esc(item.card_id || "—")}</span>`,
       esc(item.type_label || "—"),
       esc(item.status_label || "—"),
       `<span class="mono">${yuan(item.daily_limit_cents || 0)}</span>`,
@@ -3290,15 +3465,16 @@ function recordsRowsFor(key, payload) {
   }
   if (key === "suspicions") {
     return (data.findings || []).map((item) => {
-      const labels = (item.evidence || [])
-        .map((row) => row.merchant_label)
-        .filter(Boolean);
+      const evidenceLines = (item.evidence || []).map((row) => {
+        const moment = row.booked_at ? String(row.booked_at).slice(11, 16) : "";
+        return `${esc(row.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(row.city || "地点未知")} · ${esc(row.merchant_label || "—")}`;
+      }).join("<br>");
       return recordsRow([
         esc(FINDING_LABELS[item.kind] || item.kind),
         esc(FINDING_STATUS[item.status] || item.status),
         esc(confidenceLabel(item.confidence)),
         `<span class="mono">${yuan(item.impact_cents || 0)}</span>`,
-        esc(Array.from(new Set(labels)).join(" / ") || "—"),
+        `<span class="mono">${evidenceLines || "—"}</span>`,
         "—",
       ]);
     });
@@ -3378,9 +3554,12 @@ async function renderRecordsTab(tab) {
     return;
   }
   const rows = recordsRowsFor(key, result.data || {});
+  const note = key === "suspicions"
+    ? `<p class="muted records-note">识别结果只作核对线索，不当作已确认；渠道列无来源时显示「—」。数据来源：${esc((result.data || {}).data_source || "服务端事实")}。</p>`
+    : "";
   body.innerHTML = rows.length
     ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
-      recordsTableHtml(RECORD_HEADERS[key], rows)
+      recordsTableHtml(RECORD_HEADERS[key], rows) + note
     : recordsEmptyHtml(spec);
 }
 
@@ -3650,7 +3829,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=25", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=30", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
