@@ -398,13 +398,12 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .trace__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
 .trace__head .panel__title { margin: 0; }
 .trace__head #btn-close-trace { display: none; }
-#insights-status { overflow-wrap: anywhere; }
 #app > #trace .mono { white-space: normal; overflow-wrap: anywhere; }
 
 /* 主动洞察：右栏空间有限——只留「结论 + 状态」，依据折叠 */
 #insights-panel { padding: var(--s-3) var(--s-4); }
 #insights-panel .panel__title { margin-bottom: var(--s-2); }
-#insights-status { margin: 0 0 var(--s-2); font-size: var(--fs-small); }
+#insights-status { margin: 0 0 var(--s-2); font-size: var(--fs-small); overflow-wrap: anywhere; }
 #insights-list { display: grid; gap: 0; }
 .insight-row { display: grid; gap: 2px; padding: var(--s-2) 0; border-top: 1px dashed var(--rule); }
 .insight-row:first-child { padding-top: 0; border-top: 0; }
@@ -1030,7 +1029,8 @@ body { background: var(--pg-bg); line-height: 1.52; }
    ========================================================================== */
 
 /* 桌面隐藏 APP 专用块 */
-.home-scene-list { display: none; }
+.home-balance,
+.home-tiles { display: none; }
 
 @media (max-width: 600px) {
   #app.layout.layout--workspace {
@@ -1092,37 +1092,65 @@ body { background: var(--pg-bg); line-height: 1.52; }
   #conversation-welcome { padding: var(--s-3) 0 var(--s-4); }
   #presets { grid-template-columns: minmax(0, 1fr); }
 
-  /* 首页：竖排列表（图标 + 名称 + 一句说明 + 箭头），下方接最近对话 */
+  /* 首页：余额卡（真实数字）+ 2 列场景宫格，与「原型-app」一致；下方接最近对话 */
   .scene-grid { display: none; }
   #view-home .view__head p,
   #home-note { display: none; }
   /* 「工具」面板与底部 Tab 重复，窄屏去掉 */
   #view-home > .panel { display: none; }
-  .home-scene-list {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    background: var(--pg-panel);
-    border: 1px solid var(--pg-line);
+  .home-balance {
+    display: block;
+    margin-bottom: var(--s-4);
+    padding: var(--s-5);
     border-radius: var(--r-card);
+    /* 固定品牌色：暗色主题下 --blue-700 会变浅，白字会看不清 */
+    background: linear-gradient(160deg, #0a3fa8, #0b4fd8 62%, #2e7bff);
+    color: #fff;
   }
-  .home-scene-list button {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    width: 100%;
-    padding: 13px 14px;
-    border: 0;
-    border-bottom: 1px solid var(--pg-line);
-    background: transparent;
-    color: var(--ink);
+  .home-balance__k { margin: 0; font-size: 13px; opacity: 0.82; }
+  .home-balance__v {
+    margin: 2px 0 var(--s-4);
+    font-family: var(--font-mono);
+    font-size: 30px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .home-balance__row { display: flex; gap: var(--s-2); }
+  .home-balance__chip {
+    flex: 1;
+    min-width: 0;
+    padding: 9px 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.14);
+    font-size: 12.5px;
+  }
+  .home-balance__chip b {
+    display: block;
+    margin-top: 1px;
+    font-family: var(--font-mono);
     font-size: 15px;
+  }
+  .home-tiles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s-2);
+  }
+  .home-tile {
+    display: grid;
+    gap: 2px;
+    align-content: start;
+    padding: 12px 13px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--voucher-alt);
+    color: var(--ink);
+    font-size: 14px;
     text-align: left;
     cursor: pointer;
   }
-  .home-scene-list button:last-child { border-bottom: 0; }
-  .home-scene-list button:hover { background: var(--blue-050); }
-  .home-row__ico {
+  .home-tile:hover { background: var(--blue-050); }
+  .home-tile__h { display: flex; align-items: center; gap: var(--s-2); font-weight: 600; }
+  .home-tile__ico {
     flex: none;
     display: grid;
     place-items: center;
@@ -1134,9 +1162,7 @@ body { background: var(--pg-bg); line-height: 1.52; }
     font-size: 13px;
     font-weight: 700;
   }
-  .home-row__text { flex: 1; min-width: 0; }
-  .home-row__text small { display: block; color: var(--ink-3); font-size: 12.5px; font-weight: 400; }
-  .home-row__go { color: var(--ink-3); font-size: 18px; }
+  .home-tile__d { font-size: 12px; color: var(--ink-3); line-height: 1.45; }
   .home-recent[hidden] { display: none; }
   .home-recent .side__label { padding: 0 0 6px; }
   .home-recent .convs { padding: 0; }
@@ -1195,6 +1221,33 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .records-skeleton .skeleton { display: block; width: 100%; height: 14px; border-radius: 6px; }
 .state-card .btn { margin-top: var(--s-2); }
 
+/* ---------------- AI 三角色链路 + 完成回执（2026-10-29） ---------------- */
+.role-chain {
+  display: grid;
+  gap: var(--s-2);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: var(--s-3);
+}
+.role-card {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-left: 3px solid var(--rule-strong);
+  border-radius: var(--r-control);
+  background: var(--pg-panel);
+}
+.role-card__step { color: var(--ink-3); font-size: 11.5px; letter-spacing: 0.04em; }
+.role-card__value { color: var(--ink); font-size: var(--fs-small); font-weight: 600; overflow-wrap: anywhere; }
+.role-card__note { color: var(--ink-3); font-size: 11.5px; overflow-wrap: anywhere; }
+.role-card--green { border-left-color: var(--lvl-green); background: var(--lvl-green-bg); }
+.role-card--yellow { border-left-color: var(--lvl-yellow); background: var(--lvl-yellow-bg); }
+.role-card--red { border-left-color: var(--lvl-red); background: var(--lvl-red-bg); }
+.takeover--receipt { border-left: 3px solid var(--lvl-green); background: var(--lvl-green-bg); }
+@media (max-width: 720px) {
+  .role-chain { grid-template-columns: minmax(0, 1fr); }
+}
 /* 订阅证据表：在窄屏上保留完整字段，允许横向查看。 */
 .charge-records-table-wrap { overflow-x: auto; }
 .charge-records-table {
@@ -1253,16 +1306,17 @@ body { background: var(--pg-bg); line-height: 1.52; }
 }
 .share-bar i,
 .cards-bar i { display: block; height: 100%; background: #0b4fd8; border-radius: 999px; }
-.profile-card {
+/* 账单画像：独立类名，避免与个人中心的 .profile-card / .profile-grid（2 列）互相覆盖 */
+.bills-profile-card {
   margin: var(--s-3) 0;
   padding: var(--s-3);
   border: 1px solid var(--pg-line);
   border-radius: 12px;
   background: #fbfdff;
 }
-.profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
-.profile-grid li { display: grid; gap: 2px; font-size: 12px; }
-.profile-grid strong { font-size: 14px; color: #16233a; }
+.bills-profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
+.bills-profile-grid li { display: grid; gap: 2px; font-size: 12px; }
+.bills-profile-grid strong { font-size: 14px; color: #16233a; }
 .bills-top {
   padding: var(--s-2) 0;
   border-bottom: 1px dashed var(--pg-line);

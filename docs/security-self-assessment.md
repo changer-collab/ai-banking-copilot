@@ -117,9 +117,10 @@
 | R15 | 「按手机号转账」按**手机尾号**匹配，完整号码不单独存 | 中 | `gateway/resolvers.py::resolve_payees` 能识别完整 11 位号码，但名册只存 `payees.phone_tail`（4 位），实际按后四位比对。尾号重名时**不产出级别、强制澄清**（安全侧正确），但与官方点名的「按手机号转账」存在语义差距。缓解：澄清卡同时展示账号尾号 / 手机尾号 / 全名三要素。生产化需接完整号码 + 实名映射 |
 | R16 | 账单异常识别覆盖 7 类，仍缺两类统计判据 | 低 | 已覆盖 7 类：`scenarios/bill_findings.py::FINDING_KINDS`（重复扣款 / 涨价 / 隐藏费用 / 循环订阅 / 异常大额 / 深夜 / 异地）；深夜为 22:00–06:00，异地以常用城市为基线、历史样本 < 2 不启用（避免新用户误报）。**未覆盖**「商户首次出现」「金额偏离历史分布」；时间 / 城市为空时**跳过判据并说明不适用**，不猜测 |
 | R17 | ~~理财风险评估缺对话式问卷入口~~ | 已关闭 | 2026-10-28 关闭：聊天内直接下发固定 5 题问卷（`web/session.py` + `scenarios/wealth_assessment.py`），**等级由服务端评分算出**，请求体不得自填 `risk_profile`；落库 `source='questionnaire'`，未测评 / 过期 / 不匹配仍 fail-closed 拒绝申购 |
-| R18 | 飞书渠道**代码已接线、生产凭据未配置** | 中 | 2026-10-28 代码侧关闭：`POST /api/im/feishu`（验签 + 时间戳 ±5 分钟 + AES 解密 + `card.action`）、`POST /api/im/message`、`POST /api/im/confirm`、`GET /im`、`GET /api/channels/health` 均已在 `web/app.py`；入站按 `channel_identities` 解析用户、失败给绑定指引不回落，`event_id` 幂等 + 20 次/分限流。**残留是运维**：服务器尚无 4 个 `AIB_FEISHU_*`，health 现为 `feishu.mode=stub`，演示用 `scripts/replay_webhook.py` 回放 |
+| R18 | 飞书渠道**代码已接线、生产凭据未配置** | 中 | **2026-10-29 线上实测**：`GET /api/channels/health` 返回 `feishu.configured=false, mode=replay, reason=replay_mode, card_action=false`；服务器 `~/aib/.env` 无任何 `AIB_FEISHU_*`，服务器 `docker-compose.yml` 仍是旧版（不透传四个变量，仓库侧已补、待重建）。代码侧能力（验签 + 时间戳 ±5 分钟 + AES 解密 + `card.action` + `event_id` 幂等 + 20 次/分限流 + 未绑定 401）均已在 `web/app.py`，replay 四项已在公网跑通；**真实回调与卡片动作未验收，不宣称已接入** |
 | R19 | ~~确定性解析器不识别中文数字金额~~ | 已关闭 | 2026-10-28 关闭：`gateway/resolvers.py::parse_amount` 支持「五百 / 一千二 / 两千五 / 一百零八 / 一万块」等口语写法；万级中文数字**必须带货币单位**（「一万」视为未命中），多候选（如「300 元和五百块」）一律不猜、交上层追问 |
 | R20 | ~~理财赎回无持仓校验~~ | 已关闭 | 2026-10-28 关闭：`Store` 新增 `wealth_holdings`，`gateway/core_bank.py::_wealth_flow` 申购时同事务累加持仓、赎回时校验「不得超过持仓」，起购金额只约束申购（不再拦截赎回）；持仓与余额同增同减，回执 `effect_ids` 同时声明 `accounts:*` 与 `wealth_holdings:*` |
+| R21 | 渠道身份绑定**无 HTTP 自助入口** | 中 | `channel_identities` 是唯一的 fail-closed 放行依据，仓库内没有发码 / 兑换 / 解绑接口，只能手工写库；现网 `feishu / ou-replay → u_demo` 是**演示绑定**，不代表真实用户链路。生产化需补绑定码签发与消费、解绑审计，并区分「演示绑定」与「真实绑定」来源 |
 
 ## 三、自评结论
 
@@ -128,9 +129,10 @@
 - 界面与实现一致：红色不再宣称「人脸 / U 盾」，中断失败如实报错，回退由「如实失败」升级为**真实冲正**（回补余额 + 反向分录）。
 - 工程门禁由 Ruff、严格 mypy、全量 pytest 和模板服务自检组成；当前提交的执行结果以 CI 与 PR 验证记录为准。
 - 能力边界如实声明：**不证决策正确、不证泛化、LLM 侧有抖动、降级通道非等价实现、强验证无真实第二信道**。
-- 官方六场景 × 25 项点名能力：**24 项有 · 1 项半有（R15 手机尾号）· 0 项无**，逐条对照见 [official-requirements.md](official-requirements.md)；半有项仍登记为已知风险，不包装成「已完成」。R16 / R17 / R18 / R19 / R20 已于 2026-10-28 关闭，其中 R18 只剩运维配置（飞书凭据），不是代码缺口。
+- 官方六场景 × 25 项点名能力：**24 项有 · 1 项半有（R15 手机尾号）· 0 项无**，逐条对照见 [official-requirements.md](official-requirements.md)；半有项仍登记为已知风险，不包装成「已完成」。R17 / R19 / R20 已关闭，R16 升至 7 类；R18 代码已接线、生产凭据与公网回调待配置；R21 为渠道身份绑定缺口。
 
 ---
 
 *2026-10-01 建立 · 2026-10-27 补 R15–R20（手机尾号 / 异常五类缺时空 / 缺问卷入口 / IM 孤儿代码 / 中文数字 / 赎回凭空造钱）*
 *2026-10-28 复核：R17 / R19 / R20 关闭，R16 升至 7 类，R18 代码关闭、仅留飞书凭据配置；R15 保留*
+*2026-10-29 复核：R18 按线上实测改写（health=replay、服务器 compose 未透传），新增 R21 渠道身份绑定缺口；R15 保留*

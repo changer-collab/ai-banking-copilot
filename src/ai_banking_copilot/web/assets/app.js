@@ -1211,9 +1211,9 @@ function billsProfileHtml(profile) {
     : "¥0.00/月";
   const suspicious = item.suspicious_count ? `${item.suspicious_count} 条` : "0 条";
   const maxImpact = item.max_suspicious_cents ? yuan(item.max_suspicious_cents) : "—";
-  return `<article class="profile-card">
+  return `<article class="bills-profile-card">
     <p class="panel__title panel__title--sub">用户画像 <span class="tech">只读 · 账单与订阅事实</span></p>
-    <ul class="profile-grid">
+    <ul class="bills-profile-grid">
       <li><span class="muted">消费结构</span><strong>${top}</strong><small class="mono">${topAmount}</small></li>
       <li><span class="muted">订阅负担</span><strong>${subscription}</strong><small class="muted">在用订阅折算到每月</small></li>
       <li><span class="muted">大额风险</span><strong>${suspicious}</strong><small class="mono">最大 ${maxImpact}</small></li>
@@ -1624,7 +1624,7 @@ function renderStage() {
   state.response.innerHTML = state.card
     ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
     : (state.panel || "") + state.notice;
-  state.response.innerHTML += modelMetadataHtml();
+  state.response.innerHTML += roleChainHtml();
   if (el("vcode")) el("vcode").value = code;
   if (state.task) state.task.appendChild(el("task-actions"));
   showRequestStatus();
@@ -1650,17 +1650,42 @@ function showModelMetadata(metadata) {
   state.model = metadata || null;
 }
 
-function modelMetadataHtml() {
+/* AI 三角色链路：规划器 / 审查员是模型通道，规则风险官是 PDP 规则引擎（不是 LLM）。
+   三格只回显服务端真实字段；缺数据写「未调用 / 待裁决」，不补也不猜。 */
+function roleChainHtml() {
   const metadata = state.model;
   if (!metadata) return "";
   const channels = {
     "template": "确定性模板", "bypass": "旁路诊断", "llm-strict": "真实模型严格通道",
     "template_fallback": "模板回退（真实模型不可用）", "injected": "测试注入通道",
   };
-  const name = (channel) => channels[channel] || "未调用";
+  const name = (channel) => (channel ? channels[channel] || String(channel) : "未调用");
   const tokens = metadata.usage && metadata.usage.total_tokens;
-  return `<p class="muted">意图：${esc(name(metadata.planner_channel))} · 审查：${esc(name(metadata.reviewer_channel))}
-    <br />本任务真实 HTTP ${esc(String(metadata.http_attempts || 0))} 次 · 供应商 tokens ${esc(tokens == null ? "未提供" : String(tokens))}</p>`;
+  const decision = state.decision || null;
+  const level = decision && decision.level ? String(decision.level) : "";
+  const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
+  const tone = { GREEN: "green", YELLOW: "yellow", RED: "red" }[level] || "";
+  const reviewer = metadata.reviewer_channel;
+  const reviewerNote = reviewer
+    ? (reviewer === "bypass" ? "旁路诊断通道：未逐条审查计划" : "逐条核对计划是否越权")
+    : "当前通道旁路审查，不冒充已审查";
+  return `<section class="role-chain" aria-label="AI 三角色链路">
+    <div class="role-card">
+      <span class="role-card__step">① 规划器</span>
+      <span class="role-card__value">${esc(name(metadata.planner_channel))}</span>
+      <span class="role-card__note">真实 HTTP ${esc(String(metadata.http_attempts || 0))} 次 · tokens ${esc(tokens == null ? "未提供" : String(tokens))}</span>
+    </div>
+    <div class="role-card">
+      <span class="role-card__step">② 审查员</span>
+      <span class="role-card__value">${esc(reviewer ? name(reviewer) : "未启用")}</span>
+      <span class="role-card__note">${esc(reviewerNote)}</span>
+    </div>
+    <div class="role-card${tone ? ` role-card--${tone}` : ""}">
+      <span class="role-card__step">③ 规则风险官</span>
+      <span class="role-card__value">${esc(level || "待裁决")}</span>
+      <span class="role-card__note">${esc(decision ? `命中规则 ${reasons.length} 条（规则引擎，非 LLM）` : "尚无裁决")}</span>
+    </div>
+  </section>`;
 }
 
 function appendMessage(role, text) {
@@ -2333,7 +2358,7 @@ function applyExecution(data) {
   const adviceFallback = billAdviceHtml(data.bill_advice) +
     (data.bill_advice_message ? `<p class="muted">${esc(data.bill_advice_message)}</p>` : "");
   state.notice = complete
-    ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
+    ? `<div class="takeover takeover--receipt"><p>${esc(data.message || "计划执行完成")}</p>` +
       results.map((item) => `<p>${esc(resultMessage(item))}</p>`).join("") + `</div>` +
       (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
@@ -2947,10 +2972,23 @@ async function runLifeEvent(eventId, form) {
   await start();
 }
 
+/* 加载态：与列表同骨架的占位卡，读完整体替换；失败由 panelFailure 覆盖 */
+function lifeLoadingHtml() {
+  const card = `<article class="life-card" aria-hidden="true">
+    <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+  </article>`;
+  return `<div class="life-grid" role="status" aria-live="polite">${card}${card}${card}</div>`;
+}
+
 async function refreshLifeEvents() {
   const status = el("life-events-status");
   const list = el("life-events-list");
   if (!status || !list || state.offline) return;
+  /* 只有首次进入才铺骨架：`refreshOptions()` 拿到对象后会再刷一次，那一次不能闪回加载态 */
+  if (!list.querySelector(".life-card")) {
+    status.textContent = "正在读取生活事件原型…";
+    list.innerHTML = lifeLoadingHtml();
+  }
   let result;
   try {
     result = await apiFetch("GET", "/api/life-events");
@@ -3012,7 +3050,7 @@ async function refreshLifeEvents() {
     }).join("")
     : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
 
-  list.innerHTML = `<div class="life-grid">${cards || '<article class="state-card"><p class="state-card__k">生活事件 · 暂无原型</p><p class="muted">服务端未下发原型，请稍后重试。</p></article>'}</div>
+  list.innerHTML = `<div class="life-grid">${cards || '<article class="state-card"><p class="state-card__k">生活事件 · 暂无原型</p><p class="muted">当前服务端没有可用的生活事件原型；这是空态，不是读取失败。</p></article>'}</div>
     <p class="side__label">我的生活事件</p>
     <div class="life-records">${recordRows}</div>`;
   /* 对象槽默认取第一个真实选项，避免「填了金额却卡在选卡片」 */
@@ -3343,20 +3381,56 @@ const SCENES = {
   },
 };
 
-/* 窄屏首页的竖排场景列表（与「前端示例-APP端」一致）：图标 + 名称 + 一句说明 + 箭头 */
+/* 窄屏首页的 2 列场景宫格（与「原型-app」一致）：图标 + 名称 + 一句说明 */
 function renderHomeSceneList() {
   const host = el("home-scene-list");
   if (!host) return;
   host.innerHTML = Object.keys(SCENES).map((key) => {
     const spec = SCENES[key];
-    return `<button type="button" data-nav="scene" data-scene="${esc(key)}">
-      <span class="home-row__ico" aria-hidden="true">${esc(spec.title.slice(0, 1))}</span>
-      <span class="home-row__text">${esc(spec.title)}<small>${esc(spec.short)}</small></span>
-      <span class="home-row__go" aria-hidden="true">›</span>
+    return `<button class="home-tile" type="button" data-nav="scene" data-scene="${esc(key)}">
+      <span class="home-tile__h"><span class="home-tile__ico" aria-hidden="true">${esc(spec.title.slice(0, 1))}</span>${esc(spec.title)}</span>
+      <span class="home-tile__d">${esc(spec.short)}</span>
     </button>`;
   }).join("");
 }
 renderHomeSceneList();
+
+/* 首页余额卡：分与元的格式化只做展示，数值一律来自服务端；读不到就保持「—」。 */
+function yuanText(cents) {
+  const [intPart, decPart] = ((Number(cents) || 0) / 100).toFixed(2).split(".");
+  return `¥${intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${decPart}`;
+}
+
+async function refreshHomeBalance() {
+  const totalEl = el("home-balance-total");
+  if (!totalEl) return;
+  try {
+    const [optionsRes, cardsRes] = await Promise.all([
+      fetch("/api/options", { cache: "no-store" }),
+      fetch("/api/cards", { cache: "no-store" }),
+    ]);
+    if (!optionsRes.ok || !cardsRes.ok) throw new Error("读取余额失败");
+    const options = await optionsRes.json();
+    const cards = await cardsRes.json();
+    const accounts = options.accounts || [];
+    const centsOf = (item) => Number(item.balance_cents) || 0;
+    const total = accounts.reduce((sum, item) => sum + centsOf(item), 0);
+    const current = accounts
+      .filter((item) => String(item.label || "").includes("活期"))
+      .reduce((sum, item) => sum + centsOf(item), 0);
+    const limit = (cards.cards || []).reduce(
+      (sum, card) => sum + (Number(card.daily_limit_cents) || 0),
+      0
+    );
+    totalEl.textContent = yuanText(total);
+    el("home-balance-current").textContent = yuanText(current);
+    el("home-balance-limit").textContent = yuanText(limit);
+  } catch {
+    /* 保持「—」：不编造金额 */
+    totalEl.textContent = "—";
+  }
+}
+void refreshHomeBalance();
 
 const RECORD_TABS = {
   transfers: { label: "转账记录", hint: "转账完成后，这里显示收款人（脱敏）、金额、状态与业务流水渠道。" },
@@ -3829,7 +3903,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=30", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=32", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

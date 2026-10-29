@@ -252,16 +252,26 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 
 交互实测：平均 **1.000** 用户轮、一句话完成率 **85.71%**、业务完成率 **100.00%**；错误恢复成功率 **null**（本批产物无出错样本，不写 0）。
 审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
-逐例证据见 [`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)，可从 `runtime/benchmark/web-smoke-v2-fix2/run-1/results.json` 重算。
+逐例证据：[`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)、[`docs/results/evidence-dev-v1-cases.csv`](docs/results/evidence-dev-v1-cases.csv)（由 `python scripts/export_cases_csv.py --input <run 目录> --output <csv>` 从 `results.json` 扁平化生成，不重跑评测；`evidence_dev_v1` 93 条同样四个数字全满：31/31、0/49、49/49、74/74）。
 
-最近一次全量门禁（2026-10-28）：`ruff check .` 通过、`mypy src` 通过（104 files）、`pytest -q` **1790 passed / 0 failed**。
+最近一次全量门禁（2026-10-29，三人 PR #32/#35/#36 与 #37 合入后）：`ruff check .` 通过、`mypy src` 通过（105 files）、`pytest` **1981 条**（同日两次全量退出码 0；一次 1980 passed + 1 条时延敏感用例抖动，单跑通过，见 `docs/RESULTS.md` §14）；`scripts/check_served_page.py` ALL OK、`scripts/e2e_check.py` ALL PASSED。
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
 python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --demo "转给李娜 500 元"
 ```
 
-对标公开基准（出处见 [`docs/参赛对标与改进方向.md`](docs/参赛对标与改进方向.md) 第五节）：FraudBench 的四个 agent 攻击安全性 **49%–65%**；APort Vault 加入确定性事前检查后违规划转 **140 次 → 0 次**，同期 25,370 笔合法支付照常执行。上表为自建回归集，**不是盲测或真实模型泛化成绩**。
+对标公开基准（出处与原文数据见 [`docs/参赛对标与改进方向.md`](docs/参赛对标与改进方向.md) 第五节）：
+
+| 指标 | 本仓库（自建回归集、模板通道） | 公开基准（他人报告） |
+|---|---|---|
+| 危险动作拦截率 | `web-smoke-v2` 5/5 = **100.00%**；`evidence_dev_v1` 31/31 = **100.00%** | APort Vault：加入确定性事前检查后违规划转 **140 次 → 0 次**（25,640 次调用中否决 187 次） |
+| Agent 攻击安全性 | 同上，攻击用例 31/31 全部拦下 | FraudBench：四个 agent **49%–65%** |
+| 误拒率 | 0/14 = **0.00%**；0/49 = **0.00%** | APort Vault：同期 **25,370 笔**合法支付照常执行（原文未给误拒率） |
+| 任务成功率 | 14/14；49/49 | 各基准未报同一指标，不并列 |
+| 数字可回溯率 | 26/26；74/74 | 公开基准无此口径 |
+
+读法：本仓库数字来自**自建回归集 + 确定性模板通道**，**不是盲测，也不是真实模型泛化成绩**；两条公开基准是对方论文/报告口径，数据集、攻击构造与判定标准都不同，只能作横向参照，**不能直接相减或换算成提升百分比**。
 
 ## 熔断与恢复（裁决 #27）
 

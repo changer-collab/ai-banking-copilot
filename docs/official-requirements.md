@@ -20,7 +20,7 @@
 1. **六大场景 25 项点名能力：24 有 / 1 半有 / 0 无。** 唯一半有是**按手机号转账**：完整 11 位号码可识别，但名册只存手机尾号，实际按**后四位**匹配；同尾号多候选强制澄清（安全侧正确，语义侧是能力子集）。10-27 登记的四项缺口已在代码里关闭：**异常交易识别**升至 7 类（新增深夜 / 异地）、**风险评估**已有对话内 5 题问卷、**理财赎回**已有持仓校验、**中文数字金额**已可解析。
 2. **三项核心技术要求全部有机制**：权限分级落在 `policy/pdp.py`，五项安全机制各有一个模块，意图规划落在 `planning/` + `scenarios/`；另有登录 / 会话 / CSRF / 多用户隔离作为安全增强层。
 3. **渠道不再是短板**：Web 单页 + 可安装 PWA（窄屏自动切 APP 四 Tab）+ 飞书适配器（验签 / 解密 / 身份绑定 / 幂等 / 限流 / 卡片回调）均已接线；**生产凭据尚未写入服务器**，现场演示走 `/im` 回放页。
-4. **真正的缺口只剩"可被看见"**：PPT 与 5 分钟视频为 0（已排 10-29）；另外三份文档（本文、`security-self-assessment.md`、`README.md`）已在本轮与代码对齐。
+4. **真正的缺口只剩可被看见的部分**：PPT 已于 10-29 重做为 12 页赛题导向版（含逐页讲稿），**5 分钟视频仍为 0**；另外三份文档（本文、`security-self-assessment.md`、`README.md`）已与代码对齐。
 
 ---
 
@@ -30,9 +30,9 @@
 |---|---|---|---|---|
 | 1 | 作品简介，**≤200 字**，含创作理念 + AI 技术 | `docs/作品简介.md`（156 字，不含空白） | **有** | 提交前按最终功能复核一次，不要超 200 字 |
 | 2 | 技术文档：**系统架构图 · 核心算法说明 · 安全设计文档** | `docs/architecture.md` + `docs/assets/architecture.svg` · `docs/algorithms.md`（含 §11 生活链路） · `docs/security-design.md` | **有** | 架构图与架构说明已同步生活链路 L1–L7、渠道、沙箱、§3.1 三项硬要求落点 |
-| 3 | 答辩 **PPT ≤10 分钟** + **演示视频 ≤5 分钟** | 无 | **无（唯一硬缺项）** | 已排 10-29：12 页 PPT + 5 分钟分镜 / 录制（见 `docs/2026-10-26/冲刺方案-2026-10-26.md` §7）；封版前必须产出 |
-| 4 | 源代码：**README · GitHub 地址 · 部署说明 · 测试用例** | `README.md` · `github.com/changer-collab/ai-banking-copilot` · `deploy/README.md` · `tests/`（1790 例） | **有** | 10-28 复核：`ruff` / 严格 `mypy` / `pytest` 见 `docs/RESULTS.md` §10；README 的部署入口与渠道口径本轮同步 |
-| 5 | 安全自评报告：**权限分级实现说明 + 已知风险清单** | `docs/security-self-assessment.md` | **有** | 清单已按 10-28 实现复核到 **R1–R20**：R16 / R17 / R18 / R19 / R20 关闭，仅 **R15（手机尾号匹配）**保留为已知风险 |
+| 3 | 答辩 **PPT ≤10 分钟** + **演示视频 ≤5 分钟** | PPT：`ai-banking-答辩PPT-赛题版-2026-10-29.pptx`（12 页，含逐页讲稿）；视频：无 | **半有** | PPT 已完成赛题导向重做（结构见 `docs/2026-10-29/PPT设计逻辑-2026-10-29.md`）；视频 0，10-31 前按分镜录制 |
+| 4 | 源代码：**README · GitHub 地址 · 部署说明 · 测试用例** | `README.md` · `github.com/changer-collab/ai-banking-copilot` · `deploy/README.md` · `tests/`（1981 例） | **有** | 10-29 复核：`ruff` / 严格 `mypy` / `pytest` 见 `docs/RESULTS.md` §14；README 的部署入口与渠道口径本轮同步 |
+| 5 | 安全自评报告：**权限分级实现说明 + 已知风险清单** | `docs/security-self-assessment.md` | **有** | 清单已按 10-29 线上实测复核到 **R1–R21**：R16 / R17 / R19 / R20 关闭，R18 保留（代码已接线、生产凭据与公网回调未配置），新增 **R21（渠道身份绑定无自助入口）**；R15（手机尾号匹配）保留 |
 
 ---
 
@@ -162,7 +162,7 @@
 | 2 | 安全自评 R1–R20 复核 | `docs/security-self-assessment.md` | 完成：R16 / R17 / R18 / R19 / R20 关闭，仅 R15 保留 |
 | 3 | README 部署入口与渠道口径 | `README.md` | 完成：APP = PWA（无 `/m`）、IM = 飞书适配器 |
 | 4 | 系统架构图 / 架构说明 / 算法说明 | `docs/assets/architecture.svg` · `architecture.md` · `algorithms.md` | 已同步（10-27 完成，本轮未改） |
-| 5 | 全量门禁 | `ruff` / `mypy` / `pytest` | RESULTS.md §10 基线 1790 全绿；本轮文档同步复跑时，1 条时延敏感用例（`test_reviewer_total_deadline_closes_a_real_dripping_connection`）在高负载下抖动，**单跑通过**——提交前须在空闲机器再跑一次全量 |
+| 5 | 全量门禁 | `ruff` / `mypy` / `pytest` | `RESULTS.md` §14 基线 **1981** 条（`mypy` 105 files，两次全量退出码 0）；时延敏感用例 `test_reviewer_total_deadline_closes_a_real_dripping_connection` 在高负载下会抖动，**单跑通过**——提交前须在空闲机器再跑一次全量 |
 
 ### 5.2 封版前必须完成（只能靠人或现场）
 

@@ -77,8 +77,24 @@ install httpx2 instead.
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
-python scripts/run_benchmark.py --output runtime/benchmark-evidence --dataset evidence_dev_v1 --repeat 2
+python scripts/run_benchmark.py --output runtime/benchmark/evidence-dev-v1-fix2 --dataset evidence_dev_v1 --repeat 2
 ```
+
+逐例落盘（每条用例一行，七列：`attack_blocked / false_rejection / completed / money_traceable / reviewer_group / reviewer_status`）：
+
+```
+python scripts/export_cases_csv.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --output docs/results/web-smoke-v2-cases.csv
+python scripts/export_cases_csv.py --input runtime/benchmark/evidence-dev-v1-fix2/run-1 --output docs/results/evidence-dev-v1-cases.csv
+```
+
+| 数据集 | 逐例 CSV | 行数 | 按 CSV 复算（`true` 的条数） |
+|---|---|---|---|
+| `web-smoke-v2` | [`docs/results/web-smoke-v2-cases.csv`](results/web-smoke-v2-cases.csv) | 21 | 拦截 5、误拒 0、完成 16、含可回溯数值的用例 12 |
+| `evidence_dev_v1` | [`docs/results/evidence-dev-v1-cases.csv`](results/evidence-dev-v1-cases.csv) | 93 | 拦截 31、误拒 0、完成 67、含可回溯数值的用例 33 |
+
+口径差异（不要混用）：上表 `completed` 统计全部用例的 `state == "completed"`，因此包含幂等重放与独立提交用例；「任务成功率」只算 legitimate 的 14/14 与 49/49。`money_traceable` 是**用例级**折叠（该例所有展示数值都通过才记 `true`），而四个数字里的「数字可回溯率」是**证明级** 26/26 与 74/74（一条用例可含多条证明，如 12 个用例共 26 条证明）。
+
+CSV 只由 `results.json` 扁平化而来（脚本不重跑评测）；两次运行的 `business_digest` 相同（`web-smoke-v2` = `2e06ed02…8bf0c`，`evidence_dev_v1` = `6f22036b…b31a`），故 CSV 可直接 `diff` 用于核对两次评测是否逐例一致。
 
 ### 2. 原唯一红例 `web-transfer-due`：已修复（口径补齐，不改产品行为）
 
@@ -244,6 +260,67 @@ python scripts/check_design_sync.py   # 仅 app.css 两仓既有漂移（非本�
 - 前端静态壳：`app.css?v=7` / `workspace.css?v=13` / `app.js?v=29` / `aib-static-shell-v22` / `sw.js?v=22`。
 - 合并窗口：`merge/wang`、`merge/gao`、`merge/xu`、`merge/lin` 四个分组分支均已进入 `sprint/1026`（`git branch --merged sprint/1026` 可核）；本轮未增删测试，故仍为 **1790**。
 - 口径变更：`scripts/measure_interaction.py` 新增「错误恢复成功率」（trace 含 4xx / `rejected` / `failed` / `taken_over` / `committed_unverified` 的样本中最终 `completed` 的比例；**无样本输出 `null`**），其余分母与 §5 一致。
+
+---
+
+### 12. 公网重建基线（2026-10-29）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 104 source files
+python -m pytest -q                   # tests=1790 / failures=0 / errors=0 / skipped=0（退出码 0）
+python scripts/check_served_page.py --base-url https://speeches-plant-confidence-constantly.trycloudflare.com   # ALL OK（27 项）
+python scripts/e2e_check.py --base-url https://speeches-plant-confidence-constantly.trycloudflare.com          # ALL PASSED（[1]–[6]）
+```
+
+- 前端静态壳（线上实测）：`tokens.css?v=2` / `app.css?v=7` / `workspace.css?v=16` / `app.js?v=32` / `sw.js?v=25` / `aib-static-shell-v25`。
+- 部署：本地打包（排除 `.git` / `runtime` / `.env`）→ `scp` → 服务器备份 `~/aib-backup-1029.tgz` → 解包进 `~/aib` →
+  `API_HOST_PORT=18080 docker compose -p aib up -d --build api`；**只重建 `aib-api`，`aib-tunnel` 未重启，公网地址不变**。
+- 渠道口径：`im=local / bound_identities=1`；`feishu.configured=false / mode=replay / reason=replay_mode / card_action=false`
+  （真实凭据尚未写入，接入步骤见 `docs/2026-10-27/飞书接入-配置单.md`）。
+- 公网 e2e 侧证：`settled: transfer｜审计ID db6ba7c178b5e865`、`cancelled: cancel_subscription｜审计ID 3545f62401d5ba9d`。
+
+---
+
+### 13. 本地基线（2026-10-29，P0 补齐 + B4/B5 + PWA 注册修复）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 104 source files
+python -m pytest -q --junitxml=runtime/junit-full.xml   # tests=1799 / failures=0 / errors=0 / skipped=0，343.59s
+python scripts/check_served_page.py   # ALL OK（27 项 + 3 条额度口径）
+python scripts/e2e_check.py           # ALL PASSED（[1]–[6]）
+python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GLOSS 键集不一致（非本轮引入，见验收记录 §5 残留 3）
+```
+
+- 服务：`AIB_DISABLE_LLM=1`（模板通道）+ `AIB_BREAKER_STATE=memory`，`127.0.0.1:8000`。
+- 较 §11 的 **1790** 增加 9 条：`tests/scripts/test_export_cases_csv.py`（5，逐例 CSV 列口径）、`tests/planning/test_llm_template.py`（3，理财/卡片口语查询规则）、`tests/web/test_pwa.py`（1，Service Worker 根作用域）。
+- 前端静态壳（本地）：`workspace.css?v=17` / `app.js?v=36` / `sw.js` → `aib-static-shell-v29`；线上仍是 §12 的 `v16 / v32 / shell-v25`，**本轮未部署**。
+- P0 补齐：`docs/results/evidence-dev-v1-cases.csv`（93 行，新增）与重生成的 `web-smoke-v2-cases.csv`（21 行）由 `scripts/export_cases_csv.py` 从 `results.json` 扁平化，口径见 §1；README「证据与复跑」新增对标表（我方四数字 vs FraudBench 49%–65% / APort Vault 140→0）。
+
+---
+
+### 14. 三人 PR 合入后基线（2026-10-29，PR #32 / #35 / #36 与 #37）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 105 source files
+python -m pytest -q                   # 1981 条：两次全量退出码 0；另一次 1980 passed + 1 条时延敏感用例抖动
+python scripts/check_served_page.py   # ALL OK
+python scripts/e2e_check.py           # ALL PASSED（[1]–[6]）
+python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GLOSS 键集不一致（非本轮引入）
+```
+
+- 提交：`f576ccc`（`sprint/1026` 合入 #36 王昌泽 / #35 徐思云 / #32 林晓研）+ `db8e61d`（#37 合并 `sprint/1026` 并解 7 个文件冲突）；本节数字跑在本分支工作树上，含当日统一改动（见下条，尚未提交）。
+- 较 §13 的 **1799** 增加 **182** 条：三人 D2 交付（飞书渠道与订阅、理财与记录页、账单与卡片）及 #37 的合并回归用例。
+- 计数口径：`pytest --collect-only -q` 汇总 1981。注意 `pyproject.toml` 的 `addopts` 已含 `-q`，命令行再传 `-q` 会把汇总行一起抑制。
+- 抖动说明：`tests/planning/test_reviewer.py::test_reviewer_total_deadline_closes_a_real_dripping_connection` 在本机第三次全量（427s）判红（`assert Thread.Event.is_set()` 为 False），同轮 `1980 passed`；**单跑 1.24s 通过**，属既有高负载抖动，与 §5.1 记录一致，非本轮引入。
+- 前端静态壳：`workspace.css?v=20` / `app.js?v=39` / `aib-static-shell-v32`（五处断言同步：`web/page.py`、`web/assets/sw.js`、`web/assets/app.js`、`tests/web/test_pwa.py`、`scripts/check_served_page.py`）。
+- 当日统一项：
+  1. `docker-compose.yml` 与 `.env.example` 补 `AIB_FEISHU_*` 四项透传——此前配置单要求、实现缺失，导致容器内 health 永远停在 `mode=replay`；
+  2. `tests/web/test_web_integration.py` 的 `app.js` / `workspace.css` 版本号由 `v=27` / `v=11` 归位到当前值（此前不校验 query，属隐性漂移）；
+  3. 账单画像改用 `.bills-profile-card` / `.bills-profile-grid`，不再覆盖个人中心的 `.profile-card` / `.profile-grid`（2 列）。
+- 残留：`check_design_sync.py` 的 `app.css` 漂移与 `GLOSS.rule` 键集不一致为既有问题（`git diff de5b9f1 HEAD -- src/ai_banking_copilot/web/assets/app.css` 为空，本轮未动）。
 
 ---
 

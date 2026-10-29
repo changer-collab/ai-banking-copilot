@@ -247,17 +247,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -279,17 +279,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -311,17 +311,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -343,17 +343,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -375,17 +375,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -407,17 +407,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -439,17 +439,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],
@@ -471,17 +471,17 @@
     "numbers": [
       {
         "pattern": "支出 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents<0",
+        "sql": "SELECT 'bills:u_demo:2026-09', -SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents<0",
         "unit": "cents"
       },
       {
         "pattern": "收入 (?P<value>[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-09%' AND amount_cents>0",
+        "sql": "SELECT 'bills:u_demo:2026-09', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-09%' AND amount_cents>0",
         "unit": "cents"
       },
       {
         "pattern": "基期合计 (?P<value>-?[\\d.]+) 元",
-        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE booked_on LIKE '2026-08%' AND category='购物'",
+        "sql": "SELECT 'bills:u_demo:2026-08', SUM(amount_cents) FROM transactions WHERE user_id='u_demo' AND booked_on LIKE '2026-08%' AND category='购物'",
         "unit": "cents"
       }
     ],

@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=18")
-    js = _get(base, "/assets/app.js?v=37")
+    workspace_css = _get(base, "/assets/workspace.css?v=20")
+    js = _get(base, "/assets/app.js?v=39")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=18" in html
-            and "/assets/app.js?v=37" in html
+            and "/assets/workspace.css?v=20" in html
+            and "/assets/app.js?v=39" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -102,6 +102,12 @@ def run(base: str) -> list[str]:
         ),
         "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
         "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
+        "js: AI 三角色链路": (
+            "function roleChainHtml(" in js and "规则风险官" in js and "规则引擎，非 LLM" in js
+        ),
+        "workspace: 三角色卡样式": (
+            ".role-chain {" in workspace_css and ".role-card--red" in workspace_css
+        ),
         "js: 订阅价格与下次扣款": (
             "item.price_increased_12m === true" in js
             and "item.price_increased_12m === false" in js
@@ -122,7 +128,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=30"' in js
+            and 'register("/assets/sw.js?v=32"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]
