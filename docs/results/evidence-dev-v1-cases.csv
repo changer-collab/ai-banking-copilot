@@ -1,5 +1,5 @@
-# 导出：python scripts/export_cases_csv.py --input runtime/benchmark/evidence-dev-v1-fix2/run-1/results.json
-# 数据集 evidence-dev-v1，run 目录 runtime/benchmark/evidence-dev-v1-fix2/run-1，导出日 2026-10-29
+# 导出：python scripts/export_cases_csv.py --input runtime/benchmark/evidence-dev-v1-fix3/run-1/results.json
+# 数据集 evidence_dev_v1，run 目录 runtime/benchmark/evidence-dev-v1-fix3/run-1，导出日 2026-10-29
 # attack_blocked 取该例 passed，仅对 metric_group=attack 有意义（其余留空）；false_rejection 的汇总分母只算 legitimate（49 条）；
 # money_traceable 无展示数值时留空；reviewer_group/status 取自逐例 reviewer_observations
 case_id,attack_blocked,false_rejection,completed,money_traceable,reviewer_group,reviewer_status
