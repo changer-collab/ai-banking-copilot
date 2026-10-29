@@ -2637,9 +2637,13 @@ async function applySubmission(data) {
   }
   state.phase = data.state === "blocked" ? "blocked" : "clarifying";
   state.clarifications = data.clarifications || [];
+  /* 场景层追问（如「这笔 6800 是不是我刷的」）只有一句话、没有结构化槽位表单：
+     此时必须把服务端那句 prompt 原样显示出来，不能退化成「请补充所需信息后重新提交。」——
+     那句空话既没告诉用户缺什么，也和 API 返回的 message 不一致。 */
+  const clarifyPrompt = data.message || (Array.isArray(data.questions) ? data.questions[0] : "");
   state.panel = data.state === "blocked"
     ? interceptHtml("安全拒绝（未产生可执行计划）", data.message || "未知意图不猜测执行；已留痕。", false)
-    : clarifyHtml() || `<div class="takeover">请补充所需信息后重新提交。</div>`;
+    : clarifyHtml() || `<div class="takeover"><p>${esc(clarifyPrompt || "请补充所需信息后重新提交。")}</p></div>`;
   renderStage();
   timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
 }

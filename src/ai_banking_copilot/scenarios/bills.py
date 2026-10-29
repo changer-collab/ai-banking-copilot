@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import date
@@ -51,6 +52,7 @@ from ai_banking_copilot.policy.pep import (
     require_str,
 )
 from ai_banking_copilot.scenarios.base import (
+    ClarificationRequired,
     ScenarioHandler,
     ScenarioRefused,
     as_int,
@@ -94,6 +96,31 @@ _CAPABILITY_BOUNDARIES: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 """能力边界（场景层）：不支持的问法一律明确说做不到，不拿大额扫描结果冒充答案。"""
+
+_VAGUE_TRANSACTION = re.compile(
+    r"(?:这|那)(?:一)?笔|是不是我刷的|是我刷的"
+)
+"""指代不明的「某笔消费核实」（如「这笔 6800 是不是我刷的」）。
+
+这类问法没有可定位的键：流水里既没有用户口中的单据号，也没有「这笔」指向哪一行的确证。
+**不允许**拿默认账户的当月大额扫描结果顶替答案（那会把"没找到大额"说成"不是你刷的"）。
+"""
+
+_VAGUE_TRANSACTION_PROMPT = (
+    "无法定位你说的那一笔：交易流水里没有可反查的单据号，也没有「这笔」指向哪一行的依据。"
+    "请补充交易日期与商户（例如「9 月 27 日凌晨那笔 6880」），"
+    "或到「记录页 → 可疑清单」逐笔核对（那里带时间、城市、商户与置信度）。"
+)
+"""追问话术：给两个可执行出口（补日期商户 / 去可疑清单），不替用户猜是哪一笔。"""
+
+
+def _vague_transaction(intents: Sequence[Intent]) -> bool:
+    """判断这组意图里有没有「指代某笔」的原话片段（只看 span，不用它填任何控制槽）。"""
+    for intent in intents:
+        span = intent.slots.get("span")
+        if isinstance(span, str) and _VAGUE_TRANSACTION.search(span):
+            return True
+    return False
 
 
 def large_transactions(
@@ -162,6 +189,8 @@ class BillsHandler(ScenarioHandler):
         boundary = _capability_boundary(intents)
         if boundary is not None:
             raise ScenarioRefused(boundary)
+        if _vague_transaction(intents):
+            raise ClarificationRequired("transaction", _VAGUE_TRANSACTION_PROMPT)
         balances = [intent for intent in intents if intent.action == "account.balance"]
         account_txn = [
             intent for intent in intents if intent.action == "account.transactions"
