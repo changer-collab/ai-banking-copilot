@@ -799,6 +799,37 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .life-form__grid { display: grid; gap: 6px; margin-top: 6px; }
 .life-form__field { display: grid; gap: 2px; color: var(--ink-3); font-size: 11px; }
 .life-form__field .input { width: 100%; }
+/* DAG 步骤条：横向节点 + 箭头，纯 CSS；节点数随服务端 skeleton 增减 */
+.life-dag { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0 0; padding: 0; list-style: none; }
+.life-dag__node { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px 1px 4px; border: 1px solid var(--rule); border-radius: var(--r-chip); background: var(--voucher-alt); color: var(--ink-2); font-size: 11px; }
+.life-dag__index { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--blue-050); color: var(--blue-700); font-size: 9px; }
+.life-dag__arrow { color: var(--ink-3); font-size: 11px; list-style: none; }
+/* 预算执行进度：三段全由服务端事实点亮，未点亮即灰 */
+.life-budget { display: grid; gap: 3px; margin: 2px 0; }
+.life-budget__bar { display: flex; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.life-budget__seg { flex: 1; padding: 1px 0; border-radius: var(--r-chip); background: var(--rule); color: var(--ink-3); font-size: 10px; text-align: center; }
+.life-budget__seg.is-done { background: var(--blue-050); color: var(--blue-700); }
+.life-budget__meta { margin: 0; font-size: 10px; }
+
+/* 计划卡执行前预演：可折叠，三块内容全部回显服务端字段，缺字段就不画 */
+.preview { margin-top: var(--s-4); padding: var(--s-3) var(--s-4); border: 1px dashed var(--rule); border-radius: var(--r-control); background: var(--voucher-alt); }
+.preview > summary { cursor: pointer; color: var(--blue-700); font-size: var(--fs-small); }
+.preview__block { margin-top: var(--s-3); }
+.preview__title { display: block; margin-bottom: 4px; color: var(--ink-3); font-size: 11px; letter-spacing: .08em; }
+.preview__grid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px var(--s-3); margin: 0; font-size: var(--fs-small); }
+.preview__grid dt { color: var(--ink-3); }
+.preview__grid dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.preview__val--strong { font-weight: 700; }
+.preview__list { display: grid; gap: 2px; margin: 0; padding-left: 1.2em; color: var(--ink-2); font-family: var(--font-mono); font-size: 12px; }
+.preview__rules { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 0; }
+.preview__note { margin: var(--s-3) 0 0; font-size: 11px; }
+
+/* 数值溯源：回执后点开看 record_id + content_hash，均来自审计，没有就写没有 */
+.provenance { margin-top: var(--s-3); padding: var(--s-2) var(--s-3); border: 1px dashed var(--rule); border-radius: var(--r-control); }
+.provenance > summary { cursor: pointer; color: var(--blue-700); font-size: var(--fs-small); }
+.provenance__rows { display: grid; gap: var(--s-2); margin: var(--s-2) 0 0; padding: 0; list-style: none; }
+.provenance__rows li { display: grid; gap: 2px; }
+.provenance__rows .mono { overflow-wrap: anywhere; font-size: 11.5px; color: var(--ink-2); }
 
 @media (max-width: 960px) {
   #app > .main > .view { padding: var(--s-4); }

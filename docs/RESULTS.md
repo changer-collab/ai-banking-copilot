@@ -133,12 +133,13 @@ python scripts/run_benchmark.py --output runtime/benchmark-llm --channel llm-str
 命令：
 
 ```
-python scripts/measure_interaction.py --input runtime/benchmark/run-1 \
+python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2/run-1 \
   --demo "转给李娜 500 元" --demo "我妈下个月过生日" --demo "我卡丢了" \
   --output runtime/interaction/web-smoke-v2.json
 ```
 
 口径：用户轮 = trace 里 `/api/submit` + `/api/clarify` 的次数（只统计 `metric_group=legitimate`）；确认次数 = `/api/confirm` + `/api/due`；手机银行步数取自 `scripts/measure_interaction.py::MOBILE_BANKING_STEPS`（按现有页面实际点击路径计数）。
+错误恢复成功率 = 出错样本（trace 含 4xx 或 `rejected` / `failed` / `taken_over` / `committed_unverified`）中最终 `completed` 的比例；**无出错样本输出 `null`，不写 0**。
 
 | 指标 | 实测 |
 |---|---|
@@ -149,6 +150,7 @@ python scripts/measure_interaction.py --input runtime/benchmark/run-1 \
 | 平均确认次数 | 1.286 |
 | 系统发起占比（`/api/due`，用户未开口） | 14.29% |
 | 业务完成率 | 100.00% |
+| 错误恢复成功率 | **null**（无出错样本 0 例；合法用例未被 4xx / 拒绝 / 接管阻断） |
 
 | 场景 | 手机银行步数 | 本产品用户轮数 | 步数降幅 |
 |---|---|---|---|
@@ -226,6 +228,22 @@ python -m pytest -q           # tests=1790 / failures=0 / errors=0 / skipped=0�
 - 较第 9 节 **1789** 增加 1 条：`auth.resolve` 时间戳损坏时 fail-closed 的用例。
 - 前端静态壳：`app.css?v=7` / `workspace.css?v=9` / `app.js?v=25` / `aib-static-shell-v18` / `sw.js?v=18`。
 - 壳 HTML 已加 `Cache-Control: no-store`，避免旧 HTML 缓存锁死旧资源版本。
+
+### 11. 本轮收尾基线（2026-10-28 晚）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 104 source files
+python -m pytest -q                   # tests=1790 / failures=0 / errors=0 / skipped=0（退出码 0）
+python scripts/check_served_page.py   # ALL OK
+python scripts/e2e_check.py           # ALL PASSED
+python scripts/check_design_sync.py   # 仅 app.css 两仓既有漂移（非本轮引入）
+```
+
+- 提交：`102a8c8`（工作树含本轮未提交改动；跑服务前用 `scripts/reset_demo.py` 重置本地演示库，审计链报错属本地密钥/历史不一致，已按 G1 一键重置恢复）。
+- 前端静态壳：`app.css?v=7` / `workspace.css?v=13` / `app.js?v=29` / `aib-static-shell-v22` / `sw.js?v=22`。
+- 合并窗口：`merge/wang`、`merge/gao`、`merge/xu`、`merge/lin` 四个分组分支均已进入 `sprint/1026`（`git branch --merged sprint/1026` 可核）；本轮未增删测试，故仍为 **1790**。
+- 口径变更：`scripts/measure_interaction.py` 新增「错误恢复成功率」（trace 含 4xx / `rejected` / `failed` / `taken_over` / `committed_unverified` 的样本中最终 `completed` 的比例；**无样本输出 `null`**），其余分母与 §5 一致。
 
 ---
 

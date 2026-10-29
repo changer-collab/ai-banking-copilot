@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=13" />
+<link rel="stylesheet" href="/assets/workspace.css?v=16" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -173,6 +173,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <p>查账单、办转账、管理卡片与订阅。缺少的信息，我会向您确认；需要授权的操作，会先给您<b>计划卡</b>。</p>
         <div class="btn-row" id="presets"></div>
         <p class="muted welcome-note">演示环境 · 模拟资金与演示商户订单</p>
+        <p class="muted welcome-note">绿＝仅自动查询 · 黄＝由您确认 · 红＝需要强验证</p>
       </section>
     </div>
 
@@ -400,7 +401,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=29"></script>
+<script src="/assets/app.js?v=32"></script>
 </body>
 </html>
 """

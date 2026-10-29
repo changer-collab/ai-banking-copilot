@@ -159,6 +159,27 @@ const LIFE_EVENT_STATUS = {
   failed: "失败",
 };
 
+/* 生活事件 DAG 节点展示名：只做「动作 → 中文」的展示映射，动作名仍以原始文本挂 title */
+const LIFE_STEP_LABEL = {
+  "funds.freeze": "冻结预算",
+  "funds.release": "解冻剩余",
+  "merchant.order": "下单结算",
+  "transfer.schedule": "按期转出",
+  "transfer.create": "转出",
+  "transfer.request_collection": "发起分摊",
+  "subscription.list": "代扣清单",
+  "card.set_limit": "调整限额",
+  "card.lock": "锁卡",
+  "card.report_lost": "挂失",
+  "card.apply_virtual": "补虚拟卡",
+  "password.change": "改密码",
+  "account.balance": "查余额",
+  "account.transactions": "查交易",
+  "wealth.redeem": "赎回",
+  "bills.yearly": "年度账单",
+  "bills.monthly": "月度账单",
+};
+
 function newRequestId() {
   try {
     if (window.crypto && crypto.randomUUID) return "req-" + crypto.randomUUID();
@@ -1165,6 +1186,27 @@ function traceHtml(trace) {
     </div>`;
 }
 
+/* 执行前预演：三块全部回显服务端计划卡字段（summary / balance_trace / decision.reasons），
+   绿卡不预演；缺字段就不画那一块，不估算、不补 0。 */
+function previewHtml(card) {
+  if (!card || !card.level || card.level === "GREEN") return "";
+  const rows = card.summary || [];
+  const trace = card.balance_trace || [];
+  const reasons = state.decision ? state.decision.reasons || [] : [];
+  const impact = rows.length
+    ? `<dl class="preview__grid">${rows
+        .map((row) => `<dt>${esc(row.label)}</dt><dd${row.emphasis ? ' class="preview__val--strong"' : ""}>${esc(row.value)}</dd>`)
+        .join("")}</dl>`
+    : "";
+  return `<details class="preview">
+    <summary>确认后会发生什么</summary>
+    ${impact ? `<div class="preview__block"><span class="preview__title">影响面</span>${impact}</div>` : ""}
+    ${trace.length ? `<div class="preview__block"><span class="preview__title">可用余额轨迹</span><ol class="preview__list">${trace.map((row) => `<li>${esc(row)}</li>`).join("")}</ol></div>` : ""}
+    <div class="preview__block"><span class="preview__title">命中规则</span><p class="preview__rules">${rulesHtml(reasons)}</p></div>
+    <p class="muted preview__note">以上数字均取自服务端计划卡，前端未做二次计算。</p>
+  </details>`;
+}
+
 function voucherHtml() {
   const card = state.card;
   const lines = card.lines || [];
@@ -1197,9 +1239,13 @@ function voucherHtml() {
 
     ${quotaHtml(card)}
 
+    ${previewHtml(card)}
+
     ${lines.length ? `<ol class="steps">${lines.map(stepHtml).join("")}</ol>` : ""}
 
     ${traceHtml(card.balance_trace)}
+
+    ${card.expires_at ? `<p class="muted voucher__expiry">有效期至 ${esc(momentLabel(card.expires_at))}；过期后需重新生成计划。</p>` : ""}
 
     <p class="muted" style="margin-top: var(--s-3)">
       命中规则<span class="rules">${rulesHtml(state.decision ? state.decision.reasons || [] : [])}</span>
@@ -1433,12 +1479,18 @@ function setButtons() {
   const clarifyButton = el("btn-clarify");
   if (clarifyButton) clarifyButton.disabled = offline || busy;
   const redPending = state.card && state.card.level === "RED" && !strongPhase;
-  el("btn-confirm").textContent = strongPhase
-    ? "提交验证码并执行"
-    : redPending
-      ? "申请强验证"
-      : "确认并执行";
-  el("btn-confirm").disabled = operationUnknown || offline || !(awaiting || strongPhase) || busy;
+  /* 服务端已校验过期；前端只做「不让人白点」，不改服务端语义 */
+  const expired = Boolean(
+    state.card && state.card.expires_at && Date.now() >= Date.parse(state.card.expires_at),
+  );
+  el("btn-confirm").textContent = expired
+    ? "计划已过期 · 重新发起"
+    : strongPhase
+      ? "提交验证码并执行"
+      : redPending
+        ? "申请强验证"
+        : "确认并执行";
+  el("btn-confirm").disabled = operationUnknown || offline || expired || !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = operationUnknown || offline || state.busy || !(state.phase === "executing" || awaiting);
   el("btn-resume").disabled = operationUnknown || offline || busy || !state.card || state.phase !== "interrupted";
   el("btn-reject").disabled = operationUnknown || offline || busy || !state.card || !(awaiting || state.phase === "interrupted");
@@ -1950,11 +2002,42 @@ function applyExecution(data) {
   state.notice = complete
     ? `<div class="takeover"><p>${esc(data.message || "计划执行完成")}</p>` +
       results.map((item) => `<p>${esc(resultMessage(item))}</p>`).join("") + `</div>` +
-      (billHtml || adviceFallback)
+      (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
   renderStage();
+  if (complete) void loadProvenance();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
   setButtons();
+}
+
+/* 数值溯源：只读审计里该用户最近一条 execution 事件的 provenance（record_id + content_hash），
+   没有就如实说没有，绝不补哈希。 */
+function provenancePanelHtml() {
+  return `<details class="provenance" id="provenance-panel">
+    <summary>数值溯源（record_id + content_hash）</summary>
+    <p class="muted">读取审计…</p>
+  </details>`;
+}
+
+async function loadProvenance() {
+  const panel = el("provenance-panel");
+  if (!panel) return;
+  const head = "<summary>数值溯源（record_id + content_hash）</summary>";
+  try {
+    const result = await apiFetch("GET", "/api/audit?limit=20");
+    if (!result.ok) throw new Error(String(result.status));
+    const events = Array.isArray(result.data.events) ? result.data.events : [];
+    const latest = events.find((event) => event.kind === "execution");
+    const payload = latest && latest.payload ? latest.payload : {};
+    const rows = Array.isArray(payload.provenance) ? payload.provenance : [];
+    panel.innerHTML = head + (rows.length
+      ? `<ul class="provenance__rows">${rows
+          .map((row) => `<li><span class="mono">${esc(String(row.record_id || ""))}</span><span class="mono">${esc(String(row.content_hash || ""))}</span></li>`)
+          .join("")}</ul>`
+      : '<p class="muted">本次执行未产生可溯源记录（审计中没有 provenance），不展示哈希。</p>');
+  } catch (_) {
+    panel.innerHTML = head + '<p class="muted">审计暂不可读，溯源未展示。</p>';
+  }
 }
 
 async function onInterrupt() {
@@ -2386,18 +2469,25 @@ function closeProfile() {
 async function refreshProfileEntry() {
   const entry = el("profile-entry-name");
   const sideName = el("side-user-name");
-  if (!entry && !sideName) return;
+  const avatar = document.querySelector(".side-user__avatar");
+  if (!entry && !sideName && !avatar) return;
   try {
     const result = await apiFetch("GET", "/api/me");
-    if (!result.ok) return;
+    if (!result.ok) {
+      if (avatar) avatar.textContent = "演示";
+      return;
+    }
     const user = (result.data || {}).user || {};
     const name = user.display_name || user.username || "当前用户";
     if (name) {
       if (entry) entry.textContent = name;
       if (sideName) sideName.textContent = name;
+      /* 头像只取首字做视觉标识，无障碍名仍由 #side-user-name 提供 */
+      if (avatar) avatar.textContent = Array.from(name)[0] || "示";
     }
   } catch (_) {
     /* 只影响入口文案，静默保留默认值 */
+    if (avatar) avatar.textContent = "演示";
   }
 }
 
@@ -2448,6 +2538,39 @@ function lifeFieldHtml(eventId, field) {
     return `<select ${attrs}>${optionsHtml(field.type)}</select>`;
   }
   return `<input ${attrs} type="${field.type}" inputmode="${field.type === "number" ? "decimal" : "text"}" placeholder="${esc(field.placeholder || "")}" />`;
+}
+
+/* 横向 DAG 步骤条：节点与顺序全部来自服务端下发的 skeleton，前端不拼步骤、不猜动作 */
+function lifeDagHtml(skeleton) {
+  const steps = Array.isArray(skeleton) ? skeleton.filter((step) => typeof step === "string" && step) : [];
+  if (!steps.length) return "";
+  const nodes = steps.map((step, index) => {
+    const label = LIFE_STEP_LABEL[step] || step;
+    return `<li class="life-dag__node" title="${esc(step)}"><span class="life-dag__index tech mono">${index + 1}</span>${esc(label)}</li>`;
+  });
+  return `<ol class="life-dag" aria-label="链路步骤">${nodes.join('<li class="life-dag__arrow" aria-hidden="true">→</li>')}</ol>`;
+}
+
+const LIFE_BUDGET_STEPS = [
+  ["freeze", "冻结"],
+  ["order", "下单"],
+  ["release", "释放"],
+];
+
+/* 预算执行进度：三段是否点亮由服务端按 holds / 下单回执算出，无数据即不画 */
+function lifeBudgetHtml(budget) {
+  if (!budget || typeof budget !== "object") return "";
+  const steps = budget.steps || {};
+  const segments = LIFE_BUDGET_STEPS.map(
+    ([key, label]) => `<li class="life-budget__seg${steps[key] ? " is-done" : ""}">${label}</li>`,
+  ).join("");
+  const state = budget.state === "released" ? "已释放" : "冻结中";
+  const amount = typeof budget.amount_cents === "number" ? ` · 冻结余额 ${yuan(budget.amount_cents)}` : "";
+  const holdId = budget.hold_id ? ` · 冻结单 <span class="tech">${esc(budget.hold_id)}</span>` : "";
+  return `<div class="life-budget">
+        <ol class="life-budget__bar" aria-label="预算执行进度">${segments}</ol>
+        <p class="muted life-budget__meta">${esc(state)}${esc(amount)}${holdId}</p>
+      </div>`;
 }
 
 function lifeValues(form) {
@@ -2518,6 +2641,7 @@ async function refreshLifeEvents() {
     const description = typeof prototype.description === "string" ? prototype.description : "";
     const example = typeof prototype.example === "string" ? prototype.example : "";
     const steps = typeof prototype.steps === "number" ? `${prototype.steps} 步` : "";
+    const dag = lifeDagHtml(prototype.skeleton);
     const fields = LIFE_FORMS[eventId] || [];
     const form = fields.length
       ? `<details class="life-form"><summary>填写参数</summary><div class="life-form__grid">
@@ -2527,6 +2651,7 @@ async function refreshLifeEvents() {
     return `<article class="life-card" data-event="${esc(eventId)}">
       <div class="life-card__head"><b>${esc(name || eventId)}<span class="tech mono"> · ${esc(eventId)}</span></b><span class="life-card__steps">${esc(steps)}</span></div>
       <p class="life-card__desc">${esc(description)}</p>
+      ${dag}
       <p class="life-card__example">示例：${esc(example)}</p>
       ${form}
       <div class="life-card__foot">
@@ -2542,6 +2667,7 @@ async function refreshLifeEvents() {
       return `<article class="takeover insight-item">
       <div><b>${esc(record.event_name || record.event_id)}</b> <span class="chip">${esc(label)}</span></div>
       <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
+      ${lifeBudgetHtml(record.budget)}
       <p class="muted">会话 <span class="tech">${esc(record.session_id)}</span>
         <button class="life-send" type="button" data-life-open="${esc(record.session_id)}">打开会话</button></p>
     </article>`;
@@ -3287,7 +3413,7 @@ window.addEventListener("online", () => {
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=22", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=25", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

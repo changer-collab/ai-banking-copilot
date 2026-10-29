@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=13")
-    js = _get(base, "/assets/app.js?v=29")
+    workspace_css = _get(base, "/assets/workspace.css?v=16")
+    js = _get(base, "/assets/app.js?v=32")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=13" in html
-            and "/assets/app.js?v=29" in html
+            and "/assets/workspace.css?v=16" in html
+            and "/assets/app.js?v=32" in html
         ),
         "page: 场景①额度卡容器": 'id="quota-panel"' in html and 'id="quota-body"' in html,
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
@@ -95,6 +95,8 @@ def run(base: str) -> list[str]:
         "js: 红色强验证挑战": (
             "strong-verify" in js and "申请强验证" in js and "/api/verify/request" in js
         ),
+        "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
+        "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
     }
     bad = [key for key, ok in checks.items() if not ok]
     for key, ok in checks.items():
