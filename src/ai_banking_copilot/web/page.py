@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=17" />
+<link rel="stylesheet" href="/assets/workspace.css?v=19" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -74,6 +74,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="top__s">今天，有什么可以帮您？</div>
       </div>
       <div class="topbar__nav">
+        <button class="btn btn--ghost" id="btn-install" type="button">安装应用</button>
         <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
                 aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
         <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
@@ -88,6 +89,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         </button>
       </div>
     </header>
+    <p class="muted" id="install-status" role="status" hidden></p>
 
     <section class="view" id="view-home" hidden>
       <header class="view__head">
@@ -264,6 +266,9 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="bills-status">正在读取账单识别结果…</p>
           <p class="muted" id="bills-disclaimer" hidden></p>
           <div id="bills-summary"></div>
+          <div id="bills-profile"></div>
+          <div id="bills-charts"></div>
+          <div id="bills-top3"></div>
           <div id="bills-findings"></div>
           <details class="bills-details" id="bills-details">
             <summary>账单明细（本期交易）</summary>
@@ -279,11 +284,27 @@ _PAGE_HTML = """<!DOCTYPE html>
         <section class="panel" id="wealth-panel">
           <p class="panel__title">理财 · 测评与持仓</p>
           <div class="muted" id="wealth-status">正在读取测评状态与持仓…</div>
+          <div id="wealth-viz">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取风险等级与持仓占比…</p>
+              <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <div id="wealth-assessment"><p class="muted">尚未读取风险测评问卷。</p></div>
           <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定</span></p>
-          <div id="wealth-products"><p class="muted">尚未读取产品目录。</p></div>
+          <div id="wealth-products">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取产品目录…</p>
+              <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <p class="panel__title panel__title--sub">我的持仓</p>
-          <div id="wealth-holdings"><p class="muted">尚未读取持仓。</p></div>
+          <div id="wealth-holdings">
+            <div class="wealth-loading" role="status" aria-live="polite">
+              <p class="muted">正在读取持仓…</p>
+              <span class="skeleton"></span><span class="skeleton"></span>
+            </div>
+          </div>
           <p class="muted" id="wealth-source"></p>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>
@@ -296,6 +317,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="panel__title">卡片管理</p>
           <p class="muted" id="cards-status">正在读取卡片…</p>
           <div id="cards-list"></div>
+          <div id="cards-visual"></div>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="cards">看卡片状态</button>
           </div>
@@ -309,6 +331,10 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="subscription-boundary" hidden></p>
           <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
           <div id="subscription-cancel-result" hidden></div>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">查看扣款记录</button>
+            <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button>
+          </div>
         </section>
       </div>
 
@@ -342,14 +368,19 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>渠道健康</h2>
-          <p class="muted">未接入的渠道如实显示 stub；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
+          <p class="muted">未接入的渠道如实显示 replay/未接入；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
         </div>
         <button class="btn btn--sm" type="button" id="btn-health-refresh">刷新</button>
       </header>
       <section class="panel" id="channel-health-panel">
         <p class="panel__title">渠道状态</p>
         <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-        <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
+        <div class="channel-health-table-wrap" id="channel-health-list">
+          <table class="channel-health-table">
+            <thead><tr><th>渠道</th><th>状态</th><th>最后事件</th><th>成功</th><th>失败</th><th>限流</th><th>回放模式</th></tr></thead>
+            <tbody id="channel-health-body"><tr><td colspan="7">尚未读取渠道状态。</td></tr></tbody>
+          </table>
+        </div>
       </section>
     </section>
 
@@ -405,7 +436,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=36"></script>
+<script src="/assets/app.js?v=38"></script>
 </body>
 </html>
 """

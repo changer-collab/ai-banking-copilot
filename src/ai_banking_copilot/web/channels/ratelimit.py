@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from typing import Any, TypeVar
@@ -16,6 +18,8 @@ from typing import Any, TypeVar
 from ai_banking_copilot.gateway.store import Store
 
 T = TypeVar("T")
+AttemptCallback = Callable[[int, int | None, str | None], None]
+RetryCallback = Callable[[int, float], None]
 
 EVENT_LEDGER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS channel_events (
@@ -27,6 +31,93 @@ CREATE TABLE IF NOT EXISTS channel_events (
 """
 
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 8.0)
+DEFAULT_RESERVATION_TTL_S = 60.0
+DEFAULT_MAX_RESERVATIONS = 1000
+
+
+@dataclass
+class _Bucket:
+    tokens: float
+    updated_at: float
+
+
+class TokenBucketRateLimiter:
+    """按外部身份计数的进程内令牌桶，并支持一次性预准入。"""
+
+    def __init__(
+        self,
+        *,
+        limit: int = 20,
+        window_s: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+        reservation_ttl_s: float = DEFAULT_RESERVATION_TTL_S,
+        max_reservations: int = DEFAULT_MAX_RESERVATIONS,
+    ) -> None:
+        if limit < 1 or window_s <= 0 or reservation_ttl_s <= 0:
+            raise ValueError("invalid_rate_limit")
+        if max_reservations < 1:
+            raise ValueError("invalid_reservation_capacity")
+        self._limit = limit
+        self._refill_per_second = limit / window_s
+        self._clock = clock
+        self._reservation_ttl_s = reservation_ttl_s
+        self._max_reservations = max_reservations
+        self._buckets: dict[str, _Bucket] = {}
+        self._reservations: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._lock = Lock()
+
+    def allow(self, key: str, *, reservation_id: str | None = None) -> bool:
+        """消费预准入标记；没有标记时直接补充并扣减一个令牌。"""
+        with self._lock:
+            now = self._clock()
+            self._expire_reservations(now)
+            if reservation_id is not None:
+                marker = (key, reservation_id)
+                if marker in self._reservations:
+                    del self._reservations[marker]
+                    return True
+            return self._consume(key, now)
+
+    def reserve(self, key: str, reservation_id: str) -> bool:
+        """预先扣减令牌并保存一次性标记，供后台 dispatch 消费。"""
+        with self._lock:
+            now = self._clock()
+            self._expire_reservations(now)
+            marker = (key, reservation_id)
+            if marker in self._reservations:
+                return True
+            if len(self._reservations) >= self._max_reservations:
+                return False
+            if not self._consume(key, now):
+                return False
+            self._reservations[marker] = now + self._reservation_ttl_s
+            return True
+
+    def _consume(self, key: str, now: float) -> bool:
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _Bucket(tokens=float(self._limit), updated_at=now)
+            self._buckets[key] = bucket
+        elapsed = max(0.0, now - bucket.updated_at)
+        bucket.tokens = min(
+            float(self._limit), bucket.tokens + elapsed * self._refill_per_second
+        )
+        bucket.updated_at = now
+        if bucket.tokens < 1.0:
+            return False
+        bucket.tokens -= 1.0
+        return True
+
+    def _expire_reservations(self, now: float) -> None:
+        expired = [
+            marker for marker, expires_at in self._reservations.items() if expires_at <= now
+        ]
+        for marker in expired:
+            del self._reservations[marker]
+
+
+SlidingWindowRateLimiter = TokenBucketRateLimiter
+"""兼容旧导入名；实现已统一为令牌桶。"""
 
 
 class EventLedger:
@@ -76,13 +167,16 @@ class EventLedger:
 def retry_outbound(
     send: Callable[[], T],
     *,
-    attempts: int = 3,
+    attempts: int = 4,
     sleeper: Callable[[float], None] = time.sleep,
     delays: tuple[float, ...] = DEFAULT_RETRY_DELAYS,
+    on_attempt: AttemptCallback | None = None,
+    on_retry: RetryCallback | None = None,
 ) -> T:
     """发送出站消息；仅对超时与 5xx 重试，最多调用 ``attempts`` 次。
 
     发送函数可以返回带 ``status_code`` 属性的响应对象，也可以返回整数状态码。
+    每次实际调用都报告尝试结果；异常只报告稳定类型名，不包含异常正文。
     4xx 或其他成功结果立即返回；最后一次 5xx 也原样返回，交由上层记录失败。
     """
     if attempts < 1:
@@ -91,12 +185,21 @@ def retry_outbound(
         try:
             result = send()
         except Exception as error:
+            if on_attempt is not None:
+                on_attempt(index + 1, None, type(error).__name__)
             if not _retryable_exception(error) or index >= attempts - 1:
                 raise
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
             _sleep_before_retry(index, delays, sleeper)
             continue
 
-        if _status_code(result) >= 500 and index < attempts - 1:
+        status = _status_code(result)
+        if on_attempt is not None:
+            on_attempt(index + 1, status, None)
+        if status >= 500 and index < attempts - 1:
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
             _sleep_before_retry(index, delays, sleeper)
             continue
         return result
@@ -109,6 +212,12 @@ class HealthRegistry:
     def __init__(self) -> None:
         self._lock = Lock()
         self._channels: dict[str, dict[str, object]] = {}
+
+    def register(self, channel: str, *, replay_mode: bool = False) -> None:
+        """注册物理渠道，使零事件快照也包含完整字段。"""
+        with self._lock:
+            stats = self._stats(channel)
+            stats["replay_mode"] = replay_mode
 
     def record_event(self, channel: str, *, success: bool) -> None:
         with self._lock:
@@ -149,6 +258,7 @@ class HealthRegistry:
                 "replayed": 0,
                 "retries": 0,
                 "ratelimit_hits": 0,
+                "replay_mode": False,
             }
         return self._channels[channel]
 

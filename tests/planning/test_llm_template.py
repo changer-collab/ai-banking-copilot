@@ -154,6 +154,16 @@ def test_bare_verbs_keep_write_semantics() -> None:
         assert actions and actions[0] == "subscription.cancel", utterance
 
 
+@pytest.mark.parametrize(
+    "utterance",
+    ["我不想取消视频会员", "会员不会取消", "会员能取消吗", "视频会员是否取消"],
+)
+def test_subscription_cancel_query_does_not_become_a_write(utterance: str) -> None:
+    actions = _actions(utterance)
+    assert actions and actions[0] == "subscription.list", utterance
+    assert "subscription.cancel" not in actions, utterance
+
+
 def test_new_list_rules_reachable() -> None:
     expected = {
         "理财产品": "wealth.list",

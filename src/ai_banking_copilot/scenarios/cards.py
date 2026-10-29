@@ -58,6 +58,9 @@ CARD_ACTIONS = frozenset(
 _CARD_SCOPED_ACTIONS = frozenset({"card.lock", "card.unlock", "card.report_lost", "card.set_limit"})
 _LIMIT_ACTIONS = frozenset({"card.apply_virtual", "card.set_limit"})
 
+CARD_DAILY_LIMIT_MAX_CENTS = 5_000_000
+"""单卡日限额上限（分）：5 万元。调额 / 补卡超过该值一律拒绝（演示风控上限）。"""
+
 
 def loss_report_request(user_id: str) -> PolicyRequest:
     """挂失的 PDP 请求：**不可逆**（≥ 红），与金额无关。"""
@@ -112,6 +115,11 @@ def _build_card_node(
         )
         if limit.cents <= 0:
             raise ScenarioRefused("日限额必须为正")
+        if limit.cents > CARD_DAILY_LIMIT_MAX_CENTS:
+            raise ScenarioRefused(
+                f"单卡日限额上限 {Money(CARD_DAILY_LIMIT_MAX_CENTS).yuan} 元，"
+                f"暂不支持调整到 {Money(limit.cents).yuan} 元"
+            )
         params["daily_limit_cents"] = limit.cents
     return PlanNode(
         node_id=node_id,

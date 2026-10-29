@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=17")
-    js = _get(base, "/assets/app.js?v=36")
+    workspace_css = _get(base, "/assets/workspace.css?v=19")
+    js = _get(base, "/assets/app.js?v=38")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,14 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=17" in html
-            and "/assets/app.js?v=36" in html
+            and "/assets/workspace.css?v=19" in html
+            and "/assets/app.js?v=38" in html
+        ),
+        "page: PWA 安装与订阅入口": (
+            'id="btn-install"' in html
+            and 'id="install-status"' in html
+            and 'data-record-tab="charges"' in html
+            and 'data-action="refresh-subscriptions"' in html
         ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
@@ -101,6 +107,28 @@ def run(base: str) -> list[str]:
         ),
         "workspace: 三角色卡样式": (
             ".role-chain {" in workspace_css and ".role-card--red" in workspace_css
+        ),
+        "js: 订阅价格与下次扣款": (
+            "item.price_increased_12m === true" in js
+            and "item.price_increased_12m === false" in js
+            and "样本不足" in js
+            and "下次扣款日" in js
+        ),
+        "js: 订阅扣款证据表": (
+            'if (key === "charges")' in js
+            and 'class="charge-records-table"' in js
+            and "seen.has(txn.record_id)" in js
+            and "内容哈希" in js
+        ),
+        "js: 审计渠道与摘要": (
+            'payload.channel || "未记录"' in js
+            and "payload.text_digest" in js
+            and "同摘要关联" in js
+        ),
+        "js: PWA 安装交互": (
+            "beforeinstallprompt" in js
+            and "appinstalled" in js
+            and 'register("/assets/sw.js?v=31"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]

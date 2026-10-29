@@ -22,7 +22,8 @@ from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pdp import evaluate
 from ai_banking_copilot.scenarios.authorization import node_policy_request
-from ai_banking_copilot.scenarios.cards import CardsHandler
+from ai_banking_copilot.scenarios.base import ScenarioRefused
+from ai_banking_copilot.scenarios.cards import CARD_DAILY_LIMIT_MAX_CENTS, CardsHandler
 from ai_banking_copilot.tools.catalog import build_default_registry
 
 CARD_ID = "card_debit"
@@ -103,3 +104,20 @@ def test_card_lock_is_yellow_and_unlock_is_red(gateway: FactGateway) -> None:
     """施加保护可确认，解除保护必须强验证（单向升档）。"""
     assert _decide("card.lock", gateway).level is Level.YELLOW
     assert _decide("card.unlock", gateway).level is Level.RED
+
+
+def test_set_limit_above_the_single_card_cap_is_refused(gateway: FactGateway) -> None:
+    """S6①：调额超单卡上限（5 万元）→ 场景层拒绝并说明。"""
+    intent = _intent(
+        "card.set_limit", daily_limit=Value(Money(50_000_000), Trust.TRUSTED)
+    )
+    with pytest.raises(ScenarioRefused, match="上限"):
+        CardsHandler().build([intent], gateway)
+
+
+def test_set_limit_at_the_cap_is_allowed(gateway: FactGateway) -> None:
+    intent = _intent(
+        "card.set_limit", daily_limit=Value(Money(CARD_DAILY_LIMIT_MAX_CENTS), Trust.TRUSTED)
+    )
+    plan = CardsHandler().build([intent], gateway)
+    assert plan.nodes[0].params["daily_limit_cents"] == CARD_DAILY_LIMIT_MAX_CENTS

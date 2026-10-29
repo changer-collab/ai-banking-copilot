@@ -105,3 +105,17 @@ def test_overview_is_read_only(deps: AppDeps, rw_store: Store) -> None:
     before = _business_state(rw_store)
     _overview(deps)
     assert _business_state(rw_store) == before
+
+
+def test_catalog_carries_expandable_explanation(deps: AppDeps) -> None:
+    """§8.1b：产品卡可展开「为什么推荐 / 为什么不能买」，解释随 overview 一起下发。"""
+    products = _by_product(_overview(deps), "products")
+    for product_id, row in products.items():
+        why = row["explanation"]
+        assert isinstance(why, dict), product_id
+        assert why["title"] in {"为什么推荐", "为什么不能买"}
+        assert why["eligible"] is row["eligible"]
+        assert isinstance(why["reasons"], list) and why["reasons"]
+        path = why["path"]
+        assert isinstance(path, list) and path[0].startswith("产品「")
+        assert why["data_source"] == PRODUCT_DATA_SOURCE

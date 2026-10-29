@@ -105,3 +105,22 @@ def test_seed_merchant_text_carries_injection_sample(seeded_db: Path) -> None:
     # 该注入样例流水每月 1 条，覆盖区间共 21 个月 ⇒ 21 条。
     assert len(rows) == 21
     store.close()
+
+
+def test_seed_subscription_charges_have_explicit_card_tail(seeded_db: Path) -> None:
+    store = Store(seeded_db)
+    video_charges = store.query(
+        "SELECT booked_at, card_tail FROM transactions"
+        " WHERE user_id = ? AND merchant = '视频会员' ORDER BY booked_on",
+        (DEMO_USER_ID,),
+    )
+    invalid_tails = store.query(
+        "SELECT txn_id FROM transactions WHERE card_tail IS NOT NULL"
+        " AND (length(card_tail) != 4 OR card_tail GLOB '*[^0-9]*')"
+    )
+
+    assert video_charges
+    assert all(row["booked_at"] is not None for row in video_charges)
+    assert {row["card_tail"] for row in video_charges} == {"4821"}
+    assert invalid_tails == []
+    store.close()
