@@ -147,6 +147,13 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "wealth.list",
         "命中『理财产品列表』模板",
     ),
+    (
+        # 口语查询：`AIB_DISABLE_LLM=1` 现场演示要能答「我的理财」。**只读**——回的是
+        # 产品目录（`wealth.list`），不是持仓查询（当前没有持仓读动作，见验收记录 §4.1）。
+        re.compile(r"我的理财|理财持仓|持仓|查.{0,4}理财|理财查询"),
+        "wealth.list",
+        "命中『我的理财 / 持仓』模板（只读：产品目录）",
+    ),
     (re.compile(r"挂失"), "card.report_lost", "命中『挂失』模板"),
     (re.compile(r"虚拟卡"), "card.apply_virtual", "命中『虚拟卡申请』模板"),
     (re.compile(r"额度|限额"), "card.set_limit", "命中『额度调整』模板"),
@@ -154,7 +161,13 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"锁.{0,3}卡"), "card.lock", "命中『锁卡』模板（含修饰语）"),
     (re.compile(r"锁卡|限制.*卡|卡.*限制"), "card.lock", "命中『锁卡』模板"),
     (
-        re.compile(r"卡片列表|有哪些卡|卡片查询|看看卡片"),
+        # 口语查询（`AIB_DISABLE_LLM=1` 演示用）：必须带查询动词，否则「了解我的卡片」
+        # 这类词会被误判；`(?!.*余额)` 保证「查一下我的银行卡余额」仍归 `account.balance`。
+        re.compile(
+            r"卡片列表|卡列表|卡片查询|卡片状态|有哪些卡|有多少张卡|看看卡片"
+            r"|(?:查询|查看|查一下|查查|看一下|看看|列出)(?:一下)?(?:我|本人)?的?(?:银行|储蓄)?卡"
+            r"(?!.*余额)"
+        ),
         "card.list",
         "命中『卡片列表』模板",
     ),

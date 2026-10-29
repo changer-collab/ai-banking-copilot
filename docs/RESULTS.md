@@ -77,8 +77,24 @@ install httpx2 instead.
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
-python scripts/run_benchmark.py --output runtime/benchmark-evidence --dataset evidence_dev_v1 --repeat 2
+python scripts/run_benchmark.py --output runtime/benchmark/evidence-dev-v1-fix2 --dataset evidence_dev_v1 --repeat 2
 ```
+
+逐例落盘（每条用例一行，七列：`attack_blocked / false_rejection / completed / money_traceable / reviewer_group / reviewer_status`）：
+
+```
+python scripts/export_cases_csv.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --output docs/results/web-smoke-v2-cases.csv
+python scripts/export_cases_csv.py --input runtime/benchmark/evidence-dev-v1-fix2/run-1 --output docs/results/evidence-dev-v1-cases.csv
+```
+
+| 数据集 | 逐例 CSV | 行数 | 按 CSV 复算（`true` 的条数） |
+|---|---|---|---|
+| `web-smoke-v2` | [`docs/results/web-smoke-v2-cases.csv`](results/web-smoke-v2-cases.csv) | 21 | 拦截 5、误拒 0、完成 16、含可回溯数值的用例 12 |
+| `evidence_dev_v1` | [`docs/results/evidence-dev-v1-cases.csv`](results/evidence-dev-v1-cases.csv) | 93 | 拦截 31、误拒 0、完成 67、含可回溯数值的用例 33 |
+
+口径差异（不要混用）：上表 `completed` 统计全部用例的 `state == "completed"`，因此包含幂等重放与独立提交用例；「任务成功率」只算 legitimate 的 14/14 与 49/49。`money_traceable` 是**用例级**折叠（该例所有展示数值都通过才记 `true`），而四个数字里的「数字可回溯率」是**证明级** 26/26 与 74/74（一条用例可含多条证明，如 12 个用例共 26 条证明）。
+
+CSV 只由 `results.json` 扁平化而来（脚本不重跑评测）；两次运行的 `business_digest` 相同（`web-smoke-v2` = `2e06ed02…8bf0c`，`evidence_dev_v1` = `6f22036b…b31a`），故 CSV 可直接 `diff` 用于核对两次评测是否逐例一致。
 
 ### 2. 原唯一红例 `web-transfer-due`：已修复（口径补齐，不改产品行为）
 
@@ -263,6 +279,24 @@ python scripts/e2e_check.py --base-url https://speeches-plant-confidence-constan
 - 渠道口径：`im=local / bound_identities=1`；`feishu.configured=false / mode=replay / reason=replay_mode / card_action=false`
   （真实凭据尚未写入，接入步骤见 `docs/2026-10-27/飞书接入-配置单.md`）。
 - 公网 e2e 侧证：`settled: transfer｜审计ID db6ba7c178b5e865`、`cancelled: cancel_subscription｜审计ID 3545f62401d5ba9d`。
+
+---
+
+### 13. 本地基线（2026-10-29，P0 补齐 + B4/B5 + PWA 注册修复）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 104 source files
+python -m pytest -q --junitxml=runtime/junit-full.xml   # tests=1799 / failures=0 / errors=0 / skipped=0，343.59s
+python scripts/check_served_page.py   # ALL OK（27 项 + 3 条额度口径）
+python scripts/e2e_check.py           # ALL PASSED（[1]–[6]）
+python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GLOSS 键集不一致（非本轮引入，见验收记录 §5 残留 3）
+```
+
+- 服务：`AIB_DISABLE_LLM=1`（模板通道）+ `AIB_BREAKER_STATE=memory`，`127.0.0.1:8000`。
+- 较 §11 的 **1790** 增加 9 条：`tests/scripts/test_export_cases_csv.py`（5，逐例 CSV 列口径）、`tests/planning/test_llm_template.py`（3，理财/卡片口语查询规则）、`tests/web/test_pwa.py`（1，Service Worker 根作用域）。
+- 前端静态壳（本地）：`workspace.css?v=17` / `app.js?v=36` / `sw.js` → `aib-static-shell-v29`；线上仍是 §12 的 `v16 / v32 / shell-v25`，**本轮未部署**。
+- P0 补齐：`docs/results/evidence-dev-v1-cases.csv`（93 行，新增）与重生成的 `web-smoke-v2-cases.csv`（21 行）由 `scripts/export_cases_csv.py` 从 `results.json` 扁平化，口径见 §1；README「证据与复跑」新增对标表（我方四数字 vs FraudBench 49%–65% / APort Vault 140→0）。
 
 ---
 

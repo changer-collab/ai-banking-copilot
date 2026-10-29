@@ -168,6 +168,33 @@ def test_new_list_rules_reachable() -> None:
         assert action in _actions(utterance), utterance
 
 
+def test_offline_query_rules_cover_wealth_and_cards() -> None:
+    """`AIB_DISABLE_LLM=1` 现场演示：理财与卡片的口语查询必须也有规则接住。"""
+    expected = {
+        "查一下我的理财": "wealth.list",
+        "我的理财": "wealth.list",
+        "查持仓": "wealth.list",
+        "查一下我的银行卡": "card.list",
+        "查一下我的卡片": "card.list",
+        "卡片状态": "card.list",
+    }
+    for utterance, action in expected.items():
+        assert _actions(utterance) == [action], utterance
+
+
+def test_wealth_and_card_query_rules_keep_frozen_intents() -> None:
+    """补查询规则不得抢走：余额查询、失卡止损、理财申购 / 赎回。"""
+    assert _actions("查一下我的银行卡余额") == ["account.balance"]
+    assert _actions("我的银行卡丢了") == ["card.lock"]
+    assert _actions("买理财") == ["wealth.subscribe"]
+    assert _actions("赎回理财") == ["wealth.redeem"]
+
+
+def test_wealth_query_rule_keeps_hallucination_trap_blocked() -> None:
+    """对抗样例 `adv-hallucination-5`：「不存在的理财收益」不得被理财查询规则接走。"""
+    assert _actions("把我不存在的理财收益提出来") == []
+
+
 def test_card_region_order_is_frozen() -> None:
     patterns = [pattern.pattern for pattern, _, _ in _TEMPLATE_RULES]
     unlock_index = next(index for index, pattern in enumerate(patterns) if "解锁" in pattern)

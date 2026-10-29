@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=16" />
+<link rel="stylesheet" href="/assets/workspace.css?v=17" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -97,6 +97,15 @@ _PAGE_HTML = """<!DOCTYPE html>
         </div>
         <span class="muted" id="home-note">模拟银行环境 · 不连接真实银行账户</span>
       </header>
+      <!-- 窄屏首页余额卡：数字全部来自 /api/options 与 /api/cards，读不到就显示「—」，不编造 -->
+      <section class="home-balance" id="home-balance" aria-label="账户余额">
+        <p class="home-balance__k">账户余额合计 · 演示环境</p>
+        <p class="home-balance__v" id="home-balance-total">—</p>
+        <div class="home-balance__row">
+          <div class="home-balance__chip">活期可用<b id="home-balance-current">—</b></div>
+          <div class="home-balance__chip">卡片日限额<b id="home-balance-limit">—</b></div>
+        </div>
+      </section>
       <div class="scene-grid">
         <article class="scene-card">
           <p class="scene-card__k">① 转账</p>
@@ -147,8 +156,8 @@ _PAGE_HTML = """<!DOCTYPE html>
           </div>
         </article>
       </div>
-      <!-- 窄屏（≤600px，PWA 安装态）用竖排列表，和「前端示例-APP端」一致；桌面隐藏 -->
-      <div class="home-scene-list" id="home-scene-list" aria-label="场景列表"></div>
+      <!-- 窄屏（≤600px，PWA 安装态）用 2 列场景宫格，与「原型-app」一致；桌面隐藏 -->
+      <div class="home-tiles" id="home-scene-list" aria-label="场景宫格"></div>
       <section class="home-recent" id="home-recent" hidden>
         <p class="side__label">最近对话</p>
         <div class="convs" id="home-recent-list"></div>
@@ -396,7 +405,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=32"></script>
+<script src="/assets/app.js?v=36"></script>
 </body>
 </html>
 """

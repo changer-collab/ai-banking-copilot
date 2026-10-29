@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
@@ -418,6 +418,21 @@ def create_app(deps: AppDeps) -> FastAPI:
                     pass
 
     app = FastAPI(title="AI 银行副驾 · Web 渠道", version="0.1.0", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def service_worker_scope(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """`/assets/sw.js` 需要 `Service-Worker-Allowed: /` 才能注册到站点根作用域。
+
+        静态文件挂在 `/assets`，浏览器默认只允许 `/assets/` 作用域；缺这个响应头时
+        注册会被拒（`SecurityError`），离线壳与安装能力都不成立。
+        """
+        response = await call_next(request)
+        if request.url.path == "/assets/sw.js":
+            response.headers["Service-Worker-Allowed"] = "/"
+        return response
+
     app.mount(
         "/assets",
         StaticFiles(directory=str(Path(__file__).parent / "assets")),
