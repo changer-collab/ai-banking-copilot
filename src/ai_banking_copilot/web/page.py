@@ -74,6 +74,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="top__s">今天，有什么可以帮您？</div>
       </div>
       <div class="topbar__nav">
+        <button class="btn btn--ghost" id="btn-install" type="button">安装应用</button>
         <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
                 aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
         <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
@@ -88,6 +89,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         </button>
       </div>
     </header>
+    <p class="muted" id="install-status" role="status" hidden></p>
 
     <section class="view" id="view-home" hidden>
       <header class="view__head">
@@ -300,6 +302,10 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="subscription-boundary" hidden></p>
           <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
           <div id="subscription-cancel-result" hidden></div>
+          <div class="btn-row">
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">查看扣款记录</button>
+            <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button>
+          </div>
         </section>
       </div>
 
@@ -333,14 +339,19 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>渠道健康</h2>
-          <p class="muted">未接入的渠道如实显示 stub；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
+          <p class="muted">未接入的渠道如实显示 replay/未接入；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
         </div>
         <button class="btn btn--sm" type="button" id="btn-health-refresh">刷新</button>
       </header>
       <section class="panel" id="channel-health-panel">
         <p class="panel__title">渠道状态</p>
         <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-        <div id="channel-health-list"><p class="muted">尚未读取渠道状态。</p></div>
+        <div class="channel-health-table-wrap" id="channel-health-list">
+          <table class="channel-health-table">
+            <thead><tr><th>渠道</th><th>状态</th><th>最后事件</th><th>成功</th><th>失败</th><th>限流</th><th>回放模式</th></tr></thead>
+            <tbody id="channel-health-body"><tr><td colspan="7">尚未读取渠道状态。</td></tr></tbody>
+          </table>
+        </div>
       </section>
     </section>
 

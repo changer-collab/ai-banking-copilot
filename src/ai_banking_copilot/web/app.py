@@ -45,6 +45,7 @@ from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.planning.task_observations import TaskObservations
 from ai_banking_copilot.policy.audit import (
+    KIND_CHANNEL,
     KIND_OPERATOR,
     AuditEvent,
     AuditLog,
@@ -111,7 +112,12 @@ from ai_banking_copilot.web.channels.contracts import (
     InboundMessage,
     OutboundMessage,
 )
-from ai_banking_copilot.web.channels.dispatcher import Dispatcher
+from ai_banking_copilot.web.channels.dispatcher import (
+    DEFAULT_CHAT_ID,
+    Dispatcher,
+    DispatchOutcomeUnknown,
+    channel_audit_payload,
+)
 from ai_banking_copilot.web.channels.feishu import (
     FeishuAdapter,
     FeishuConfig,
@@ -123,7 +129,11 @@ from ai_banking_copilot.web.channels.identity import (
     StoreIdentityDirectory,
     init_channel_schema,
 )
-from ai_banking_copilot.web.channels.ratelimit import EventLedger, HealthRegistry
+from ai_banking_copilot.web.channels.ratelimit import (
+    EventLedger,
+    HealthRegistry,
+    TokenBucketRateLimiter,
+)
 from ai_banking_copilot.web.channels.render import render_feishu_card, render_text
 from ai_banking_copilot.web.conversation_store import ConversationStore
 from ai_banking_copilot.web.insights import InsightService
@@ -165,6 +175,29 @@ REVERIFY_HEADER = "X-Reverify-Ticket"
 """删除类动作的二次验证票据请求头（票据一次性、5 分钟有效）。"""
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _BestEffortAuditDispatcher(Dispatcher):
+    """成功结果已构造后，渠道审计故障不得改变业务与幂等结果。"""
+
+    def _record_audit(
+        self,
+        inbound: InboundMessage | ConfirmCommand,
+        outbound: OutboundMessage,
+        *,
+        user_id: str,
+    ) -> None:
+        try:
+            super()._record_audit(inbound, outbound, user_id=user_id)
+        except Exception as error:
+            LOGGER.warning(
+                "channel_audit channel=%s event_id=%s status=failed "
+                "reason=audit_failed audit_status=sent error_type=%s",
+                self._audit_channel(inbound),
+                inbound.event_id or "",
+                type(error).__name__,
+            )
+
 
 _CSRF_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 """需要同源校验的写方法（含 `DELETE`：删除对话历史）。"""
@@ -354,6 +387,12 @@ class _ImMessageRequest(BaseModel):
     event_id: str | None = None
 
 
+class _ImVerificationRequest(BaseModel):
+    """IM 强验证挑战：只用 chat_id 定位与待确认计划相同的 IM 会话。"""
+
+    chat_id: str | None = None
+
+
 class _ImConfirmRequest(BaseModel):
     """IM 计划卡确认：字段与 `POST /api/confirm` 同口径，复用同一冻结校验。"""
 
@@ -431,7 +470,15 @@ def create_app(deps: AppDeps) -> FastAPI:
     else:
         identities = MemoryIdentityDirectory()
     feishu = FeishuAdapter(FeishuConfig.from_env())
+    feishu_audit_channel = "feishu" if feishu.config.mode == "adapter" else "replay"
+    LOGGER.info(
+        "channel_startup channel=feishu event_id= feishu=%s", feishu.config.mode
+    )
     health = HealthRegistry()
+    health.register("web")
+    health.register(CHANNEL_LOCAL)
+    health.register(CHANNEL_FEISHU, replay_mode=feishu.replay_mode)
+    channel_limiter = TokenBucketRateLimiter()
     event_ledger: EventLedger | None = None
     memory_event_ids: set[str] = set()
     replay_responses: dict[str, dict[str, object]] = {}
@@ -444,17 +491,67 @@ def create_app(deps: AppDeps) -> FastAPI:
             existing = _dispatchers.get(user_id)
             if existing is not None:
                 return existing
-            built = Dispatcher(
+            built = _BestEffortAuditDispatcher(
                 manager=manager,
                 identities=identities,
                 submission_payload=_submission_payload,
                 execution_payload=_execution_payload,
                 audit=deps.audit,
                 server_user_id=user_id,
+                limiter=channel_limiter,
                 feishu_configured=feishu.configured,
+                feishu_audit_channel=feishu_audit_channel,
             )
             _dispatchers[user_id] = built
             return built
+
+    def _append_channel_audit(
+        *,
+        user_id: str,
+        channel: str,
+        direction: str,
+        status: str,
+        reason: str = "",
+        event_id: str | None = None,
+        external_user_id: str | None = None,
+        attempt_no: int | None = None,
+        http_status: int | None = None,
+        text: str | None = None,
+        details: dict[str, object] | None = None,
+        best_effort: bool = False,
+    ) -> None:
+        event = AuditEvent(
+            event_id=f"{KIND_CHANNEL}:{channel}:{secrets.token_hex(8)}",
+            kind=KIND_CHANNEL,
+            payload=channel_audit_payload(
+                user_id=user_id,
+                channel=channel,
+                direction=direction,
+                status=status,
+                reason=reason,
+                event_id=event_id,
+                external_user_id=external_user_id,
+                attempt_no=attempt_no,
+                http_status=http_status,
+                text=text,
+                details=details,
+            ),
+            prev_hash="",
+        )
+        try:
+            deps.audit.append(event)
+        except Exception as error:
+            if not best_effort:
+                raise
+            LOGGER.warning(
+                "channel_audit channel=%s event_id=%s status=failed "
+                "reason=audit_failed audit_status=%s audit_reason=%s error_type=%s",
+                channel,
+                event_id or "",
+                status,
+                reason,
+                type(error).__name__,
+            )
 
     @app.exception_handler(SessionPersistenceError)
     @app.exception_handler(SessionSnapshotError)
@@ -467,6 +564,11 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def channel_error(request: Request, error: ChannelError) -> JSONResponse:
         """渠道层稳定错误：直接采用错误族自带的 `status_code`，不吞成 500。"""
         headers = {"Retry-After": "60"} if isinstance(error, ChannelRateLimited) else None
+        message = (
+            "发太快了，60 秒后再试"
+            if isinstance(error, ChannelRateLimited)
+            else str(error)
+        )
         if isinstance(error, ChannelRateLimited):
             channel = (
                 CHANNEL_FEISHU
@@ -476,9 +578,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                 else "web"
             )
             health.record_rate_limit(channel)
+            health.record_event(channel, success=False)
         return JSONResponse(
             status_code=error.status_code,
-            content={"detail": error.code, "message": str(error)},
+            content={"detail": error.code, "message": message},
             headers=headers,
         )
 
@@ -967,14 +1070,70 @@ def create_app(deps: AppDeps) -> FastAPI:
                 on_stage=on_stage,
             )
         except SessionStateError as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="web",
+                direction="inbound",
+                status="failed",
+                reason="session_state_error",
+                event_id=request.request_id,
+                text=request.utterance,
+                details={"session_id": request.session_id},
+            )
+            health.record_event("web", success=False)
+            LOGGER.warning(
+                "channel_event channel=web event_id=%s status=failed "
+                "reason=session_state_error error_type=%s",
+                request.request_id or "",
+                type(error).__name__,
+            )
             raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="web",
+                direction="inbound",
+                status="failed",
+                reason="submit_failed",
+                event_id=request.request_id,
+                text=request.utterance,
+                details={"session_id": request.session_id},
+            )
+            health.record_event("web", success=False)
+            LOGGER.warning(
+                "channel_event channel=web event_id=%s status=failed "
+                "reason=submit_failed error_type=%s",
+                request.request_id or "",
+                type(error).__name__,
+            )
+            raise
         finally:
             if request.request_id:
                 deps.progress.finish(user_id, request.session_id, request.request_id)
         _record_message(user_id, request.session_id, "user", "text", request.utterance)
         _record_answer(user_id, request.session_id, view)
         _record_life_event(user_id, request.session_id, request.utterance, request.selected, view)
-        return _response(request.session_id, user_id, _submission_payload(view))
+        payload = _submission_payload(view)
+        card = payload.get("card")
+        card_map = card if isinstance(card, dict) else {}
+        _append_channel_audit(
+            user_id=user_id,
+            channel="web",
+            direction="inbound",
+            status="sent",
+            event_id=request.request_id,
+            text=request.utterance,
+            details={
+                "session_id": request.session_id,
+                "request_kind": "message",
+                "state": str(payload.get("state", "")),
+                "level": str(card_map.get("level", "")),
+                "card_id": str(card_map.get("card_id", "")),
+                "frozen_hash": "",
+            },
+        )
+        health.record_event("web", success=True)
+        return _response(request.session_id, user_id, payload)
 
     @app.post("/api/clarify")
     def clarify(
@@ -1441,7 +1600,19 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _channel_payload(_dispatcher_for(user_id).dispatch(inbound))
+        try:
+            outbound = _dispatcher_for(user_id).dispatch(inbound)
+            response = _channel_payload(outbound)
+        except ChannelRateLimited:
+            raise
+        except Exception:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise
+        if outbound.replayed:
+            health.record_replay(CHANNEL_LOCAL)
+        else:
+            health.record_event(CHANNEL_LOCAL, success=True)
+        return response
 
     @app.post("/api/im/confirm")
     def im_confirm(
@@ -1461,7 +1632,48 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        return _channel_payload(_dispatcher_for(user_id).dispatch(command))
+        try:
+            outbound = _dispatcher_for(user_id).dispatch(command)
+            response = _channel_payload(outbound)
+        except ChannelRateLimited:
+            raise
+        except (
+            SessionStateError,
+            ConfirmationMismatchError,
+            StrongVerificationRequiredError,
+            StalePlanError,
+        ) as error:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception:
+            health.record_event(CHANNEL_LOCAL, success=False)
+            raise
+        if outbound.replayed:
+            health.record_replay(CHANNEL_LOCAL)
+        else:
+            health.record_event(CHANNEL_LOCAL, success=True)
+        return response
+
+    @app.post("/api/im/verify/request")
+    def request_im_verification(
+        request: _ImVerificationRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """申请绑定到当前 IM 会话及冻结计划的一次性强验证挑战。"""
+        session_id = f"{CHANNEL_LOCAL}:{request.chat_id or DEFAULT_CHAT_ID}"
+        try:
+            prompt = _session_for(session_id, user_id).request_verification()
+        except (SessionStateError, StrongVerificationRequiredError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        result: dict[str, object] = {
+            "mode": prompt.mode,
+            "status": prompt.status,
+            "channel": prompt.channel,
+            "target": prompt.target,
+            "expires_in_s": prompt.expires_in_s,
+        }
+        if prompt.mode == "demo":
+            result["code"] = prompt.code
+        return result
 
     @app.get("/api/channels/health")
     def channels_health(user_id: str = Depends(current_user)) -> dict[str, object]:
@@ -1472,28 +1684,142 @@ def create_app(deps: AppDeps) -> FastAPI:
             channels["web"] = {"configured": True, "mode": "web", "reason": ""}
             channels[CHANNEL_FEISHU] = {
                 "configured": feishu.configured,
-                "mode": (
-                    "adapter"
-                    if feishu.configured
-                    else ("replay" if feishu.replay_mode else "stub")
-                ),
+                "mode": feishu.config.mode,
                 "reason": (
-                    ""
-                    if feishu.configured
-                    else ("replay_mode" if feishu.replay_mode else "not_configured")
+                    "replay_mode" if feishu.replay_mode
+                    else ("" if feishu.configured else "not_configured")
                 ),
-                "card_action": feishu.configured,
+                "card_action": feishu.configured and not feishu.replay_mode,
             }
         body["health"] = health.snapshot()
         return body
 
-    def _send_live_feishu(outbound: OutboundMessage) -> None:
+    def _release_feishu_event(event_id: str | None) -> None:
+        if not event_id:
+            return
+        if event_ledger is not None:
+            event_ledger.release(event_id)
+        else:
+            memory_event_ids.discard(event_id)
+
+    def _dispatch_live_feishu(
+        material: InboundMessage | ConfirmCommand,
+        user_id: str,
+        event_id: str | None,
+    ) -> None:
         try:
-            feishu.send(outbound)
-            health.record_event(CHANNEL_FEISHU, success=True)
-        except Exception:
+            outbound = _dispatcher_for(user_id).dispatch_live(material)
+        except DispatchOutcomeUnknown as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="inbound",
+                status="failed",
+                reason="dispatch_outcome_unknown",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+                best_effort=True,
+            )
+            LOGGER.warning(
+                "channel_event channel=feishu event_id=%s status=failed "
+                "reason=dispatch_outcome_unknown error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
+            return
+        except Exception as error:
+            _release_feishu_event(event_id)
+            LOGGER.warning(
+                "channel_event channel=feishu event_id=%s status=failed "
+                "reason=dispatch_failed error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return
+
+        def record_attempt(
+            attempt_no: int, status: int | None, error_type: str | None
+        ) -> None:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="outbound",
+                status="attempt",
+                reason=error_type or "",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                attempt_no=attempt_no,
+                http_status=status,
+                best_effort=True,
+            )
+            LOGGER.info(
+                "channel_send channel=feishu event_id=%s status=attempt "
+                "attempt_no=%s http_status=%s reason=%s",
+                event_id or "",
+                attempt_no,
+                status if status is not None else "",
+                error_type or "",
+            )
+
+        def record_retry(attempt_no: int, _delay: float) -> None:
             health.record_retry(CHANNEL_FEISHU)
+            LOGGER.warning(
+                "channel_send channel=feishu event_id=%s status=retry "
+                "attempt_no=%s reason=retry_scheduled",
+                event_id or "",
+                attempt_no,
+            )
+
+        try:
+            status = feishu.send(
+                outbound,
+                on_attempt=record_attempt,
+                on_retry=record_retry,
+            )
+        except Exception as error:
+            _append_channel_audit(
+                user_id=user_id,
+                channel="feishu",
+                direction="outbound",
+                status="failed",
+                reason="send_failed",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                best_effort=True,
+            )
+            LOGGER.warning(
+                "channel_send channel=feishu event_id=%s status=failed "
+                "reason=send_failed error_type=%s",
+                event_id or "",
+                type(error).__name__,
+            )
+            health.record_event(CHANNEL_FEISHU, success=False)
+            return
+        success = 200 <= status < 300
+        _append_channel_audit(
+            user_id=user_id,
+            channel="feishu",
+            direction="outbound",
+            status="sent" if success else "failed",
+            reason="" if success else "send_failed",
+            event_id=event_id,
+            external_user_id=material.external_user_id,
+            http_status=status,
+            best_effort=True,
+        )
+        LOGGER.log(
+            logging.INFO if success else logging.WARNING,
+            "channel_send channel=feishu event_id=%s status=%s "
+            "http_status=%s reason=%s",
+            event_id or "",
+            "sent" if success else "failed",
+            status,
+            "" if success else "send_failed",
+        )
+        health.record_event(CHANNEL_FEISHU, success=success)
 
     @app.post("/api/im/feishu")
     async def im_feishu(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
@@ -1505,6 +1831,18 @@ def create_app(deps: AppDeps) -> FastAPI:
         nonlocal event_ledger
         body = await request.body()
         if not feishu.verify(request.headers, body):
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="signature_invalid",
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id= status=rejected "
+                "reason=signature_invalid",
+                feishu_audit_channel,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=401,
@@ -1514,6 +1852,19 @@ def create_app(deps: AppDeps) -> FastAPI:
             payload = feishu.decode_body(body)
             event = feishu.parse_event(payload)
         except FeishuProtocolError as error:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="protocol_error",
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id= status=rejected "
+                "reason=protocol_error error_type=%s",
+                feishu_audit_channel,
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=400,
@@ -1526,6 +1877,20 @@ def create_app(deps: AppDeps) -> FastAPI:
         inbound = event.inbound
         material = command if command is not None else inbound
         if material is None:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="message_event_missing",
+                event_id=event.event_id,
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=rejected "
+                "reason=message_event_missing",
+                feishu_audit_channel,
+                event.event_id or "",
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=400,
@@ -1538,13 +1903,29 @@ def create_app(deps: AppDeps) -> FastAPI:
             else None
         )
         if binding is None:
+            _append_channel_audit(
+                user_id="",
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="rejected",
+                reason="identity_unbound",
+                event_id=event.event_id,
+                external_user_id=external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=rejected "
+                "reason=identity_unbound",
+                feishu_audit_channel,
+                event.event_id or "",
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
                 status_code=401,
                 content={
                     "detail": "identity_unbound",
                     "channel": CHANNEL_FEISHU,
-                    "message": "该飞书账号尚未绑定，请先在网页个人中心完成绑定",
+                    "message": "该飞书账号尚未绑定，请先在 Web 端输入 6 位绑定码完成绑定",
                 },
             )
         event_id = event.event_id
@@ -1571,16 +1952,73 @@ def create_app(deps: AppDeps) -> FastAPI:
                         "replayed": True,
                     }
                 )
+        if feishu.configured and not feishu.replay_mode:
+            rate_identity = material.external_user_id or binding.user_id
+            rate_key = f"{material.channel}:{rate_identity}"
+            if event_id is None or not channel_limiter.reserve(rate_key, event_id):
+                _release_feishu_event(event_id)
+                _append_channel_audit(
+                    user_id=binding.user_id,
+                    channel="feishu",
+                    direction="inbound",
+                    status="rejected",
+                    reason="rate_limited",
+                    event_id=event_id,
+                    external_user_id=material.external_user_id,
+                    text=material.text if isinstance(material, InboundMessage) else None,
+                    best_effort=True,
+                )
+                LOGGER.warning(
+                    "channel_event channel=feishu event_id=%s status=rejected "
+                    "reason=rate_limited",
+                    event_id or "",
+                )
+                raise ChannelRateLimited("消息过于频繁，请稍后再试")
+            envelope = {
+                "code": 0,
+                "channel": CHANNEL_FEISHU,
+                "event_id": event_id,
+                "accepted": True,
+            }
+            background_tasks.add_task(
+                _dispatch_live_feishu, material, binding.user_id, event_id
+            )
+            return JSONResponse(content=envelope)
         try:
-            outbound = _dispatcher_for(binding.user_id).dispatch(material)
-        except Exception:
-            # 未执行成功（401/429/409/状态机拒绝）不得消费事件，否则平台重投只会拿到空回放。
-            if event_id:
-                if event_ledger is not None:
-                    event_ledger.release(event_id)
-                else:
-                    memory_event_ids.discard(event_id)
+            outbound = _dispatcher_for(binding.user_id).dispatch_live(material)
+        except DispatchOutcomeUnknown as error:
+            _append_channel_audit(
+                user_id=binding.user_id,
+                channel=feishu_audit_channel,
+                direction="inbound",
+                status="failed",
+                reason="dispatch_outcome_unknown",
+                event_id=event_id,
+                external_user_id=material.external_user_id,
+                text=material.text if isinstance(material, InboundMessage) else None,
+                best_effort=True,
+            )
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=failed "
+                "reason=dispatch_outcome_unknown error_type=%s",
+                feishu_audit_channel,
+                event_id or "",
+                type(error).__name__,
+            )
             health.record_event(CHANNEL_FEISHU, success=False)
+            raise
+        except Exception as error:
+            # 未执行成功（401/429/409/状态机拒绝）不得消费事件，否则平台重投只会拿到空回放。
+            _release_feishu_event(event_id)
+            LOGGER.warning(
+                "channel_event channel=%s event_id=%s status=failed "
+                "reason=dispatch_failed error_type=%s",
+                feishu_audit_channel,
+                event_id or "",
+                type(error).__name__,
+            )
+            if not isinstance(error, ChannelRateLimited):
+                health.record_event(CHANNEL_FEISHU, success=False)
             raise
         health.record_event(CHANNEL_FEISHU, success=True)
         response = _channel_payload(outbound)
@@ -1588,8 +2026,6 @@ def create_app(deps: AppDeps) -> FastAPI:
             "text": render_text(outbound),
             "feishu": feishu.render(outbound),
         }
-        if feishu.configured and not feishu.replay_mode:
-            background_tasks.add_task(_send_live_feishu, outbound)
         envelope = {
             "code": 0,
             "channel": CHANNEL_FEISHU,
@@ -1940,17 +2376,18 @@ _IM_PAGE_HTML = """<!doctype html>
   .dot.on { background: #16794a; }
   #bubbles { display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
   .bubble { max-width: 88%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
-  .bubble.user { align-self: flex-end; background: #1f4e79; color: #fff; }
-  .bubble.assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e6ea; }
-  .bubble.system { align-self: center; background: #fff7e6; color: #8a5a00; font-size: 12px; }
-  .card { align-self: flex-start; width: 100%; background: #fff; border: 1px solid #cfd6de;
+  .bubble--user { align-self: flex-end; background: #1f4e79; color: #fff; }
+  .bubble--assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e6ea; }
+  .bubble--system { align-self: center; background: #fff7e6; color: #8a5a00; font-size: 12px; }
+  .plan-card { align-self: flex-start; width: 100%; background: #fff; border: 1px solid #cfd6de;
     border-radius: 10px; padding: 12px 14px; }
-  .card h2 { margin: 0 0 8px; font-size: 13px; color: #1f4e79; font-weight: 600; }
-  .card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
-  .card dt { color: #6b7280; font-size: 12px; }
-  .card dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .card ul { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: #4b5563; }
-  .card button { margin-top: 10px; }
+  .plan-card h2 { margin: 0 0 8px; font-size: 13px; color: #1f4e79; font-weight: 600; }
+  .plan-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+  .plan-card dt { color: #6b7280; font-size: 12px; }
+  .plan-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .plan-card ul { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: #4b5563; }
+  .plan-card button { margin-top: 10px; }
+  .verification-code { display: block; width: 100%; margin-top: 10px; }
   form { display: flex; gap: 8px; margin-top: 16px; }
   input[type=text] {
     flex: 1; padding: 8px 10px; border: 1px solid #cfd6de; border-radius: 8px;
@@ -1974,7 +2411,7 @@ _IM_PAGE_HTML = """<!doctype html>
   <div id="bubbles"></div>
   <form id="composer">
     <input type="text" id="text" placeholder="例如：这个月订阅花了多少" autocomplete="off">
-    <button type="submit">发送</button>
+    <button type="submit" id="send-button">发送</button>
   </form>
   <p class="note">本页与主对话页共用同一条会话状态机与冻结校验；仅用于验证本地 IM 渠道。</p>
 </main>
@@ -1985,7 +2422,11 @@ _IM_PAGE_HTML = """<!doctype html>
   var bubbles = document.getElementById("bubbles");
   var composer = document.getElementById("composer");
   var input = document.getElementById("text");
+  var sendButton = document.getElementById("send-button");
   var health = document.getElementById("health");
+  var composerLockTimer = null;
+  var composerLockToken = 0;
+  var healthHasData = false;
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -1995,7 +2436,7 @@ _IM_PAGE_HTML = """<!doctype html>
   }
 
   function push(role, text) {
-    bubbles.appendChild(el("div", "bubble " + role, text));
+    bubbles.appendChild(el("div", "bubble bubble--" + role, text));
     bubbles.scrollTop = bubbles.scrollHeight;
   }
 
@@ -2006,7 +2447,7 @@ _IM_PAGE_HTML = """<!doctype html>
 
   function renderCard(card) {
     if (!card) { return; }
-    var box = el("section", "card");
+    var box = el("section", "plan-card");
     box.appendChild(el("h2", null, "计划卡 · " + (card.level || "")));
     var summary = card.summary || [];
     var lines = card.lines || [];
@@ -2027,15 +2468,57 @@ _IM_PAGE_HTML = """<!doctype html>
         + " · 已用 " + money(card.daily_accumulated_cents || 0));
       box.appendChild(quota);
     }
+    var requiresStrongVerification = Array.isArray(card.requires)
+      && card.requires.indexOf("strong_verify") !== -1;
+    var verificationInput = null;
+    if (requiresStrongVerification) {
+      verificationInput = el("input", "verification-code");
+      verificationInput.type = "text";
+      verificationInput.inputMode = "numeric";
+      verificationInput.autocomplete = "one-time-code";
+      verificationInput.placeholder = "输入验证渠道收到的验证码";
+      box.appendChild(verificationInput);
+      var requestButton = el("button", null, "申请强验证");
+      requestButton.type = "button";
+      requestButton.addEventListener("click", function () {
+        requestButton.disabled = true;
+        post("/api/im/verify/request", { chat_id: CHAT_ID })
+          .then(function (challenge) {
+            if (typeof challenge.code === "string" && challenge.code.trim()) {
+              verificationInput.value = challenge.code.trim();
+              push("system", "演示验证码已填入，请确认执行。");
+            } else {
+              push("system", "强验证已发起，请填写验证渠道实际收到的验证码。");
+              verificationInput.focus();
+            }
+          })
+          .catch(function (error) { showRequestError(error, "申请强验证失败"); })
+          .finally(function () { requestButton.disabled = false; });
+      });
+      box.appendChild(requestButton);
+    }
     var btn = el("button", null, "确认执行");
     btn.type = "button";
     btn.addEventListener("click", function () {
+      var verificationCode = verificationInput ? verificationInput.value.trim() : "";
+      if (requiresStrongVerification && !verificationCode) {
+        push("system", "请先申请强验证，并填写实际收到的验证码。");
+        verificationInput.focus();
+        return;
+      }
       btn.disabled = true;
-      post("/api/im/confirm", {
+      var body = {
         card_id: card.card_id,
         frozen_hash: card.frozen_hash,
         chat_id: CHAT_ID
-      }).then(render).catch(function () { btn.disabled = false; });
+      };
+      if (verificationCode) { body.verification_code = verificationCode; }
+      post("/api/im/confirm", body)
+        .then(render)
+        .catch(function (error) {
+          showRequestError(error, "确认失败");
+          btn.disabled = false;
+        });
     });
     box.appendChild(btn);
     bubbles.appendChild(box);
@@ -2061,33 +2544,86 @@ _IM_PAGE_HTML = """<!doctype html>
       return resp.json().catch(function () { return {}; }).then(function (data) {
         if (!resp.ok) {
           var detail = data.detail || data.message || ("HTTP " + resp.status);
-          throw new Error(detail);
+          var error = new Error(detail);
+          error.status = resp.status;
+          error.retryAfter = resp.headers.get("Retry-After") || "";
+          error.detail = detail;
+          throw error;
         }
         return data;
       });
     });
   }
 
+  function lockComposer() {
+    composerLockToken += 1;
+    var lockToken = composerLockToken;
+    input.disabled = true;
+    sendButton.disabled = true;
+    if (composerLockTimer !== null) { window.clearTimeout(composerLockTimer); }
+    composerLockTimer = window.setTimeout(function () {
+      if (lockToken !== composerLockToken) { return; }
+      input.disabled = false;
+      sendButton.disabled = false;
+      composerLockTimer = null;
+      input.focus();
+    }, 3000);
+  }
+
+  function showRequestError(error, prefix) {
+    if (error && error.status === 429) {
+      lockComposer();
+      push("system", "发太快了，" + (error.retryAfter || "60") + " 秒后再试");
+      return;
+    }
+    var detail = error && (error.detail || error.message);
+    push("system", prefix + "：" + (detail || "渠道暂不可用"));
+  }
+
   function loadHealth() {
     fetch("/api/channels/health", { credentials: "same-origin" })
-      .then(function (resp) { return resp.json(); })
+      .then(function (resp) {
+        if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+        return resp.json();
+      })
       .then(function (data) {
-        health.textContent = "";
         var channels = data.channels || {};
-        var names = Object.keys(channels);
-        if (!names.length) { health.appendChild(el("span", null, "无渠道信息")); }
+        var runtime = data.health || {};
+        var names = ["web", "im", "feishu"];
+        var fragment = document.createDocumentFragment();
         names.forEach(function (name) {
-          var item = channels[name] || {};
+          var config = channels[name] || {};
+          var item = runtime[name] || {};
           var chip = el("span", null, null);
-          chip.appendChild(el("i", "dot" + (item.configured ? " on" : "")));
-          var label = name + " · " + (item.configured ? "已配置" : "未配置");
+          var configured = config.configured === true;
+          chip.appendChild(el("i", "dot" + (configured ? " on" : "")));
+          var rateLimits = item.ratelimit_hits || 0;
+          var label = name + " · " + (configured ? "已接入" : "未接入")
+            + " · 成功 " + (item.ok || 0)
+            + " · 失败 " + (item.failed || 0)
+            + " · 限流 " + rateLimits;
+          if (rateLimits > 0) { label += " · 发太快了，请稍后再试"; }
           chip.appendChild(document.createTextNode(label));
-          health.appendChild(chip);
+          fragment.appendChild(chip);
         });
+        health.replaceChildren(fragment);
+        healthHasData = true;
       })
       .catch(function () {
-        health.textContent = "";
-        health.appendChild(el("span", null, "渠道健康暂不可用"));
+        var previousFailure = health.querySelector(".health-error");
+        if (previousFailure) { previousFailure.remove(); }
+        var failure = el(
+          "span",
+          "health-error",
+          healthHasData
+            ? "渠道健康暂不可用，正在显示上次结果"
+            : "渠道健康暂不可用，稍后自动重试"
+        );
+        if (healthHasData) {
+          health.appendChild(failure);
+        } else {
+          health.replaceChildren(failure);
+        }
       });
   }
 
@@ -2100,11 +2636,12 @@ _IM_PAGE_HTML = """<!doctype html>
     post("/api/im/message", { text: text, chat_id: CHAT_ID })
       .then(render)
       .catch(function (error) {
-        push("system", "发送失败：" + error.message + "；渠道暂不可用，请用主对话页。");
+        showRequestError(error, "发送失败");
       });
   });
 
   loadHealth();
+  window.setInterval(loadHealth, 5000);
 })();
 </script>
 </body>

@@ -73,6 +73,7 @@ const state = {
   verification: null,
   clarifications: [],
   options: null,
+  optionsStatus: "loading",
   busy: false,
   notice: "",
   resultCount: 0,
@@ -342,11 +343,23 @@ function optionsHtml(slot, selected = "") {
 }
 
 async function refreshOptions() {
-  const response = await fetch("/api/options", { cache: "no-store" });
-  if (!response.ok) throw new Error("无法读取可选对象");
-  state.options = await response.json();
+  state.optionsStatus = "loading";
+  renderSubscriptionDetails(state.options);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
+  try {
+    const response = await fetch("/api/options", { cache: "no-store" });
+    if (!response.ok) throw new Error("无法读取可选对象");
+    state.options = await response.json();
+    state.optionsStatus = "ready";
+  } catch (error) {
+    state.optionsStatus = "error";
+    renderSubscriptionDetails(state.options);
+    if (currentRecordTab === "charges") renderRecordsTab("charges");
+    throw error;
+  }
   el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
   renderSubscriptionDetails(state.options);
+  if (currentRecordTab === "charges") renderRecordsTab("charges");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
     select.innerHTML = optionsHtml(slot, select.value);
@@ -680,8 +693,9 @@ async function refreshTransfers() {
   renderTransfers(result.data);
 }
 
-function subscriptionStatusLabel(status) {
-  return { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
+function subscriptionStatusLabel(status, registeredStatus = "") {
+  const local = { cancelled: "已取消订阅", locked: "已锁定", lost: "已挂失" };
+  return local[registeredStatus] || { confirmed: "已确认订阅", suspected: "疑似订阅" }[status] || "未知状态";
 }
 
 function confidenceLabel(value) {
@@ -706,22 +720,32 @@ function subscriptionEvidenceHtml(item) {
     ).join("") + "</ul></details>";
 }
 
+const CHANNEL_ORDER = ["web", "im", "feishu"];
+
 function renderChannelHealth(data) {
   const status = el("channel-health-status");
-  const list = el("channel-health-list");
-  if (!status || !list) return;
+  const body = el("channel-health-body");
+  if (!status || !body) return;
   const channels = data && data.channels ? data.channels : {};
-  const rows = Object.entries(channels).map(([name, item]) => {
-    const state = item && item.mode ? item.mode : "unknown";
-    const configured = item && item.configured ? "已配置" : "未配置";
-    return `<li><b>${esc(name)}</b> · ${esc(state)} · ${configured}` +
-      `${item && item.reason ? ` · ${esc(item.reason)}` : ""}</li>`;
+  const health = data && data.health ? data.health : {};
+  const rows = CHANNEL_ORDER.map((name) => {
+    const item = channels[name] || {};
+    const stats = health[name] || {};
+    const configured = item.configured !== false;
+    const state = configured ? (item.mode || stats.status || "unknown") : "未接入";
+    const lastEvent = stats.last_event_at || "暂无事件";
+    const replay = stats.replay_mode || item.mode === "replay" ? "是" : "否";
+    return `<tr><td>${esc(name)}</td><td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
+      `<td>${esc(String(stats.ok || 0))}</td><td>${esc(String(stats.failed || 0))}</td>` +
+      `<td>${esc(String(stats.ratelimit_hits || 0))}</td><td>${replay}</td></tr>`;
   });
   status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
-  list.innerHTML = rows.length ? `<ul>${rows.join("")}</ul>` : '<p class="muted">暂无渠道状态。</p>';
+  body.innerHTML = rows.length ? rows.join("\n") : '<tr><td colspan="7">暂无渠道状态。</td></tr>';
 }
 
 async function refreshChannelHealth() {
+  const status = el("channel-health-status");
+  if (status) status.textContent = "正在读取渠道状态…";
   const result = await apiFetch("GET", "/api/channels/health");
   if (!result.ok) throw new Error("无法读取渠道状态");
   renderChannelHealth(result.data);
@@ -730,14 +754,18 @@ async function refreshChannelHealth() {
 function subscriptionItemHtml(item) {
   const next = item.next_charge_on
     ? `${esc(item.next_charge_on)}（${item.next_charge_is_prediction ? "预测值" : "登记值"}）`
-    : "—";
+    : "未提供";
+  const price = item.price_increased_12m === true
+    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
+    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
   const external = item.external_cancel_status === "not_integrated"
     ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
   return `<article class="takeover">
-    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status))}</span>
+    <div><b>${esc(item.merchant)}</b> <span class="chip">${esc(subscriptionStatusLabel(item.status, item.registered_status))}</span>
       <span class="chip">置信度 ${esc(confidenceLabel(item.confidence))}</span></div>
     <p>扣费 ${yuan(item.amount_cents)} · ${esc(item.currency)} · ${esc(item.cycle_label)}扣费</p>
-    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次预计 ${next}</p>
+    <p class="subscription-price">${price}</p>
+    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 下次扣款日 ${next}</p>
     <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
     ${subscriptionNoticesHtml(item)}
     <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
@@ -755,6 +783,13 @@ function renderSubscriptionDetails(options) {
   const status = el("subscription-status");
   const list = el("subscription-list");
   const boundary = el("subscription-boundary");
+  if (state.optionsStatus !== "ready") {
+    status.textContent = state.optionsStatus === "error"
+      ? "订阅数据暂不可用，请稍后重试。" : "正在读取订阅识别结果…";
+    list.innerHTML = "";
+    boundary.hidden = true;
+    return;
+  }
   if (!details) {
     status.textContent = "订阅识别服务尚未接入。";
     list.innerHTML = "";
@@ -2330,9 +2365,14 @@ function renderProfile(me, audit) {
     const revoked = record.revoked ? " · 已失效" : "";
     return `<li>${esc(momentLabel(record.issued_at))} 登录 · ${esc(profileValue(record.client_ip))} · ${esc(profileValue(record.user_agent))}${revoked}</li>`;
   }).join("");
-  const trail = (audit.events || []).map((event) =>
-    `<li>${esc(momentLabel(event.timestamp))} · ${esc(profileValue(event.kind))} <span class="tech mono">${esc(profileValue(event.event_id))}</span></li>`
-  ).join("");
+  const trail = (audit.events || []).map((event) => {
+    const payload = event.payload || {};
+    const channel = payload.channel || "未记录";
+    const digest = payload.text_digest;
+    return `<li><span class="mono">${esc(momentLabel(event.timestamp))}</span> · ${esc(profileValue(event.kind))}` +
+      ` · 渠道 ${esc(channel)} <span class="tech mono">${esc(profileValue(event.event_id))}</span>` +
+      (digest ? `<details><summary>同摘要关联</summary><p class="mono audit-digest">${esc(digest)}</p></details>` : "") + "</li>";
+  }).join("");
   const html = `
     <section class="profile-head">
       <span class="profile-avatar" aria-hidden="true">${esc(initial)}</span>
@@ -2404,7 +2444,7 @@ async function loadProfile(target, loadingText) {
       if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
       return;
     }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : {});
+    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
   } catch (_) {
     if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
   }
@@ -3151,6 +3191,10 @@ async function renderRecordsTab(tab) {
   });
   const body = el("records-body");
   if (!body) return;
+  if (key === "charges") {
+    renderChargeRecords(body);
+    return;
+  }
   const token = ++recordsRequestToken;
   body.innerHTML = recordsLoadingHtml(spec);
   let result;
@@ -3172,6 +3216,34 @@ async function renderRecordsTab(tab) {
     ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
       recordsTableHtml(RECORD_HEADERS[key], rows)
     : recordsEmptyHtml(spec);
+}
+
+function renderChargeRecords(body) {
+  const details = state.options && state.options.subscription_details;
+  let message = "";
+  if (state.optionsStatus === "loading") message = "正在读取扣款记录…";
+  else if (state.optionsStatus === "error" || !details) message = "扣款记录暂不可用，请稍后重试。";
+  const seen = new Set();
+  const records = [];
+  if (!message) {
+    for (const item of details.insights || []) {
+      for (const txn of item.evidence || []) {
+        if (seen.has(txn.record_id)) continue;
+        seen.add(txn.record_id);
+        records.push(txn);
+      }
+    }
+    if (!records.length) message = "暂无可核对的订阅扣款记录。";
+  }
+  body.innerHTML = `<p class="muted" role="status">${esc(message || `共 ${records.length} 条订阅扣款记录`)}</p>` +
+    '<div class="btn-row"><button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button></div>';
+  if (message) return;
+  body.innerHTML += `<div class="charge-records-table-wrap" tabindex="0" aria-label="订阅扣款记录">
+    <table class="charge-records-table"><thead><tr><th>商户</th><th>金额</th><th>时间</th><th>卡尾号</th><th>渠道</th><th>记录 ID</th><th>内容哈希</th></tr></thead>
+    <tbody>${records.map((txn) => `<tr><td>${esc(txn.merchant_label)}</td><td>${yuan(Math.abs(Number(txn.amount_cents) || 0))}</td>` +
+      `<td>${esc(txn.booked_at || txn.booked_on)}</td><td>${esc(txn.card_tail || "未提供")}</td>` +
+      `<td>${esc(txn.channel || "未记录")}</td><td class="mono">${esc(txn.record_id)}</td>` +
+      `<td class="mono" title="${esc(txn.content_hash)}">${esc(txn.content_hash.slice(0, 12))}…</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function showScene(key) {
@@ -3227,6 +3299,10 @@ function navigate(name, options) {
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  if (target.closest('[data-action="refresh-subscriptions"]')) {
+    refreshOptions().catch(() => {});
+    return;
+  }
   if (target.id === "profile-backdrop") {
     closeProfile();
     return;
@@ -3298,7 +3374,7 @@ el("btn-health-refresh")?.addEventListener("click", () => {
   const status = el("channel-health-status");
   if (status) status.textContent = "正在刷新渠道状态…";
   refreshChannelHealth().catch(() => {
-    if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
   });
 });
 
@@ -3325,7 +3401,7 @@ refreshOptions().catch(() => {
 });
 refreshChannelHealth().catch(() => {
   const status = el("channel-health-status");
-  if (status) status.textContent = "渠道状态读取失败，请稍后重试。";
+    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
 });
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
@@ -3373,6 +3449,40 @@ window.addEventListener("online", () => {
   timelineAdd("已恢复在线；请先刷新服务端状态后继续。", "live");
   if (state.card) refreshSession().catch(() => timelineAdd("服务端状态读取失败，请稍后重试。", "warn"));
 });
+
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  const button = el("btn-install");
+  const status = el("install-status");
+  if (button) button.hidden = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = "应用已安装。";
+  }
+});
+el("btn-install")?.addEventListener("click", async () => {
+  const status = el("install-status");
+  if (status) status.hidden = false;
+  if (!installPrompt) {
+    if (status) status.textContent = "请在浏览器菜单选择安装应用或添加到主屏幕；若已安装，可直接打开应用。";
+    return;
+  }
+  try {
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (status) status.textContent = choice.outcome === "accepted"
+      ? "已提交安装，请按浏览器提示完成。" : "已取消安装，可稍后重试。";
+    installPrompt = null;
+  } catch {
+    if (status) status.textContent = "暂时无法安装，请稍后重试或使用浏览器菜单。";
+  }
+});
+
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
 navigator.serviceWorker.register("/assets/sw.js?v=24", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");

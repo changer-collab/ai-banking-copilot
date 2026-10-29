@@ -73,6 +73,12 @@ def run(base: str) -> list[str]:
             and "/assets/workspace.css?v=15" in html
             and "/assets/app.js?v=31" in html
         ),
+        "page: PWA 安装与订阅入口": (
+            'id="btn-install"' in html
+            and 'id="install-status"' in html
+            and 'data-record-tab="charges"' in html
+            and 'data-action="refresh-subscriptions"' in html
+        ),
         "page: 不露原始骑缝哈希": "骑缝哈希（cfhash）" not in html,
         "css: .quota 额度行样式": ".quota {" in css and ".quota__val" in css,
         "css: 超额强调": ".quota--over" in css,
@@ -96,6 +102,28 @@ def run(base: str) -> list[str]:
         ),
         "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
         "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
+        "js: 订阅价格与下次扣款": (
+            "item.price_increased_12m === true" in js
+            and "item.price_increased_12m === false" in js
+            and "样本不足" in js
+            and "下次扣款日" in js
+        ),
+        "js: 订阅扣款证据表": (
+            'if (key === "charges")' in js
+            and 'class="charge-records-table"' in js
+            and "seen.has(txn.record_id)" in js
+            and "内容哈希" in js
+        ),
+        "js: 审计渠道与摘要": (
+            'payload.channel || "未记录"' in js
+            and "payload.text_digest" in js
+            and "同摘要关联" in js
+        ),
+        "js: PWA 安装交互": (
+            "beforeinstallprompt" in js
+            and "appinstalled" in js
+            and 'register("/assets/sw.js?v=24"' in js
+        ),
     }
     bad = [key for key, ok in checks.items() if not ok]
     for key, ok in checks.items():

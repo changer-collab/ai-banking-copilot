@@ -24,6 +24,10 @@ def test_index_exposes_versioned_installable_shell(deps: object) -> None:
     assert 'id="view-records"' in html
     assert 'id="view-health"' in html
     assert 'id="app-tabbar"' in html
+    assert 'id="btn-install"' in html
+    assert 'id="install-status"' in html
+    assert 'data-record-tab="charges"' in html
+    assert 'data-action="refresh-subscriptions"' in html
 
 
 def test_service_worker_keeps_api_network_only(deps: object) -> None:
@@ -43,6 +47,8 @@ def test_service_worker_keeps_api_network_only(deps: object) -> None:
     assert '"/assets/app.css?v=7"' in worker.text
     app_js = client.get("/assets/app.js?v=31")
     assert 'register("/assets/sw.js?v=24"' in app_js.text
+    assert "beforeinstallprompt" in app_js.text
+    assert "appinstalled" in app_js.text
     assert "function previewHtml(" in app_js.text
     assert "provenance-panel" in app_js.text
     assert 'url.pathname.startsWith("/api/")' in worker.text

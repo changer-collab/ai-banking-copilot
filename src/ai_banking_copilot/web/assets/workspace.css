@@ -1139,3 +1139,39 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .records-skeleton { display: grid; gap: var(--s-2); padding: var(--s-2) 0; }
 .records-skeleton .skeleton { display: block; width: 100%; height: 14px; border-radius: 6px; }
 .state-card .btn { margin-top: var(--s-2); }
+
+/* 订阅证据表：在窄屏上保留完整字段，允许横向查看。 */
+.charge-records-table-wrap { overflow-x: auto; }
+.charge-records-table {
+  width: 100%;
+  min-width: 900px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.charge-records-table th,
+.charge-records-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-line);
+  text-align: left;
+  vertical-align: top;
+}
+.charge-records-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
+.charge-records-table td { color: #16233a; word-break: break-word; }
+.subscription-price { color: var(--blue-700); font-weight: 600; }
+.audit-digest { margin: 4px 0 0; word-break: break-all; }
+.channel-health-table-wrap { overflow-x: auto; }
+.channel-health-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.channel-health-table th,
+.channel-health-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pg-line);
+  text-align: left;
+}
+.channel-health-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }

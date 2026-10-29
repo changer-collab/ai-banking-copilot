@@ -352,6 +352,7 @@ class FactGateway:
             direction=str(row["direction"]),  # type: ignore[index]
             booked_at=_optional_text(row["booked_at"]),  # type: ignore[index]
             city=_optional_text(row["city"]),  # type: ignore[index]
+            card_tail=_optional_card_tail(row["card_tail"]),  # type: ignore[index]
         )
         return _record("transactions", payload.txn_id, payload)
 
@@ -446,6 +447,14 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_card_tail(value: object) -> str | None:
+    """付款卡尾号只暴露四位 ASCII 数字，非法值视为未知。"""
+    text = _optional_text(value)
+    if text is not None and len(text) == 4 and text.isascii() and text.isdigit():
+        return text
+    return None
 
 
 def _merchant_order(row: object) -> MerchantOrder:

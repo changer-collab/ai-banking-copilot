@@ -55,6 +55,12 @@ def test_list_is_pure_query(gateway: FactGateway) -> None:
     assert plan_is_pure_query(plan) is True
 
 
+def test_list_uses_injected_internal_user_id(gateway: FactGateway) -> None:
+    intent = _intent("subscription.list", user_id=Value("u_lin", Trust.TRUSTED))
+    plan = SubscriptionsHandler().build([intent], gateway)
+    assert plan.nodes[0].params["user_id"] == "u_lin"
+
+
 def test_sign_action_uses_merchant_slots_not_subscription_id(gateway: FactGateway) -> None:
     """README 裁决 #17：代扣签约按 商户/金额/周期/下次扣款日 + user_id 装配（不涉及订阅 id）。"""
     intent = _intent(

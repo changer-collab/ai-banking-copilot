@@ -61,6 +61,24 @@ def test_transaction_keeps_signed_amount_and_raw_merchant_text() -> None:
     )
     assert txn.amount == Money(-3200)
     assert "备注" in txn.merchant
+    assert txn.card_tail is None
+
+
+def test_transaction_accepts_explicit_card_tail() -> None:
+    txn = Transaction(
+        txn_id="txn_card_tail",
+        user_id="u_demo",
+        account_id="acc_current",
+        booked_on=date(2026, 9, 18),
+        amount=Money(-2500),
+        merchant="视频会员",
+        category="娱乐",
+        channel="app",
+        direction="out",
+        card_tail="4821",
+    )
+
+    assert txn.card_tail == "4821"
 
 
 def test_bill_summary_holds_category_totals() -> None:
