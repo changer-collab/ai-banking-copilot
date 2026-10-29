@@ -328,20 +328,80 @@ def _capability_boundary(intents: Sequence[Intent]) -> str | None:
     return None
 
 
+_EXPLICIT_PERIOD = re.compile(r"(?P<year>\d{4})\s*(?:年|[-/.])\s*(?P<month>\d{1,2})\s*月?")
+"""原话里**明确写出**的账期：「2019 年 1 月」「2026-09」「2019/1」（年份越界由白名单拒绝）。"""
+
+_RELATIVE_PERIOD = re.compile(r"(?P<rel>去年|今年|明年)\s*(?P<month>\d{1,2})\s*月")
+"""相对年份 + 月份：「去年 12 月」。只认这三种相对词，不猜「上上个月」之类。"""
+
+_STATED_YEAR = re.compile(r"(?P<year>\d{4})\s*年|(?P<rel>去年|今年|明年)")
+"""年度账单的年份：「2019 年的年度账单」「去年的年度账单」。"""
+
+_RELATIVE_YEAR_OFFSET = {"去年": -1, "今年": 0, "明年": 1}
+
+
+def _checked_year(year: int) -> int:
+    """年份白名单：与 `/api/bills/analysis` 同口径（2000–2100）。"""
+    if not 2000 <= year <= 2100:
+        raise ScenarioRefused(f"账期超出支持范围：{year} 年（只支持 2000–2100 年）")
+    return year
+
+
+def _checked_period(year: int, month: int) -> tuple[int, int]:
+    """账期白名单校验：与 `/api/bills/analysis` 同口径（2000–2100 年、1–12 月）。"""
+    _checked_year(year)
+    if not 1 <= month <= 12:
+        raise ScenarioRefused(f"账期不合法：{month} 月（应为 1–12 月）")
+    return year, month
+
+
+def _stated_period(intents: Sequence[Intent]) -> tuple[int, int] | None:
+    """从意图原话里取**写明**的账期；没写就返回 `None`（保持「缺省 = 上一个月」）。
+
+    只看 `span`（报文回指的原文片段），不改任何控制槽：`bills.monthly` 是纯查询，
+    账期只是查询参数。解析是确定性的，零模型参与；越界一律拒绝，不静默换成本月。
+    """
+    for intent in intents:
+        span = intent.slots.get("span")
+        if not isinstance(span, str):
+            continue
+        match = _EXPLICIT_PERIOD.search(span)
+        if match is not None:
+            return _checked_period(int(match["year"]), int(match["month"]))
+        match = _RELATIVE_PERIOD.search(span)
+        if match is not None:
+            year = DEFAULT_BOOKING_DATE.year + _RELATIVE_YEAR_OFFSET[match["rel"]]
+            return _checked_period(year, int(match["month"]))
+    return None
+
+
 def _period(intents: Sequence[Intent]) -> tuple[int, int]:
     for intent in intents:
         if intent.action in BILLS_ACTIONS and "year" in intent.slots and "month" in intent.slots:
             year = as_int(require_trusted(intent.slots["year"], "year"), "year")
             month = as_int(require_trusted(intent.slots["month"], "month"), "month")
             return year, month
+    stated = _stated_period(intents)
+    if stated is not None:
+        return stated
     return _previous_month(DEFAULT_BOOKING_DATE.year, DEFAULT_BOOKING_DATE.month)
 
 
 def _year(intents: Sequence[Intent]) -> int:
-    """年度账单的年份：取可信 `year` 槽；缺省用基准记账日的年份（不猜）。"""
+    """年度账单的年份：取可信 `year` 槽，其次取原话写明的年份；都没有才用基准年（不猜）。"""
     for intent in intents:
         if intent.action == "bills.yearly" and "year" in intent.slots:
             return as_int(require_trusted(intent.slots["year"], "year"), "year")
+    for intent in intents:
+        span = intent.slots.get("span")
+        if not isinstance(span, str):
+            continue
+        match = _STATED_YEAR.search(span)
+        if match is None:
+            continue
+        if match["year"]:
+            return _checked_year(int(match["year"]))
+        return _checked_year(DEFAULT_BOOKING_DATE.year + _RELATIVE_YEAR_OFFSET[match["rel"]])
     return DEFAULT_BOOKING_DATE.year
 
 

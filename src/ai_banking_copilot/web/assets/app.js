@@ -89,6 +89,7 @@ const state = {
   wealth: { products: [], holdings: [] },
   cards: [],
   bills: null,
+  billsPeriod: null,
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -1966,12 +1967,27 @@ function billsEmpty(payload) {
   el("bills-table").innerHTML = billsTableHtml(payload);
 }
 
+/* 记住最近一次账单回答的账期（形如 "2019-01"），供场景页按同一账期取数 */
+function rememberBillsPeriod(findings) {
+  const period = findings && typeof findings.period === "string" ? findings.period : "";
+  const matched = /^(\d{4})-(\d{2})$/.exec(period);
+  state.billsPeriod = matched
+    ? { year: Number(matched[1]), month: Number(matched[2]) }
+    : null;
+}
+
 async function refreshBills() {
   if (state.offline) return;
   billsLoading();
+  /* 场景页跟随「最近一次账单问答」的账期：问「查 2019 年 1 月账单」就别再画本月的图。
+     没问过时留空，服务端按缺省（上一个月）返回。 */
+  const period = state.billsPeriod;
+  const path = period
+    ? `/api/bills/analysis?year=${period.year}&month=${period.month}`
+    : "/api/bills/analysis";
   let result;
   try {
-    result = await apiFetch("GET", "/api/bills/analysis");
+    result = await apiFetch("GET", path);
   } catch (error) {
     billsFailure("账单识别读取失败，请检查网络后重试。");
     throw error;
@@ -2964,6 +2980,7 @@ function applyExecution(data) {
   state.resultCount = results.length;
   state.phase = data.state === "completed" ? "done" : data.state;
   const complete = data.state === "completed";
+  rememberBillsPeriod(data.bill_findings);
   const billHtml = complete
     ? billAnalysisHtml(data.bill_findings, data.bill_advice, data.bill_advice_message)
     : "";
@@ -4994,7 +5011,11 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+<<<<<<< HEAD
 navigator.serviceWorker.register("/assets/sw.js?v=55", { scope: "/" }).catch(() => {
+=======
+navigator.serviceWorker.register("/assets/sw.js?v=35", { scope: "/" }).catch(() => {
+>>>>>>> 01b0639 (fix(bills): 账期解析——原话写明的账期不再被改成本月)
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
