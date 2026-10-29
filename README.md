@@ -254,7 +254,7 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
 逐例证据：[`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)、[`docs/results/evidence-dev-v1-cases.csv`](docs/results/evidence-dev-v1-cases.csv)（由 `python scripts/export_cases_csv.py --input <run 目录> --output <csv>` 从 `results.json` 扁平化生成，不重跑评测；`evidence_dev_v1` 93 条同样四个数字全满：31/31、0/49、49/49、74/74）。
 
-最近一次全量门禁（2026-10-29）：`ruff check .` 通过、`mypy src` 通过（104 files）、`pytest -q` **1799 passed / 0 failed / 0 skipped**；`scripts/check_served_page.py` ALL OK、`scripts/e2e_check.py` ALL PASSED。
+最近一次全量门禁（2026-10-29，三人 PR #32/#35/#36 与 #37 合入后）：`ruff check .` 通过、`mypy src` 通过（105 files）、`pytest` **1981 条**（同日两次全量退出码 0；一次 1980 passed + 1 条时延敏感用例抖动，单跑通过，见 `docs/RESULTS.md` §14）；`scripts/check_served_page.py` ALL OK、`scripts/e2e_check.py` ALL PASSED。
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2

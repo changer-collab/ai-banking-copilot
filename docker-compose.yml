@@ -18,6 +18,12 @@ services:
       - AI_MODEL=${AI_MODEL:-deepseek-flash}
       - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # 飞书渠道：四项生产凭据只写在仓库根 .env（不提交）。留空即如实显示 replay / 未配置；
+      # 不要为了演示设 AIB_FEISHU_REPLAY_MODE=true，判定与验收见 docs/2026-10-27/飞书接入-配置单.md §1。
+      - AIB_FEISHU_APP_ID=${AIB_FEISHU_APP_ID:-}
+      - AIB_FEISHU_APP_SECRET=${AIB_FEISHU_APP_SECRET:-}
+      - AIB_FEISHU_VERIFICATION_TOKEN=${AIB_FEISHU_VERIFICATION_TOKEN:-}
+      - AIB_FEISHU_ENCRYPT_KEY=${AIB_FEISHU_ENCRYPT_KEY:-}
     # 会话 / 计划卡 / 审计链都落在 runtime/copilot.db，必须挂出来，否则容器重建即丢数据。
     volumes:
       - ./runtime:/app/runtime

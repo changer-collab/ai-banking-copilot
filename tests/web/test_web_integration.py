@@ -43,8 +43,8 @@ def test_web_layer_never_touches_the_core_bank_directly() -> None:
 def test_channel_health_page_has_a_stable_product_table(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
     html = client.get("/").text
-    script = client.get("/assets/app.js?v=27").text
-    stylesheet = client.get("/assets/workspace.css?v=11").text
+    script = client.get("/assets/app.js?v=39").text
+    stylesheet = client.get("/assets/workspace.css?v=20").text
 
     headers = ("渠道", "状态", "最后事件", "成功", "失败", "限流", "回放模式")
     positions = [html.index(f"<th>{header}</th>") for header in headers]

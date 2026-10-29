@@ -10,8 +10,8 @@ def test_index_exposes_versioned_installable_shell(deps: object) -> None:
     assert page.headers["cache-control"] == "no-store", "壳 HTML 内嵌版本号，不能被缓存"
     assert 'rel="manifest"' in html
     assert "/assets/manifest.json?v=1" in html
-    assert "/assets/app.js?v=38" in html
-    assert "/assets/workspace.css?v=19" in html
+    assert "/assets/app.js?v=39" in html
+    assert "/assets/workspace.css?v=20" in html
     assert "当前离线" in html
     assert 'id="conversation-sidebar"' in html
     assert 'id="conversation-welcome"' in html
@@ -42,19 +42,19 @@ def test_service_worker_keeps_api_network_only(deps: object) -> None:
     client = TestClient(create_app(deps))  # type: ignore[arg-type]
     manifest = client.get("/assets/manifest.json?v=1")
     worker = client.get("/assets/sw.js?v=1")
-    workspace = client.get("/assets/workspace.css?v=19")
+    workspace = client.get("/assets/workspace.css?v=20")
     assert manifest.status_code == 200
     assert manifest.json()["display"] == "standalone"
     assert worker.status_code == 200
     assert workspace.status_code == 200
     assert ".layout.layout--workspace" in workspace.text
     assert ".layout--workspace [hidden]" in workspace.text
-    assert 'const CACHE_NAME = "aib-static-shell-v31"' in worker.text
-    assert '"/assets/workspace.css?v=19"' in worker.text
-    assert '"/assets/app.js?v=38"' in worker.text
+    assert 'const CACHE_NAME = "aib-static-shell-v32"' in worker.text
+    assert '"/assets/workspace.css?v=20"' in worker.text
+    assert '"/assets/app.js?v=39"' in worker.text
     assert '"/assets/app.css?v=7"' in worker.text
-    app_js = client.get("/assets/app.js?v=38")
-    assert 'register("/assets/sw.js?v=31"' in app_js.text
+    app_js = client.get("/assets/app.js?v=39")
+    assert 'register("/assets/sw.js?v=32"' in app_js.text
     assert "beforeinstallprompt" in app_js.text
     assert "appinstalled" in app_js.text
     assert "function previewHtml(" in app_js.text

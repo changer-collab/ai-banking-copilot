@@ -300,6 +300,30 @@ python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GL
 
 ---
 
+### 14. 三人 PR 合入后基线（2026-10-29，PR #32 / #35 / #36 与 #37）
+
+```
+python -m ruff check .                # All checks passed!
+python -m mypy src                    # Success: no issues found in 105 source files
+python -m pytest -q                   # 1981 条：两次全量退出码 0；另一次 1980 passed + 1 条时延敏感用例抖动
+python scripts/check_served_page.py   # ALL OK
+python scripts/e2e_check.py           # ALL PASSED（[1]–[6]）
+python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GLOSS 键集不一致（非本轮引入）
+```
+
+- 提交：`f576ccc`（`sprint/1026` 合入 #36 王昌泽 / #35 徐思云 / #32 林晓研）+ `db8e61d`（#37 合并 `sprint/1026` 并解 7 个文件冲突）；本节数字跑在本分支工作树上，含当日统一改动（见下条，尚未提交）。
+- 较 §13 的 **1799** 增加 **182** 条：三人 D2 交付（飞书渠道与订阅、理财与记录页、账单与卡片）及 #37 的合并回归用例。
+- 计数口径：`pytest --collect-only -q` 汇总 1981。注意 `pyproject.toml` 的 `addopts` 已含 `-q`，命令行再传 `-q` 会把汇总行一起抑制。
+- 抖动说明：`tests/planning/test_reviewer.py::test_reviewer_total_deadline_closes_a_real_dripping_connection` 在本机第三次全量（427s）判红（`assert Thread.Event.is_set()` 为 False），同轮 `1980 passed`；**单跑 1.24s 通过**，属既有高负载抖动，与 §5.1 记录一致，非本轮引入。
+- 前端静态壳：`workspace.css?v=20` / `app.js?v=39` / `aib-static-shell-v32`（五处断言同步：`web/page.py`、`web/assets/sw.js`、`web/assets/app.js`、`tests/web/test_pwa.py`、`scripts/check_served_page.py`）。
+- 当日统一项：
+  1. `docker-compose.yml` 与 `.env.example` 补 `AIB_FEISHU_*` 四项透传——此前配置单要求、实现缺失，导致容器内 health 永远停在 `mode=replay`；
+  2. `tests/web/test_web_integration.py` 的 `app.js` / `workspace.css` 版本号由 `v=27` / `v=11` 归位到当前值（此前不校验 query，属隐性漂移）；
+  3. 账单画像改用 `.bills-profile-card` / `.bills-profile-grid`，不再覆盖个人中心的 `.profile-card` / `.profile-grid`（2 列）。
+- 残留：`check_design_sync.py` 的 `app.css` 漂移与 `GLOSS.rule` 键集不一致为既有问题（`git diff de5b9f1 HEAD -- src/ai_banking_copilot/web/assets/app.css` 为空，本轮未动）。
+
+---
+
 ## 四个数字的口径（2026-10-27 冻结）
 
 > 本节只冻结「怎么算」，**不填数**。实测值在跑数日由 `runtime/benchmark/results.json` 回填，并注明提交号与数据集哈希。

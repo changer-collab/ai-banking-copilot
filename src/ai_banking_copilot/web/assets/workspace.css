@@ -398,13 +398,12 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .trace__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
 .trace__head .panel__title { margin: 0; }
 .trace__head #btn-close-trace { display: none; }
-#insights-status { overflow-wrap: anywhere; }
 #app > #trace .mono { white-space: normal; overflow-wrap: anywhere; }
 
 /* 主动洞察：右栏空间有限——只留「结论 + 状态」，依据折叠 */
 #insights-panel { padding: var(--s-3) var(--s-4); }
 #insights-panel .panel__title { margin-bottom: var(--s-2); }
-#insights-status { margin: 0 0 var(--s-2); font-size: var(--fs-small); }
+#insights-status { margin: 0 0 var(--s-2); font-size: var(--fs-small); overflow-wrap: anywhere; }
 #insights-list { display: grid; gap: 0; }
 .insight-row { display: grid; gap: 2px; padding: var(--s-2) 0; border-top: 1px dashed var(--rule); }
 .insight-row:first-child { padding-top: 0; border-top: 0; }
@@ -1307,16 +1306,17 @@ body { background: var(--pg-bg); line-height: 1.52; }
 }
 .share-bar i,
 .cards-bar i { display: block; height: 100%; background: #0b4fd8; border-radius: 999px; }
-.profile-card {
+/* 账单画像：独立类名，避免与个人中心的 .profile-card / .profile-grid（2 列）互相覆盖 */
+.bills-profile-card {
   margin: var(--s-3) 0;
   padding: var(--s-3);
   border: 1px solid var(--pg-line);
   border-radius: 12px;
   background: #fbfdff;
 }
-.profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
-.profile-grid li { display: grid; gap: 2px; font-size: 12px; }
-.profile-grid strong { font-size: 14px; color: #16233a; }
+.bills-profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
+.bills-profile-grid li { display: grid; gap: 2px; font-size: 12px; }
+.bills-profile-grid strong { font-size: 14px; color: #16233a; }
 .bills-top {
   padding: var(--s-2) 0;
   border-bottom: 1px dashed var(--pg-line);

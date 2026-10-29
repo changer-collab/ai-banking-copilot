@@ -1211,9 +1211,9 @@ function billsProfileHtml(profile) {
     : "¥0.00/月";
   const suspicious = item.suspicious_count ? `${item.suspicious_count} 条` : "0 条";
   const maxImpact = item.max_suspicious_cents ? yuan(item.max_suspicious_cents) : "—";
-  return `<article class="profile-card">
+  return `<article class="bills-profile-card">
     <p class="panel__title panel__title--sub">用户画像 <span class="tech">只读 · 账单与订阅事实</span></p>
-    <ul class="profile-grid">
+    <ul class="bills-profile-grid">
       <li><span class="muted">消费结构</span><strong>${top}</strong><small class="mono">${topAmount}</small></li>
       <li><span class="muted">订阅负担</span><strong>${subscription}</strong><small class="muted">在用订阅折算到每月</small></li>
       <li><span class="muted">大额风险</span><strong>${suspicious}</strong><small class="mono">最大 ${maxImpact}</small></li>
@@ -3903,7 +3903,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=31", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=32", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
