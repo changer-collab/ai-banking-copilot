@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from enum import StrEnum
@@ -158,7 +159,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 class Store:
-    """SQLite 连接包装。**唯一的物理写入通道**。"""
+    """SQLite 连接包装。**唯一的物理写入通道**。
+
+    `sqlite3.Connection` 不是线程安全的；FastAPI 的同步端点跑在线程池里，页面一次加载会并发
+    命中多个只读接口。`check_same_thread=False` 只关掉模块级断言，**不提供并发保护**——多个线程
+    同时 `execute` 同一条连接会抛 `InterfaceError: bad parameter or other API misuse`。
+    因此所有连接访问统一经 `_lock` 串行化（`RLock` 允许事务内再调用 `query` / `execute`）。
+    """
 
     def __init__(self, db_path: str | Path, mode: StoreMode = StoreMode.READ_WRITE) -> None:
         self._path = Path(db_path)
@@ -173,6 +180,7 @@ class Store:
             self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._lock = threading.RLock()
 
     @property
     def mode(self) -> StoreMode:
@@ -185,26 +193,30 @@ class Store:
     def query(self, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:
         """只读查询：仅放行 SELECT / WITH。"""
         _assert_read_only_sql(sql)
-        cursor = self._conn.execute(sql, tuple(params))
-        rows: list[sqlite3.Row] = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(sql, tuple(params))
+            rows: list[sqlite3.Row] = cursor.fetchall()
         return rows
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> None:
         """单条写语句（调用方负责提交或使用 `transaction()`）。"""
         if self._mode is StoreMode.READ_ONLY:
             raise ReadOnlyViolation("只读连接不得执行写语句")
-        self._conn.execute(sql, tuple(params))
+        with self._lock:
+            self._conn.execute(sql, tuple(params))
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """事务：正常退出提交，异常退出回滚。"""
         if self._mode is StoreMode.READ_ONLY:
             raise ReadOnlyViolation("只读连接不能开启事务")
-        with self._conn:
-            yield self._conn
+        with self._lock:
+            with self._conn:
+                yield self._conn
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 def _assert_read_only_sql(sql: str) -> None:
