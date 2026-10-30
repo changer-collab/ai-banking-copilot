@@ -2834,14 +2834,6 @@ async function onConfirm() {
   await refreshAfterExecution();
 }
 
-const BILL_KIND_LABELS = {
-  "duplicate-charge": "疑似重复扣费",
-  "price-change": "商户价格变化",
-  "hidden-fee": "未登记扣费",
-  "recurring-subscription": "周期性订阅",
-  "abnormal-spend": "异常消费",
-};
-
 const BILL_STATUS_LABELS = {
   confirmed: "已确认",
   suspected: "疑似",
@@ -2869,7 +2861,7 @@ function billIssueHtml(item) {
   const status = BILL_STATUS_LABELS[item.status] || "未知状态";
   return `<details class="bill__issue">
     <summary>
-      <b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>
+      <b>${esc(FINDING_LABELS[item.kind] || item.kind)}</b>
       <span class="bill__issue-amt">${yuan(Number(item.impact_cents) || 0)}</span>
       <span class="chip">${esc(status)}</span>
     </summary>
@@ -2915,6 +2907,7 @@ function billAnalysisHtml(payload, advice, adviceMessage) {
           ? "本期未命中需要优先核对的问题；未发现不等于不存在。"
           : "本期没有支出流水，无法给出消费结论。"}</p>`}
     ${topAdvice ? `<p class="bill__note">建议：${esc(topAdvice.suggestion)}</p>` : ""}
+    <p class="bill__note">识别结果只作核对线索，不当作已确认；未发现不等于不存在，请照下方证据逐条核对。</p>
     ${potentialSaving > 0
       ? `<p class="bill__note">潜在节省 ${yuan(potentialSaving)} 为识别口径下的估算上限，未到账不计入。</p>`
       : ""}

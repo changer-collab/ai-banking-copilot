@@ -129,7 +129,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=54"' in js
+            and 'register("/assets/sw.js?v=55"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]
