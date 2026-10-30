@@ -173,11 +173,14 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 - **会话边界**：各渠道共用同一 `SessionManager` 与状态机，但**会话键是 `channel:chat_id`**，
   因此 Feishu / Web / PWA 之间**不共享对话上下文**，也不能拿 A 渠道的计划卡去 B 渠道确认；
   共享的是同一用户的账户事实、三色策略、审计与执行器。
-- **能力边界（如实声明）**：不覆盖群聊、富媒体、长连接推送；**服务器尚未写入 4 个 `AIB_FEISHU_*`
-  凭据**，`GET /api/channels/health` 无凭据时显示 `feishu.mode=replay`；显式设置
-  `AIB_FEISHU_REPLAY_MODE=1` 时，即使凭据齐全也仍显示 `replay`。现场演示可用
-  `python scripts/replay_webhook.py normal|tamper|replay|burst` 与 `/im` 联调页复现同一链路；
-  写入凭据并重启后即为真回调。
+- **身份绑定**：个人中心「飞书渠道」卡片调用 `POST /api/channels/feishu/link-code` 签发 6 位一次性绑定码
+  （5 分钟 TTL），`DELETE /api/channels/feishu/link` 只解绑当前账号；`/api/me` 返回
+  `feishu: {configured, mode, linked}` 供前端如实渲染。未绑定用户发消息只给绑定指引，不回落默认用户。
+- **能力边界（如实声明）**：不覆盖群聊、富媒体、长连接推送；服务器已写入 4 个 `AIB_FEISHU_*` 凭据
+  （2026-10-30），`GET /api/channels/health`（登录态）显示
+  `feishu.configured=true, mode=adapter, card_action=true`；显式设置 `AIB_FEISHU_REPLAY_MODE=1`
+  时即使凭据齐全也显示 `replay`，仅作断网兜底，现场可用
+  `python scripts/replay_webhook.py normal|tamper|replay|burst` 与 `/im` 联调页复现同一链路。
 
 ### Web 业务闭环与可复现评测
 
@@ -316,7 +319,7 @@ python scripts/operator_unlock.py --reason "注入误报，已人工核实"
 | 手机 / APP 端（可安装 PWA） | `https://<tunnel>/`（≤600px 自动切底部四 Tab，无独立 `/m` 入口） |
 | 本地联调页（不算产品页） | `https://<tunnel>/im` |
 | 渠道健康 | `https://<tunnel>/api/channels/health` |
-| 飞书回调（已接线，待配置凭据） | `https://<tunnel>/api/im/feishu` |
+| 飞书回调（已接线，凭据已配置） | `https://<tunnel>/api/im/feishu` |
 
 > 多用户登录为**可选增强**：服务器 `.env` 设 `AIB_AUTH_MODE=demo` + `AIB_DEMO_PASSWORD` 后启用
 > Cookie 会话与 CSRF；未设置时沿用单用户演示身份。
