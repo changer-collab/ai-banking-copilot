@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -174,6 +176,9 @@ AUTH_MODE_DEMO = "demo"
 
 AUTH_COOKIE_NAME = "aib_session"
 """会话 Cookie：`HttpOnly` + `SameSite=Lax`，页面脚本读不到 token。"""
+
+LINK_CODE_TTL_SECONDS = 300
+"""「连接飞书」绑定码的有效期（秒）：与登录票据同量级，够用户切到飞书发一句。"""
 
 REVERIFY_HEADER = "X-Reverify-Ticket"
 """删除类动作的二次验证票据请求头（票据一次性、5 分钟有效）。"""
@@ -493,6 +498,101 @@ def create_app(deps: AppDeps) -> FastAPI:
     LOGGER.info(
         "channel_startup channel=feishu event_id= feishu=%s", feishu.config.mode
     )
+
+    def _issue_link_code(user_id: str) -> tuple[str, int]:
+        """签发 6 位一次性绑定码（5 分钟有效）；同一用户重签即覆盖旧码。"""
+        store = deps.channel_store
+        if store is None:
+            raise HTTPException(status_code=409, detail="channel_store_unavailable")
+        now = time.time()
+        with store.transaction() as conn:
+            conn.execute("DELETE FROM channel_link_codes WHERE expires_at <= ?", (now,))
+            conn.execute(
+                "DELETE FROM channel_link_codes WHERE channel = 'feishu' AND user_id = ?",
+                (user_id,),
+            )
+            for _ in range(8):
+                code = f"{secrets.randbelow(10**6):06d}"
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO channel_link_codes"
+                    " (code, channel, user_id, expires_at) VALUES (?, 'feishu', ?, ?)",
+                    (code, user_id, now + LINK_CODE_TTL_SECONDS),
+                )
+                if cursor.rowcount:
+                    return code, LINK_CODE_TTL_SECONDS
+        raise HTTPException(status_code=409, detail="link_code_exhausted")
+
+    def _claim_link_code(text: str) -> str | None:
+        """用户在飞书里发来的 6 位码 → 对应 user_id；码一次性、过期即作废。"""
+        store = deps.channel_store
+        code = text.strip()
+        if store is None or len(code) != 6 or not code.isdigit():
+            return None
+        rows = store.query(
+            "SELECT user_id, expires_at FROM channel_link_codes"
+            " WHERE code = ? AND channel = 'feishu'",
+            (code,),
+        )
+        if not rows:
+            return None
+        with store.transaction() as conn:
+            conn.execute("DELETE FROM channel_link_codes WHERE code = ?", (code,))
+        if float(rows[0]["expires_at"]) <= time.time():
+            return None
+        return str(rows[0]["user_id"])
+
+    def _bind_feishu_identity(external_user_id: str, user_id: str) -> None:
+        store = deps.channel_store
+        if store is None:
+            return
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO channel_identities"
+                " (channel, external_user_id, user_id, bound_at) VALUES ('feishu', ?, ?, ?)",
+                (external_user_id, user_id, datetime.now().isoformat()),
+            )
+
+    def _unbind_feishu(user_id: str) -> int:
+        store = deps.channel_store
+        if store is None:
+            return 0
+        with store.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM channel_identities WHERE channel = 'feishu' AND user_id = ?",
+                (user_id,),
+            )
+            return int(cursor.rowcount)
+
+    def _feishu_linked(user_id: str) -> bool:
+        store = deps.channel_store
+        if store is None:
+            return False
+        rows = store.query(
+            "SELECT 1 AS hit FROM channel_identities"
+            " WHERE channel = 'feishu' AND user_id = ? LIMIT 1",
+            (user_id,),
+        )
+        return bool(rows)
+
+    def _send_feishu_notice(chat_id: str, text: str) -> None:
+        """绑定成功后给用户回一条提示；失败只记日志，不回滚绑定结果。"""
+        outbound = OutboundMessage(
+            channel=CHANNEL_FEISHU,
+            chat_id=chat_id,
+            session_id=f"{CHANNEL_FEISHU}:{chat_id}",
+            state="linked",
+            text=text,
+        )
+        try:
+            feishu.send(outbound)
+        except Exception as error:  # noqa: BLE001 - 通知失败不影响绑定
+            LOGGER.warning(
+                "channel_send channel=%s event_id= status=failed "
+                "reason=link_notice_failed error_type=%s",
+                CHANNEL_FEISHU,
+                type(error).__name__,
+            )
+
     health = HealthRegistry()
     health.register("web")
     health.register(CHANNEL_LOCAL)
@@ -714,20 +814,28 @@ def create_app(deps: AppDeps) -> FastAPI:
         selected: dict[str, object] | None,
         view: SubmissionView,
     ) -> None:
-        """识别到生活事件且已出计划卡时登记一条 `planned`；金额只取表单值，不估算。"""
+        """识别到生活事件且已出计划卡时登记一条 `planned`。
+
+        金额优先取表单值，其次取原话里明写的「N 元」，都没有就留空（不估算）；
+        标题记具体事件，金额不重复写进标题。
+        """
         store = deps.life_events
         if store is None or view.card is None:
             return
         event_id = detect_life_combo(utterance) or detect_life_event(utterance)
         if event_id is None:
             return
+        event_name = _life_event_name(event_id)
+        amount = _selected_amount_cents(selected)
         try:
             store.create(
                 user_id=user_id,
                 session_id=session_id,
                 event_id=event_id,
-                event_name=_life_event_name(event_id),
-                amount_cents=_selected_amount_cents(selected),
+                event_name=event_name,
+                # 具体事件：优先用该类型的「常见事件」名，否则压掉金额后的原话
+                event_title=_life_event_title(utterance, fallback=event_name),
+                amount_cents=amount if amount is not None else _utterance_amount_cents(utterance),
             )
         except Exception:
             LOGGER.warning("生活事件写入失败：%s / %s", user_id, session_id, exc_info=True)
@@ -1261,7 +1369,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             _mark_life_event(user_id, request.session_id, STATUS_EXECUTED)
         elif view.state.value in _ERROR_STATES:
             _mark_life_event(user_id, request.session_id, STATUS_FAILED)
-        _record_message(user_id, request.session_id, "assistant", "receipt", view.message)
+        _record_message(
+            user_id, request.session_id, "assistant", "receipt", view.message,
+            {"receipt": _receipt_payload(view)},
+        )
         return _response(request.session_id, user_id, _execution_payload(view))
 
     @app.post("/api/reject")
@@ -1272,7 +1383,10 @@ def create_app(deps: AppDeps) -> FastAPI:
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         _mark_life_event(user_id, request.session_id, STATUS_REJECTED)
-        _record_message(user_id, request.session_id, "assistant", "receipt", view.message)
+        _record_message(
+            user_id, request.session_id, "assistant", "receipt", view.message,
+            {"receipt": _receipt_payload(view)},
+        )
         return _session_payload(view)
 
     @app.post("/api/interrupt")
@@ -1291,7 +1405,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             view = _session_for(request.session_id, user_id).resume()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        _record_message(user_id, request.session_id, "assistant", "receipt", view.message)
+        _record_message(
+            user_id, request.session_id, "assistant", "receipt", view.message,
+            {"receipt": _receipt_payload(view)},
+        )
         return _response(request.session_id, user_id, _execution_payload(view))
 
     @app.post("/api/reverse")
@@ -1301,7 +1418,15 @@ def create_app(deps: AppDeps) -> FastAPI:
             outcome = _session_for(request.session_id, user_id).reverse()
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        _record_message(user_id, request.session_id, "assistant", "receipt", outcome.message)
+        _record_message(
+            user_id, request.session_id, "assistant", "receipt", outcome.message,
+            {"receipt": {
+                "state": outcome.state.value,
+                "message": outcome.message,
+                "results": [],
+                "record_ids": [],
+            }},
+        )
         return {
             "state": outcome.state.value,
             "message": outcome.message,
@@ -1485,6 +1610,11 @@ def create_app(deps: AppDeps) -> FastAPI:
             "session": session_payload,
             "recent_logins": logins,
             "channel_bindings": _channel_binding_count(user_id),
+            "feishu": {
+                "configured": feishu.configured,
+                "mode": feishu.config.mode,
+                "linked": _feishu_linked(user_id),
+            },
             "payees": len(deps.gateway.payees_of(user_id)),
             "accounts": len(deps.gateway.accounts_of(user_id)),
             "auth_mode": deps.auth_mode,
@@ -1579,6 +1709,11 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "description": prototype.description,
                     "triggers": list(prototype.triggers),
                     "example": prototype.example,
+                    # 该类型下的常见具体事件：类型只是链路形状，具体事件才是用户要办的事
+                    "cases": [
+                        {"label": label, "utterance": utterance}
+                        for label, utterance in prototype.cases
+                    ],
                     "steps": len(prototype.skeleton),
                     "skeleton": list(prototype.skeleton),
                 }
@@ -1731,6 +1866,31 @@ def create_app(deps: AppDeps) -> FastAPI:
             result["code"] = prompt.code
         return result
 
+    @app.post("/api/channels/feishu/link-code")
+    def create_feishu_link_code(
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """个人中心「连接飞书」：签发 6 位一次性绑定码。
+
+        用户把这 6 位发给机器人（飞书侧），服务端在未绑定回调里消费该码并落绑定，
+        因此 Web 端不需要知道自己的 `open_id`。
+        """
+        if not feishu.configured:
+            raise HTTPException(status_code=409, detail="feishu_not_configured")
+        code, ttl = _issue_link_code(user_id)
+        return {
+            "channel": CHANNEL_FEISHU,
+            "code": code,
+            "expires_in_s": ttl,
+            "instruction": "在飞书里直接把这 6 位数字发给「AI Banking」机器人即可完成绑定。",
+        }
+
+    @app.delete("/api/channels/feishu/link")
+    def delete_feishu_link(user_id: str = Depends(current_user)) -> dict[str, object]:
+        """解除当前账号的飞书绑定（只删自己这一行，不动别人的）。"""
+        removed = _unbind_feishu(user_id)
+        return {"channel": CHANNEL_FEISHU, "removed": removed}
+
     @app.get("/api/channels/health")
     def channels_health(user_id: str = Depends(current_user)) -> dict[str, object]:
         """渠道健康页：如实区分「已配置 / 未配置」，不把 stub 说成可用。"""
@@ -1763,8 +1923,17 @@ def create_app(deps: AppDeps) -> FastAPI:
         user_id: str,
         event_id: str | None,
     ) -> None:
+        dispatcher = _dispatcher_for(user_id)
         try:
-            outbound = _dispatcher_for(user_id).dispatch_live(material)
+            outbound = dispatcher.dispatch_live(material)
+            if (
+                isinstance(material, InboundMessage)
+                and outbound.state == "awaiting_confirm"
+                and outbound.level == "GREEN"
+            ):
+                # 绿＝只可能是纯查询。Web 端是浏览器拿到绿卡后自动点一次确认，
+                # IM 没有前端，这里补同一步：直接执行并回执，不再要求用户点按钮。
+                outbound = dispatcher.resume_green(material, outbound)
         except DispatchOutcomeUnknown as error:
             _append_channel_audit(
                 user_id=user_id,
@@ -1887,6 +2056,13 @@ def create_app(deps: AppDeps) -> FastAPI:
         nonlocal event_ledger
         body = await request.body()
         if not feishu.verify(request.headers, body):
+            # 飞书「请求地址校验」不带 X-Lark-* 签名头，challenge 分支改由
+            # 「能解密（Encrypt Key）+ token 等于配置值」把关；事件推送不受此放行，
+            # 缺签名头/签名不符照旧 401。
+            challenge_text = feishu.challenge(body)
+            if challenge_text is not None:
+                health.record_event(CHANNEL_FEISHU, success=True)
+                return JSONResponse(content={"challenge": challenge_text})
             _append_channel_audit(
                 user_id="",
                 channel=feishu_audit_channel,
@@ -1908,18 +2084,38 @@ def create_app(deps: AppDeps) -> FastAPI:
             payload = feishu.decode_body(body)
             event = feishu.parse_event(payload)
         except FeishuProtocolError as error:
+            reason = str(error)
+            if reason.startswith("unsupported_event:"):
+                # 飞书会推很多我们没实现的类型（如 im.message.message_read_v1）。
+                # 对「已订阅但本应用不处理」的事件必须 ACK 200，否则飞书按失败重试，
+                # 日志被重投刷屏；这里如实记 audited ignored，不假装处理过。
+                _append_channel_audit(
+                    user_id="",
+                    channel=feishu_audit_channel,
+                    direction="inbound",
+                    status="ignored",
+                    reason=reason,
+                )
+                LOGGER.info(
+                    "channel_event channel=%s event_id= status=ignored reason=%s",
+                    feishu_audit_channel,
+                    reason,
+                )
+                return JSONResponse(content={"code": 0, "ignored": True})
             _append_channel_audit(
                 user_id="",
                 channel=feishu_audit_channel,
                 direction="inbound",
                 status="rejected",
                 reason="protocol_error",
+                details={"error": reason},
             )
             LOGGER.warning(
                 "channel_event channel=%s event_id= status=rejected "
-                "reason=protocol_error error_type=%s",
+                "reason=protocol_error error_type=%s error=%s",
                 feishu_audit_channel,
                 type(error).__name__,
+                reason,
             )
             health.record_event(CHANNEL_FEISHU, success=False)
             return JSONResponse(
@@ -1959,6 +2155,44 @@ def create_app(deps: AppDeps) -> FastAPI:
             else None
         )
         if binding is None:
+            linked_user = (
+                _claim_link_code(material.text)
+                if isinstance(material, InboundMessage)
+                and feishu.configured
+                and external_user_id
+                else None
+            )
+            if linked_user is not None:
+                _bind_feishu_identity(external_user_id or "", linked_user)
+                _append_channel_audit(
+                    user_id=linked_user,
+                    channel="feishu",
+                    direction="inbound",
+                    status="linked",
+                    reason="link_code_accepted",
+                    event_id=event.event_id,
+                    external_user_id=external_user_id,
+                )
+                LOGGER.info(
+                    "channel_event channel=%s event_id=%s status=linked "
+                    "reason=link_code_accepted",
+                    feishu_audit_channel,
+                    event.event_id or "",
+                )
+                health.record_event(CHANNEL_FEISHU, success=True)
+                background_tasks.add_task(
+                    _send_feishu_notice,
+                    material.external_chat_id or external_user_id or "",
+                    "飞书已连接。现在可以直接在这里说「查余额」「给李娜转五百」。",
+                )
+                return JSONResponse(
+                    content={
+                        "code": 0,
+                        "channel": CHANNEL_FEISHU,
+                        "event_id": event.event_id,
+                        "linked": True,
+                    }
+                )
             _append_channel_audit(
                 user_id="",
                 channel=feishu_audit_channel,
@@ -2036,6 +2270,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                 "event_id": event_id,
                 "accepted": True,
             }
+            if command is not None:
+                # 卡片回调要求在 3 秒内返回 200；这里只 ACK + toast，执行放后台，
+                # 否则飞书客户端会报 200671（回调响应失败）。
+                envelope["toast"] = {"type": "info", "content": "已收到，正在办理…"}
             background_tasks.add_task(
                 _dispatch_live_feishu, material, binding.user_id, event_id
             )
@@ -2243,6 +2481,30 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
     }
 
 
+def _receipt_payload(view: SessionView | ExecutionView) -> dict[str, object]:
+    """执行回执快照：历史对话要能还原「执行了什么」，不能只剩一句文字。"""
+    if isinstance(view, ExecutionView):
+        results = [
+            {
+                "action": result.action,
+                "status": result.status,
+                "message": result.message,
+                "record_ids": list(result.record_ids),
+            }
+            for result in view.exec_results
+        ]
+        record_ids = list(view.record_ids)
+    else:
+        results = []
+        record_ids = []
+    return {
+        "state": view.state.value,
+        "message": view.message,
+        "results": results,
+        "record_ids": record_ids,
+    }
+
+
 def _session_payload(view: SessionView) -> dict[str, object]:
     return {"state": view.state.value, "message": view.message}
 
@@ -2338,6 +2600,45 @@ def _life_event_name(event_id: str) -> str:
         if combo.combo_id == event_id:
             return combo.name
     return ""
+
+
+_AMOUNT_IN_TEXT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:元|块钱|块)")
+_AMOUNT_STRIP = re.compile(r"(?:[¥￥]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*(?:元|块钱|块))")
+_EDGE_PUNCT = re.compile(r"^[\s，,、。；;：:！!？?]+|[\s，,、。；;：:！!？?]+$")
+_PUNCT_SPACE = re.compile(r"\s*([，,、。；;：:！!？?])\s*|\s{2,}")
+
+
+def _utterance_amount_cents(text: str) -> int | None:
+    """从原话里取第一个「N 元」当作金额（分）；没写就返回 `None`（不估算）。"""
+    match = _AMOUNT_IN_TEXT.search(text or "")
+    if match is None:
+        return None
+    try:
+        return int((Decimal(match.group(1)) * 100).to_integral_value())
+    except InvalidOperation:
+        return None
+
+
+def _life_event_title(text: str, *, fallback: str = "") -> str:
+    """把用户原话整理成「具体事件」标题。
+
+    先在原型的「常见事件」里找完全匹配的话术，命中就用事件名（如「出差」）；
+    否则只做删减：去掉金额与货币符号、压掉多余空白、去掉首尾标点。
+    删完为空则回落到类型名——宁可回退，也不拼一句假话。
+    """
+
+    raw = (text or "").strip()
+    for prototype in LIFE_EVENT_PROTOTYPES:
+        for label, utterance in prototype.cases:
+            if utterance and raw == utterance:
+                return label
+    cleaned = _AMOUNT_STRIP.sub("", raw)
+    cleaned = _PUNCT_SPACE.sub(lambda m: m.group(1) or " ", cleaned).strip()
+    cleaned = _EDGE_PUNCT.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    if len(cleaned) > 40:
+        cleaned = cleaned[:40]
+    return cleaned or fallback
 
 
 def _life_budget_progress(gateway: FactGateway, user_id: str) -> dict[str, object] | None:

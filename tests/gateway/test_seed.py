@@ -25,8 +25,8 @@ def test_seed_is_idempotent(seeded_db: Path) -> None:
     store = Store(seeded_db)
     seed_database(store)
     seed_database(store)
-    # 覆盖区间 2025-01..2026-09 = 21 个月 × 8 条/月 = 168 条（由 3 个月扩为 21 个月）。
-    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 168
+    # 覆盖区间 2025-01..2026-09 = 21 个月 × 15 条/月（8 条固定 + 7 条生活开支）= 315 条。
+    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
     assert store.query("SELECT COUNT(*) AS n FROM payees")[0]["n"] == 5
     store.close()
 
@@ -41,7 +41,7 @@ def test_seed_tops_up_a_partially_seeded_database(seeded_db: Path) -> None:
 
     reopened = Store(seeded_db)
     seed_database(reopened)
-    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 168
+    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
     reopened.close()
 
 

@@ -148,6 +148,33 @@ class Dispatcher:
         """为异步外部回调执行；业务开始后的异常标记为结果未知。"""
         return self._dispatch(inbound, preserve_outcome_error=True)
 
+    def resume_green(
+        self, inbound: InboundMessage, submission: OutboundMessage
+    ) -> OutboundMessage:
+        """绿卡自动执行：同一条入站事件的内部续跑，**不重复计频、不新增入站事件**。
+
+        Web 端是浏览器在拿到绿卡后再点一次确认；IM 没有前端，由调度层替用户完成这一步。
+        绿卡按策略只可能是纯查询，因此这里不放宽任何写操作口径。
+        """
+        card = submission.card or {}
+        card_id = card.get("card_id")
+        frozen_hash = card.get("frozen_hash")
+        if not isinstance(card_id, str) or not isinstance(frozen_hash, str):
+            return submission
+        user_id = self._resolve_user(inbound)
+        chat_id = inbound.external_chat_id or inbound.external_user_id or DEFAULT_CHAT_ID
+        session_id = f"{inbound.channel}:{chat_id}"
+        execution = self._manager.get(user_id, session_id).confirm(
+            card_id, frozen_hash=frozen_hash
+        )
+        payload = self._execution_payload(execution)
+        outbound = _outbound(
+            inbound, session_id=session_id, payload=payload, kind=KIND_RECEIPT
+        )
+        self._record_audit(inbound, outbound, user_id=user_id)
+        self._remember(inbound, outbound)
+        return outbound
+
     def _dispatch(
         self,
         inbound: InboundMessage | ConfirmCommand,

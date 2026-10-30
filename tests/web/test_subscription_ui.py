@@ -18,31 +18,31 @@ def test_subscription_cards_expose_price_tristate_and_next_charge(deps: AppDeps)
     assert "yuan(item.price_change_12m_from_cents)" in script
     assert "yuan(item.price_change_12m_to_cents)" in script
     assert ': "未提供"' in script
-    assert "subscriptionStatusLabel(item.status, item.registered_status)" in script
-    assert 'cancelled: "已取消订阅"' in script
+    assert 'data-sub-cancel=' in script
+    assert '<span class="chip">已取消</span>' in script
     assert 'active: "已确认订阅"' not in script
 
 
-def test_charge_records_reuse_options_evidence_and_show_seven_columns(deps: AppDeps) -> None:
+def test_charge_records_share_the_generic_records_table(deps: AppDeps) -> None:
+    """扣款记录必须和其他记录页共用 `records-table` 与三态，不再自建表格。"""
     client = TestClient(create_app(deps))
     html = client.get("/").text
     script = _script(deps)
     stylesheet = client.get("/assets/workspace.css").text
     assert 'data-record-tab="charges"' in html
     assert 'if (key === "charges")' in script
-    assert "state.options.subscription_details" in script
-    assert "seen.has(txn.record_id)" in script
-    assert "seen.add(txn.record_id)" in script
-    assert 'class="charge-records-table"' in script
-    table = script.split('class="charge-records-table"', 1)[1].split("</thead>", 1)[0]
-    headers = ("商户", "金额", "时间", "卡尾号", "渠道", "记录 ID", "内容哈希")
-    positions = [table.index(f"<th>{header}</th>") for header in headers]
+    assert "data.subscription_details" in script
+    assert "seen.has(key0)" in script
+    assert "seen.add(key0)" in script
+    assert "charge-records-table" not in script
+    assert "charge-records-table" not in stylesheet
+    # 列定义仍由 `RECORD_HEADERS` 提供，且顺序固定
+    headers_block = script.split("charges: [", 1)[1].split("]", 1)[0]
+    headers = ("商户", "金额", "扣费日", "渠道", "记录号")
+    positions = [headers_block.index(f'"{header}"') for header in headers]
     assert positions == sorted(positions)
-    assert "txn.booked_at || txn.booked_on" in script
-    assert 'txn.card_tail || "未提供"' in script
-    assert 'title="${esc(txn.content_hash)}"' in script
-    assert ".charge-records-table" in stylesheet
-    assert "table-layout: fixed" in stylesheet
+    assert "evidence.booked_on" in script
+    assert "evidence.booked_at ? String(evidence.booked_at).slice(11, 16)" in script
     assert "/api/charges" not in script
 
 
@@ -58,7 +58,8 @@ def test_subscription_records_and_health_have_human_states(deps: AppDeps) -> Non
     script = _script(deps)
     for text in (
         "正在读取订阅识别结果…", "未识别到订阅。", "订阅数据暂不可用，请稍后重试。",
-        "正在读取扣款记录…", "暂无可核对的订阅扣款记录。", "扣款记录暂不可用，请稍后重试。",
+        "扣款记录", "正在读取${esc(spec.label)}…", "${esc(spec.label)} · 暂无记录",
+        "${spec.label}读取失败，请稍后重试。",
         "正在读取渠道状态…", "暂无渠道状态。", "渠道状态暂不可用，请稍后重试。",
     ):
         assert text in script

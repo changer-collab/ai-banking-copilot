@@ -33,6 +33,25 @@ def _confirm(client: TestClient, view: dict, session_id: str = "closure") -> dic
     return response.json()
 
 
+def test_history_keeps_receipt_payload_for_executed_plan(tmp_path: Path) -> None:
+    """历史对话要能还原执行回执：确认后存回执快照，而不是只剩一句文字。"""
+
+    deps = _deps(tmp_path)
+    client = TestClient(create_app(deps))
+    view = client.post(
+        "/api/submit", json={"utterance": "查余额", "session_id": "closure"}
+    ).json()
+    assert view["card"]["level"] == "GREEN"
+    _confirm(client, view)
+
+    detail = client.get("/api/conversations/closure").json()
+    receipts = [item for item in detail["messages"] if item.get("kind") == "receipt"]
+    assert receipts, detail["messages"]
+    receipt = receipts[-1]["payload"]["receipt"]
+    assert receipt["state"] == "completed"
+    assert receipt["results"], receipt
+
+
 def test_options_are_real_owned_records(tmp_path: Path) -> None:
     deps = _deps(tmp_path)
     client = TestClient(create_app(deps))

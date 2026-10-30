@@ -12,9 +12,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from threading import Lock
 from typing import cast
 from urllib.error import HTTPError
@@ -132,6 +134,35 @@ def signature_for(encrypt_key: str, timestamp: str, nonce: str, body: bytes) -> 
     material = timestamp.encode("utf-8") + nonce.encode("utf-8")
     material += encrypt_key.encode("utf-8") + body
     return hashlib.sha256(material).hexdigest()
+
+
+_GO_TIMESTAMP = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*([+-]\d{2}:?\d{2})?"
+)
+
+
+def _timestamp_seconds(text: str) -> float | None:
+    """兼容两种 `X-Lark-Request-Timestamp`：事件订阅给秒级 epoch，卡片回调给 Go 的时间串。
+
+    2026-10-30 实测：`card.action.trigger` 的时间戳形如
+    `2026-10-30 08:35:44.257656464 +0800 CST m=+162632.366639307`，按浮点解析会失败，
+    导致验签被误判成伪造请求（飞书客户端报 200671）。
+    """
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    match = _GO_TIMESTAMP.match(text.strip())
+    if match is None:
+        return None
+    date, clock, zone = match.groups()
+    zone = zone or "+0000"
+    zone = zone if ":" in zone else f"{zone[:3]}:{zone[3:]}"
+    try:
+        parsed = datetime.strptime(f"{date} {clock} {zone}", "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        return None
+    return parsed.timestamp()
 
 
 def _pkcs7_pad(data: bytes, block_size: int = 16) -> bytes:
@@ -373,12 +404,34 @@ class FeishuAdapter:
         expected = signature_for(key, timestamp, nonce, body)
         return hmac.compare_digest(expected, provided)
 
+    def challenge(self, body: bytes) -> str | None:
+        """只用于 URL 校验：返回 `url_verification` 的 challenge，其余一律 `None`。
+
+        飞书在「请求地址校验」这一步**不带** `X-Lark-Request-*` 签名头（实测 2026-10-29：
+        请求头只有 cloudflare 转发头与 `x-request-id`），所以 challenge 不能以签名为准。
+        这里的门是另外两道：报文必须能用 Encrypt Key 解开（加密即共享密钥），
+        且 `token` 必须等于配置的 Verification Token。
+
+        本方法**不参与事件分派**：真实事件推送仍必须过 `verify`，缺签名头照旧 401。
+        """
+        try:
+            payload = self.decode_body(body)
+        except FeishuProtocolError:
+            return None
+        if str(payload.get("type") or "") != "url_verification":
+            return None
+        expected = self.config.verification_token
+        token = payload.get("token")
+        if not expected or not isinstance(token, str) or token != expected:
+            return None
+        challenge = payload.get("challenge")
+        return challenge if isinstance(challenge, str) and challenge else None
+
     @staticmethod
     def _fresh(timestamp: str, now: float | None) -> bool:
         """时间戳必须在 ±5 分钟内：签名正确但报文陈旧，同样视为重放。"""
-        try:
-            sent = float(timestamp)
-        except ValueError:
+        sent = _timestamp_seconds(timestamp)
+        if sent is None:
             return False
         current = time.time() if now is None else now
         return abs(current - sent) <= SIGNATURE_MAX_SKEW_S
@@ -512,8 +565,14 @@ class FeishuAdapter:
         )
 
     def render(self, outbound: OutboundMessage) -> Mapping[str, object]:
-        """复用统一计划卡事实，并附上飞书确认按钮。"""
+        """复用统一计划卡事实；**只有待确认**的卡才附飞书确认按钮。
+
+        绿卡在 IM 侧由调度层自动执行（等价 Web 端浏览器自动点确认），回执不应再带按钮；
+        黄/红卡执行完同样只出回执，避免重复执行入口。
+        """
         rendered = dict(render_feishu_card(outbound))
+        if outbound.state != "awaiting_confirm":
+            return rendered
         card = outbound.card
         if not isinstance(card, Mapping):
             return rendered

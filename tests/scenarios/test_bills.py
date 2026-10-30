@@ -47,7 +47,7 @@ def _bills_intent() -> Intent:
 
 def test_category_totals_come_from_fact_gateway(gateway: FactGateway) -> None:
     summary = category_totals(gateway, DEMO_USER_ID, 2026, 9)
-    assert summary.total_expense.cents == 763980
+    assert summary.total_expense.cents == 1611980
     assert summary.total_income.cents == 1850000
 
 
@@ -139,7 +139,7 @@ def test_bills_rejects_untrusted_control_slots(
 def test_category_share_uses_whitelisted_operator(gateway: FactGateway) -> None:
     share = category_share(gateway, DEMO_USER_ID, 2026, 9, "购物")
     assert share.operator == "ratio"
-    assert share.value == Decimal(730000) / Decimal(763980)
+    assert share.value == Decimal(826000) / Decimal(1611980)
     assert share.sources
 
 

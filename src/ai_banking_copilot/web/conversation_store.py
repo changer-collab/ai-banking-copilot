@@ -39,8 +39,8 @@ CREATE INDEX IF NOT EXISTS idx_conv_user
 TITLE_LENGTH = 20
 """列表标题长度：首条用户消息截前 20 字。"""
 
-LIST_LIMIT = 50
-"""会话列表上限：演示规模足够，避免一次拉全库。"""
+LIST_LIMIT = 100
+"""会话列表上限：按日期分组后仍能看到「更早」，同时避免一次拉全库。"""
 
 
 @dataclass(frozen=True)

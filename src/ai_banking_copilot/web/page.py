@@ -23,7 +23,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=21" />
+<link rel="stylesheet" href="/assets/workspace.css?v=39" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -42,12 +42,14 @@ _PAGE_HTML = """<!DOCTYPE html>
       <nav class="appnav" id="app-nav" aria-label="功能导航">
         <button class="appnav__item" type="button" data-nav="home">首页</button>
         <p class="side__label">场景</p>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="transfer">转账</button>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="bills">账单分析</button>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="wealth">理财</button>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="cards">卡片</button>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
-        <button class="appnav__item" type="button" data-nav="scene" data-scene="life">生活事件</button>
+        <div class="appnav__grid">
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="transfer">转账</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="bills">账单</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="wealth">理财</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="cards">卡片</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="life">生活</button>
+        </div>
         <p class="side__label">工具</p>
         <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
         <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
@@ -63,7 +65,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <span class="side-user__sub">个人中心 · 登录身份</span>
         </span>
       </button>
-      <p class="side-note">模拟银行环境 · 不连接真实银行账户<br />绿色仅自动查询 · 黄色由您确认 · 红色需要强验证</p>
+      <p class="side-note">模拟银行环境 · 不连接真实银行账户</p>
     </div>
   </aside>
 
@@ -175,8 +177,6 @@ _PAGE_HTML = """<!DOCTYPE html>
     </section>
 
     <section class="view view--chat" id="view-chat">
-    <div class="progress-steps" id="progress-steps" aria-live="polite" hidden></div>
-
     <div id="stage" class="stream" aria-live="polite" aria-relevant="additions text">
       <section id="conversation-welcome" class="conversation-welcome">
         <span class="welcome-mark" aria-hidden="true">AI</span>
@@ -251,18 +251,51 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="transfer" hidden>
         <section class="panel" id="quota-panel">
-          <p class="panel__title">今日转账额度</p>
-          <p class="muted" id="quota-status">正在读取额度…</p>
+          <div class="scene-head">
+            <p class="panel__title">今日转账额度</p>
+            <span class="muted" id="quota-status">正在读取额度…</span>
+          </div>
           <div id="quota-body"></div>
         </section>
+
+        <section class="panel">
+          <p class="panel__title">快速转账</p>
+          <p class="muted scene-hint">先出计划卡，确认后才会执行；红色动作本页不代做，会引导去对话做强验证。</p>
+          <div class="scene-form">
+            <label class="field">
+              <span class="field__label">收款人</span>
+              <input class="input" id="quick-payee" type="text" placeholder="例如 李娜" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="field__label">金额（元）</span>
+              <input class="input" id="quick-amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如 500" />
+            </label>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn--primary" type="button" id="quick-transfer-submit">确认转账</button>
+            <span class="muted" id="quick-transfer-status" role="status" aria-live="polite"></span>
+          </div>
+          <div id="quick-transfer-card"></div>
+        </section>
+
         <section class="panel" id="transfers-panel">
-          <p class="panel__title">转账记录</p>
+          <div class="scene-head">
+            <p class="panel__title">最近转账</p>
+            <button class="btn btn--sm btn--ghost" type="button" data-nav="records" data-record-tab="transfers">看全部</button>
+          </div>
           <p class="muted" id="transfers-status">正在读取最近转账…</p>
           <ul class="records" id="transfers-list"></ul>
-          <div class="btn-row">
-            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="transfers">看全部转账记录</button>
-          </div>
         </section>
+
+        <details class="scene-note">
+          <summary>转账规则说明</summary>
+          <ul class="muted">
+            <li>绿色 = 纯查询，服务端直接执行；黄色 = 状态变更，需您点确认。</li>
+            <li>红色 = 大额 / 不可逆，需服务端一次性验证码，本页只提示去对话完成。</li>
+            <li>额度条读 <span class="mono">/api/options.quota</span>；已用超过日限额时标红「已超额」。</li>
+            <li>本页与对话共用 <span class="mono">/api/submit</span> → <span class="mono">/api/confirm</span>，不新增后端接口。</li>
+          </ul>
+        </details>
       </div>
 
       <div class="scene-block" data-scene-block="bills" hidden>
@@ -271,6 +304,13 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="muted" id="bills-status">正在读取账单识别结果…</p>
           <p class="muted" id="bills-disclaimer" hidden></p>
           <div id="bills-summary"></div>
+          <div class="budget-set">
+            <label class="budget-set__label" for="budget-input">本月预算</label>
+            <input class="input input--amount" id="budget-input" type="number" min="0" step="1"
+                   placeholder="如 8000" inputmode="decimal" />
+            <button class="btn btn--sm btn--primary" type="button" data-action="save-budget">保存</button>
+            <span class="muted budget-set__status" id="budget-status">只用于「月预算提醒」洞察，不是转账限额；转账的单笔 / 当日累计限额在计划卡里按服务端口径判定。</span>
+          </div>
           <div id="bills-profile"></div>
           <div id="bills-charts"></div>
           <div id="bills-top3"></div>
@@ -287,16 +327,24 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="wealth" hidden>
         <section class="panel" id="wealth-panel">
-          <p class="panel__title">理财 · 测评与持仓</p>
-          <div class="muted" id="wealth-status">正在读取测评状态与持仓…</div>
+          <div class="scene-head">
+            <p class="panel__title">理财</p>
+            <span class="muted" id="wealth-status">正在读取测评状态与持仓…</span>
+          </div>
           <div id="wealth-viz">
             <div class="wealth-loading" role="status" aria-live="polite">
               <p class="muted">正在读取风险等级与持仓占比…</p>
               <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
             </div>
           </div>
-          <div id="wealth-assessment"><p class="muted">尚未读取风险测评问卷。</p></div>
-          <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定</span></p>
+          <dialog class="wealth-dialog" id="wealth-assessment">
+            <div class="wealth-dialog__head">
+              <p class="panel__title">风险测评</p>
+              <button class="btn btn--sm btn--ghost" type="button" id="btn-wealth-assessment-close">关闭</button>
+            </div>
+            <div id="wealth-assessment-body"><p class="muted">尚未读取风险测评问卷。</p></div>
+          </dialog>
+          <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定，超等级不可买</span></p>
           <div id="wealth-products">
             <div class="wealth-loading" role="status" aria-live="polite">
               <p class="muted">正在读取产品目录…</p>
@@ -310,7 +358,6 @@ _PAGE_HTML = """<!DOCTYPE html>
               <span class="skeleton"></span><span class="skeleton"></span>
             </div>
           </div>
-          <p class="muted" id="wealth-source"></p>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>
           </div>
@@ -319,9 +366,14 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="cards" hidden>
         <section class="panel" id="cards-panel">
-          <p class="panel__title">卡片管理</p>
-          <p class="muted" id="cards-status">正在读取卡片…</p>
+          <div class="scene-head">
+            <p class="panel__title">卡片管理</p>
+            <span class="muted" id="cards-status">正在读取卡片…</span>
+          </div>
+          <p class="muted scene-hint">四键直接办理：锁卡 / 解锁、挂失、调额、补虚拟卡。红色动作页内只生成计划卡，强验证在对话里完成。</p>
           <div id="cards-list"></div>
+          <div id="cards-plan" hidden></div>
+          <p class="muted" id="cards-plan-status" hidden></p>
           <div id="cards-visual"></div>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="cards">看卡片状态</button>
@@ -331,13 +383,38 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="subscriptions" hidden>
         <section class="panel" id="subscription-panel">
-          <p class="panel__title">订阅识别与取消状态</p>
-          <p class="muted" id="subscription-status">正在读取订阅识别结果…</p>
-          <p class="muted" id="subscription-boundary" hidden></p>
+          <div class="scene-head">
+            <p class="panel__title">订阅管理</p>
+            <span class="muted" id="subscription-status">正在读取订阅识别结果…</span>
+          </div>
+          <div id="subscription-summary"></div>
+          <div id="subscription-timeline"></div>
           <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
+          <div id="subscription-plan" hidden></div>
+          <p class="muted" id="subscription-plan-status" hidden></p>
           <div id="subscription-cancel-result" hidden></div>
+          <dialog class="sub-cancel-dialog" id="subscription-cancel-dialog">
+            <div class="sub-cancel-dialog__head">
+              <p class="panel__title">取消这个订阅？</p>
+              <button class="btn btn--sm btn--ghost" type="button" data-sub-cancel-close>返回</button>
+            </div>
+            <div class="sub-cancel-dialog__body" id="subscription-cancel-body"></div>
+            <div class="sub-cancel-dialog__foot">
+              <button class="btn btn--ghost" type="button" data-sub-cancel-close>先不取消</button>
+              <button class="btn btn--danger" type="button" data-sub-cancel-confirm>确认取消</button>
+            </div>
+          </dialog>
+          <p class="muted" id="subscription-boundary" hidden></p>
+          <details class="scene-note">
+            <summary>取消口径与数据边界</summary>
+            <ul>
+              <li>取消只在本地把订阅状态改为「已取消订阅」，商户侧是否停止扣费以商户结果为准，本页不承诺已停扣。</li>
+              <li>「疑似」订阅来自流水推断，需本人核对后再决定是否取消，系统不会自动升级为已确认。</li>
+              <li>下次扣款日标注「预测值」的是按扣费周期推算，不是商户确认的扣款日。</li>
+            </ul>
+          </details>
           <div class="btn-row">
-            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">查看扣款记录</button>
+            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">扣款记录</button>
             <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button>
           </div>
         </section>
@@ -345,10 +422,29 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="life" hidden>
         <section class="panel" id="life-events-panel">
-          <p class="panel__title">生活事件</p>
-          <p class="muted" id="life-events-status">正在读取生活事件原型…</p>
+          <div class="scene-head">
+            <p class="panel__title">生活日历</p>
+            <span class="muted" id="life-events-status">正在读取生活事件…</span>
+          </div>
+          <p class="scene-hint">按本人生成过的记录落在日期上；不是商户日程，同一天多条只算一个事件点。</p>
+          <div id="life-calendar"><p class="muted">尚未读取生活日历。</p></div>
+          <div class="life-bar">
+            <div class="life-bar__text">
+              <b>组合任务台</b>
+              <span class="muted">选一个生活事件，系统拆成多步逐张确认。</span>
+            </div>
+            <button class="btn btn--sm btn--primary" type="button" id="btn-life-workbench">打开任务台</button>
+          </div>
+          <p class="panel__title panel__title--sub">最近记录</p>
           <div id="life-events-list"><p class="muted">尚未读取生活事件。</p></div>
         </section>
+        <dialog class="life-dialog" id="life-workbench">
+          <div class="life-dialog__head">
+            <p class="panel__title">组合任务台</p>
+            <button class="btn btn--sm btn--ghost" type="button" id="btn-life-workbench-close">返回</button>
+          </div>
+          <div id="life-workbench-body"><p class="muted">尚未读取事件原型。</p></div>
+        </dialog>
       </div>
     </section>
 
@@ -441,7 +537,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=40"></script>
+<script src="/assets/app.js?v=60"></script>
 </body>
 </html>
 """

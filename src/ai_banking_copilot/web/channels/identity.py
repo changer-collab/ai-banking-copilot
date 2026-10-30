@@ -50,6 +50,13 @@ CREATE TABLE IF NOT EXISTS channel_bind_codes (
     expires_at       TEXT NOT NULL,
     attempts         INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS channel_link_codes (
+    code             TEXT PRIMARY KEY,
+    channel          TEXT NOT NULL,
+    user_id          TEXT NOT NULL,
+    expires_at       REAL NOT NULL
+);
 """
 
 

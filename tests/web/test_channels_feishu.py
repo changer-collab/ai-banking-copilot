@@ -4,12 +4,20 @@ import base64
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from threading import Barrier, Lock
 
 import pytest
 
+from ai_banking_copilot.scenarios.subscriptions import (
+    CANCEL_STATE_LABELS,
+    CANCEL_STATE_LOCAL_CANCELLED,
+    EXTERNAL_CANCEL_NOT_INTEGRATED,
+    SUBSCRIPTION_CANCEL_BOUNDARY,
+)
 from ai_banking_copilot.web.channels.contracts import (
     CHANNEL_FEISHU,
+    KIND_RECEIPT,
     InboundMessage,
     OutboundMessage,
 )
@@ -21,6 +29,7 @@ from ai_banking_copilot.web.channels.feishu import (
     encrypt_payload,
     signature_for,
 )
+from ai_banking_copilot.web.channels.render import render_feishu_card, render_text
 
 
 def _headers(
@@ -94,6 +103,22 @@ def test_stale_timestamp_is_rejected_even_when_signature_matches() -> None:
     stale = _headers(key, body, timestamp="1")
     assert adapter.verify(stale, body) is False
     assert adapter.verify(stale, body, now=1.0) is True
+
+
+def test_go_datetime_timestamp_from_card_callback_is_accepted() -> None:
+    """卡片回调的时间戳是 Go 时间串（2026-10-30 实测），不是秒级 epoch。"""
+    key = "encrypt-key"
+    body = json.dumps(_message_payload()).encode()
+    adapter = FeishuAdapter(FeishuConfig(encrypt_key=key, verification_token="verify-token"))
+
+    stamp = "2026-10-30 08:35:44.257656464 +0800 CST m=+162632.366639307"
+    headers = _headers(key, body, timestamp=stamp)
+
+    fresh = datetime.strptime("2026-10-30 00:36:00 +0000", "%Y-%m-%d %H:%M:%S %z").timestamp()
+    assert adapter.verify(headers, body, now=fresh) is True
+
+    stale = datetime.strptime("2026-10-30 00:20:00 +0000", "%Y-%m-%d %H:%M:%S %z").timestamp()
+    assert adapter.verify(headers, body, now=stale) is False
 
 
 def test_parse_card_action_returns_confirm_command() -> None:
@@ -415,3 +440,56 @@ def test_concurrent_token_refresh_requests_token_once(monkeypatch) -> None:
 
     assert results == [200, 200]
     assert token_requests == 1
+
+
+def _receipt(*, payload=None) -> OutboundMessage:
+    return OutboundMessage(
+        channel=CHANNEL_FEISHU,
+        chat_id="oc-1",
+        session_id="feishu:oc-1",
+        state="completed",
+        text="计划执行完成（1 步）",
+        card={
+            "card_id": "card-1",
+            "frozen_hash": "a" * 64,
+            "lines": ["取消视频会员"],
+            "requires": ["user_confirm"],
+        },
+        level="YELLOW",
+        kind=KIND_RECEIPT,
+        payload=payload,
+    )
+
+
+def test_execution_receipt_uses_done_title_instead_of_needs_confirm() -> None:
+    """问题二：执行完成回执不得再沿用计划卡的「黄色 · 需确认」标题与前置条件。"""
+    rendered = render_feishu_card(_receipt())
+
+    assert rendered["header"]["title"]["content"] == "办理回执 · 执行完成"
+    assert rendered["header"]["template"] == "green"
+    dumped = json.dumps(rendered, ensure_ascii=False)
+    assert "需确认" not in dumped
+    assert "user_confirm" not in dumped
+
+
+def test_subscription_cancel_receipt_shows_local_state_and_merchant_boundary() -> None:
+    """问题三：取消回执必须同时给出本地状态、商户侧状态与能力边界。"""
+    payload = {
+        "subscription_cancel": {
+            "state": CANCEL_STATE_LOCAL_CANCELLED,
+            "label": CANCEL_STATE_LABELS[CANCEL_STATE_LOCAL_CANCELLED],
+            "external_status": EXTERNAL_CANCEL_NOT_INTEGRATED,
+            "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
+        }
+    }
+
+    rendered = render_feishu_card(_receipt(payload=payload))
+    dumped = json.dumps(rendered, ensure_ascii=False)
+    assert "本地已取消（商户未确认）" in dumped
+    assert "商户取消接口尚未接入" in dumped
+    assert SUBSCRIPTION_CANCEL_BOUNDARY in dumped
+
+    text = render_text(_receipt(payload=payload))
+    assert "本地已取消（商户未确认）" in text
+    assert SUBSCRIPTION_CANCEL_BOUNDARY in text
+    assert "需要：" not in text

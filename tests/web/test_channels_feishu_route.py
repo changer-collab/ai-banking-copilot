@@ -13,7 +13,11 @@ from ai_banking_copilot.policy.gate import StalePlanError
 from ai_banking_copilot.web import app as app_module
 from ai_banking_copilot.web.app import AppDeps, create_app
 from ai_banking_copilot.web.channels.dispatcher import Dispatcher
-from ai_banking_copilot.web.channels.feishu import FeishuAdapter, signature_for
+from ai_banking_copilot.web.channels.feishu import (
+    FeishuAdapter,
+    FeishuConfig,
+    signature_for,
+)
 from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.session import (
     ConfirmationMismatchError,
@@ -102,9 +106,10 @@ class _FailAfterCompletedWriteRepository:
         return self._base.delete(user_id, session_id)
 
 
-def test_feishu_url_verification_and_tamper_are_protocol_responses(
-    deps: AppDeps, audit: AuditLog, monkeypatch
+def test_feishu_url_verification_is_answered_with_or_without_signature(
+    deps: AppDeps, monkeypatch
 ) -> None:
+    """飞书 challenge 不带签名头（2026-10-29 实测），凭 token 放行；签名路径仍可用。"""
     monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "replay-key")
     monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
     client = TestClient(create_app(deps))
@@ -116,9 +121,22 @@ def test_feishu_url_verification_and_tamper_are_protocol_responses(
     assert response.status_code == 200
     assert response.json() == {"challenge": "c-1"}
 
-    tampered = _signed(body)
-    tampered["X-Lark-Signature"] = "0" * 64
-    rejected = client.post("/api/im/feishu", content=body, headers=tampered)
+    unsigned = client.post("/api/im/feishu", content=body)
+    assert unsigned.status_code == 200
+    assert unsigned.json() == {"challenge": "c-1"}
+
+
+def test_feishu_url_verification_with_wrong_token_is_rejected(
+    deps: AppDeps, audit: AuditLog, monkeypatch
+) -> None:
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "replay-key")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    client = TestClient(create_app(deps))
+    body = json.dumps(
+        {"type": "url_verification", "token": "wrong-token", "challenge": "c-1"}
+    ).encode()
+
+    rejected = client.post("/api/im/feishu", content=body)
     assert rejected.status_code == 401
     assert rejected.json()["detail"] == "signature_invalid"
     rejected_event = _channel_events(audit)[-1]
@@ -128,6 +146,20 @@ def test_feishu_url_verification_and_tamper_are_protocol_responses(
     assert rejected_event["reason"] == "signature_invalid"
     assert rejected_event["event_id"] == ""
     assert rejected_event["external_user_id"] == ""
+
+
+def test_feishu_unsigned_message_event_is_still_rejected(
+    deps: AppDeps, monkeypatch
+) -> None:
+    """放行只限 challenge：缺签名头的事件推送必须继续 401。"""
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "replay-key")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    client = TestClient(create_app(deps))
+    body = json.dumps(_message("evt-unsigned")).encode()
+
+    response = client.post("/api/im/feishu", content=body)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "signature_invalid"
 
 
 def test_feishu_parse_failure_is_audited_without_request_body(
@@ -144,6 +176,32 @@ def test_feishu_parse_failure_is_audited_without_request_body(
     assert event["status"] == "rejected"
     assert event["reason"] == "protocol_error"
     assert body.decode() not in str(event)
+
+
+def test_feishu_unsupported_event_is_acknowledged_but_not_executed(
+    deps: AppDeps, audit: AuditLog, monkeypatch
+) -> None:
+    """已订阅但未实现的事件类型必须 ACK 200，否则飞书按失败重投刷屏；审计如实记 ignored。"""
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "replay-key")
+    client = TestClient(create_app(deps))
+    payload = {
+        "schema": "2.0",
+        "header": {
+            "event_id": "evt-read-1",
+            "event_type": "im.message.message_read_v1",
+            "token": "verify-token",
+        },
+        "event": {},
+    }
+    body = json.dumps(payload).encode()
+
+    response = client.post("/api/im/feishu", content=body, headers=_signed(body))
+
+    assert response.status_code == 200
+    assert response.json() == {"code": 0, "ignored": True}
+    event = _channel_events(audit)[-1]
+    assert event["status"] == "ignored"
+    assert event["reason"] == "unsupported_event:im.message.message_read_v1"
 
 
 def test_live_feishu_acknowledges_before_dispatch_and_sends_transfer_card(
@@ -552,6 +610,112 @@ def test_live_feishu_send_exception_keeps_claim_and_records_one_failure(
     assert health["ok"] == 0
 
 
+def test_feishu_link_code_binds_open_id_and_shows_in_profile(
+    deps: AppDeps, audit: AuditLog, rw_store, monkeypatch
+) -> None:
+    """个人中心「连接飞书」：Web 签发 6 位码 → 飞书里发回来 → 落绑定。"""
+    monkeypatch.setenv("AIB_FEISHU_APP_ID", "app-id")
+    monkeypatch.setenv("AIB_FEISHU_APP_SECRET", "app-secret")
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "live-key")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    monkeypatch.delenv("AIB_FEISHU_REPLAY_MODE", raising=False)
+    client = TestClient(create_app(replace(deps, channel_store=rw_store)))
+
+    issued = client.post("/api/channels/feishu/link-code")
+    assert issued.status_code == 200
+    code = issued.json()["code"]
+    assert len(code) == 6 and code.isdigit()
+
+    body = json.dumps(_message("evt-link-1", text=code)).encode()
+    linked = client.post("/api/im/feishu", content=body, headers=_signed(body, "live-key"))
+
+    assert linked.status_code == 200
+    assert linked.json()["linked"] is True
+    rows = rw_store.query(
+        "SELECT user_id FROM channel_identities"
+        " WHERE channel = 'feishu' AND external_user_id = 'ou-1'"
+    )
+    assert rows and rows[0]["user_id"] == deps.user_id
+    assert rw_store.query("SELECT 1 FROM channel_link_codes WHERE code = ?", (code,)) == []
+    assert client.get("/api/me").json()["feishu"]["linked"] is True
+
+
+def test_feishu_unlink_only_removes_own_binding(
+    deps: AppDeps, rw_store, monkeypatch
+) -> None:
+    monkeypatch.setenv("AIB_FEISHU_APP_ID", "app-id")
+    monkeypatch.setenv("AIB_FEISHU_APP_SECRET", "app-secret")
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "live-key")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    monkeypatch.delenv("AIB_FEISHU_REPLAY_MODE", raising=False)
+    init_channel_schema(rw_store)
+    rw_store.execute(
+        "INSERT INTO channel_identities(channel, external_user_id, user_id, bound_at)"
+        " VALUES ('feishu', 'ou-1', ?, 'now'), ('feishu', 'ou-2', 'u_other', 'now')",
+        (deps.user_id,),
+    )
+    client = TestClient(create_app(replace(deps, channel_store=rw_store)))
+
+    removed = client.delete("/api/channels/feishu/link")
+
+    assert removed.status_code == 200
+    assert removed.json()["removed"] == 1
+    left = rw_store.query(
+        "SELECT external_user_id FROM channel_identities WHERE channel = 'feishu'"
+    )
+    assert [row["external_user_id"] for row in left] == ["ou-2"]
+
+
+def test_live_feishu_green_query_auto_executes_without_confirm_button(
+    deps: AppDeps, audit: AuditLog, rw_store, monkeypatch
+) -> None:
+    """绿卡＝纯查询，IM 侧自动执行并回执；不再让用户点「确认办理」。"""
+    monkeypatch.setenv("AIB_FEISHU_APP_ID", "app-id")
+    monkeypatch.setenv("AIB_FEISHU_APP_SECRET", "app-secret")
+    monkeypatch.setenv("AIB_FEISHU_ENCRYPT_KEY", "live-key")
+    monkeypatch.setenv("AIB_FEISHU_VERIFICATION_TOKEN", "verify-token")
+    monkeypatch.delenv("AIB_FEISHU_REPLAY_MODE", raising=False)
+    scheduled: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+    sent = []
+
+    def add_task(_tasks, task, *args, **kwargs) -> None:
+        scheduled.append((task, args, kwargs))
+
+    def send(_adapter: FeishuAdapter, outbound, *, on_attempt=None, on_retry=None) -> int:
+        del on_attempt, on_retry
+        sent.append(outbound)
+        return 200
+
+    monkeypatch.setattr(app_module.BackgroundTasks, "add_task", add_task)
+    monkeypatch.setattr(FeishuAdapter, "send", send)
+    init_channel_schema(rw_store)
+    rw_store.execute(
+        "INSERT INTO channel_identities(channel, external_user_id, user_id, bound_at) "
+        "VALUES ('feishu', 'ou-1', ?, 'now')",
+        (deps.user_id,),
+    )
+    client = TestClient(create_app(replace(deps, channel_store=rw_store)))
+    event_id = "evt-live-query"
+    body = json.dumps(_message(event_id, text="查一下余额")).encode()
+
+    response = client.post(
+        "/api/im/feishu", content=body, headers=_signed(body, "live-key")
+    )
+
+    assert response.status_code == 200
+    task, args, kwargs = scheduled.pop()
+    task(*args, **kwargs)
+
+    assert len(sent) == 1
+    outbound = sent[0]
+    assert outbound.level == "GREEN"
+    assert outbound.state != "awaiting_confirm"
+    rendered = FeishuAdapter(FeishuConfig()).render(outbound)
+    assert "确认办理" not in json.dumps(rendered, ensure_ascii=False)
+    events = [item for item in _channel_events(audit) if item["event_id"] == event_id]
+    assert any(item["direction"] == "outbound" and item["status"] == "sent" for item in events)
+
+
 def test_live_feishu_confirm_executes_and_sends_once_then_only_replays(
     deps: AppDeps, rw_store, monkeypatch
 ) -> None:
@@ -612,6 +776,8 @@ def test_live_feishu_confirm_executes_and_sends_once_then_only_replays(
         "channel": "feishu",
         "event_id": event_id,
         "accepted": True,
+        # 卡片回调必须在 3 秒内拿到 200 + 可识别响应体（feishu 客户端 toast），否则报 200671。
+        "toast": {"type": "info", "content": "已收到，正在办理…"},
     }
     assert confirm_calls == send_calls == 0
     task, args, kwargs = scheduled.pop()

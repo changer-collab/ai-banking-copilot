@@ -164,6 +164,13 @@ def product_facts(product_id: str) -> ProductFacts | None:
     return None
 
 
+def fee_label() -> str:
+    """产品行一行内展示的费率：缺数据时只写「未知」，完整口径留在推荐理由里。"""
+    node = load_graph().nodes.get(_FEE_NODE)
+    label = node.label if node is not None else FEE_UNKNOWN
+    return "未知" if label.startswith("未知") else label
+
+
 def explain_product(
     item: Mapping[str, object], risk_profile: str | None
 ) -> dict[str, object]:
@@ -189,8 +196,8 @@ def explain_product(
     if eligible:
         meaning = graph.risk_levels.get(facts.risk_level, "未知")
         reasons.append(
-            f"风险等级 {facts.risk_level}（{meaning}）≤ 你的测评等级 {risk_profile or '未知'}"
-            "：通过适当性闸门（服务端判定）"
+            f"风险匹配：你的测评等级 {risk_profile or '未知'}，产品风险 {facts.risk_level}"
+            f"（{meaning}），未超出你可承受的范围（由服务端按测评结果判定）。"
         )
     else:
         reason = item.get("reason")
@@ -199,12 +206,16 @@ def explain_product(
             if isinstance(reason, str) and reason
             else "当前不可申购（服务端未给出原因，不编造）"
         )
-    reasons.append(f"客群：{facts.audience}")
-    reasons.append(f"期限 {facts.term_days} 天 · 起购 {facts.min_amount_yuan} 元")
+    reasons.append(f"适合人群：{facts.audience}。")
+    reasons.append(
+        f"期限 {facts.term_days} 天、起购 {facts.min_amount_yuan} 元，"
+        "购买前请确认这笔资金在期限内不需要动用。"
+    )
     fee_node = graph.nodes.get(_FEE_NODE)
-    reasons.append(f"费率：{fee_node.label if fee_node is not None else FEE_UNKNOWN}")
+    fee_text = fee_node.label if fee_node is not None else FEE_UNKNOWN
+    reasons.append(f"费率：{fee_text}；本页不做测算，也不作业绩承诺。")
     return {
-        "title": "为什么推荐" if eligible else "为什么不能买",
+        "title": "推荐理由" if eligible else "为什么不能买",
         "eligible": eligible,
         "reasons": tuple(reasons),
         "path": _path(graph, facts),

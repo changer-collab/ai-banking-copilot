@@ -91,9 +91,9 @@ def test_demo_advice_uses_real_net_amounts_and_current_subscriptions(gateway: Fa
     assert [item.kind for item in advice] == ["category-share", "subscription-review"]
     share, subscription = advice
     assert share.period == "2026-09"
-    assert "购物净支出 7300.00 元" in share.evidence
-    assert "7639.80 元" in share.evidence
-    assert "95.55%" in share.evidence
+    assert "购物净支出 8260.00 元" in share.evidence
+    assert "16119.80 元" in share.evidence
+    assert "51.24%" in share.evidence
     assert "可调整" in share.suggestion
     assert "一次性" in share.suggestion
     assert "占比高不代表不必要" in share.suggestion

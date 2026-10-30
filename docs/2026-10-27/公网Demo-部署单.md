@@ -353,6 +353,13 @@ docker restart aib-tunnel && sleep 10 && docker logs aib-tunnel 2>&1 | grep tryc
 ```
 
 > `.env` 和 `runtime/` 在 `~/aib` 下，上面第 ② 步**不删它们**，所以密钥与会话/审计数据每天都在，不会被覆盖。
+>
+> **打包必须在仓库根目录执行（2026-10-30 实际踩到）**：如果在仓库的**上级目录**打包，tar 里会多一层
+> `ai-banking-copilot/`，解包到 `~/aib` 后代码落在 `~/aib/ai-banking-copilot/`，`~/aib/src` 仍是旧版本，
+> 容器照常启动、页面照常 200，**看起来部署成功但改的代码没生效**。正确写法：
+> `tar -C /path/to/ai-banking-copilot -czf aib.tar.gz --exclude=.git --exclude=runtime --exclude=.env .`
+> 验收时逐条核对容器内的文件，而不是只看 `docker ps`：
+> `docker exec aib-api-1 grep -c '<本次改动的关键符号>' /app/src/ai_banking_copilot/web/app.py`
 
 ---
 

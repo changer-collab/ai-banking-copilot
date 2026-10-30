@@ -43,15 +43,16 @@ def test_monthly_bill_aggregates_by_category(gateway: FactGateway) -> None:
     summary = gateway.monthly_bill(DEMO_USER_ID, 2026, 9)
     totals = {item.category: item.total for item in summary.payload.by_category}
     assert totals == {
-        "餐饮": Money(-3200),
-        "交通": Money(-1580),
-        "购物": Money(-730000),
+        "餐饮": Money(-179200),
+        "交通": Money(-27580),
+        "住房": Money(-480000),
+        "购物": Money(-826000),
         "转账": Money(-6800),
-        "生活缴费": Money(-19900),
-        "娱乐": Money(-2500),
+        "生活缴费": Money(-57900),
+        "娱乐": Money(-34500),
         "工资": Money(1850000),
     }
-    assert summary.payload.total_expense == Money(763980)
+    assert summary.payload.total_expense == Money(1611980)
     assert summary.payload.total_income == Money(1850000)
     categories = [item.category for item in summary.payload.by_category]
     assert categories == sorted(categories)

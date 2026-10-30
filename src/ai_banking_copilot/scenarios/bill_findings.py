@@ -23,7 +23,7 @@ from typing import Protocol
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 
-BILL_DATA_SOURCE = "内置演示数据（gateway/seed.py 播种，未接入真实账单导入）"
+BILL_DATA_SOURCE = "内置演示数据（未接入真实账单导入）"
 """当前唯一的数据来源；真实账单导入接通前必须原样展示。"""
 
 LOOKBACK_MONTHS = 12

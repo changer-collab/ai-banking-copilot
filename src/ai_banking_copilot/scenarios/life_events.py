@@ -82,6 +82,12 @@ class LifeEventPrototype:
     example: str = ""
     """示例话术（前端「用这句发起」按钮直接提交，走同一条 `/api/submit`）。"""
 
+    cases: tuple[tuple[str, str], ...] = ()
+    """该类型下的常见具体事件：`(事件名, 可直接提交的话术)`。
+
+    类型只描述链路形状，具体事件才是用户嘴里那件事；前端把这一列做成一排可选按钮。
+    """
+
 
 LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
     LifeEventPrototype(
@@ -93,6 +99,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.cross.birthday_plan",
         description="先把预算冻结住，商户下单后自动解冻剩余，超预算直接拒绝。",
         example="我妈下个月过生日",
+        cases=(
+            ("妈妈生日", "我妈下个月过生日"),
+            ("结婚纪念日", "结婚纪念日想订个蛋糕"),
+            ("爷爷寿宴", "爷爷寿宴，先按 1000 元预算"),
+            ("过节送礼", "过节送礼，预算 500 元"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L2",
@@ -103,6 +115,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.transfer + scenarios.subscriptions",
         description="按期自动转出，可在代扣清单里随时查看与停止。",
         example="每月给李娜 500 元生活费",
+        cases=(
+            ("给父母生活费", "每月给爸妈 2000 元生活费"),
+            ("房租月付", "每月给房东 3000 元"),
+            ("学费分期", "每月给学校 1000 元学费"),
+            ("健身月卡", "每月给健身房 200 元"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L3",
@@ -113,6 +131,11 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.cards",
         description="出行期间把日限额调低，到期自动恢复原额度。",
         example="下周三出差，把卡片日限额降到 1000 元",
+        cases=(
+            ("出差", "下周三出差，把卡片日限额降到 1000 元"),
+            ("出国旅游", "下月出国旅游，把日限额降到 800 元"),
+            ("境外出行", "境外出行期间，把日限额降到 500 元"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L4",
@@ -123,6 +146,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.wealth + scenarios.transfer",
         description="先查余额，缺口才赎回，再一次性转出。",
         example="凑钱还房贷 500 元给李娜",
+        cases=(
+            ("还房贷", "凑钱还房贷 500 元给李娜"),
+            ("买车首付", "凑钱付买车首付 5000 元"),
+            ("装修尾款", "凑钱付装修款 2000 元"),
+            ("交学费", "凑钱交学费 3000 元"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L5",
@@ -139,6 +168,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.cards",
         description="锁卡 → 挂失 → 补虚拟卡 → 改密码 → 查近期交易，五步止损。",
         example="我的借记卡丢了",
+        cases=(
+            ("卡丢了", "我的借记卡丢了"),
+            ("手机丢了", "手机丢了，先锁卡"),
+            ("钱包被偷", "钱包被偷了，帮我锁卡"),
+            ("疑似盗刷", "疑似盗刷，帮我查近期交易"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L6",
@@ -149,6 +184,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.bills + scenarios.subscriptions",
         description="年度账单 + 代扣盘点，纯查询不写资金。",
         example="阶段盘点",
+        cases=(
+            ("年终盘点", "年终总结，帮我做一次阶段盘点"),
+            ("换工作", "换工作了，做一次年度盘点"),
+            ("毕业盘点", "毕业了，阶段盘点一下"),
+            ("搬家后盘点", "搬家后阶段盘点"),
+        ),
     ),
     LifeEventPrototype(
         event_id="L7",
@@ -159,6 +200,12 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         reuse="scenarios.transfer + scenarios.bills",
         description="发起分摊收款 → 确认到账 → 记到上月账单。",
         example="分摊收款，李娜 应付 100 元",
+        cases=(
+            ("合租分摊", "合租分摊，李娜应付 100 元"),
+            ("AA 聚餐", "AA制分摊，聚餐李娜应付 80 元"),
+            ("婚宴份子", "份子钱分摊，李娜应付 200 元"),
+            ("团购收款", "团购收款，李娜应付 60 元"),
+        ),
     ),
 )
 """七条生活链路原型（顺序即触发优先级）。"""

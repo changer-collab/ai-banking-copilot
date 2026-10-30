@@ -52,7 +52,7 @@ def test_channel_health_page_has_a_stable_product_table(deps: AppDeps) -> None:
     assert 'id="channel-health-body"' in html
     assert 'class="channel-health-table-wrap"' in html
 
-    assert 'const CHANNEL_ORDER = ["web", "im", "feishu"]' in script
+    assert 'const CHANNEL_ORDER = ["web", "feishu"]' in script
     assert "data.health" in script
     assert "未接入" in script
     assert "暂无事件" in script

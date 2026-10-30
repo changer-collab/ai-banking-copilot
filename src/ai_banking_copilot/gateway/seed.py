@@ -4,12 +4,14 @@
 - **零随机**：全部为字面量或按固定公式生成，任何两次播种结果逐字节一致。
 - **幂等补种**：逐行 `INSERT OR IGNORE` —— 重复调用零副作用；种子扩充后既有库会自动补行；
   演示中产生的真实变更（余额 / 状态 / 用户发起的交易）不被覆盖。详见 `seed_database` 的 docstring。
-- 数据刻意埋入四类演示点：① 同名多候选收款人（王伟 ×2）；② `blocked` 收款人；
-  ③ 备注夹带指令的商户文本（H3 taint 演示，**只是数据**）；④ 单笔 6880 元异常大额。
+- 数据刻意埋入五类演示点：① 同名多候选收款人（王伟 ×2）；② `blocked` 收款人；
+  ③ 备注夹带指令的商户文本（H3 taint 演示，**只是数据**）；④ 单笔 6880 元异常大额；
+  ⑤ 每月一份完整生活开支（房租 / 餐饮 / 交通 / 话费 / 娱乐 / 日用），让分类占比可读。
 """
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date
 
 from ai_banking_copilot.gateway.store import Store
@@ -71,11 +73,32 @@ _SEED_LAST: tuple[int, int] = (2026, 9)
 _YEAR_SCALE: dict[int, int] = {2025: 85, 2026: 100}
 """按**年**的确定性整数缩放系数（百分比）：金额 = `cents * scale // 100`。
 
-零随机、可复现。`2026 = 100` ⇒ 既有 24 条流水**逐字段不变**（避免连锁破坏既有精确数值断言）；
-`2025 = 85` ⇒ 上年同期支出为本年的 85%，使年度**同期同比**产出真实百分比
-（`(100 - 85) / 85 = 17.65%`）。`_TXN_SPECS` 的金额均为 20 的倍数，缩放后仍为整数分
-（无浮点、无舍入误差）。
+零随机、可复现。`2026 = 100` ⇒ 2026 各月基准不变；`2025 = 85` ⇒ 上年同期支出为本年的 85%，
+使年度**同期同比**产出真实百分比（`(100 - 85) / 85 = 17.65%`）。
+`_TXN_SPECS` 的金额均为 20 的倍数，缩放后仍为整数分（无浮点、无舍入误差）。
 """
+
+_MONTH_SCALE_2026: dict[int, int] = {
+    1: 108,
+    2: 108,
+    3: 109,
+    4: 85,
+    5: 90,
+    6: 95,
+    7: 100,
+    8: 105,
+    9: 100,
+}
+"""2026 年**逐月**确定性系数（百分比），让「近 6 月支出趋势」出现真实起伏。
+
+- 1–9 月合计仍为 900（= 9 × 100），所以年度同比仍是 `+17.65%`；
+- 目标账期 2026-09 保持 100，本期账单与既有精确断言不变；
+- 只缩放消费类流水；订阅扣费（视频会员）保持原价，避免被误判为「商户涨价」；
+- 本期不高于 8 月，且对近 5 个月中位数的涨幅低于 10%，不会凭空产生 price-change 提醒。
+"""
+
+_FIXED_MONTH_MERCHANTS = frozenset({"视频会员"})
+"""逐月保持原价的商户：订阅扣款是固定金额，不应随消费波动。"""
 
 _TXN_SPECS = (
     # (day, account_id, amount_cents, category, merchant, channel, time, city, card_tail)
@@ -90,6 +113,16 @@ _TXN_SPECS = (
     (23, "acc_savings", 1850000, "工资", "工资代发", "bank", "09:00", None, None),
     # 深夜 + 异地：账单「深夜 / 异地」两类判据的确定性正例（未知商户 6880 元）。
     (27, "acc_current", -688000, "购物", "未知商户 9921", "web", "02:17", "深圳", None),
+    # 每月生活开支：让「分类占比」呈现出正常月份的样子（否则 6880 元异常大额会把购物顶到 95%）。
+    # 全部低于 5000 元、白天、常用城市，不额外制造大额 / 深夜 / 异地线索；
+    # 金额均为 100 的倍数，保证按年 / 按月缩放后仍是整数分，年度同比口径不变。
+    (12, "acc_current", -480000, "住房", "房租支出", "app", "09:10", "杭州", None),
+    (13, "acc_current", -68000, "餐饮", "外卖平台", "app", "12:10", "杭州", None),
+    (15, "acc_current", -26000, "交通", "打车出行", "app", "08:40", "杭州", None),
+    (16, "acc_current", -38000, "生活缴费", "宽带与话费", "app", "10:20", "杭州", None),
+    (20, "acc_current", -32000, "娱乐", "电影与演出", "app", "19:30", "杭州", None),
+    (22, "acc_current", -96000, "购物", "超市日用", "app", "18:20", "杭州", None),
+    (24, "acc_current", -108000, "餐饮", "周末聚餐", "app", "18:50", "杭州", None),
 )
 
 
@@ -143,6 +176,7 @@ def seed_database(store: Store) -> None:
             " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _build_transactions(),
         )
+        _upgrade_seeded_amounts(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,)
         )
@@ -163,10 +197,12 @@ def _seed_months() -> tuple[tuple[int, int], ...]:
     return tuple(periods)
 
 
-def _build_transactions() -> tuple[tuple[object, ...], ...]:
-    rows: list[tuple[object, ...]] = []
+def _seeded_rows() -> tuple[tuple[tuple[object, ...], int], ...]:
+    """返回（流水行，旧版平铺金额）：旧金额用于「只升级未被改过的种子行」。"""
+    rows: list[tuple[tuple[object, ...], int]] = []
     for year, month in _seed_months():
-        scale = _YEAR_SCALE[year]
+        year_scale = _YEAR_SCALE[year]
+        month_scale = _MONTH_SCALE_2026.get(month, 100) if year == 2026 else 100
         for (
             day,
             account_id,
@@ -178,25 +214,51 @@ def _build_transactions() -> tuple[tuple[object, ...], ...]:
             city,
             card_tail,
         ) in _TXN_SPECS:
-            amount_cents = cents * scale // 100
+            legacy_cents = cents * year_scale // 100
+            amount_cents = legacy_cents
+            if cents < 0 and year == 2026 and merchant not in _FIXED_MONTH_MERCHANTS:
+                amount_cents = legacy_cents * month_scale // 100
             booked_on = date(year, month, day).isoformat()
             rows.append(
                 (
-                    f"txn_{year}{month:02d}{day:02d}",
-                    DEMO_USER_ID,
-                    account_id,
-                    booked_on,
-                    amount_cents,
-                    merchant,
-                    category,
-                    channel,
-                    "out" if amount_cents < 0 else "in",
-                    f"{booked_on}T{time_of_day}:00",
-                    city,
-                    card_tail,
+                    (
+                        f"txn_{year}{month:02d}{day:02d}",
+                        DEMO_USER_ID,
+                        account_id,
+                        booked_on,
+                        amount_cents,
+                        merchant,
+                        category,
+                        channel,
+                        "out" if amount_cents < 0 else "in",
+                        f"{booked_on}T{time_of_day}:00",
+                        city,
+                        card_tail,
+                    ),
+                    legacy_cents,
                 )
             )
     return tuple(rows)
+
+
+def _build_transactions() -> tuple[tuple[object, ...], ...]:
+    return tuple(row for row, _ in _seeded_rows())
+
+
+def _upgrade_seeded_amounts(conn: sqlite3.Connection) -> None:
+    """把旧库中仍为平铺金额的种子行升级为逐月金额。
+
+    只命中「txn_YYYYMMDD + 金额仍等于旧种子值」的行：用户发起或改过的流水不会被覆盖；
+    非 2026 行与 2026-09 行新旧金额相同，等价 no-op。
+    """
+    for row, legacy_cents in _seeded_rows():
+        txn_id, amount_cents = row[0], row[4]
+        if amount_cents == legacy_cents:
+            continue
+        conn.execute(
+            "UPDATE transactions SET amount_cents = ? WHERE txn_id = ? AND amount_cents = ?",
+            (amount_cents, txn_id, legacy_cents),
+        )
 
 
 SECONDARY_USER_ID = "u_lin"

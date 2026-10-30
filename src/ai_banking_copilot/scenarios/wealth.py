@@ -46,7 +46,7 @@ from ai_banking_copilot.scenarios.base import (
     intent_text,
     trusted_slot,
 )
-from ai_banking_copilot.scenarios.wealth_graph import explain_product
+from ai_banking_copilot.scenarios.wealth_graph import explain_product, fee_label
 
 WEALTH_ACTIONS = frozenset({"wealth.list", "wealth.subscribe", "wealth.redeem"})
 """理财域动作（README 规范动作表 #5 / #10 / #11）。"""
@@ -302,6 +302,7 @@ def product_catalog(
                 "risk_level": product.risk_level,
                 "term_days": product.term_days,
                 "min_amount_yuan": str(product.min_amount.yuan),
+                "fee": fee_label(),
                 "eligible": eligible,
                 "reason": reason,
                 "data_source": PRODUCT_DATA_SOURCE,

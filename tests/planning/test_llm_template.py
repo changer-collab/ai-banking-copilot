@@ -205,6 +205,25 @@ def test_wealth_query_rule_keeps_hallucination_trap_blocked() -> None:
     assert _actions("把我不存在的理财收益提出来") == []
 
 
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "取消后商户还扣吗",
+        "取消后商户还会扣吗",
+        "取消后还会扣款吗",
+        "取消后还会继续扣费吗",
+        "取消以后还会扣吗",
+    ],
+)
+def test_cancel_followup_colloquial_phrasings_map_to_subscription_list(
+    utterance: str,
+) -> None:
+    """取消后的口语追问（「还会扣 / 还会继续扣费」）必须归查询，不能掉进未知意图或写动作。"""
+    actions = _actions(utterance)
+    assert actions and actions[0] == "subscription.list", utterance
+    assert "subscription.cancel" not in actions, utterance
+
+
 def test_card_region_order_is_frozen() -> None:
     patterns = [pattern.pattern for pattern, _, _ in _TEMPLATE_RULES]
     unlock_index = next(index for index, pattern in enumerate(patterns) if "解锁" in pattern)

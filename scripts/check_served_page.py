@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=21")
-    js = _get(base, "/assets/app.js?v=40")
+    workspace_css = _get(base, "/assets/workspace.css?v=39")
+    js = _get(base, "/assets/app.js?v=60")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=21" in html
-            and "/assets/app.js?v=40" in html
+            and "/assets/workspace.css?v=39" in html
+            and "/assets/app.js?v=60" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -99,7 +99,7 @@ def run(base: str) -> list[str]:
         "js: 要求字典": "user_confirm: " in js and "strong_verify: " in js,
         "js: 凭证号替代哈希": "function receiptNo(" in js,
         "js: 红色强验证挑战": (
-            "strong-verify" in js and "申请强验证" in js and "/api/verify/request" in js
+            "strong-verify" in js and "获取验证码" in js and "/api/verify/request" in js
         ),
         "js: 执行前预演": "function previewHtml(" in js and "确认后会发生什么" in js,
         "js: 数值溯源": "provenance-panel" in js and "/api/audit?limit=" in js,
@@ -115,11 +115,11 @@ def run(base: str) -> list[str]:
             and "样本不足" in js
             and "下次扣款日" in js
         ),
-        "js: 订阅扣款证据表": (
+        "js: 扣款记录复用通用表格": (
             'if (key === "charges")' in js
-            and 'class="charge-records-table"' in js
-            and "seen.has(txn.record_id)" in js
-            and "内容哈希" in js
+            and 'class="charge-records-table"' not in js
+            and "seen.has(key0)" in js
+            and "data.subscription_details" in js
         ),
         "js: 审计渠道与摘要": (
             'payload.channel || "未记录"' in js
@@ -129,7 +129,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=33"' in js
+            and 'register("/assets/sw.js?v=54"' in js
         ),
     }
     bad = [key for key, ok in checks.items() if not ok]

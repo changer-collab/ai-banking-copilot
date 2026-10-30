@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.web.app import (
+    AppDeps,
+    _life_event_title,
+    _utterance_amount_cents,
+    create_app,
+)
 from ai_banking_copilot.web.life_event_store import (
     STATUS_EXECUTED,
     STATUS_FAILED,
@@ -132,3 +140,75 @@ def test_records_are_isolated_and_limited_per_user(store: Store) -> None:
     assert events.list_for_user("u_lin")[0].status == STATUS_PLANNED
     assert events.mark(user_id="u_lin", session_id="s_lin", status=STATUS_REJECTED) == 1
     assert events.list_for_user("u_demo")[0].status == STATUS_PLANNED
+
+
+def test_event_title_is_persisted_and_returned(store: Store) -> None:
+    """具体事件单独落一列：列表先显示它，类型只做分类标签。"""
+
+    events = LifeEventStore(store)
+    record = events.create(
+        user_id="u_demo",
+        session_id="s1",
+        event_id="L4",
+        event_name="大额凑集型",
+        event_title="还房贷",
+        amount_cents=50000,
+        now=_T0,
+    )
+
+    assert record.event_title == "还房贷"
+    assert record.to_dict()["event_title"] == "还房贷"
+
+
+def test_schema_migration_adds_event_title_to_old_table(tmp_path: Path) -> None:
+    """老库没有 `event_title` 列：`init` 补列后仍可写，历史行留空由前端回落到类型名。"""
+
+    opened = Store(tmp_path / "old.db")
+    with opened.transaction() as conn:
+        conn.execute(
+            "CREATE TABLE life_event_records ("
+            " record_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL,"
+            " event_id TEXT NOT NULL, event_name TEXT NOT NULL, amount_cents INTEGER,"
+            " status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+    init_life_event_schema(opened)
+    record = LifeEventStore(opened).create(
+        user_id="u_demo", session_id="s1", event_id="L6", event_name="阶段盘点型", now=_T0
+    )
+    assert record.event_title == ""
+    opened.close()
+
+
+def test_life_event_title_prefers_case_label_and_strips_amount() -> None:
+    """命中「常见事件」就用事件名；否则去掉金额，删空则回落类型名。"""
+
+    assert _life_event_title("凑钱还房贷 500 元给李娜") == "还房贷"
+    assert _life_event_title("下周三出差，把卡片日限额降到 1000 元") == "出差"
+    assert _life_event_title("我随手写的 300 元杂事") == "我随手写的 杂事"
+    assert _life_event_title("500 元", fallback="阶段盘点型") == "阶段盘点型"
+    assert _utterance_amount_cents("凑钱还房贷 500 元给李娜") == 50000
+    assert _utterance_amount_cents("帮我盘点一下") is None
+
+
+def test_life_events_api_returns_event_title_and_cases(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """接口同时给「具体事件标题 + 该类型的常见事件」，前端才有东西可显示。"""
+
+    init_life_event_schema(rw_store)
+    client = TestClient(create_app(replace(deps, life_events=LifeEventStore(rw_store))))
+
+    # 用一条能直接出计划卡的句子（L7 分摊收款）；金额从原话里取，不写进标题
+    assert client.post(
+        "/api/submit", json={"utterance": "合租分摊，李娜应付 100 元"}
+    ).status_code == 200
+
+    payload = client.get("/api/life-events").json()
+    record = payload["records"][0]
+    assert record["event_title"] == "合租分摊"
+    assert record["event_name"] == "分摊收款型"
+    assert record["amount_cents"] == 10000
+
+    cases = {item["event_id"]: item["cases"] for item in payload["prototypes"]}
+    assert {"label": "合租分摊", "utterance": "合租分摊，李娜应付 100 元"} in cases["L7"]
+    assert all(item["cases"] for item in payload["prototypes"])

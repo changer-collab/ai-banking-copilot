@@ -54,11 +54,11 @@ def test_explain_eligible_product() -> None:
     why = explain_product(
         {"product_id": "wp_bond", "eligible": True, "reason": ""}, "R3"
     )
-    assert why["title"] == "为什么推荐"
+    assert why["title"] == "推荐理由"
     assert why["eligible"] is True
     reasons = why["reasons"]
     assert isinstance(reasons, tuple)
-    assert any("通过适当性闸门" in text for text in reasons)
+    assert any("未超出你可承受的范围" in text for text in reasons)
     assert any(FEE_UNKNOWN in text for text in reasons)
     path = why["path"]
     assert isinstance(path, tuple)
