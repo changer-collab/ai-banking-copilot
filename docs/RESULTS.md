@@ -324,6 +324,22 @@ python scripts/check_design_sync.py   # FAILED：app.css 两仓既有漂移 + GL
 
 ---
 
+### 15. D3 合并后基线（2026-10-30，audit + #40 / #39 / #38 合入后）
+
+```
+python -m ruff check .                # All checks passed!
+python -m pytest -q                   # junit：tests=2025 failures=0 errors=0 skipped=0（512.7s）
+```
+
+- 提交：`a83f39a`（`sprint/1026` 依次合入 `audit/d3-2026-10-30`、`feat/gaojingwen-d3`（#40）、`feat/xusiyun-d3`（#39）、`feat/linxiaoyan-d3`（#38），四个 merge commit 无冲突）。
+- 较 §14 的 **1981** 增加 **44** 条：林晓研 D3 的账单/卡片修复用例（`test_bills_period_parsing` / `test_bills_phrasings` / `test_bills_vague_transaction` / `test_card_lost_unlock`）；高靖雯与徐思云本轮只交 docs + PNG。
+- 计数口径：一律以 `--junitxml` 的 `tests=` 为准（§14 的「命令行再传 `-q` 会抑制汇总行」问题仍在）。
+- 抖动说明：本轮三次全量里，`test_reviewer_total_deadline_closes_a_real_dripping_connection` 与 `tests/web/test_channels_feishu_route.py::test_live_feishu_preadmission_is_consumed_without_second_charge` 在**干净 `6fa674e` 基线**上也会红（前者 `Thread.Event.is_set()` 为 False，后者 30 连发第 5 次期望 200 实得 429）；合并后的 `a83f39a` 全量 2025 条 0 失败，确认二者均为高负载抖动，非改动引入。
+- 前端静态壳：`app.js?v=61` / `workspace.css?v=39` / `aib-static-shell-v55`（`web/page.py`、`web/assets/sw.js`、`web/assets/app.js` 注册行、`tests/web/test_pwa.py`、`scripts/check_served_page.py` 五处同步）；`tests/web/test_web_integration.py` 已改为从页面 HTML 正则取版本号，后续抬链不再需要改断言。
+- 口径文档：`docs/2026-10-30/D3审计-2026-10-30.md`（完成度矩阵、P0 处理结果、三分支 rebase 记录与冲突处理）。
+
+---
+
 ## 四个数字的口径（2026-10-27 冻结）
 
 > 本节只冻结「怎么算」，**不填数**。实测值在跑数日由 `runtime/benchmark/results.json` 回填，并注明提交号与数据集哈希。
