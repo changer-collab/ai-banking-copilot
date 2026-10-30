@@ -5004,11 +5004,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-<<<<<<< HEAD
 navigator.serviceWorker.register("/assets/sw.js?v=55", { scope: "/" }).catch(() => {
-=======
-navigator.serviceWorker.register("/assets/sw.js?v=35", { scope: "/" }).catch(() => {
->>>>>>> 01b0639 (fix(bills): 账期解析——原话写明的账期不再被改成本月)
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
