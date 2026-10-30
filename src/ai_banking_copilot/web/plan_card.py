@@ -385,6 +385,17 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
         end = _str_param(node, "end")
         if start is not None and end is not None:
             return f"{start}~{end}"
+    if node.action == "bills.monthly":
+        # 账期是计划参数：计划卡必须把它写出来，否则「查 2019 年 1 月」和「查本月」
+        # 在卡上长得一模一样，用户无法在确认前核对查的是哪个月。
+        year = node.params.get("year")
+        month = node.params.get("month")
+        if (
+            isinstance(year, int) and not isinstance(year, bool)
+            and isinstance(month, int) and not isinstance(month, bool)
+        ):
+            return f"{year}-{month:02d}"
+        return "—"
     if node.action == "bills.yearly":
         year = node.params.get("year")
         if isinstance(year, int) and not isinstance(year, bool):

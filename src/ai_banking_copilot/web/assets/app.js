@@ -89,6 +89,7 @@ const state = {
   wealth: { products: [], holdings: [] },
   cards: [],
   bills: null,
+  billsPeriod: null,
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -1664,7 +1665,8 @@ function cardsHtml(payload) {
     </article>`;
   }
   const maxLimit = Math.max(...cards.map((card) => Number(card.daily_limit_cents) || 0), 1);
-  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`;
+  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`
+    + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：计划卡确认时输入演示验证码。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能补卡。</p>`;
 }
 
 /* 额度饼图：各卡日限额占全部卡片合计的比例（真实数字，仅用于横向对比） */
@@ -1965,12 +1967,27 @@ function billsEmpty(payload) {
   el("bills-table").innerHTML = billsTableHtml(payload);
 }
 
+/* 记住最近一次账单回答的账期（形如 "2019-01"），供场景页按同一账期取数 */
+function rememberBillsPeriod(findings) {
+  const period = findings && typeof findings.period === "string" ? findings.period : "";
+  const matched = /^(\d{4})-(\d{2})$/.exec(period);
+  state.billsPeriod = matched
+    ? { year: Number(matched[1]), month: Number(matched[2]) }
+    : null;
+}
+
 async function refreshBills() {
   if (state.offline) return;
   billsLoading();
+  /* 场景页跟随「最近一次账单问答」的账期：问「查 2019 年 1 月账单」就别再画本月的图。
+     没问过时留空，服务端按缺省（上一个月）返回。 */
+  const period = state.billsPeriod;
+  const path = period
+    ? `/api/bills/analysis?year=${period.year}&month=${period.month}`
+    : "/api/bills/analysis";
   let result;
   try {
-    result = await apiFetch("GET", "/api/bills/analysis");
+    result = await apiFetch("GET", path);
   } catch (error) {
     billsFailure("账单识别读取失败，请检查网络后重试。");
     throw error;
@@ -2636,9 +2653,13 @@ async function applySubmission(data) {
   }
   state.phase = data.state === "blocked" ? "blocked" : "clarifying";
   state.clarifications = data.clarifications || [];
+  /* 场景层追问（如「这笔 6800 是不是我刷的」）只有一句话、没有结构化槽位表单：
+     此时必须把服务端那句 prompt 原样显示出来，不能退化成「请补充所需信息后重新提交。」——
+     那句空话既没告诉用户缺什么，也和 API 返回的 message 不一致。 */
+  const clarifyPrompt = data.message || (Array.isArray(data.questions) ? data.questions[0] : "");
   state.panel = data.state === "blocked"
     ? interceptHtml("安全拒绝（未产生可执行计划）", data.message || "未知意图不猜测执行；已留痕。", false)
-    : clarifyHtml() || `<div class="takeover">请补充所需信息后重新提交。</div>`;
+    : clarifyHtml() || `<div class="takeover"><p>${esc(clarifyPrompt || "请补充所需信息后重新提交。")}</p></div>`;
   renderStage();
   timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
 }
@@ -2813,14 +2834,6 @@ async function onConfirm() {
   await refreshAfterExecution();
 }
 
-const BILL_KIND_LABELS = {
-  "duplicate-charge": "疑似重复扣费",
-  "price-change": "商户价格变化",
-  "hidden-fee": "未登记扣费",
-  "recurring-subscription": "周期性订阅",
-  "abnormal-spend": "异常消费",
-};
-
 const BILL_STATUS_LABELS = {
   confirmed: "已确认",
   suspected: "疑似",
@@ -2848,7 +2861,7 @@ function billIssueHtml(item) {
   const status = BILL_STATUS_LABELS[item.status] || "未知状态";
   return `<details class="bill__issue">
     <summary>
-      <b>${esc(BILL_KIND_LABELS[item.kind] || item.kind)}</b>
+      <b>${esc(FINDING_LABELS[item.kind] || item.kind)}</b>
       <span class="bill__issue-amt">${yuan(Number(item.impact_cents) || 0)}</span>
       <span class="chip">${esc(status)}</span>
     </summary>
@@ -2894,6 +2907,7 @@ function billAnalysisHtml(payload, advice, adviceMessage) {
           ? "本期未命中需要优先核对的问题；未发现不等于不存在。"
           : "本期没有支出流水，无法给出消费结论。"}</p>`}
     ${topAdvice ? `<p class="bill__note">建议：${esc(topAdvice.suggestion)}</p>` : ""}
+    <p class="bill__note">识别结果只作核对线索，不当作已确认；未发现不等于不存在，请照下方证据逐条核对。</p>
     ${potentialSaving > 0
       ? `<p class="bill__note">潜在节省 ${yuan(potentialSaving)} 为识别口径下的估算上限，未到账不计入。</p>`
       : ""}
@@ -2959,6 +2973,7 @@ function applyExecution(data) {
   state.resultCount = results.length;
   state.phase = data.state === "completed" ? "done" : data.state;
   const complete = data.state === "completed";
+  rememberBillsPeriod(data.bill_findings);
   const billHtml = complete
     ? billAnalysisHtml(data.bill_findings, data.bill_advice, data.bill_advice_message)
     : "";
@@ -4989,7 +5004,11 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=54", { scope: "/" }).catch(() => {
+<<<<<<< HEAD
+navigator.serviceWorker.register("/assets/sw.js?v=55", { scope: "/" }).catch(() => {
+=======
+navigator.serviceWorker.register("/assets/sw.js?v=35", { scope: "/" }).catch(() => {
+>>>>>>> 01b0639 (fix(bills): 账期解析——原话写明的账期不再被改成本月)
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
