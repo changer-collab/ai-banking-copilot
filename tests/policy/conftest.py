@@ -221,6 +221,12 @@ def _build_test_registry() -> ToolRegistry:
             money="daily_limit_cents",
         ),
         _spec(
+            "password.change",
+            RiskClass.SMALL_CHANGE,
+            (_param("user_id", str),),
+            pure=False,
+        ),
+        _spec(
             "funds.freeze",
             RiskClass.SMALL_CHANGE,
             (_param("account_id", str), _param("amount_cents", int), _param("reason", str)),

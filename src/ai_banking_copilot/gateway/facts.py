@@ -25,8 +25,10 @@ from ai_banking_copilot.gateway.models import (
     Payee,
     Subscription,
     Transaction,
+    WealthHolding,
     WealthProduct,
 )
+from ai_banking_copilot.gateway.security_store import PasswordChangeEvent
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     CollectionRequest,
@@ -111,6 +113,15 @@ class FactGateway:
     def wealth_products(self) -> tuple[Record[WealthProduct], ...]:
         rows = self._store.query("SELECT * FROM wealth_products ORDER BY product_id")
         return tuple(self._wealth_product(row) for row in rows)
+
+    def wealth_holdings_of(self, user_id: str) -> tuple[Record[WealthHolding], ...]:
+        """本人理财持仓（只读；金额与申购/赎回同源，供页面「操作可查」对账）。"""
+        rows = self._store.query(
+            "SELECT * FROM wealth_holdings WHERE user_id = ? AND amount_cents > 0"
+            " ORDER BY product_id",
+            (user_id,),
+        )
+        return tuple(self._wealth_holding(row) for row in rows)
 
     def transactions_between(
         self, account_id: str, start: date, end: date
@@ -237,6 +248,12 @@ class FactGateway:
         )
         return bool(rows)
 
+    def password_change_event(self, event_id: str) -> Record[PasswordChangeEvent]:
+        """按主键回读一条密码修改事件（安全动作独立表；出处校验用，**不含密码**）。"""
+        return self._password_change_event(
+            self._one("password_change_events", "event_id", event_id)
+        )
+
     def user_profile(self, user_id: str) -> Record[UserProfile] | None:
         """按用户读取资料（生日来源；`user_profiles` 为演示播种，缺行返回 `None`）。"""
         rows = self._store.query(
@@ -278,6 +295,8 @@ class FactGateway:
             return self.scheduled_transfer(pk).content_hash
         if table == "merchant_orders":
             return self.merchant_order(pk).content_hash
+        if table == "password_change_events":
+            return self.password_change_event(pk).content_hash
         raise GatewayNotFoundError(f"未知记录表：{table}")
 
     def _one(self, table: str, key: str, value: str) -> sqlite3.Row:
@@ -331,6 +350,9 @@ class FactGateway:
             category=str(row["category"]),  # type: ignore[index]
             channel=str(row["channel"]),  # type: ignore[index]
             direction=str(row["direction"]),  # type: ignore[index]
+            booked_at=_optional_text(row["booked_at"]),  # type: ignore[index]
+            city=_optional_text(row["city"]),  # type: ignore[index]
+            card_tail=_optional_card_tail(row["card_tail"]),  # type: ignore[index]
         )
         return _record("transactions", payload.txn_id, payload)
 
@@ -356,6 +378,15 @@ class FactGateway:
             min_amount=Money(int(row["min_amount_cents"])),  # type: ignore[index]
         )
         return _record("wealth_products", payload.product_id, payload)
+
+    def _wealth_holding(self, row: object) -> Record[WealthHolding]:
+        payload = WealthHolding(
+            product_id=str(row["product_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            amount=Money(int(row["amount_cents"])),  # type: ignore[index]
+            purchased_on=date.fromisoformat(str(row["purchased_on"])),  # type: ignore[index]
+        )
+        return _record("wealth_holdings", payload.product_id, payload)
 
     def _hold(self, row: object) -> Record[Hold]:
         payload = Hold(
@@ -392,6 +423,15 @@ class FactGateway:
         )
         return _record("scheduled_transfers", payload.schedule_id, payload)
 
+    def _password_change_event(self, row: object) -> Record[PasswordChangeEvent]:
+        payload = PasswordChangeEvent(
+            event_id=str(row["event_id"]),  # type: ignore[index]
+            user_id=str(row["user_id"]),  # type: ignore[index]
+            status=str(row["status"]),  # type: ignore[index]
+            requested_on=date.fromisoformat(str(row["requested_on"])),  # type: ignore[index]
+        )
+        return _record("password_change_events", payload.event_id, payload)
+
 
 def _record(table: str, pk: str, payload: T) -> Record[T]:
     return Record(
@@ -399,6 +439,22 @@ def _record(table: str, pk: str, payload: T) -> Record[T]:
         payload=payload,
         content_hash=sha256_hex(canonical_json(payload)),
     )
+
+
+def _optional_text(value: object) -> str | None:
+    """可空文本列：`NULL` / 空串一律归一为 `None`（判据必须能识别「不适用」）。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_card_tail(value: object) -> str | None:
+    """付款卡尾号只暴露四位 ASCII 数字，非法值视为未知。"""
+    text = _optional_text(value)
+    if text is not None and len(text) == 4 and text.isascii() and text.isdigit():
+        return text
+    return None
 
 
 def _merchant_order(row: object) -> MerchantOrder:

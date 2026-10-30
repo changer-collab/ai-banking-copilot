@@ -67,6 +67,7 @@ def test_due_nodes_link_independent_facts_and_rule_without_authorizing(
         assert context["intent_scope"] == "check_due_proposal"
         assert context["missing_sources"] == []
         basis = context["proposal_basis"]
+        birthday_refs = {"user_profiles:u_demo", "demo_configuration:birthday_order"}
         if node.action == "transfer.create":
             schedule_ref = f"scheduled_transfers:{node.params['schedule_id']}"
             assert set(context["fact_refs"]) == {
@@ -77,11 +78,20 @@ def test_due_nodes_link_independent_facts_and_rule_without_authorizing(
             assert facts[schedule_ref]["booked_on"] == "2026-09-30"
             assert basis["parameter_sources"]["executed_on"] == "request.today"
             assert "executed_on" not in facts[schedule_ref]
+        elif node.action == "funds.freeze":
+            assert set(context["fact_refs"]) == {
+                *birthday_refs, f"accounts:{node.params['account_id']}",
+            }
+            assert basis["rule"] == "birthday_budget"
+            assert basis["order_on"] == "2026-10-01"
+        elif node.action == "funds.release":
+            assert set(context["fact_refs"]) == birthday_refs
+            assert basis["rule"] == "birthday_budget"
+            assert basis["occasion_completed"] is False
         else:
             assert node.action == "merchant.order"
-            assert set(context["fact_refs"]) == {
-                "user_profiles:u_demo", "demo_configuration:birthday_order",
-            }
+            assert set(context["fact_refs"]) == birthday_refs
+            assert basis["rule"] == "birthday_order"
             assert basis["birthday_on"] == "2026-10-03"
             assert basis["order_on"] == "2026-10-01"
             assert basis["occasion_completed"] is False

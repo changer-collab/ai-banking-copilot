@@ -22,6 +22,7 @@ from ai_banking_copilot.gateway.errors import (
     CurrencyMismatchError,
     IdempotencyConflictError,
     InsufficientFundsError,
+    InsufficientHoldingError,
     NotReversibleError,
     StoreError,
     UnknownAccountError,
@@ -37,6 +38,7 @@ from ai_banking_copilot.gateway.preconditions import (
     PreconditionStatus,
     WritePreconditionError,
 )
+from ai_banking_copilot.gateway.security_store import PASSWORD_CHANGE_EVENTS_SCHEMA_SQL
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     COLLECTION_REQUESTS_SCHEMA_SQL,
@@ -68,6 +70,8 @@ class WriteReceipt:
     replayed: bool = False
     external_status: str = ""
     previous_status: str | None = None
+    holding_before: int | None = None
+    holding_after: int | None = None
 
 
 def _effect_id(kind: str, action: str, idempotency_key: str) -> str:
@@ -256,8 +260,16 @@ class CoreBank:
 
     def freeze_funds(
         self, *, account_id: str, amount: Money, reason: str, idempotency_key: str,
+        hold_id: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
+        """冻结资金：可用余额扣减，冻结记录落 `holds`。
+
+        `hold_id` 由**场景层预先确定**（跨场景预算链需要冻结 / 下单结算 / 解冻三方共享同一标识）；
+        不传则沿用「由 `idempotency_key` 派生」的旧口径。同一 `hold_id` 重复冻结时：
+        - 记录为 `active` 且账户 / 金额一致 ⇒ 幂等回放（不重复扣额）；
+        - 记录为 `released`（已解冻或被下单结算清零）⇒ 重新激活并重新扣额，保证补偿后重试可跑通。
+        """
         if amount.cents <= 0:
             raise CoreBankError("冻结金额必须为正")
 
@@ -267,24 +279,49 @@ class CoreBank:
             ).fetchone()
             if account is None:
                 raise UnknownAccountError(account_id)
+            target = hold_id or _effect_id("hold", "freeze_funds", idempotency_key)
+            existing = conn.execute(
+                "SELECT account_id, amount_cents, status FROM holds WHERE hold_id = ?", (target,)
+            ).fetchone()
+            if existing is not None:
+                if (str(existing["account_id"]), int(existing["amount_cents"])) != (
+                    account_id, amount.cents,
+                ):
+                    raise CoreBankError(f"冻结记录 {target} 已存在且参数不一致")
+                if str(existing["status"]) == "active":
+                    return WriteReceipt(
+                        idempotency_key=idempotency_key,
+                        action="freeze_funds",
+                        status="held",
+                        record_ids=(f"holds:{target}",),
+                        effect_ids=(f"holds:{target}",),
+                        replayed=True,
+                    )
             if int(account["balance_cents"]) < amount.cents:
                 raise InsufficientFundsError(f"可用余额不足以冻结 {amount.cents} 分")
-            hold_id = _effect_id("hold", "freeze_funds", idempotency_key)
             conn.execute(
                 "UPDATE accounts SET balance_cents = balance_cents - ? WHERE account_id = ?",
                 (amount.cents, account_id),
             )
-            conn.execute(
-                "INSERT INTO holds(hold_id, account_id, amount_cents, reason, status)"
-                " VALUES(?, ?, ?, ?, 'active')",
-                (hold_id, account_id, amount.cents, reason),
-            )
+            if existing is not None:
+                # 已解冻的同一预算被重新启用：恢复金额与归属，置回 active（余额已重新扣减）。
+                conn.execute(
+                    "UPDATE holds SET account_id = ?, amount_cents = ?, reason = ?,"
+                    " status = 'active' WHERE hold_id = ?",
+                    (account_id, amount.cents, reason, target),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO holds(hold_id, account_id, amount_cents, reason, status)"
+                    " VALUES(?, ?, ?, ?, 'active')",
+                    (target, account_id, amount.cents, reason),
+                )
             return WriteReceipt(
                 idempotency_key=idempotency_key,
                 action="freeze_funds",
                 status="held",
-                record_ids=(f"holds:{hold_id}",),
-                effect_ids=(f"holds:{hold_id}",),
+                record_ids=(f"holds:{target}",),
+                effect_ids=(f"holds:{target}",),
             )
 
         return self._run_once("freeze_funds", idempotency_key, body,
@@ -500,6 +537,40 @@ class CoreBank:
         return self._run_once("set_card_limit", idempotency_key, body,
                               before_write=before_write)
 
+    def request_password_change(
+        self, *, user_id: str, idempotency_key: str, before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
+        """登记一次**交易密码修改事件**（红色动作；只记事件，不碰密码本身）。
+
+        纪律与既有原语一致：幂等 / 单事务 / 确定性 id / 不做授权判断。
+        **旧密码、新密码、密码摘要一律不落库**：`password_change_events` 只记用户、状态与基准日，
+        真实改密由安全通道完成，本演示只证明"红色动作被计划卡 + 强验证挡住并留痕"。
+        """
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            conn.execute(PASSWORD_CHANGE_EVENTS_SCHEMA_SQL)
+            user = conn.execute(
+                "SELECT user_id FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if user is None:
+                raise CoreBankError(f"用户不存在：{user_id}")
+            event_id = _effect_id("pwd", "request_password_change", idempotency_key)
+            conn.execute(
+                "INSERT INTO password_change_events(event_id, user_id, status, requested_on)"
+                " VALUES(?, ?, 'pending_verification', ?)",
+                (event_id, user_id, DEFAULT_BOOKING_DATE.isoformat()),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="request_password_change",
+                status="pending_verification",
+                record_ids=(f"password_change_events:{event_id}",),
+                effect_ids=(f"password_change_events:{event_id}",),
+            )
+
+        return self._run_once("request_password_change", idempotency_key, body,
+                              before_write=before_write)
+
     def sign_subscription(
         self,
         *,
@@ -671,13 +742,17 @@ class CoreBank:
         order_on: date,
         idempotency_key: str,
         occasion_id: str | None = None,
+        hold_id: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """向商户下单（P2-5 生日联动的流出动作）：登记一条 `merchant_orders` 事实。
 
         纪律与其他写原语一致：**幂等**（`write_receipts` 命中即回放）、**全或无**（单事务）、
         **确定性 id**（由 `action + key` 派生）、**不做授权判断**（裁决归 `policy.pdp`）。
-        本原语只**登记订单**（订单本身即持久化效果），不在模拟核心银行里做资金划转。
+
+        `hold_id` 非空时**从冻结预算结算**：资金已在冻结时从可用余额扣减，本步只递减冻结余额
+        （归零时置 `released`、不改金额——`holds.amount_cents > 0` 是表级约束）；
+        下单额超过冻结余额即拒绝（冻结额是硬上限）。不传 `hold_id` 则只登记订单、不划转资金。
         """
         if amount.cents <= 0:
             raise CoreBankError("下单金额必须为正")
@@ -696,12 +771,37 @@ class CoreBank:
             ) != (user_id, merchant, amount.cents, order_on.isoformat()):
                 raise CoreBankError("到期订单参数与原订单不一致")
 
+        def settle_hold(conn: sqlite3.Connection) -> None:
+            hold = conn.execute(
+                "SELECT h.account_id, h.amount_cents, h.status, a.user_id FROM holds h"
+                " JOIN accounts a ON a.account_id = h.account_id WHERE h.hold_id = ?",
+                (hold_id,),
+            ).fetchone()
+            if hold is None:
+                raise CoreBankError(f"冻结记录不存在：{hold_id}")
+            if str(hold["user_id"]) != user_id:
+                raise CoreBankError("冻结记录不属于当前用户")
+            if str(hold["status"]) != "active":
+                raise CoreBankError(f"冻结记录已释放：{hold_id}")
+            held_cents = int(hold["amount_cents"])
+            if amount.cents > held_cents:
+                raise CoreBankError(f"下单金额 {amount.cents} 分超过冻结金额 {held_cents} 分")
+            remaining = held_cents - amount.cents
+            if remaining > 0:
+                conn.execute(
+                    "UPDATE holds SET amount_cents = ? WHERE hold_id = ?", (remaining, hold_id)
+                )
+            else:
+                conn.execute("UPDATE holds SET status = 'released' WHERE hold_id = ?", (hold_id,))
+
         def body(conn: sqlite3.Connection) -> WriteReceipt:
             user = conn.execute(
                 "SELECT user_id FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
             if user is None:
                 raise CoreBankError(f"用户不存在：{user_id}")
+            if hold_id is not None:
+                settle_hold(conn)
             order_id = _effect_id("order", "place_merchant_order", idempotency_key)
             conn.execute(
                 "INSERT INTO merchant_orders(order_id, user_id, merchant, amount_cents,"
@@ -743,17 +843,48 @@ class CoreBank:
             ).fetchone()
             if product is None:
                 raise UnknownProductError(product_id)
-            min_cents = int(product["min_amount_cents"])
-            if amount.cents < min_cents:
-                raise CoreBankError(f"{product_id} 起购金额为 {min_cents} 分")
             account = conn.execute(
                 "SELECT balance_cents FROM accounts WHERE account_id = ? AND user_id = ?",
                 (account_id, user_id),
             ).fetchone()
             if account is None:
                 raise UnknownAccountError(account_id)
-            if direction == "out" and int(account["balance_cents"]) < amount.cents:
-                raise InsufficientFundsError("可用余额不足")
+            holding = conn.execute(
+                "SELECT amount_cents FROM wealth_holdings WHERE product_id = ? AND user_id = ?",
+                (product_id, user_id),
+            ).fetchone()
+            holding_before = int(holding["amount_cents"]) if holding is not None else 0
+            if direction == "out":
+                # 申购：起购金额只约束**买入**；同时写持仓（事实零生成：钱与份额同增）。
+                min_cents = int(product["min_amount_cents"])
+                if amount.cents < min_cents:
+                    raise CoreBankError(f"{product_id} 起购金额为 {min_cents} 分")
+                if int(account["balance_cents"]) < amount.cents:
+                    raise InsufficientFundsError("可用余额不足")
+                holding_after = holding_before + amount.cents
+                conn.execute(
+                    "INSERT INTO wealth_holdings(product_id, user_id, amount_cents, purchased_on)"
+                    " VALUES(?, ?, ?, ?) ON CONFLICT(product_id, user_id)"
+                    " DO UPDATE SET amount_cents = excluded.amount_cents",
+                    (
+                        product_id,
+                        user_id,
+                        holding_after,
+                        DEFAULT_BOOKING_DATE.isoformat(),
+                    ),
+                )
+            else:
+                # 赎回：不受起购金额约束（H2），但**不得超过持仓**（H1）。
+                if amount.cents > holding_before:
+                    raise InsufficientHoldingError(
+                        f"{product_id} 持仓 {holding_before} 分，不足以赎回 {amount.cents} 分"
+                    )
+                holding_after = holding_before - amount.cents
+                conn.execute(
+                    "UPDATE wealth_holdings SET amount_cents = ?"
+                    " WHERE product_id = ? AND user_id = ?",
+                    (holding_after, product_id, user_id),
+                )
             signed = -amount.cents if direction == "out" else amount.cents
             txn_id = _effect_id("txn", action, idempotency_key)
             conn.execute(
@@ -780,7 +911,9 @@ class CoreBank:
                 action=action,
                 status="settled",
                 record_ids=(f"transactions:{txn_id}",),
-                effect_ids=(f"accounts:{account_id}",),
+                effect_ids=(f"accounts:{account_id}", f"wealth_holdings:{product_id}"),
+                holding_before=holding_before,
+                holding_after=holding_after,
             )
 
         return self._run_once(action, idempotency_key, body,
@@ -840,6 +973,12 @@ class CoreBank:
             previous_status=(
                 str(data["previous_status"]) if data.get("previous_status") is not None else None
             ),
+            holding_before=(
+                int(data["holding_before"]) if data.get("holding_before") is not None else None
+            ),
+            holding_after=(
+                int(data["holding_after"]) if data.get("holding_after") is not None else None
+            ),
         )
 
     def _store_receipt(self, conn: sqlite3.Connection, receipt: WriteReceipt) -> None:
@@ -851,6 +990,8 @@ class CoreBank:
             "effect_ids": list(receipt.effect_ids),
             "external_status": receipt.external_status,
             "previous_status": receipt.previous_status,
+            "holding_before": receipt.holding_before,
+            "holding_after": receipt.holding_after,
         }
         conn.execute(
             "INSERT INTO write_receipts(idempotency_key, action, receipt_json) VALUES(?, ?, ?)",

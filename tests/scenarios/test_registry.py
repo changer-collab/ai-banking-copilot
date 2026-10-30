@@ -35,10 +35,11 @@ def _transfer_intent(payee: str = "p_lina") -> Intent:
 
 
 def test_all_handlers_satisfy_the_protocol() -> None:
-    assert len(SCENARIO_HANDLERS) == 6
+    assert len(SCENARIO_HANDLERS) == 7
     assert all(isinstance(handler, ScenarioHandler) for handler in SCENARIO_HANDLERS)
     assert [handler.name for handler in SCENARIO_HANDLERS] == [
         "cross",
+        "life_events",
         "transfer",
         "bills",
         "wealth",

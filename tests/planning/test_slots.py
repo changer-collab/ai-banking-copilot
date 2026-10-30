@@ -1,7 +1,7 @@
 from datetime import date
 
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
-from ai_banking_copilot.gateway.models import Payee
+from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import ACTION_KINDS
 from ai_banking_copilot.planning.slots import (
@@ -40,11 +40,26 @@ def test_transfer_slots_are_filled_from_deterministic_resolvers(payees: tuple[Pa
     }
 
 
-def test_amount_without_unit_is_not_guessed(payees: tuple[Payee, ...]) -> None:
+def test_amount_without_unit_is_filled_when_the_number_is_unambiguous(
+    payees: tuple[Payee, ...]
+) -> None:
+    """「转给李娜 500」：数字唯一、不是收款人尾号 ⇒ 直接当金额，不再追问。
+
+    （旧口径要求必须带单位，验收时「转 200 给他」被判缺金额；只放宽这一种无歧义情形，
+    有歧义仍追问。）
+    """
     fill = fill_control_slots("transfer.create", _transfer_inputs("转给李娜 500", payees))
-    assert fill.complete is False
+    assert fill.complete is True
+    assert fill.slots["amount"] == 50000
+
+
+def test_bare_number_equal_to_a_payee_tail_is_still_clarified(
+    payees: tuple[Payee, ...]
+) -> None:
+    """「转给 9021」里的 9021 是李娜卡号尾号：只能当收款人，金额仍要追问。"""
+    fill = fill_control_slots("transfer.create", _transfer_inputs("转给 9021", payees))
+    assert fill.slots["payee"] == "p_lina"
     assert [question.slot for question in fill.questions] == ["amount"]
-    assert "payee" in fill.slots
 
 
 def test_daily_limit_is_parsed_from_text_with_a_unit() -> None:
@@ -209,6 +224,7 @@ def test_required_slots_follow_the_catalog_required_control_slots() -> None:
         "wealth.redeem",
         "subscription.sign",
         "merchant.order",
+        "password.change",
     }
     for action in requires_user_id:
         assert "user_id" in REQUIRED_SLOTS[action]
@@ -264,3 +280,70 @@ def test_refusing_to_cancel_is_still_blocked() -> None:
     )
     assert fill.negated is True
     assert fill.slots == {}
+
+
+_PRODUCTS = (
+    WealthProduct("wp_cash", "活期理财篮子", "R1", 0, 150, Money(100)),
+    WealthProduct("wp_bond", "稳利债券 A", "R2", 90, 300, Money(100_000)),
+    WealthProduct("wp_mix", "均衡配置 B", "R3", 180, 420, Money(500_000)),
+    WealthProduct("wp_equity", "成长精选 C", "R4", 365, 520, Money(1_000_000)),
+)
+
+
+def _wealth_inputs(text: str, *, default_product: str | None = None) -> SlotInputs:
+    return SlotInputs(
+        text=text,
+        today=TODAY,
+        selected={"user_id": DEMO_USER_ID, "account": "acc_savings"},
+        products=_PRODUCTS,
+        default_product=default_product,
+    )
+
+
+def test_product_is_resolved_from_the_spoken_name_without_spaces() -> None:
+    """「稳利债券A」与目录里的「稳利债券 A」是同一只（去空白比对，不靠语义猜）。"""
+    fill = fill_control_slots("wealth.redeem", _wealth_inputs("赎回 300 元稳利债券A"))
+    assert fill.complete is True
+    assert fill.slots["product"] == "wp_bond"
+    assert fill.slots["amount"] == 30000
+
+
+def test_product_is_resolved_from_product_id_and_risk_level() -> None:
+    by_id = fill_control_slots("wealth.redeem", _wealth_inputs("赎回 wp_mix 100"))
+    assert by_id.slots["product"] == "wp_mix"
+    by_risk = fill_control_slots("wealth.subscribe", _wealth_inputs("买 1000 元 R2"))
+    assert by_risk.slots["product"] == "wp_bond"
+    # `R2` 里的 2 是等级词，不是金额
+    assert by_risk.slots["amount"] == 100000
+
+
+def test_text_product_beats_the_subscribe_default() -> None:
+    """默认产品只做兜底：原文点名 / 点名等级时必须优先。"""
+    fill = fill_control_slots(
+        "wealth.subscribe", _wealth_inputs("买 1000 元 R4", default_product="wp_cash")
+    )
+    assert fill.slots["product"] == "wp_equity"
+
+
+def test_ambiguous_risk_level_asks_with_the_catalog_candidates() -> None:
+    duplicate = (*_PRODUCTS, WealthProduct("wp_mix2", "均衡配置 C", "R3", 180, 430, Money(500_000)))
+    inputs = SlotInputs(
+        text="买 1000 元 R3",
+        today=TODAY,
+        selected={"user_id": DEMO_USER_ID, "account": "acc_savings"},
+        products=duplicate,
+    )
+    fill = fill_control_slots("wealth.subscribe", inputs)
+    assert "product" not in fill.slots
+    (question,) = fill.questions
+    assert question.slot == "product"
+    assert question.candidates == ("均衡配置 B（R3）", "均衡配置 C（R3）")
+
+
+def test_missing_product_lists_the_catalog_instead_of_a_dead_end() -> None:
+    fill = fill_control_slots("wealth.redeem", _wealth_inputs("赎回 500"))
+    assert fill.slots["amount"] == 50000
+    (question,) = fill.questions
+    assert question.slot == "product"
+    assert "活期理财篮子（R1）" in question.prompt
+    assert "成长精选 C（R4）" in question.prompt

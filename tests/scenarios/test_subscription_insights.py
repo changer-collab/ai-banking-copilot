@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -139,6 +140,122 @@ def _only_insight(gateway: FactGateway) -> SubscriptionInsight:
 
 def _codes(insight: SubscriptionInsight) -> set[str]:
     return {notice.code for notice in insight.notices}
+
+
+@pytest.mark.parametrize(
+    ("first_cents", "last_cents", "increased"),
+    [(2500, 3000, True), (3000, 2500, False), (2500, 2500, False), (2500, 2501, True)],
+)
+def test_price_change_12m_compares_first_and_last_charge(
+    first_cents: int, last_cents: int, increased: bool,
+) -> None:
+    insight = _only_insight(_gateway(
+        subscriptions=(_subscription("星光视频", 2500, AS_OF),),
+        transactions=(
+            _txn("first", date(2026, 7, 18), first_cents, "星光视频"),
+            _txn("middle", date(2026, 8, 18), 5000, "星光视频"),
+            _txn("last", date(2026, 9, 18), last_cents, "星光视频"),
+        ),
+    ))
+    assert insight.price_increased_12m is increased
+    assert insight.price_change_12m_from_cents == first_cents
+    assert insight.price_change_12m_to_cents == last_cents
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_price_change_12m_is_unknown_with_fewer_than_two_charges(count: int) -> None:
+    insight = _only_insight(_gateway(
+        subscriptions=(_subscription("星光视频", 2500, AS_OF),),
+        transactions=(_txn("only", date(2026, 9, 18), 2500, "星光视频"),)[:count],
+    ))
+    assert insight.price_increased_12m is None
+    assert insight.price_change_12m_from_cents is None
+    assert insight.price_change_12m_to_cents is None
+
+
+@pytest.mark.parametrize(
+    ("as_of", "start"),
+    [
+        (AS_OF, date(2025, 10, 21)),
+        (date(2024, 2, 29), date(2023, 2, 28)),
+        (date(2025, 2, 28), date(2024, 2, 28)),
+    ],
+)
+def test_price_change_12m_uses_closed_calendar_month_window(
+    as_of: date, start: date,
+) -> None:
+    report = subscription_report(_gateway(
+        subscriptions=(_subscription("星光视频", 2500, as_of),),
+        transactions=(
+            _txn("before", start - timedelta(days=1), 1000, "星光视频"),
+            _txn("start", start, 2500, "星光视频"),
+            _txn("end", as_of, 3000, "星光视频"),
+            _txn("future", as_of + timedelta(days=1), 9000, "星光视频"),
+        ),
+    ), USER_ID, as_of=as_of)
+    insight = report.insights[0]
+    assert insight.price_increased_12m is True
+    assert insight.price_change_12m_from_cents == 2500
+    assert insight.price_change_12m_to_cents == 3000
+    # 窗口只用于新字段，既有历史证据、计数和中位数调价提示仍保留。
+    assert insight.charge_count == 3
+    assert [item.txn_id for item in insight.evidence] == ["before", "start", "end"]
+    notice = next(item for item in insight.notices if item.code == "amount-change")
+    assert "17.50 元变为 30.00 元" in notice.message
+
+
+def test_price_change_12m_ignores_other_users_merchants_and_inflows() -> None:
+    first = _txn("first", date(2026, 7, 18), 2500, "星光视频")
+    insight = _only_insight(_gateway(
+        subscriptions=(_subscription("星光视频", 2500, AS_OF),),
+        transactions=(
+            first,
+            _txn("last", date(2026, 9, 18), 3000, "星光视频"),
+            replace(first, txn_id="other-user", user_id="u_other", amount=Money(-100)),
+            replace(first, txn_id="other-merchant", merchant="咖啡店", amount=Money(-100)),
+            replace(first, txn_id="inflow", direction="in", amount=Money(100)),
+        ),
+    ))
+    assert insight.price_increased_12m is True
+    assert insight.price_change_12m_from_cents == 2500
+    assert insight.price_change_12m_to_cents == 3000
+    assert [item.txn_id for item in insight.evidence] == ["first", "last"]
+
+
+def test_same_day_charges_sort_by_time_then_transaction_id_and_keep_evidence() -> None:
+    day = date(2026, 9, 18)
+    early = replace(
+        _txn("z-early", day, 2500, "星光视频"),
+        booked_at="2026-09-18T09:00:00", card_tail="4821",
+    )
+    late = replace(early, txn_id="b-late", amount=Money(-3000), booked_at="2026-09-18T20:30:00")
+    legacy = _txn("zz-legacy", day, 2400, "星光视频")
+    insight = _only_insight(_gateway(
+        subscriptions=(_subscription("星光视频", 2500, AS_OF),),
+        transactions=(late, replace(late, txn_id="a-late", amount=Money(-2700)), early, legacy),
+    ))
+    assert [item.txn_id for item in insight.evidence] == [
+        "zz-legacy", "z-early", "a-late", "b-late",
+    ]
+    assert insight.price_increased_12m is True
+    assert insight.price_change_12m_from_cents == 2400
+    assert insight.price_change_12m_to_cents == 3000
+    assert insight.evidence[0].booked_at is None
+    assert insight.evidence[0].card_tail is None
+    assert insight.evidence[-1].booked_at == late.booked_at
+    assert insight.evidence[-1].card_tail == "4821"
+
+
+def test_unregistered_insight_includes_price_change_12m() -> None:
+    insight = _only_insight(_gateway(transactions=(
+        _txn("first", date(2026, 8, 18), 2500, "悦读会员"),
+        _txn("last", date(2026, 9, 18), 2600, "悦读会员"),
+    )))
+    assert insight.status == INSIGHT_SUSPECTED
+    assert insight.price_increased_12m is True
+    assert insight.price_change_12m_from_cents == 2500
+    assert insight.price_change_12m_to_cents == 2600
+    assert "amount-change" not in _codes(insight)
 
 
 # 1. 商户改名：仍能识别，但降级为疑似并给出改名提示
@@ -284,6 +401,7 @@ def test_seed_report_marks_prediction_and_matches_raw_transactions(
         assert evidence.content_hash == record.content_hash
         assert evidence.amount_cents == record.payload.amount.cents
         assert evidence.booked_on == record.payload.booked_on
+        assert evidence.channel == record.payload.channel
 
 
 def test_payload_marks_demo_data_and_unintegrated_external_cancel(
@@ -299,6 +417,7 @@ def test_payload_marks_demo_data_and_unintegrated_external_cancel(
     assert video["amount_yuan"] == "25.00"
     assert video["currency"] == "CNY"
     assert video["evidence"]
+    assert cast(list[dict[str, object]], video["evidence"])[0]["channel"] == "app"
 
 
 # 9. 取消状态互不混用；失败 / 超时不得表述为已取消

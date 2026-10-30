@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from enum import StrEnum
@@ -16,7 +17,17 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+
+_TRANSACTIONS_OPTIONAL_COLUMNS = (
+    ("booked_at", "TEXT"),
+    ("city", "TEXT"),
+    ("card_tail", "TEXT"),
+)
+"""`transactions` 的**可空**扩展列（v3）。
+
+判据层（如账单「深夜 / 异地」）必须能跳过 `NULL`——旧库升级后历史行为 `NULL`。
+"""
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -65,7 +76,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     merchant     TEXT NOT NULL,
     category     TEXT NOT NULL,
     channel      TEXT NOT NULL,
-    direction    TEXT NOT NULL CHECK (direction IN ('in', 'out'))
+    direction    TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    booked_at    TEXT,
+    city         TEXT,
+    card_tail    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS wealth_products (
@@ -75,6 +89,14 @@ CREATE TABLE IF NOT EXISTS wealth_products (
     term_days        INTEGER NOT NULL CHECK (term_days >= 0),
     yield_bp         INTEGER NOT NULL,
     min_amount_cents INTEGER NOT NULL CHECK (min_amount_cents > 0)
+);
+
+CREATE TABLE IF NOT EXISTS wealth_holdings (
+    product_id   TEXT NOT NULL REFERENCES wealth_products(product_id),
+    user_id      TEXT NOT NULL REFERENCES users(user_id),
+    amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+    purchased_on TEXT NOT NULL,
+    PRIMARY KEY (product_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -113,17 +135,37 @@ class StoreMode(StrEnum):
 
 
 def init_schema(store: Store) -> None:
-    """建表并登记 schema 版本（幂等）。"""
+    """建表并登记 schema 版本（幂等，含旧库平滑升级）。"""
     with store.transaction() as conn:
         conn.executescript(SCHEMA_SQL)
+        _migrate_schema(conn)
         conn.execute(
-            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """v1 / v2 → v3 幂等迁移：给 `transactions` 补可空列。
+
+    `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
+    先查 `PRAGMA table_info` 再补，重复执行零副作用。
+    """
+    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(transactions)")}
+    for column, column_type in _TRANSACTIONS_OPTIONAL_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {column} {column_type}")
+
+
 class Store:
-    """SQLite 连接包装。**唯一的物理写入通道**。"""
+    """SQLite 连接包装。**唯一的物理写入通道**。
+
+    `sqlite3.Connection` 不是线程安全的；FastAPI 的同步端点跑在线程池里，页面一次加载会并发
+    命中多个只读接口。`check_same_thread=False` 只关掉模块级断言，**不提供并发保护**——多个线程
+    同时 `execute` 同一条连接会抛 `InterfaceError: bad parameter or other API misuse`。
+    因此所有连接访问统一经 `_lock` 串行化（`RLock` 允许事务内再调用 `query` / `execute`）。
+    """
 
     def __init__(self, db_path: str | Path, mode: StoreMode = StoreMode.READ_WRITE) -> None:
         self._path = Path(db_path)
@@ -138,6 +180,7 @@ class Store:
             self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._lock = threading.RLock()
 
     @property
     def mode(self) -> StoreMode:
@@ -150,26 +193,30 @@ class Store:
     def query(self, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:
         """只读查询：仅放行 SELECT / WITH。"""
         _assert_read_only_sql(sql)
-        cursor = self._conn.execute(sql, tuple(params))
-        rows: list[sqlite3.Row] = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(sql, tuple(params))
+            rows: list[sqlite3.Row] = cursor.fetchall()
         return rows
 
     def execute(self, sql: str, params: Sequence[object] = ()) -> None:
         """单条写语句（调用方负责提交或使用 `transaction()`）。"""
         if self._mode is StoreMode.READ_ONLY:
             raise ReadOnlyViolation("只读连接不得执行写语句")
-        self._conn.execute(sql, tuple(params))
+        with self._lock:
+            self._conn.execute(sql, tuple(params))
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """事务：正常退出提交，异常退出回滚。"""
         if self._mode is StoreMode.READ_ONLY:
             raise ReadOnlyViolation("只读连接不能开启事务")
-        with self._conn:
-            yield self._conn
+        with self._lock:
+            with self._conn:
+                yield self._conn
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 def _assert_read_only_sql(sql: str) -> None:

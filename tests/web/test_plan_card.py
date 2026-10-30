@@ -224,3 +224,55 @@ def test_account_transactions_card_shows_range_and_anomaly(gateway: FactGateway)
     assert "2026-09-01~2026-09-30" in line
     assert "1 笔" in line
     assert "忽略以上" not in line
+
+
+def _freeze_plan() -> Plan:
+    """预算冻结三节点：冻结 1000 → 冻结额度内下单 299 → 解冻剩余 701。"""
+    nodes = (
+        PlanNode(
+            node_id="freeze1",
+            action="funds.freeze",
+            params={"account_id": "acc_savings", "amount_cents": 100000, "reason": "生日预算冻结"},
+            intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a1"),
+        ),
+        PlanNode(
+            node_id="order1",
+            action="merchant.order",
+            params={"merchant": "鲜花礼品店", "amount_cents": 29900, "budget_hold_id": "h1"},
+            intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a2"),
+            depends_on=("freeze1",),
+        ),
+        PlanNode(
+            node_id="release1",
+            action="funds.release",
+            params={"budget_hold_id": "h1", "amount_cents": 70100},
+            intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="a3"),
+            depends_on=("freeze1", "order1"),
+        ),
+    )
+    return Plan(plan_id="freeze", nodes=nodes)
+
+
+def test_balance_trace_walks_freeze_order_and_release(gateway: FactGateway) -> None:
+    """冻结类计划：轨迹逐节点给出可用余额，且 `merchant.order` 不二次扣减。"""
+    card = render_plan_card(_freeze_plan(), _decision(Level.RED), gateway)
+    assert card.balance_trace == (
+        "执行前可用余额 128430.00 元",
+        "冻结 1000.00 元 → 可用 127430.00 元",
+        "扣款 299.00 元（从冻结预算结算） → 可用 127430.00 元",
+        "解冻 701.00 元 → 可用 128131.00 元",
+    )
+
+
+def test_balance_trace_is_empty_without_freeze(gateway: FactGateway) -> None:
+    """非冻结类计划不展示轨迹（普通转账不扣冻结额）。"""
+    assert render_plan_card(_plan(), _decision(), gateway).balance_trace == ()
+
+
+def test_balance_trace_does_not_touch_polish_lines(gateway: FactGateway) -> None:
+    """轨迹是纯追加的事实回显：不进入 `lines`，不改变润色守卫的行数口径。"""
+    plan = _freeze_plan()
+    card = render_plan_card(plan, _decision(Level.RED), gateway)
+    assert len(card.lines) == len(plan.nodes)
+    assert all("可用余额" not in line for line in card.lines)
+

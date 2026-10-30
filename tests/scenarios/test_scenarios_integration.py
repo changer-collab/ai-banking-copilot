@@ -150,4 +150,4 @@ def test_cross_scenario_dag_and_net_effect(gateway: FactGateway) -> None:
     assert outcome.plan.nodes[1].depends_on == ("n1",)
     assert outcome.plan.nodes[1].intent is not None
     assert outcome.plan.nodes[1].intent.source is AnchorSource.USER_APPROVED
-    assert plan_net_effect(outcome.plan, gateway).amount == Money(230000)
+    assert plan_net_effect(outcome.plan, gateway).amount == Money(30000)

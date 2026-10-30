@@ -32,6 +32,8 @@ class SessionRepository(Protocol):
         self, snapshot: SessionSnapshot, *, expected_revision: int | None,
     ) -> SessionSnapshot: ...
 
+    def delete(self, user_id: str, session_id: str) -> int: ...
+
 
 def init_session_schema(store: Store) -> None:
     with store.transaction() as conn:
@@ -92,3 +94,16 @@ class SQLiteSessionRepository:
         except sqlite3.Error as error:
             raise SessionPersistenceError("session_save_failed") from error
         return saved
+
+    def delete(self, user_id: str, session_id: str) -> int:
+        """删除一条快照（删除对话历史时调用）；不存在返回 0。"""
+
+        try:
+            with self._store.transaction() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM session_snapshots WHERE user_id = ? AND session_id = ?",
+                    (user_id, session_id),
+                )
+                return cursor.rowcount
+        except sqlite3.Error as error:
+            raise SessionPersistenceError("session_delete_failed") from error

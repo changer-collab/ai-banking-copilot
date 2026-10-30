@@ -25,8 +25,8 @@ def test_seed_is_idempotent(seeded_db: Path) -> None:
     store = Store(seeded_db)
     seed_database(store)
     seed_database(store)
-    # 覆盖区间 2025-01..2026-09 = 21 个月 × 8 条/月 = 168 条（由 3 个月扩为 21 个月）。
-    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 168
+    # 覆盖区间 2025-01..2026-09 = 21 个月 × 15 条/月（8 条固定 + 7 条生活开支）= 315 条。
+    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
     assert store.query("SELECT COUNT(*) AS n FROM payees")[0]["n"] == 5
     store.close()
 
@@ -41,7 +41,7 @@ def test_seed_tops_up_a_partially_seeded_database(seeded_db: Path) -> None:
 
     reopened = Store(seeded_db)
     seed_database(reopened)
-    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 168
+    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
     reopened.close()
 
 
@@ -104,4 +104,23 @@ def test_seed_merchant_text_carries_injection_sample(seeded_db: Path) -> None:
     rows = store.query("SELECT merchant FROM transactions WHERE merchant LIKE '%忽略以上%'")
     # 该注入样例流水每月 1 条，覆盖区间共 21 个月 ⇒ 21 条。
     assert len(rows) == 21
+    store.close()
+
+
+def test_seed_subscription_charges_have_explicit_card_tail(seeded_db: Path) -> None:
+    store = Store(seeded_db)
+    video_charges = store.query(
+        "SELECT booked_at, card_tail FROM transactions"
+        " WHERE user_id = ? AND merchant = '视频会员' ORDER BY booked_on",
+        (DEMO_USER_ID,),
+    )
+    invalid_tails = store.query(
+        "SELECT txn_id FROM transactions WHERE card_tail IS NOT NULL"
+        " AND (length(card_tail) != 4 OR card_tail GLOB '*[^0-9]*')"
+    )
+
+    assert video_charges
+    assert all(row["booked_at"] is not None for row in video_charges)
+    assert {row["card_tail"] for row in video_charges} == {"4821"}
+    assert invalid_tails == []
     store.close()

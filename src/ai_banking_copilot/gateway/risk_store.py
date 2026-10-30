@@ -37,6 +37,10 @@ _DEMO_ASSESSED_ON = (DEFAULT_BOOKING_DATE - timedelta(days=30)).isoformat()
 
 SOURCE_SEED = "seed"
 SOURCE_USER_INPUT = "user_input"
+SOURCE_QUESTIONNAIRE = "questionnaire"
+"""用户通过固定题库作答得到的等级（等级由 `scenarios.wealth_assessment` 算出，自身不能填）。"""
+
+_WRITABLE_SOURCES = (SOURCE_USER_INPUT, SOURCE_QUESTIONNAIRE)
 
 
 @dataclass(frozen=True)
@@ -61,10 +65,17 @@ class RiskAssessmentSource(Protocol):
 
 @runtime_checkable
 class RiskAssessmentWriter(Protocol):
-    """风险测评**写入**协议：仅用户自助录入，永不写 `seed` 来源。"""
+    """风险测评**写入**协议：只写用户侧来源（自助录入 / 问卷），永不写 `seed`。"""
 
-    def save(self, user_id: str, risk_profile: str, assessed_on: date) -> None:
-        """保存/更新一次用户录入的测评（覆盖同一用户的旧事实）。"""
+    def save(
+        self,
+        user_id: str,
+        risk_profile: str,
+        assessed_on: date,
+        *,
+        source: str = SOURCE_USER_INPUT,
+    ) -> None:
+        """保存/更新一次用户侧测评（覆盖同一用户的旧事实）。"""
         ...
 
 
@@ -80,13 +91,20 @@ class StoreRiskAssessmentSource:
 
 
 class StoreRiskAssessmentWriter:
-    """`RiskAssessmentWriter` 的默认实现：写连接上 UPSERT 用户录入事实。"""
+    """`RiskAssessmentWriter` 的默认实现：写连接上 UPSERT 用户侧测评事实。"""
 
     def __init__(self, store: Store) -> None:
         self._store = store
 
-    def save(self, user_id: str, risk_profile: str, assessed_on: date) -> None:
-        save_risk_assessment(self._store, user_id, risk_profile, assessed_on)
+    def save(
+        self,
+        user_id: str,
+        risk_profile: str,
+        assessed_on: date,
+        *,
+        source: str = SOURCE_USER_INPUT,
+    ) -> None:
+        save_risk_assessment(self._store, user_id, risk_profile, assessed_on, source=source)
 
 
 def init_risk_schema(store: Store) -> None:
@@ -116,12 +134,16 @@ def save_risk_assessment(
     risk_profile: str,
     assessed_on: date,
     valid_days: int = 365,
+    *,
+    source: str = SOURCE_USER_INPUT,
 ) -> None:
-    """保存/更新用户自助录入的测评事实（`source='user_input'`）。"""
+    """保存/更新用户侧测评事实（`source` ∈ `user_input` / `questionnaire`）。"""
     if risk_profile not in _RISK_PROFILES:
         raise ValueError(f"风险等级无效：{risk_profile}")
     if valid_days <= 0:
         raise ValueError(f"有效期必须为正整数天数：{valid_days}")
+    if source not in _WRITABLE_SOURCES:
+        raise ValueError(f"来源无效：{source}（用户侧只允许 {_WRITABLE_SOURCES}）")
     with store.transaction() as conn:
         conn.execute(
             "INSERT INTO risk_assessments(user_id, risk_profile, assessed_on, valid_days, source)"
@@ -131,7 +153,7 @@ def save_risk_assessment(
             " assessed_on = excluded.assessed_on,"
             " valid_days = excluded.valid_days,"
             " source = excluded.source",
-            (user_id, risk_profile, assessed_on.isoformat(), valid_days, SOURCE_USER_INPUT),
+            (user_id, risk_profile, assessed_on.isoformat(), valid_days, source),
         )
 
 

@@ -23,7 +23,7 @@ from typing import Protocol
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 
-BILL_DATA_SOURCE = "内置演示数据（gateway/seed.py 播种，未接入真实账单导入）"
+BILL_DATA_SOURCE = "内置演示数据（未接入真实账单导入）"
 """当前唯一的数据来源；真实账单导入接通前必须原样展示。"""
 
 LOOKBACK_MONTHS = 12
@@ -58,12 +58,23 @@ SMALL_FEE_MAX_CENTS = 10_000
 
 FEE_KEYWORDS = ("会员", "服务费", "管理费", "订阅", "自动续费", "增值服务")
 
+LATE_NIGHT_START_HOUR = 22
+"""「深夜」判据起点（含）：22:00 起算。"""
+
+LATE_NIGHT_END_HOUR = 6
+"""「深夜」判据终点（不含）：06:00 前算深夜。"""
+
+REMOTE_CITY_MIN_SAMPLES = 2
+"""判定「常用城市」所需的最少历史样本数；不足则不启用异地判据（避免新用户误报）。"""
+
 FINDING_KINDS = (
     "duplicate-charge",
     "price-change",
     "hidden-fee",
     "recurring-subscription",
     "abnormal-spend",
+    "late-night",
+    "remote-city",
 )
 FINDING_STATUSES = ("confirmed", "suspected", "normal")
 SAVING_BASES = ("confirmed", "potential", "none")
@@ -105,6 +116,10 @@ class FindingEvidence:
     amount_cents: int
     """原始带符号金额（支出为负），不做四舍五入或改写。"""
     merchant_label: str
+    booked_at: str | None = None
+    """发生时刻（可空）：深夜判据的唯一时间出处，同时供可疑清单展示。"""
+    city: str | None = None
+    """发生城市（可空）：异地判据的唯一地点出处，同时供可疑清单展示。"""
 
 
 @dataclass(frozen=True)
@@ -136,6 +151,8 @@ class BillTxnDigest:
     category: str
     merchant_label: str
     direction: str
+    booked_at: str | None = None
+    city: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +186,8 @@ class _Charge:
     category: str
     record_id: str
     content_hash: str
+    booked_at: str | None = None
+    city: str | None = None
 
     @property
     def merchant_key(self) -> str:
@@ -211,7 +230,14 @@ def analyze_bill(
         findings.extend(_price_change_findings(window, start, end, allocated, covered))
         findings.extend(_hidden_fee_findings(window, start, end, registered, allocated, covered))
         findings.extend(_subscription_findings(window, start, end, registered))
+        # 判据优先级：异常大额 > 异地 > 深夜。同一笔只归一条，
+        # 否则「凌晨+异地+大额」会被深夜先认领，异常大额永远命中不到。
         findings.extend(_abnormal_findings(window, period, covered))
+        common_cities = _common_cities(window)
+        if not common_cities:
+            notes.append("历史城市样本不足，异地判据未启用；未命中不代表不存在异常。")
+        findings.extend(_remote_city_findings(period, common_cities, covered))
+        findings.extend(_late_night_findings(period, covered))
         if len(window) < SUBSCRIPTION_MIN_CHARGES:
             notes.append("历史样本不足 3 期，价格变化与订阅结论仅作疑似提示，不作为已确认问题。")
 
@@ -327,6 +353,8 @@ def report_payload(report: BillFindingsReport) -> dict[str, object]:
                 "category": item.category,
                 "merchant_label": item.merchant_label,
                 "direction": item.direction,
+                "booked_at": item.booked_at,
+                "city": item.city,
             }
             for item in report.transactions
         ],
@@ -345,6 +373,8 @@ def report_payload(report: BillFindingsReport) -> dict[str, object]:
                         "booked_on": item.booked_on.isoformat(),
                         "amount_cents": item.amount_cents,
                         "merchant_label": item.merchant_label,
+                        "booked_at": item.booked_at,
+                        "city": item.city,
                     }
                     for item in finding.evidence
                 ],
@@ -366,6 +396,127 @@ def report_payload(report: BillFindingsReport) -> dict[str, object]:
         "potential_saving_cents": report.potential_saving_cents,
         "notes": list(report.notes),
     }
+
+
+# --------------------------------------------------------------------------- 画像 / 趋势
+
+TREND_MONTHS = 6
+"""场景页「近 6 月支出趋势」窗口（含本期）。"""
+
+
+@dataclass(frozen=True)
+class BillTrendPoint:
+    """一个账期的支出合计（正数，单位分）。"""
+
+    period: str
+    expense_cents: int
+
+
+@dataclass(frozen=True)
+class CategoryShare:
+    """本期分类结构：分类支出与占比（占比由服务端计算，前端不除）。"""
+
+    category: str
+    expense_cents: int
+    share: Decimal
+
+
+@dataclass(frozen=True)
+class BillProfile:
+    """用户画像（只读、可回读）：消费结构 / 订阅负担 / 大额风险。"""
+
+    top_category: str | None
+    top_category_cents: int
+    top_category_share: Decimal | None
+    subscription_monthly_cents: int
+    suspicious_count: int
+    max_suspicious_cents: int
+
+
+def _month_sequence(year: int, month: int, months: int) -> tuple[tuple[int, int], ...]:
+    """自目标账期向前取 `months` 个账期，按时间升序返回。"""
+    if months <= 0:
+        raise ValueError(f"months 必须为正：{months}")
+    sequence = [(year, month)]
+    for _ in range(months - 1):
+        if month == 1:
+            year, month = year - 1, 12
+        else:
+            month -= 1
+        sequence.append((year, month))
+    return tuple(reversed(sequence))
+
+
+def expense_trend(
+    gateway: FactGateway, user_id: str, year: int, month: int, *, months: int = TREND_MONTHS
+) -> tuple[BillTrendPoint, ...]:
+    """近 N 月支出趋势：全部来自事实网关 `monthly_bill`，不含任何估算。"""
+    points: list[BillTrendPoint] = []
+    for point_year, point_month in _month_sequence(year, month, months):
+        summary = gateway.monthly_bill(user_id, point_year, point_month).payload
+        points.append(
+            BillTrendPoint(
+                period=f"{point_year:04d}-{point_month:02d}",
+                expense_cents=summary.total_expense.cents,
+            )
+        )
+    return tuple(points)
+
+
+def category_shares(
+    gateway: FactGateway, user_id: str, year: int, month: int
+) -> tuple[CategoryShare, ...]:
+    """本期分类占比：分母 = 各分类支出合计（不含收入），由服务端一次性算好。"""
+    summary = gateway.monthly_bill(user_id, year, month).payload
+    expenses = [
+        (item.category, -item.total.cents)
+        for item in summary.by_category
+        if item.total.cents < 0 and -item.total.cents > 0
+    ]
+    total = sum(cents for _, cents in expenses)
+    if total <= 0:
+        return ()
+    shares = [
+        CategoryShare(
+            category=category,
+            expense_cents=cents,
+            share=(Decimal(cents) / Decimal(total)).quantize(Decimal("0.0001")),
+        )
+        for category, cents in expenses
+    ]
+    return tuple(sorted(shares, key=lambda item: (-item.expense_cents, item.category)))
+
+
+def bill_profile(
+    gateway: FactGateway, user_id: str, report: BillFindingsReport
+) -> BillProfile:
+    """账单 → 用户画像（只读）：消费结构 / 订阅负担 / 大额风险。
+
+    - 消费结构：本期占比最高的分类与占比（来自 `monthly_bill`）；
+    - 订阅负担：在用订阅折算到「每月」的固定扣款（年付按 12 个月均摊）；
+    - 大额风险：确认 / 疑似发现项的条数与最大单笔影响金额。
+    """
+    year, month = (int(part) for part in report.period.split("-", 1))
+    shares = category_shares(gateway, user_id, year, month)
+    top = shares[0] if shares else None
+    subscriptions = [
+        record.payload
+        for record in gateway.subscriptions_of(user_id)
+        if record.payload.user_id == user_id and record.payload.status == "active"
+    ]
+    monthly_cents = sum(
+        item.amount.cents // 12 if item.period == "yearly" else item.amount.cents
+        for item in subscriptions
+    )
+    risky = [item for item in report.findings if item.status in {"confirmed", "suspected"}]
+    return BillProfile(
+        top_category=top.category if top is not None else None,
+        top_category_cents=top.expense_cents if top is not None else 0,
+        top_category_share=top.share if top is not None else None,
+        subscription_monthly_cents=monthly_cents,
+        suspicious_count=len(risky),
+        max_suspicious_cents=max((item.impact_cents for item in risky), default=0),
+    )
 
 
 # --------------------------------------------------------------------------- 规则
@@ -603,6 +754,79 @@ def _subscription_findings(
                 detail=(
                     f"{latest.merchant_label} 近 {len(items)} 期扣款，中位间隔 {cycle} 天，"
                     f"单期约 {Money(latest.amount_cents).yuan} 元（{cycle_label}）。"
+                ),
+            )
+        )
+    return findings
+
+
+def _late_night_findings(period: Sequence[_Charge], covered: set[str]) -> list[Finding]:
+    """深夜（22:00–06:00）支出：只提示核对，不计入节省。`booked_at` 为空则跳过。"""
+    findings: list[Finding] = []
+    for charge in period:
+        moment = _time_of_day(charge.booked_at)
+        if moment is None or not _is_late_night(moment[0]):
+            continue
+        if charge.txn_id in covered:
+            continue
+        covered.add(charge.txn_id)
+        findings.append(
+            Finding(
+                finding_id=f"late-night-{len(findings) + 1:02d}",
+                kind="late-night",
+                status="suspected",
+                confidence=Decimal("0.55"),
+                txn_ids=(charge.txn_id,),
+                evidence=(_evidence(charge),),
+                impact_cents=charge.amount_cents,
+                impact_basis=(
+                    "该笔为本期支出金额，仅用于提示复核；深夜交易不是节省，不计入节省金额。"
+                ),
+                saving_basis="none",
+                assumption="深夜消费可能完全正常（加班、夜间出行、跨时区）；命中只表示建议核对。",
+                suggestion="核对是否本人消费；如非本人操作，建议同时锁卡并联系银行。",
+                detail=(
+                    f"{charge.merchant_label} 于 {moment[0]:02d}:{moment[1]:02d} 发生 "
+                    f"{Money(charge.amount_cents).yuan} 元支出。"
+                ),
+            )
+        )
+    return findings
+
+
+def _remote_city_findings(
+    period: Sequence[_Charge], common_cities: frozenset[str], covered: set[str]
+) -> list[Finding]:
+    """异地支出：发生城市不在常用城市集合内。`city` 为空则跳过（不适用 ≠ 异常）。"""
+    if not common_cities:
+        return []
+    baseline = "、".join(sorted(common_cities))
+    findings: list[Finding] = []
+    for charge in period:
+        if not charge.city or charge.city in common_cities:
+            continue
+        covered.add(charge.txn_id)
+        findings.append(
+            Finding(
+                finding_id=f"remote-city-{len(findings) + 1:02d}",
+                kind="remote-city",
+                status="suspected",
+                confidence=Decimal("0.60"),
+                txn_ids=(charge.txn_id,),
+                evidence=(_evidence(charge),),
+                impact_cents=charge.amount_cents,
+                impact_basis=(
+                    "该笔为本期支出金额，仅用于提示复核；异地交易不是节省，不计入节省金额。"
+                ),
+                saving_basis="none",
+                assumption=(
+                    f"假设常用城市为 {baseline}（近 {LOOKBACK_MONTHS} 个月样本）；"
+                    "出差、旅行、线上消费归属地也可能导致异地。"
+                ),
+                suggestion="核对是否本人消费；如非本人操作，建议同时锁卡并联系银行。",
+                detail=(
+                    f"{charge.merchant_label} 发生地 {charge.city}，常用城市 {baseline}，"
+                    f"金额 {Money(charge.amount_cents).yuan} 元。"
                 ),
             )
         )
@@ -862,6 +1086,44 @@ def _render_summary(report: BillFindingsReport) -> str:
 # --------------------------------------------------------------------------- 工具
 
 
+def _time_of_day(booked_at: str | None) -> tuple[int, int] | None:
+    """从 `YYYY-MM-DDTHH:MM:SS` / `HH:MM` 取 `(时, 分)`；空值或格式非法返回 `None`。"""
+    if not booked_at:
+        return None
+    text = booked_at.strip()
+    if "T" in text:
+        text = text.split("T", 1)[1]
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    return hour, minute
+
+
+def _is_late_night(hour: int) -> bool:
+    """深夜区间：`[22:00, 24:00) ∪ [00:00, 06:00)`。"""
+    return hour >= LATE_NIGHT_START_HOUR or hour < LATE_NIGHT_END_HOUR
+
+
+def _common_cities(window: Sequence[_Charge]) -> frozenset[str]:
+    """常用城市基线：窗口内出现最多的城市；样本不足 `REMOTE_CITY_MIN_SAMPLES` 则不启用。"""
+    counts: dict[str, int] = {}
+    for charge in window:
+        if charge.city:
+            counts[charge.city] = counts.get(charge.city, 0) + 1
+    if not counts:
+        return frozenset()
+    city, count = max(counts.items(), key=lambda item: (item[1], item[0]))
+    if count < REMOTE_CITY_MIN_SAMPLES:
+        return frozenset()
+    return frozenset({city})
+
+
 def _collect_charges(
     gateway: FactGateway, user_id: str, start: date, end: date
 ) -> tuple[_Charge, ...]:
@@ -884,6 +1146,8 @@ def _collect_charges(
                 category=transaction.category,
                 record_id=record.record_id,
                 content_hash=record.content_hash,
+                booked_at=transaction.booked_at,
+                city=transaction.city,
             )
     return tuple(sorted(collected.values(), key=lambda item: (item.booked_on, item.txn_id)))
 
@@ -904,6 +1168,8 @@ def _digest(charge: _Charge) -> BillTxnDigest:
         category=charge.category,
         merchant_label=charge.merchant_label,
         direction="out",
+        booked_at=charge.booked_at,
+        city=charge.city,
     )
 
 
@@ -915,6 +1181,8 @@ def _evidence(charge: _Charge) -> FindingEvidence:
         booked_on=charge.booked_on,
         amount_cents=-charge.amount_cents,
         merchant_label=charge.merchant_label,
+        booked_at=charge.booked_at,
+        city=charge.city,
     )
 
 

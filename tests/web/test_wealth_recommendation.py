@@ -12,6 +12,7 @@ from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.risk_store import save_risk_assessment
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.scenarios.wealth_assessment import MAX_SCORE, QUESTIONNAIRE
 from ai_banking_copilot.web.app import AppDeps, create_app
 from ai_banking_copilot.web.session import Session, SessionState, SessionStateError
 
@@ -201,3 +202,52 @@ def test_risk_assessment_post_cannot_forge_identity(deps: AppDeps, rw_store: Sto
     assert response.status_code == 200
     rows = rw_store.query("SELECT user_id FROM risk_assessments ORDER BY user_id")
     assert [row["user_id"] for row in rows] == [DEMO_USER_ID]
+
+
+# 风险测评问卷（P0-5）：等级由服务端评分算出，落库 source='questionnaire'
+def _answers(option_index: int) -> dict[str, str]:
+    return {question.id: question.options[option_index].id for question in QUESTIONNAIRE}
+
+
+def test_risk_assessment_get_exposes_questionnaire(deps: AppDeps) -> None:
+    payload = _client(deps).get("/api/risk-assessment").json()
+    questionnaire = payload["questionnaire"]
+    assert len(questionnaire) == len(QUESTIONNAIRE)
+    assert questionnaire[0]["id"] == QUESTIONNAIRE[0].id
+    assert "score" not in questionnaire[0]["options"][0]
+
+
+def test_risk_assessment_questionnaire_records_computed_profile(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    payload = _client(deps).post(
+        "/api/risk-assessment", json={"answers": _answers(3)}
+    ).json()
+    assessment = payload["assessment"]
+    assert assessment["risk_profile"] == "R5"
+    assert assessment["source"] == "questionnaire"
+    assert assessment["source_label"] == "风险测评问卷"
+    assert payload["result"]["score"] == MAX_SCORE
+    rows = rw_store.query("SELECT source FROM risk_assessments WHERE user_id = ?", (DEMO_USER_ID,))
+    assert rows[0]["source"] == "questionnaire"
+
+
+def test_risk_assessment_questionnaire_is_stable_across_runs(deps: AppDeps) -> None:
+    client = _client(deps)
+    first = client.post("/api/risk-assessment", json={"answers": _answers(1)}).json()
+    second = client.post("/api/risk-assessment", json={"answers": _answers(1)}).json()
+    assert first["result"] == second["result"]
+
+
+def test_risk_assessment_questionnaire_rejects_self_filled_level(deps: AppDeps) -> None:
+    response = _client(deps).post(
+        "/api/risk-assessment", json={"answers": _answers(3), "risk_profile": "R1"}
+    )
+    assert response.status_code == 400
+
+
+def test_risk_assessment_questionnaire_rejects_incomplete_answers(deps: AppDeps) -> None:
+    incomplete = _answers(3)
+    incomplete.pop(QUESTIONNAIRE[0].id)
+    response = _client(deps).post("/api/risk-assessment", json={"answers": incomplete})
+    assert response.status_code == 400

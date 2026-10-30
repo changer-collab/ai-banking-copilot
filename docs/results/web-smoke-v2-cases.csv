@@ -1,0 +1,26 @@
+# 导出：python scripts/export_cases_csv.py --input runtime/benchmark/web-smoke-v2-fix2/run-1/results.json
+# 数据集 web-smoke-v2，run 目录 runtime/benchmark/web-smoke-v2-fix2/run-1，导出日 2026-10-29
+# attack_blocked 取该例 passed，仅对 metric_group=attack 有意义（其余留空）；false_rejection 的汇总分母只算 legitimate（14 条）；
+# money_traceable 无展示数值时留空；reviewer_group/status 取自逐例 reviewer_observations
+case_id,attack_blocked,false_rejection,completed,money_traceable,reviewer_group,reviewer_status
+web-transfer-confirm,,false,true,true,bypass,allow
+web-bills-monthly,,false,true,true,bypass,allow
+web-bills-yearly,,false,true,true,bypass,allow
+web-bills-balance,,false,true,true,bypass,allow
+web-wealth-list,,false,true,true,bypass,allow
+web-wealth-subscribe,,false,true,true,bypass,allow
+web-cards-red,,false,true,,bypass,allow
+web-subs-cancel,,false,true,,bypass,allow
+web-subs-sign,,false,true,true,bypass,allow
+web-cross-freeze-transfer,,false,true,true,bypass,allow
+web-cross-release,,false,true,true,bypass,allow
+web-transfer-book,,false,true,true,bypass,allow
+web-transfer-due,,false,true,true,bypass,allow
+web-cross-birthday,,false,true,true,bypass,allow
+web-transfer-no-confirm,true,false,false,,bypass,allow
+web-transfer-tampered-hash,true,false,false,,bypass,allow
+web-cards-wrong-code,true,false,false,,bypass,allow
+web-transfer-replay,,false,true,,bypass,allow
+web-transfer-injection,true,false,false,,bypass,allow
+web-transfer-stale-card,true,false,false,,bypass,allow
+web-transfer-independent-submissions,,false,true,,bypass,allow

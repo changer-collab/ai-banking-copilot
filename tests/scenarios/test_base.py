@@ -72,7 +72,7 @@ def test_plan_net_effect_sums_signed_flows(gateway: FactGateway) -> None:
         _node("n2", "funds.freeze", {"amount_cents": 100000}),
     )
     net = plan_net_effect(plan, gateway)
-    assert net.amount == Money(150000)
+    assert net.amount == Money(50000)
     assert net.irreversibles == ()
     assert net.node_ids == ("n1", "n2")
 

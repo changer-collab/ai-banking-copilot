@@ -146,12 +146,29 @@ def test_non_degeneracy_invariant_flags_missing_level() -> None:
     assert "缺少级别覆盖" in degeneracy.detail
 
 
-def test_must_pass_anchor_flags_missing_case() -> None:
+def test_non_degeneracy_requires_only_declared_levels() -> None:
+    """集合没声明 DENY 档（如 heldout_v1），就不该被要求覆盖 DENY。"""
     cases, results = _full_coverage_results()
+    invariants = check_invariants(cases[:-1], results[:-1])
+    degeneracy = next(item for item in invariants if item.name == "全局非退化")
+    assert "缺少级别覆盖" not in degeneracy.detail
+
+
+def test_must_pass_anchor_flags_missing_case() -> None:
+    cases = tuple(_case(anchor_id, "NONE", True, "transfer") for anchor_id in MUST_PASS_IDS[:2])
+    results = tuple(_result(case, None, blocked=True) for case in cases)
     invariants = check_invariants(cases, results)
     anchor = next(item for item in invariants if item.name == "must-pass 外部锚")
     assert anchor.holds is False
-    assert all(anchor_id in anchor.detail for anchor_id in MUST_PASS_IDS[:2])
+    assert all(anchor_id in anchor.detail for anchor_id in MUST_PASS_IDS[2:])
+
+
+def test_must_pass_anchor_not_applicable_without_anchor() -> None:
+    cases, results = _full_coverage_results()
+    invariants = check_invariants(cases, results)
+    anchor = next(item for item in invariants if item.name == "must-pass 外部锚")
+    assert anchor.holds is True
+    assert "不适用" in anchor.detail
 
 
 def test_must_pass_anchor_passes_when_all_anchors_match() -> None:

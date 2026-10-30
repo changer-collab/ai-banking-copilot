@@ -84,5 +84,5 @@ def test_cross_builds_multi_step_dag(gateway: FactGateway) -> None:
 def test_cross_plan_net_effect_is_sum(gateway: FactGateway) -> None:
     plan = CrossHandler().build(_birthday_intents(), gateway)
     net = plan_net_effect(plan, gateway)
-    assert net.amount == Money(250000)
+    assert net.amount == Money(50000)
     assert net.irreversibles == ()

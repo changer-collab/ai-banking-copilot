@@ -1,0 +1,293 @@
+"""渠道可靠性辅助件：事件幂等、出站重试与健康统计。
+
+本模块不参与身份、计划或策略裁决。事件台账只记录渠道和事件号，
+健康统计只提供运行态指标，便于回调入口和健康页复用。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from threading import Lock
+from typing import Any, TypeVar
+
+from ai_banking_copilot.gateway.store import Store
+
+T = TypeVar("T")
+AttemptCallback = Callable[[int, int | None, str | None], None]
+RetryCallback = Callable[[int, float], None]
+
+EVENT_LEDGER_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS channel_events (
+    channel    TEXT NOT NULL,
+    event_id   TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    PRIMARY KEY (channel, event_id)
+);
+"""
+
+DEFAULT_RETRY_DELAYS: tuple[float, ...] = (0.5, 2.0, 8.0)
+DEFAULT_RESERVATION_TTL_S = 60.0
+DEFAULT_MAX_RESERVATIONS = 1000
+
+
+@dataclass
+class _Bucket:
+    tokens: float
+    updated_at: float
+
+
+class TokenBucketRateLimiter:
+    """按外部身份计数的进程内令牌桶，并支持一次性预准入。"""
+
+    def __init__(
+        self,
+        *,
+        limit: int = 20,
+        window_s: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+        reservation_ttl_s: float = DEFAULT_RESERVATION_TTL_S,
+        max_reservations: int = DEFAULT_MAX_RESERVATIONS,
+    ) -> None:
+        if limit < 1 or window_s <= 0 or reservation_ttl_s <= 0:
+            raise ValueError("invalid_rate_limit")
+        if max_reservations < 1:
+            raise ValueError("invalid_reservation_capacity")
+        self._limit = limit
+        self._refill_per_second = limit / window_s
+        self._clock = clock
+        self._reservation_ttl_s = reservation_ttl_s
+        self._max_reservations = max_reservations
+        self._buckets: dict[str, _Bucket] = {}
+        self._reservations: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._lock = Lock()
+
+    def allow(self, key: str, *, reservation_id: str | None = None) -> bool:
+        """消费预准入标记；没有标记时直接补充并扣减一个令牌。"""
+        with self._lock:
+            now = self._clock()
+            self._expire_reservations(now)
+            if reservation_id is not None:
+                marker = (key, reservation_id)
+                if marker in self._reservations:
+                    del self._reservations[marker]
+                    return True
+            return self._consume(key, now)
+
+    def reserve(self, key: str, reservation_id: str) -> bool:
+        """预先扣减令牌并保存一次性标记，供后台 dispatch 消费。"""
+        with self._lock:
+            now = self._clock()
+            self._expire_reservations(now)
+            marker = (key, reservation_id)
+            if marker in self._reservations:
+                return True
+            if len(self._reservations) >= self._max_reservations:
+                return False
+            if not self._consume(key, now):
+                return False
+            self._reservations[marker] = now + self._reservation_ttl_s
+            return True
+
+    def _consume(self, key: str, now: float) -> bool:
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _Bucket(tokens=float(self._limit), updated_at=now)
+            self._buckets[key] = bucket
+        elapsed = max(0.0, now - bucket.updated_at)
+        bucket.tokens = min(
+            float(self._limit), bucket.tokens + elapsed * self._refill_per_second
+        )
+        bucket.updated_at = now
+        if bucket.tokens < 1.0:
+            return False
+        bucket.tokens -= 1.0
+        return True
+
+    def _expire_reservations(self, now: float) -> None:
+        expired = [
+            marker for marker, expires_at in self._reservations.items() if expires_at <= now
+        ]
+        for marker in expired:
+            del self._reservations[marker]
+
+
+SlidingWindowRateLimiter = TokenBucketRateLimiter
+"""兼容旧导入名；实现已统一为令牌桶。"""
+
+
+class EventLedger:
+    """SQLite 事件认领表；同一渠道的同一 event_id 只能成功认领一次。"""
+
+    def __init__(self, store: Store, channel: str = "feishu") -> None:
+        self._store = store
+        self._channel = channel
+        with self._store.transaction() as connection:
+            connection.execute(EVENT_LEDGER_SCHEMA_SQL)
+
+    def claim(self, event_id: str) -> bool:
+        """原子认领事件；首次返回 True，重复或空事件号返回 False。"""
+        if not event_id:
+            return False
+        claimed_at = datetime.now(UTC).isoformat()
+        try:
+            with self._store.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO channel_events(channel, event_id, claimed_at) "
+                    "VALUES (?, ?, ?)",
+                    (self._channel, event_id, claimed_at),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error:
+            # 事件台账写失败必须 fail-closed，避免重复执行业务。
+            return False
+
+    def release(self, event_id: str) -> None:
+        """撤销一次认领：只在本次请求**没有真正执行**时调用（401 / 429 / 状态机拒绝）。
+
+        平台重投时必须还能再进来一次；成功执行过的事件不释放，保证幂等。
+        """
+        if not event_id:
+            return
+        try:
+            with self._store.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM channel_events WHERE channel = ? AND event_id = ?",
+                    (self._channel, event_id),
+                )
+        except sqlite3.Error:
+            # 释放失败只会导致该事件被判为重复（宁可少执行，不可重复执行）。
+            return
+
+
+def retry_outbound(
+    send: Callable[[], T],
+    *,
+    attempts: int = 4,
+    sleeper: Callable[[float], None] = time.sleep,
+    delays: tuple[float, ...] = DEFAULT_RETRY_DELAYS,
+    on_attempt: AttemptCallback | None = None,
+    on_retry: RetryCallback | None = None,
+) -> T:
+    """发送出站消息；仅对超时与 5xx 重试，最多调用 ``attempts`` 次。
+
+    发送函数可以返回带 ``status_code`` 属性的响应对象，也可以返回整数状态码。
+    每次实际调用都报告尝试结果；异常只报告稳定类型名，不包含异常正文。
+    4xx 或其他成功结果立即返回；最后一次 5xx 也原样返回，交由上层记录失败。
+    """
+    if attempts < 1:
+        raise ValueError("attempts_must_be_positive")
+    for index in range(attempts):
+        try:
+            result = send()
+        except Exception as error:
+            if on_attempt is not None:
+                on_attempt(index + 1, None, type(error).__name__)
+            if not _retryable_exception(error) or index >= attempts - 1:
+                raise
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
+            _sleep_before_retry(index, delays, sleeper)
+            continue
+
+        status = _status_code(result)
+        if on_attempt is not None:
+            on_attempt(index + 1, status, None)
+        if status >= 500 and index < attempts - 1:
+            if on_retry is not None:
+                on_retry(index + 1, delays[min(index, len(delays) - 1)])
+            _sleep_before_retry(index, delays, sleeper)
+            continue
+        return result
+    raise RuntimeError("outbound_retry_exhausted")
+
+
+class HealthRegistry:
+    """按渠道保存最近事件、失败、重试和限流计数。"""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._channels: dict[str, dict[str, object]] = {}
+
+    def register(self, channel: str, *, replay_mode: bool = False) -> None:
+        """注册物理渠道，使零事件快照也包含完整字段。"""
+        with self._lock:
+            stats = self._stats(channel)
+            stats["replay_mode"] = replay_mode
+
+    def record_event(self, channel: str, *, success: bool) -> None:
+        with self._lock:
+            stats = self._stats(channel)
+            self._increment(stats, "events")
+            key = "ok" if success else "failed"
+            self._increment(stats, key)
+            stats["last_event_at"] = datetime.now(UTC).isoformat()
+            stats["status"] = "ok" if success else "degraded"
+
+    def record_replay(self, channel: str) -> None:
+        with self._lock:
+            stats = self._stats(channel)
+            self._increment(stats, "replayed")
+
+    def record_retry(self, channel: str) -> None:
+        with self._lock:
+            stats = self._stats(channel)
+            self._increment(stats, "retries")
+
+    def record_rate_limit(self, channel: str) -> None:
+        with self._lock:
+            stats = self._stats(channel)
+            self._increment(stats, "ratelimit_hits")
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        with self._lock:
+            return {channel: dict(stats) for channel, stats in self._channels.items()}
+
+    def _stats(self, channel: str) -> dict[str, object]:
+        if channel not in self._channels:
+            self._channels[channel] = {
+                "status": "unknown",
+                "last_event_at": None,
+                "events": 0,
+                "ok": 0,
+                "failed": 0,
+                "replayed": 0,
+                "retries": 0,
+                "ratelimit_hits": 0,
+                "replay_mode": False,
+            }
+        return self._channels[channel]
+
+    @staticmethod
+    def _increment(stats: dict[str, object], key: str) -> None:
+        current = stats.get(key)
+        stats[key] = current + 1 if isinstance(current, int) else 1
+
+
+def _sleep_before_retry(
+    index: int,
+    delays: tuple[float, ...],
+    sleeper: Callable[[float], None],
+) -> None:
+    if delays:
+        sleeper(delays[min(index, len(delays) - 1)])
+
+
+def _status_code(result: Any) -> int:
+    if isinstance(result, int):
+        return result
+    try:
+        return int(result.status_code)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _retryable_exception(error: Exception) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    error_type = type(error)
+    return error_type.__module__ == "httpx" and error_type.__name__ == "TimeoutException"

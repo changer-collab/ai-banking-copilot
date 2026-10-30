@@ -50,12 +50,16 @@ CARD_ACTIONS = frozenset(
         "card.report_lost",
         "card.apply_virtual",
         "card.set_limit",
+        "password.change",
     }
 )
 """卡片域动作（README 规范动作表 #6 / #14–#18）。"""
 
 _CARD_SCOPED_ACTIONS = frozenset({"card.lock", "card.unlock", "card.report_lost", "card.set_limit"})
 _LIMIT_ACTIONS = frozenset({"card.apply_virtual", "card.set_limit"})
+
+CARD_DAILY_LIMIT_MAX_CENTS = 5_000_000
+"""单卡日限额上限（分）：5 万元。调额 / 补卡超过该值一律拒绝（演示风控上限）。"""
 
 
 def loss_report_request(user_id: str) -> PolicyRequest:
@@ -104,6 +108,7 @@ def _build_card_node(
     if intent.action in _CARD_SCOPED_ACTIONS:
         card_id = as_str(trusted_slot(intent, ("card", "card_id"), "card"), "card")
         _require_card(gateway, card_id)
+        _reject_unlock_of_lost_card(intent.action, gateway, card_id)
         params = {"card_id": card_id}
     if intent.action in _LIMIT_ACTIONS:
         limit = as_money(
@@ -111,6 +116,11 @@ def _build_card_node(
         )
         if limit.cents <= 0:
             raise ScenarioRefused("日限额必须为正")
+        if limit.cents > CARD_DAILY_LIMIT_MAX_CENTS:
+            raise ScenarioRefused(
+                f"单卡日限额上限 {Money(CARD_DAILY_LIMIT_MAX_CENTS).yuan} 元，"
+                f"暂不支持调整到 {Money(limit.cents).yuan} 元"
+            )
         params["daily_limit_cents"] = limit.cents
     return PlanNode(
         node_id=node_id,
@@ -125,6 +135,22 @@ def _require_card(gateway: FactGateway, card_id: str) -> None:
         gateway.card(card_id)
     except GatewayNotFoundError as error:
         raise ScenarioRefused(f"卡片不存在：{card_id}") from error
+
+
+def _reject_unlock_of_lost_card(action: str, gateway: FactGateway, card_id: str) -> None:
+    """挂失**不可逆**：已挂失的卡不允许「解锁」回 active（想继续用卡只能补卡）。
+
+    口径来源：04 三色基准表把 `card.report_lost` 列为不可逆（PDP 的 `irreversible` 修饰），
+    手动实测清单 CRD-06 也要求「挂失后不能再解锁」。此前只有面板不显示解锁按钮，
+    对话通道仍可把 lost 改回 active，属**面板与后端能力不一致**，这里在场景层堵住。
+    """
+    if action != "card.unlock":
+        return
+    if gateway.card(card_id).payload.status != "lost":
+        return
+    raise ScenarioRefused(
+        "卡片已挂失，不支持解锁：挂失是不可逆操作；如仍需用卡，请申请补卡（补虚拟卡）。"
+    )
 
 
 def _card_status_handler(status: str) -> WriteHandler:
@@ -161,12 +187,22 @@ def _set_limit_handler(context: WriteContext) -> WriteReceipt:
     )
 
 
+def _change_password_handler(context: WriteContext) -> WriteReceipt:
+    """把 `password.change` 映射到 `CoreBank.request_password_change`（只登记事件，不碰密码）。"""
+    return context.core_bank.request_password_change(
+        user_id=require_str(context.params, "user_id"),
+        idempotency_key=context.idempotency_key,
+        before_write=context.before_write,
+    )
+
+
 WRITE_HANDLERS: Mapping[str, WriteHandler] = {
     "card.lock": _card_status_handler("locked"),
     "card.unlock": _card_status_handler("active"),
     "card.report_lost": _card_status_handler("lost"),
     "card.apply_virtual": _apply_virtual_handler,
     "card.set_limit": _set_limit_handler,
+    "password.change": _change_password_handler,
 }
 """卡片域写处理器（组合根汇入 PEP；`docs/已修复清单-2026-10-08.md` 步骤 1.5）。"""
 

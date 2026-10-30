@@ -61,6 +61,125 @@ def test_parse_amount_rejects_multi_candidate_numbers() -> None:
     assert result.matched is False
 
 
+def test_parse_amount_supports_colloquial_chinese_numerals() -> None:
+    """中文数字必须能直接解析（「给李娜打五百」不能要求用户改成阿拉伯数字）。"""
+    assert parse_amount("给李娜打五百").value == Money(50000)
+    assert parse_amount("给李娜打五百块").value == Money(50000)
+    assert parse_amount("转一千二").value == Money(120000)
+    assert parse_amount("转两千五").value == Money(250000)
+    assert parse_amount("转一万五千块").value == Money(1500000)
+
+
+def test_parse_amount_supports_standard_chinese_numerals() -> None:
+    assert parse_amount("转一百零八").value == Money(10800)
+    assert parse_amount("转十五块").value == Money(1500)
+    assert parse_amount("转三百二十").value == Money(32000)
+    assert parse_amount("转两百块").value == Money(20000)
+    assert parse_amount("转十二万元").value == Money(12000000)
+
+
+def test_parse_amount_asks_before_ten_thousand_without_currency_unit() -> None:
+    """万级中文数字不带「元 / 块」时不判定金额，先追问——大额不替用户推断单位。
+
+    `adv-hallucination-4`（「转给李娜 一万」）的期望就是这一条：不产级别、先追问。
+    """
+    assert parse_amount("转给李娜 一万").matched is False
+    assert parse_amount("转一万五").matched is False
+    assert parse_amount("转十二万").matched is False
+    assert parse_amount("转一万块").value == Money(1000000)
+
+
+def test_parse_amount_chinese_evidence_is_the_matched_text() -> None:
+    result = parse_amount("给李娜打五百")
+    assert result.matched is True
+    assert result.evidence == "五百"
+
+
+def test_parse_amount_rejects_bare_single_chinese_digit() -> None:
+    """单个汉字数字（无单位、无进位单位）不足以判定金额，必须追问。"""
+    assert parse_amount("转给他五").matched is False
+
+
+def test_parse_amount_ignores_chinese_numeral_in_date_expression() -> None:
+    """「十月一号」里的中文数字是日期，不是金额；不能与真实金额凑成两个候选。"""
+    result = parse_amount("十月一号给李娜转五百")
+    assert result.matched is True
+    assert result.value == Money(50000)
+
+
+def test_parse_amount_rejects_mixed_arabic_and_chinese_candidates() -> None:
+    assert parse_amount("300 元和五百块分两笔").matched is False
+
+
+def test_parse_amount_accepts_bare_number_only_when_caller_opts_in() -> None:
+    """「转 200 给李娜」：默认仍严格（旧口径不变），调用方显式开启后才把裸数字当金额。"""
+    assert parse_amount("转 200 给李娜").matched is False
+    parsed = parse_amount("转 200 给李娜", bare_amounts=True)
+    assert parsed.matched is True
+    assert parsed.value == Money(20000)
+    assert parsed.evidence == "200"
+
+
+def test_parse_amount_bare_number_never_shadows_a_payee_tail() -> None:
+    """尾号 / 卡号是收款人标识，不能同时被读成金额（宁可追问，也不误读）。"""
+    reserved = frozenset({"9021", "2210"})
+    parsed = parse_amount("转给 9021 500", bare_amounts=True, reserved_digits=reserved)
+    assert parsed.matched is True
+    assert parsed.value == Money(50000)
+    assert parse_amount("转给 9021", bare_amounts=True, reserved_digits=reserved).matched is False
+
+
+def test_parse_amount_bare_number_skips_dates_and_ordinals() -> None:
+    assert parse_amount("10 月 1 日", bare_amounts=True).matched is False
+    assert parse_amount("第 3 笔", bare_amounts=True).matched is False
+
+
+def test_parse_amount_bare_number_ignores_long_digit_runs() -> None:
+    """11 位手机号不会被当成「138 亿」；句子里只有中文数字时按中文数字取。"""
+    assert parse_amount("转给 13812342210 五百", bare_amounts=True).value == Money(50000)
+
+
+MOBILE_PAYEES = (
+    Payee("p_lina", "u_demo", "李娜", "9021", "3721", True, False),
+    Payee("p_wangwei", "u_demo", "王伟", "8812", "3301", True, False),
+)
+
+TAIL_COLLISION_PAYEES = (
+    Payee("p_zhangwei_a", "u_demo", "张伟", "8812", "3721", True, False),
+    Payee("p_zhangwei_b", "u_demo", "张伟", "4417", "3721", False, False),
+)
+
+
+def test_resolution_by_full_mobile_matches_payee_tail() -> None:
+    """完整 11 位手机号按后四位匹配名册（库内只存尾号），且 trace 必须脱敏。"""
+    result = resolve_payees(MOBILE_PAYEES, "给 13812343721 转五百")
+    assert [item.payee_id for item in result.candidates] == ["p_lina"]
+    assert result.needs_clarification is False
+    assert any(trace.startswith("phone_full:138****3721") for trace in result.parse_trace)
+    assert all("13812343721" not in trace for trace in result.parse_trace)
+
+
+def test_resolution_by_full_mobile_with_tail_collision_forces_clarification() -> None:
+    result = resolve_payees(TAIL_COLLISION_PAYEES, "给 13812343721 转五百")
+    assert [item.payee_id for item in result.candidates] == [
+        "p_zhangwei_a",
+        "p_zhangwei_b",
+    ]
+    assert result.needs_clarification is True
+
+
+def test_resolution_by_unknown_full_mobile_fabricates_nothing() -> None:
+    result = resolve_payees(MOBILE_PAYEES, "给 13900001111 转五百")
+    assert result.candidates == ()
+    assert result.needs_clarification is False
+
+
+def test_resolution_ignores_eleven_digit_non_mobile_number() -> None:
+    """11 位但不是手机号（非 1[3-9] 开头）的数字不得被当作手机号匹配。"""
+    result = resolve_payees(MOBILE_PAYEES, "订单号 88881233721 转五百")
+    assert result.candidates == ()
+
+
 def test_parse_temporal_resolves_relative_days() -> None:
     today = date(2026, 10, 1)
     assert parse_temporal("今天转", today).when == date(2026, 10, 1)

@@ -46,6 +46,7 @@ from ai_banking_copilot.scenarios.base import (
     intent_text,
     trusted_slot,
 )
+from ai_banking_copilot.scenarios.wealth_graph import explain_product, fee_label
 
 WEALTH_ACTIONS = frozenset({"wealth.list", "wealth.subscribe", "wealth.redeem"})
 """理财域动作（README 规范动作表 #5 / #10 / #11）。"""
@@ -75,7 +76,7 @@ S3 加严 12 词后保留**收益口径**词汇；「推荐 / 哪只 / 哪款 / 
 **选品意图**而非收益承诺，已移入 `RECOMMENDATION_HINTS`（任务 3：推荐走只读筛选流程，
 仍受 H6 保护——含收益承诺的整句依旧被拦）。"""
 
-RECOMMENDATION_HINTS = ("推荐", "哪只", "哪款", "适合我", "买哪个", "选哪个", "比较")
+RECOMMENDATION_HINTS = ("推荐", "哪只", "哪款", "适合我", "买哪个", "选哪个", "比较", "对比")
 """选品 / 比较意图词：**不是**红线词，允许进入理财推荐流程（只读、服务端硬筛选）。"""
 
 
@@ -125,7 +126,7 @@ def assess_suitability(
     state = assessment.state_on(today)
     if state is not AssessmentState.VALID:
         raise SuitabilityError("风险测评已过期或被拒，请重新测评")
-    if _RISK_ORDER[assessment.risk_profile] < _RISK_ORDER[product.risk_level]:
+    if _RISK_ORDER.get(assessment.risk_profile, 0) < _RISK_ORDER.get(product.risk_level, 99):
         raise SuitabilityError(
             f"风险等级不匹配：测评 {assessment.risk_profile} < 产品 {product.risk_level}"
         )
@@ -139,6 +140,51 @@ def describe_product(product: WealthProduct) -> str:
     )
 
 
+_ASSESSMENT_STATE_LABELS: Mapping[AssessmentState, str] = {
+    AssessmentState.VALID: "有效",
+    AssessmentState.EXPIRED: "已过期，请重新测评",
+}
+"""测评状态的中文陈述（`unassessed` 由调用方单独给出话术，不在此表）。"""
+
+
+def describe_assessment(assessment: RiskAssessment, today: date) -> str:
+    """本人风险测评事实陈述：等级 / 测评日期 / 有效期 / 来源，不做任何适配建议。
+
+    用「风险测评等级」而非「风险等级」：后者是产品属性措辞，两者不能混用
+    （既有话术断言依赖这一区分）。
+    """
+    state = assessment.state_on(today)
+    source = _RISK_SOURCE_LABELS.get(
+        assessment.source, assessment.source or "未标注"
+    )
+    return (
+        f"你的风险测评等级：{assessment.risk_profile}"
+        f"｜测评日期 {assessment.assessed_on.isoformat()}"
+        f"｜有效期 {assessment.valid_days} 天（当前{_ASSESSMENT_STATE_LABELS[state]}）"
+        f"｜来源 {source}"
+    )
+
+
+def suitability_refusal(
+    assessment: RiskAssessment | None,
+    product: WealthProduct,
+    products: Sequence[Record[WealthProduct]],
+    today: date,
+) -> str | None:
+    """**先拒后问**的确定性判定：不通过返回拒绝文案，通过返回 `None`。
+
+    与 `_build_wealth_node` 共用同一把闸门（`assess_suitability`），保证
+    「先拒绝再补金额」与「补完金额再拒绝」给出完全一致的结论。
+    """
+    try:
+        assess_suitability(assessment, product, today)
+    except SuitabilityError as error:
+        if assessment is not None and "风险等级不匹配" in str(error):
+            return blocked_suitability_message(assessment, product, products)
+        return str(error)
+    return None
+
+
 def product_comparison(gateway: FactGateway) -> tuple[str, ...]:
     """只读产品事实清单（复用 `describe_product`）：无收益字段、无排序、无推荐（守 H6）。"""
     return tuple(describe_product(record.payload) for record in gateway.wealth_products())
@@ -150,7 +196,11 @@ PRODUCT_DATA_SOURCE = "内置演示数据（gateway/seed.py，非真实在售产
 _UNDISCLOSED = "未知（产品数据未提供）"
 """目录缺该字段时的统一标注：标未知，不编造。"""
 
-_RISK_SOURCE_LABELS = {"seed": "演示 seed 数据（非真实测评）", "user_input": "用户自助录入"}
+_RISK_SOURCE_LABELS = {
+    "seed": "演示 seed 数据（非真实测评）",
+    "user_input": "用户自助录入",
+    "questionnaire": "风险测评问卷",
+}
 
 
 def recommendation_profile(assessment: RiskAssessment | None, today: date) -> str:
@@ -182,14 +232,14 @@ def recommend_products(
     if limit is None:
         raise SuitabilityError(f"风险等级无效：{risk_profile}")
     eligible = [
-        record for record in products if _RISK_ORDER[record.payload.risk_level] <= limit
+        record for record in products if _RISK_ORDER.get(record.payload.risk_level, 99) <= limit
     ]
     return tuple(sorted(eligible, key=lambda record: _rank(record.payload)))
 
 
 def _rank(product: WealthProduct) -> tuple[int, int, int, str]:
     return (
-        _RISK_ORDER[product.risk_level],
+        _RISK_ORDER.get(product.risk_level, 99),
         product.term_days,
         product.min_amount.cents,
         product.product_id,
@@ -221,6 +271,113 @@ def candidate_labels(gateway: FactGateway, risk_profile: str) -> tuple[str, ...]
         describe_product(record.payload)
         for record in recommend_products(gateway.wealth_products(), risk_profile)
     )
+
+
+PRODUCT_NOT_ASSESSED = "未完成风险测评：完成测评后才能判断你是否可以申购"
+
+
+def product_catalog(
+    products: Sequence[Record[WealthProduct]], risk_profile: str | None
+) -> tuple[dict[str, object], ...]:
+    """页面产品目录：**逐只**给出可申购判定与原因（不可申购的保留并写明原因，不隐藏）。
+
+    `risk_profile` 只接受服务端算出的有效等级；`None` ⇒ 全部标"未测评"，
+    **不默认任何等级**（与 `recommend_products` 同一口径）。
+    """
+    limit = _RISK_ORDER.get(risk_profile) if risk_profile is not None else None
+    catalog: list[dict[str, object]] = []
+    for record in sorted(products, key=lambda item: _rank(item.payload)):
+        product = record.payload
+        eligible = limit is not None and _RISK_ORDER.get(product.risk_level, 99) <= limit
+        if limit is None:
+            reason = PRODUCT_NOT_ASSESSED
+        elif eligible:
+            reason = ""
+        else:
+            reason = f"风险等级 {product.risk_level} 高于你的测评等级 {risk_profile}，不能申购"
+        catalog.append(
+            {
+                "product_id": product.product_id,
+                "name": product.name,
+                "risk_level": product.risk_level,
+                "term_days": product.term_days,
+                "min_amount_yuan": str(product.min_amount.yuan),
+                "fee": fee_label(),
+                "eligible": eligible,
+                "reason": reason,
+                "data_source": PRODUCT_DATA_SOURCE,
+                "explanation": explain_product(
+                    {
+                        "product_id": product.product_id,
+                        "eligible": eligible,
+                        "reason": reason,
+                    },
+                    risk_profile,
+                ),
+            }
+        )
+    return tuple(catalog)
+
+
+HOLDING_INCOME_UNKNOWN = "未知（演示环境无净值数据，不推算盈亏）"
+
+
+def holdings_payload(gateway: FactGateway, user_id: str) -> tuple[dict[str, object], ...]:
+    """本人持仓视图：产品名 / 金额 / 起息日 / 当前收益（无净值数据 ⇒ 如实标未知）。"""
+    products = {
+        record.payload.product_id: record.payload for record in gateway.wealth_products()
+    }
+    rows: list[dict[str, object]] = []
+    for record in gateway.wealth_holdings_of(user_id):
+        holding = record.payload
+        product = products.get(holding.product_id)
+        rows.append(
+            {
+                "product_id": holding.product_id,
+                "name": product.name if product is not None else "未知（产品目录中已无该产品）",
+                "risk_level": product.risk_level if product is not None else "未知",
+                "amount_yuan": str(holding.amount.yuan),
+                "purchased_on": holding.purchased_on.isoformat(),
+                "current_income": HOLDING_INCOME_UNKNOWN,
+                "record_id": record.record_id,
+            }
+        )
+    return tuple(rows)
+
+
+def suitability_alternatives(
+    products: Sequence[Record[WealthProduct]], risk_profile: str
+) -> tuple[WealthProduct, ...]:
+    """被拒后的替代候选：取硬筛结果里**最接近**被拒产品等级的一档（最多 2 只）。"""
+    eligible = recommend_products(products, risk_profile)
+    if not eligible:
+        return ()
+    nearest = max(_RISK_ORDER.get(record.payload.risk_level, 99) for record in eligible)
+    return tuple(
+        record.payload
+        for record in eligible
+        if _RISK_ORDER.get(record.payload.risk_level, 99) == nearest
+    )[:2]
+
+
+def blocked_suitability_message(
+    assessment: RiskAssessment,
+    product: WealthProduct,
+    products: Sequence[Record[WealthProduct]],
+) -> str:
+    """等级不匹配的拒绝文案：先给结论（保留原文），再给**相近等级**的可申购替代。"""
+    message = f"风险等级不匹配：测评 {assessment.risk_profile} < 产品 {product.risk_level}"
+    alternatives = suitability_alternatives(products, assessment.risk_profile)
+    if not alternatives:
+        return (
+            f"{message}；你的测评等级 {assessment.risk_profile} 下暂无适配产品，"
+            "不推荐任何不匹配的产品"
+        )
+    names = "、".join(
+        f"{item.name}（风险等级 {item.risk_level}，起购 {item.min_amount.yuan} 元）"
+        for item in alternatives
+    )
+    return f"{message}；你的测评等级 {assessment.risk_profile} 下可申购：{names}"
 
 
 class WealthHandler(ScenarioHandler):
@@ -266,7 +423,17 @@ def _build_wealth_node(
     account_id = as_str(trusted_slot(intent, ("account", "account_id"), "account"), "account")
     amount = as_money(trusted_slot(intent, ("amount", "amount_cents"), "amount"), "amount")
     if intent.action == "wealth.subscribe":
-        assess_suitability(_assessment(intent), product, DEFAULT_BOOKING_DATE)
+        assessment = _assessment(intent)
+        try:
+            assess_suitability(assessment, product, DEFAULT_BOOKING_DATE)
+        except SuitabilityError as error:
+            if assessment is not None and "风险等级不匹配" in str(error):
+                raise SuitabilityError(
+                    blocked_suitability_message(
+                        assessment, product, gateway.wealth_products()
+                    )
+                ) from error
+            raise
         if amount.cents < product.min_amount.cents:
             raise ScenarioRefused(f"{product.product_id} 起购金额为 {product.min_amount.yuan} 元")
     params: dict[str, object] = {

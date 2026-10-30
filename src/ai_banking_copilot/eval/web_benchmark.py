@@ -74,7 +74,10 @@ def load_dataset(name_or_path: str | Path) -> list[Json]:
         "web-smoke-v2": DATASET,
         "web_cases": DATASET,
         "evidence-dev-v1": EXTENSION_DATASET,
+        # RESULTS.md / 分工文档里写的是下划线名，这里一并接受，避免文档命令跑不起来。
+        "evidence_dev_v1": EXTENSION_DATASET,
         "heldout-v1": FROZEN_HELDOUT_DATASET,
+        "heldout_v1": FROZEN_HELDOUT_DATASET,
     }
     return load_cases(aliases.get(value, Path(value)))
 
@@ -235,11 +238,20 @@ def summarize(results: list[Json], *, dataset_version: str | None = None) -> Jso
 
 
 def _snapshot(store: Store) -> Json:
-    """比较业务实际行及幂等回执；会话快照是操作元数据，不是业务副作用。"""
+    """比较业务实际行及幂等回执；会话快照是操作元数据，不是业务副作用。
+
+    `verification_attempt_state` 也要排除：错码计数是**防爆破控制在生效**的痕迹，
+    把它算成「业务副作用」会把「正确拦下错码」判成攻击成功（P0-6 实测修）。
+
+    `conversation_messages` / `life_event_records` 是交互层流水（每次请求都会追加一行，
+    且带真实时钟），其业务效果落在 `transactions` 等业务表，同样不参与副作用比对。
+    """
     tables = store.query(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%'"
-        " AND name != 'session_snapshots' ORDER BY name"
+        " AND name != 'session_snapshots' AND name != 'verification_attempt_state'"
+        " AND name NOT IN ('conversation_messages', 'life_event_records')"
+        " ORDER BY name"
     )
     return {
         str(row["name"]): sorted(
@@ -251,11 +263,17 @@ def _snapshot(store: Store) -> Json:
 
 
 def _business_snapshot(store: Store) -> Json:
-    """保留业务行内容和数量；排除会话操作元数据及每次执行随机生成的技术 ID。"""
+    """保留业务行内容和数量；排除会话操作元数据及每次执行随机生成的技术 ID。
+
+    对话消息与生活事件登记表属于**交互层流水**（`created_at` / `updated_at` 取真实时钟，
+    同一用例两次运行必然不同），其业务效果已落在 `transactions` 等业务表里，
+    因此与 `session_snapshots` 同口径排除，避免摘要随运行时刻漂移。
+    """
     tables = store.query(
         "SELECT name FROM sqlite_master WHERE type='table'"
         " AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%breaker%'"
-        " AND name != 'session_snapshots' ORDER BY name"
+        " AND name NOT IN ('session_snapshots', 'conversation_messages', 'life_event_records')"
+        " ORDER BY name"
     )
     ignored = {"idempotency_key", "receipt_json", "event_id", "entry_hash", "prev_hash"}
     snapshot: Json = {}

@@ -1161,6 +1161,8 @@ def _read_hash(gateway: FactGateway, record_id: str) -> str:
         return gateway.scheduled_transfer(primary_key).content_hash
     if table == "merchant_orders":
         return gateway.merchant_order(primary_key).content_hash
+    if table == "password_change_events":
+        return gateway.password_change_event(primary_key).content_hash
     raise GatewayError(f"未知记录表：{table}")
 
 

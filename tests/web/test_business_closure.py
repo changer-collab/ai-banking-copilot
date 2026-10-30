@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.scenarios.cross import BIRTHDAY_ORDER_CENTS
 from ai_banking_copilot.web.app import AppDeps, create_app
 
 
@@ -30,6 +31,25 @@ def _confirm(client: TestClient, view: dict, session_id: str = "closure") -> dic
     response = client.post("/api/confirm", json=body)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_history_keeps_receipt_payload_for_executed_plan(tmp_path: Path) -> None:
+    """历史对话要能还原执行回执：确认后存回执快照，而不是只剩一句文字。"""
+
+    deps = _deps(tmp_path)
+    client = TestClient(create_app(deps))
+    view = client.post(
+        "/api/submit", json={"utterance": "查余额", "session_id": "closure"}
+    ).json()
+    assert view["card"]["level"] == "GREEN"
+    _confirm(client, view)
+
+    detail = client.get("/api/conversations/closure").json()
+    receipts = [item for item in detail["messages"] if item.get("kind") == "receipt"]
+    assert receipts, detail["messages"]
+    receipt = receipts[-1]["payload"]["receipt"]
+    assert receipt["state"] == "completed"
+    assert receipt["results"], receipt
 
 
 def test_options_are_real_owned_records(tmp_path: Path) -> None:
@@ -88,11 +108,13 @@ def test_due_requires_confirmation_and_is_not_repeated(tmp_path: Path) -> None:
     assert due["state"] == "awaiting_confirm", due
     assert deps.gateway.account("acc_savings").payload.balance.cents == initial
     assert _confirm(client, due, "due-1")["state"] == "completed"
-    assert deps.gateway.account("acc_savings").payload.balance.cents == initial - 10000
+    # /api/due 同时装配到期预约转账与生日预算链（冻结→下单→解冻），后者从储蓄账户结算。
+    expected = initial - 10000 - BIRTHDAY_ORDER_CENTS
+    assert deps.gateway.account("acc_savings").payload.balance.cents == expected
     again = client.post("/api/due", json={"session_id": "due-2"}).json()
     assert again["state"] == "idle", again
     assert again["card"] is None
-    assert deps.gateway.account("acc_savings").payload.balance.cents == initial - 10000
+    assert deps.gateway.account("acc_savings").payload.balance.cents == expected
     assert deps.audit.verify_chain()
 
 

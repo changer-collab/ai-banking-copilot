@@ -59,12 +59,31 @@ FLAG_INJECTION_DETECTED = "injection_detected"
 FLAG_FIRST_LARGE_TO_OBJECT = "first_large_to_object"
 """首次向某对象大额（涵盖熟人社工 / 盗号）。"""
 
-OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset({"wealth.subscribe", "card.unlock"})
+OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
+    {
+        "wealth.subscribe",
+        "card.unlock",
+        "card.set_limit",
+        "subscription.sign",
+        "transfer.request_collection",
+        "password.change",
+    }
+)
 """官方明文点名红色、但按金额档 / 可逆性推不出红色的动作（官方口径不得偏离）。
 
 - `wealth.subscribe`：官方红色示例「理财产品申购」——不因金额小而降为黄；
 - `card.unlock`：官方红色「挂失 / 解挂」——解挂是可逆状态变更且无金额，按金额档会落到黄；
-  解除保护比施加保护更危险，故强制 ≥ 红（`card.lock` 施加保护仍为黄）。
+  解除保护比施加保护更危险，故强制 ≥ 红（`card.lock` 施加保护仍为黄）；
+- `card.set_limit`：调高卡片限额是**解除既有风控上限**，可把卡片变成无额度约束的敞口，
+  且无金额参数（按金额档只会落黄）——与「解挂」同属「解除保护」，强制 ≥ 红；
+- `subscription.sign`：代扣签约把**未来无限次扣款**授权给商户（单笔小但敞口长期、易被诈骗利用），
+  按金额档次次落黄不足以覆盖风险，强制 ≥ 红；
+- `transfer.request_collection`：发起收款即向他人**索款**，是电信诈骗的典型施压手段，
+  金额小也不降级，强制 ≥ 红；
+- `password.change`：官方红色示例「密码修改」——改密是账户被接管的最后一步，无金额参数，
+  按金额档只会落绿，强制 ≥ 红。
+
+依据：`docs/2026-10-26/三色基准表-2026-10-26.md` 第三节（2026-10-26 裁决）。
 """
 
 KNOWN_CONTEXT_FLAGS: frozenset[str] = frozenset(

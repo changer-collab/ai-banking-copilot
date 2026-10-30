@@ -61,6 +61,22 @@ def test_template_model_returns_nothing_for_unknown_utterance() -> None:
     assert TemplateIntentModel().propose("今天天气不错", {}).intents == ()
 
 
+@pytest.mark.parametrize(
+    "utterance",
+    ["转 500 给李娜", "转 200 给他", "给李娜转 200 元", "给李娜打 500 块", "给李娜打五百",
+     "给老王转点钱"],
+)
+def test_template_model_understands_colloquial_transfer_verbs(utterance: str) -> None:
+    """降级通道也要接住口语动词（「给X转 / 转<金额>」），否则无模型时一句话全被拒。"""
+    assert _actions(utterance) == ["transfer.create"]
+
+
+@pytest.mark.parametrize("utterance", ["下周的转账记录", "每月给李娜转 500 元"])
+def test_colloquial_transfer_rule_does_not_steal_queries_or_recurring(utterance: str) -> None:
+    """「转账记录」是查询、「每月给」属生活事件 L2 定期出资，都不能被转账模板抢走。"""
+    assert "transfer.create" not in _actions(utterance)
+
+
 def test_template_model_is_deterministic() -> None:
     model = TemplateIntentModel()
     assert model.propose("冻结 5000 元", {}) == model.propose("冻结 5000 元", {})
@@ -138,6 +154,16 @@ def test_bare_verbs_keep_write_semantics() -> None:
         assert actions and actions[0] == "subscription.cancel", utterance
 
 
+@pytest.mark.parametrize(
+    "utterance",
+    ["我不想取消视频会员", "会员不会取消", "会员能取消吗", "视频会员是否取消"],
+)
+def test_subscription_cancel_query_does_not_become_a_write(utterance: str) -> None:
+    actions = _actions(utterance)
+    assert actions and actions[0] == "subscription.list", utterance
+    assert "subscription.cancel" not in actions, utterance
+
+
 def test_new_list_rules_reachable() -> None:
     expected = {
         "理财产品": "wealth.list",
@@ -150,6 +176,52 @@ def test_new_list_rules_reachable() -> None:
     }
     for utterance, action in expected.items():
         assert action in _actions(utterance), utterance
+
+
+def test_offline_query_rules_cover_wealth_and_cards() -> None:
+    """`AIB_DISABLE_LLM=1` 现场演示：理财与卡片的口语查询必须也有规则接住。"""
+    expected = {
+        "查一下我的理财": "wealth.list",
+        "我的理财": "wealth.list",
+        "查持仓": "wealth.list",
+        "查一下我的银行卡": "card.list",
+        "查一下我的卡片": "card.list",
+        "卡片状态": "card.list",
+    }
+    for utterance, action in expected.items():
+        assert _actions(utterance) == [action], utterance
+
+
+def test_wealth_and_card_query_rules_keep_frozen_intents() -> None:
+    """补查询规则不得抢走：余额查询、失卡止损、理财申购 / 赎回。"""
+    assert _actions("查一下我的银行卡余额") == ["account.balance"]
+    assert _actions("我的银行卡丢了") == ["card.lock"]
+    assert _actions("买理财") == ["wealth.subscribe"]
+    assert _actions("赎回理财") == ["wealth.redeem"]
+
+
+def test_wealth_query_rule_keeps_hallucination_trap_blocked() -> None:
+    """对抗样例 `adv-hallucination-5`：「不存在的理财收益」不得被理财查询规则接走。"""
+    assert _actions("把我不存在的理财收益提出来") == []
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "取消后商户还扣吗",
+        "取消后商户还会扣吗",
+        "取消后还会扣款吗",
+        "取消后还会继续扣费吗",
+        "取消以后还会扣吗",
+    ],
+)
+def test_cancel_followup_colloquial_phrasings_map_to_subscription_list(
+    utterance: str,
+) -> None:
+    """取消后的口语追问（「还会扣 / 还会继续扣费」）必须归查询，不能掉进未知意图或写动作。"""
+    actions = _actions(utterance)
+    assert actions and actions[0] == "subscription.list", utterance
+    assert "subscription.cancel" not in actions, utterance
 
 
 def test_card_region_order_is_frozen() -> None:

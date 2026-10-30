@@ -356,7 +356,8 @@ def test_web_and_eval_agree_on_representative_nodes(
         )
         levels[node.node_id] = web_decision.level
 
-    assert levels["set_limit"] is Level.YELLOW
+    # 调高限额 = 解除既有风控上限：2026-10-26 起为官方红（不随金额档降级）。
+    assert levels["set_limit"] is Level.RED
     assert levels["lock"] is Level.YELLOW
     assert levels["t3000"] is Level.RED
     assert levels["bills"] is Level.GREEN

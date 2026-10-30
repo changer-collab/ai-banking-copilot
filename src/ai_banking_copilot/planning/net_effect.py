@@ -1,8 +1,12 @@
 """计划级净效应（NE）：单步合法 ≠ 整体正确（PRD §5.3 第 1 条）。
 
 `cf` 口径（**带符号资金流，以"流出为正"**）：
-- 转账 / 定时转账 / 理财申购 / 代扣签约 / 自动续费 / 冻结资金 = `+流出`；
-- 理财赎回 / 解冻 = `−流出`；
+- 转账 / 定时转账 / 理财申购 / 代扣签约 / 自动续费 = `+流出`；
+- 理财赎回 = `−流出`；
+- **冻结 / 解冻 = `0`（净效应中性）**：二者只是把同一笔钱在「可用余额 ↔ 冻结额」之间搬，
+  真正的流出发生在消费节点（如 `merchant.order`）。若把冻结记正、解冻记负，
+  「冻结 1000 → 下单 299 → 解冻 701」会被算成 1000 + 299 − 701 = 598，凭空多出 299；
+  中性化后净流出恰为 299，与计划卡「净流出 299 元」一致。
 - 订阅取消 / 解约 = `−未来流出`（未来流出记负）；
 - 挂失 = **不可逆**，**不入 cf**，单列进 `irreversibles`（触发 ≥ 红色 + L3）；
 - 纯查询 / 非不可逆状态变更 = `0`。
@@ -25,6 +29,14 @@ from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind
 
 class NetEffectError(ValueError):
     """节点缺少可计算的资金流参数，或动作不在规范词表内。"""
+
+
+NEUTRAL_NET_ACTIONS = frozenset({"funds.freeze", "funds.release"})
+"""净效应中性动作：只在「可用余额 ↔ 冻结额」之间搬钱，不计入计划级净流出。
+
+三处净效应实现（此处 / `scenarios.base.plan_net_effect` / `policy.execution.assess_plan`）
+必须同向跳过，否则计划卡与执行期判档会打架。
+"""
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,8 @@ def net_effect(plan: Plan, gateway: FactGateway) -> NetEffect:
             irreversibles.append(node.node_id)
             continue
         if kind in (ActionKind.QUERY, ActionKind.STATE):
+            continue
+        if node.action in NEUTRAL_NET_ACTIONS:
             continue
         if kind is ActionKind.CANCEL_OUTFLOW:
             total -= _subscription_cents(node, gateway)

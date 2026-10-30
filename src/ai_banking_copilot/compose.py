@@ -27,7 +27,7 @@ from ai_banking_copilot.gateway.risk_store import (
     init_risk_schema,
     seed_risk_assessment,
 )
-from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database, seed_secondary_user
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
 from ai_banking_copilot.planning.analysis_codegen import AnalysisTask, generate_analysis_code
@@ -64,9 +64,21 @@ from ai_banking_copilot.policy.verification import (
 )
 from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
-from ai_banking_copilot.web.app import AppDeps
+from ai_banking_copilot.web.app import (
+    AUTH_MODE_DEMO,
+    AUTH_MODE_ENV,
+    AUTH_MODE_OFF,
+    AppDeps,
+)
+from ai_banking_copilot.web.auth import DEMO_ACCOUNTS, AuthService, init_auth_schema
 from ai_banking_copilot.web.bill_narrative import LlmBillNarrator
+from ai_banking_copilot.web.channels.identity import init_channel_schema
+from ai_banking_copilot.web.conversation_store import (
+    ConversationStore,
+    init_conversation_schema,
+)
 from ai_banking_copilot.web.insights import InsightService, SQLiteInsightMetadataStore
+from ai_banking_copilot.web.life_event_store import LifeEventStore, init_life_event_schema
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
 DISABLE_LLM_ENV = "AIB_DISABLE_LLM"
@@ -211,6 +223,28 @@ def build_session_risk_strict(env: Mapping[str, str] | None = None) -> bool:
     return source.get(SESSION_RISK_STRICT_ENV, "").strip().lower() in _DISABLED_VALUES
 
 
+DEMO_PASSWORD_ENV = "AIB_DEMO_PASSWORD"
+"""演示账号口令（仅 `AIB_AUTH_MODE=demo` 生效）；未配置时用内置演示口令。"""
+
+_DEFAULT_DEMO_PASSWORD = "aib-demo-1027"
+
+
+def build_auth_mode(env: Mapping[str, str] | None = None) -> str:
+    """登录模式：**默认 `off`**（单测基线沿用单用户）；部署 / 验收显式设 `demo`。"""
+
+    source = os.environ if env is None else env
+    mode = source.get(AUTH_MODE_ENV, AUTH_MODE_OFF).strip().lower()
+    return AUTH_MODE_DEMO if mode == AUTH_MODE_DEMO else AUTH_MODE_OFF
+
+
+def _verify_demo_accounts(auth: AuthService) -> None:
+    """启动自检：演示账号必须都能解析到用户，缺一即拒绝启动（早死早发现）。"""
+
+    missing = [row[0] for row in DEMO_ACCOUNTS if auth.user_by_username(row[0]) is None]
+    if missing:
+        raise RuntimeError(f"演示账号缺失：{'、'.join(missing)}")
+
+
 def build_bill_narrator(
     env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
     observer: CallObserver | None = None,
@@ -254,6 +288,7 @@ def build_deps(
 ) -> AppDeps:
     """装配默认依赖；短期评测可传资源栈，在用例结束时关闭数据库连接。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    source = os.environ if env is None else env
     writer = Store(db_path)
     init_schema(writer)
     seed_database(writer)
@@ -261,9 +296,14 @@ def build_deps(
     seed_risk_assessment(writer)
     init_merchant_schema(writer)
     seed_user_profiles(writer)
+    seed_secondary_user(writer)
     init_transfer_schema(writer)
     init_breaker_schema(writer)
     init_session_schema(writer)
+    init_channel_schema(writer)
+    init_auth_schema(writer)
+    init_conversation_schema(writer)
+    init_life_event_schema(writer)
     writer.close()
 
     read_store = Store(db_path, StoreMode.READ_ONLY)
@@ -282,10 +322,18 @@ def build_deps(
     session_store = Store(db_path, StoreMode.READ_WRITE)
     if resources is not None:
         resources.callback(session_store.close)
+    activity_store = Store(db_path, StoreMode.READ_WRITE)
+    if resources is not None:
+        resources.callback(activity_store.close)
+    auth_mode = build_auth_mode(env)
+    auth_service = AuthService(activity_store)
+    if auth_mode == AUTH_MODE_DEMO:
+        password = source.get(DEMO_PASSWORD_ENV, "").strip() or _DEFAULT_DEMO_PASSWORD
+        auth_service.ensure_demo_accounts(password)
+        _verify_demo_accounts(auth_service)
     risk_store = Store(db_path, StoreMode.READ_WRITE)
     if resources is not None:
         resources.callback(risk_store.close)
-    source = os.environ if env is None else env
     verification_provider, verification_key, verification_strict = build_verification(db_path, env)
     verification_store = Store(db_path, StoreMode.READ_WRITE)
     init_verification_schema(verification_store)
@@ -343,6 +391,11 @@ def build_deps(
         verification_strict=verification_strict,
         verification_limiter=verification_limiter,
         session_repository=SQLiteSessionRepository(session_store),
+        channel_store=session_store,
+        auth=auth_service,
+        auth_mode=auth_mode,
+        conversations=ConversationStore(activity_store),
+        life_events=LifeEventStore(activity_store),
         receipts=StoreReceiptReader(read_store),
         model_observations=model_observations,
         session_risk_strict=build_session_risk_strict(env),

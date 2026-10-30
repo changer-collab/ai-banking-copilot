@@ -1,7 +1,33 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        # 国内服务器直连 pypi.org 会超时；用 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 构建
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     ports:
-      - "8000:8000"
+      # 宿主端口可改：服务器上 8000 常被别的服务占用，用 API_HOST_PORT=18080 起即可。
+      - "${API_HOST_PORT:-8000}:8000"
+    # 下面这些值由仓库根目录的 .env 提供（docker compose 会自动读取同目录的 .env 做变量替换）。
+    # DEEPSEEK_API_KEY 必须显式传进来，否则容器里拿不到 key，会静默降级成模板卡。
     environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-qwen}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - AI_BASE_URL=${AI_BASE_URL:-https://api.deepseek.com/chat/completions}
+      - AI_MODEL=${AI_MODEL:-deepseek-flash}
+      - LLM_FALLBACK_ENABLED=${LLM_FALLBACK_ENABLED:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # 登录：不在 compose 里透传的话，服务器 .env 写了也不会进容器（个人中心就没有退出登录）。
+      - AIB_AUTH_MODE=${AIB_AUTH_MODE:-off}
+      - AIB_DEMO_PASSWORD=${AIB_DEMO_PASSWORD:-}
+      # 飞书渠道：四项生产凭据只写在仓库根 .env（不提交）。留空即如实显示 replay / 未配置；
+      # 不要为了演示设 AIB_FEISHU_REPLAY_MODE=true，判定与验收见 docs/2026-10-27/飞书接入-配置单.md §1。
+      - AIB_FEISHU_APP_ID=${AIB_FEISHU_APP_ID:-}
+      - AIB_FEISHU_APP_SECRET=${AIB_FEISHU_APP_SECRET:-}
+      - AIB_FEISHU_VERIFICATION_TOKEN=${AIB_FEISHU_VERIFICATION_TOKEN:-}
+      - AIB_FEISHU_ENCRYPT_KEY=${AIB_FEISHU_ENCRYPT_KEY:-}
+    # 会话 / 计划卡 / 审计链都落在 runtime/copilot.db，必须挂出来，否则容器重建即丢数据。
+    volumes:
+      - ./runtime:/app/runtime
+    restart: unless-stopped

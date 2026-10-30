@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -73,11 +74,12 @@ def resolve_cancel_race(
 
 
 def upcoming_charges(gateway: FactGateway, user_id: str) -> tuple[Subscription, ...]:
-    """只读到期提醒事实：按 `next_charge_on` **升序**返回用户全部订阅。"""
+    """只读到期提醒事实：仅返回有效订阅，并按 `next_charge_on` 升序。"""
     records = gateway.subscriptions_of(user_id)
     return tuple(
         record.payload
         for record in sorted(records, key=lambda record: record.payload.next_charge_on)
+        if record.payload.status == "active" and record.payload.next_charge_on is not None
     )
 
 
@@ -181,7 +183,7 @@ SELF_SERVICE_MAX_CENTS = 30_000
 """疑似订阅的单期中位金额上限（分）：300 元，避免把大额消费误报为订阅。"""
 
 NON_SUBSCRIPTION_CATEGORIES = frozenset(
-    {"转账", "交通", "餐饮", "生活缴费", "收入", "工资"}
+    {"转账", "交通", "餐饮", "住房", "生活缴费", "收入", "工资"}
 )
 """这些分类的常规支出即使周期性出现，也不列为疑似订阅。"""
 
@@ -256,6 +258,9 @@ class _Outflow:
     category: str
     record_id: str
     content_hash: str
+    channel: str = ""
+    booked_at: str | None = None
+    card_tail: str | None = None
 
     @property
     def merchant_key(self) -> str:
@@ -277,6 +282,9 @@ class SubscriptionEvidence:
     amount_cents: int
     """原始带符号金额（支出为负），不做改写。"""
     merchant_label: str
+    channel: str = ""
+    booked_at: str | None = None
+    card_tail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +321,9 @@ class SubscriptionInsight:
     cancel_action: str
     cancel_path: str
     external_cancel_status: str
+    price_increased_12m: bool | None
+    price_change_12m_from_cents: int | None
+    price_change_12m_to_cents: int | None
 
 
 @dataclass(frozen=True)
@@ -364,7 +375,9 @@ def subscription_report(
             if renamed_from is not None:
                 items = tuple(grouped[renamed_from])
                 pending.discard(renamed_from)
-        insights.append(_registered_insight(subscription, items, renamed_from=renamed_from))
+        insights.append(_registered_insight(
+            subscription, items, renamed_from=renamed_from, as_of=as_of,
+        ))
 
     notes: list[str] = [
         f"数据来源：{SUBSCRIPTION_DATA_SOURCE}。",
@@ -372,7 +385,7 @@ def subscription_report(
     ]
     for key in sorted(pending):
         pending_items = grouped[key]
-        candidate = _unregistered_insight(key, pending_items)
+        candidate = _unregistered_insight(key, pending_items, as_of=as_of)
         if candidate is not None:
             insights.append(candidate)
         elif _has_subscription_keyword(key) or _has_subscription_keyword(
@@ -428,6 +441,9 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                 "next_charge_is_prediction": item.next_charge_is_prediction,
                 "next_charge_basis": item.next_charge_basis,
                 "charge_count": item.charge_count,
+                "price_increased_12m": item.price_increased_12m,
+                "price_change_12m_from_cents": item.price_change_12m_from_cents,
+                "price_change_12m_to_cents": item.price_change_12m_to_cents,
                 "registered_status": item.registered_status,
                 "notices": [
                     {"code": notice.code, "message": notice.message}
@@ -439,8 +455,11 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                         "record_id": evidence.record_id,
                         "content_hash": evidence.content_hash,
                         "booked_on": evidence.booked_on.isoformat(),
+                        "booked_at": evidence.booked_at,
+                        "card_tail": evidence.card_tail,
                         "amount_cents": evidence.amount_cents,
                         "merchant_label": evidence.merchant_label,
+                        "channel": evidence.channel,
                     }
                     for evidence in item.evidence
                 ],
@@ -460,6 +479,7 @@ def _registered_insight(
     items: Sequence[_Outflow],
     *,
     renamed_from: str | None,
+    as_of: date,
 ) -> SubscriptionInsight:
     """已登记订阅：状态恒为 `confirmed`，但流水与登记不一致时必须逐条提示。"""
     gaps = _gaps([item.booked_on for item in items])
@@ -528,6 +548,7 @@ def _registered_insight(
     else:
         suggestion = "如仍在使用可保留；不再使用可在订阅管理中取消。"
 
+    increased, price_from, price_to = _price_change_12m(items, as_of)
     return SubscriptionInsight(
         insight_id=f"subscription:{subscription.subscription_id}",
         merchant=subscription.merchant,
@@ -553,10 +574,15 @@ def _registered_insight(
             if active else "订阅已不在有效状态，无需取消"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
+        price_increased_12m=increased,
+        price_change_12m_from_cents=price_from,
+        price_change_12m_to_cents=price_to,
     )
 
 
-def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionInsight | None:
+def _unregistered_insight(
+    key: str, items: Sequence[_Outflow], *, as_of: date,
+) -> SubscriptionInsight | None:
     """未登记商户：只有证据足够时才列为**疑似**订阅，否则返回 `None`（由调用方提示）。"""
     if not _subscription_like(items):
         return None
@@ -580,6 +606,7 @@ def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionIn
         "该商户未在订阅登记中，本应用无法直接取消，只能提供商户自助取消指引。",
     ))
     latest = items[-1]
+    increased, price_from, price_to = _price_change_12m(items, as_of)
     return SubscriptionInsight(
         insight_id=f"outflow:{key}",
         merchant=latest.merchant_label,
@@ -610,7 +637,28 @@ def _unregistered_insight(key: str, items: Sequence[_Outflow]) -> SubscriptionIn
             "本应用尚未接入该商户的取消接口"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
+        price_increased_12m=increased,
+        price_change_12m_from_cents=price_from,
+        price_change_12m_to_cents=price_to,
     )
+
+
+def _twelve_months_before(day: date) -> date:
+    """回退十二个日历月；闰日落到上一年二月末。"""
+    year = day.year - 1
+    return day.replace(year=year, day=min(day.day, monthrange(year, day.month)[1]))
+
+
+def _price_change_12m(
+    items: Sequence[_Outflow], as_of: date,
+) -> tuple[bool | None, int | None, int | None]:
+    """仅在十二个月闭区间内比较首末扣费；不足两笔时结论未知。"""
+    start = _twelve_months_before(as_of)
+    window = [item for item in items if start <= item.booked_on <= as_of]
+    if len(window) < 2:
+        return None, None, None
+    first, last = window[0].amount_cents, window[-1].amount_cents
+    return last > first, first, last
 
 
 def _next_charge(
@@ -621,6 +669,8 @@ def _next_charge(
     median_gap: int | None,
 ) -> tuple[date | None, bool, str]:
     """下次扣费：有流水依据时**标注为预测值**，否则退回登记日期并说明非预测。"""
+    if subscription.status != "active":
+        return None, False, "订阅已不在有效状态，无下次扣费。"
     if items and cycle != CYCLE_UNKNOWN and median_gap is not None:
         return (
             items[-1].booked_on + timedelta(days=median_gap),
@@ -628,8 +678,6 @@ def _next_charge(
             f"按最近 {len(items) - 1} 次扣费间隔的中位数 {median_gap} 天推得，"
             "仅作预测；实际扣费日以商户为准。",
         )
-    if subscription.status != "active":
-        return None, False, "订阅已不在有效状态，无下次扣费。"
     reason = (
         "流水间隔无法判定周期，改用登记值"
         if items else "无流水可核验，取登记值"
@@ -694,8 +742,14 @@ def _outflows(gateway: FactGateway, user_id: str, as_of: date) -> tuple[_Outflow
                 category=transaction.category,
                 record_id=record.record_id,
                 content_hash=record.content_hash,
+                channel=transaction.channel,
+                booked_at=transaction.booked_at,
+                card_tail=transaction.card_tail,
             )
-    return tuple(sorted(collected.values(), key=lambda item: (item.booked_on, item.txn_id)))
+    return tuple(sorted(
+        collected.values(),
+        key=lambda item: (item.booked_on, item.booked_at or "", item.txn_id),
+    ))
 
 
 def _group_outflows(flows: Sequence[_Outflow]) -> dict[str, list[_Outflow]]:
@@ -772,6 +826,9 @@ def _evidence(flow: _Outflow) -> SubscriptionEvidence:
         booked_on=flow.booked_on,
         amount_cents=-flow.amount_cents,
         merchant_label=flow.merchant_label,
+        channel=flow.channel,
+        booked_at=flow.booked_at,
+        card_tail=flow.card_tail,
     )
 
 
@@ -809,13 +866,13 @@ def _build_subscription_node(
 ) -> PlanNode:
     detail = f"订阅操作：{intent.evidence or intent.action}"
     anchor_id = grant_anchor(ledger, AnchorSource.EXPLICIT, detail)
+    user_id = _subscription_user_id(intent)
     if intent.action == "subscription.list":
-        params: dict[str, object] = {"user_id": DEMO_USER_ID}
+        params: dict[str, object] = {"user_id": user_id}
     elif intent.action == "subscription.sign":
-        params = _sign_params(intent)
+        params = _sign_params(intent, user_id=user_id)
     else:
         subscription_id = _subscription_id(intent)
-        user_id = _subscription_user_id(intent)
         _require_subscription(gateway, subscription_id, user_id)
         params = {"user_id": user_id, "subscription_id": subscription_id}
     return PlanNode(
@@ -826,13 +883,14 @@ def _build_subscription_node(
     )
 
 
-def _sign_params(intent: Intent) -> dict[str, object]:
+def _sign_params(intent: Intent, *, user_id: str | None = None) -> dict[str, object]:
     """代扣签约装配（README 裁决 #17）：对象是**商户**，不涉及已有订阅 id。"""
+    resolved_user_id = user_id or _subscription_user_id(intent)
     period = as_str(trusted_slot(intent, ("period",), "period"), "period")
     if period not in _SIGN_PERIODS:
         raise ScenarioRefused(f"代扣周期只支持 {sorted(_SIGN_PERIODS)}，收到 {period}")
     return {
-        "user_id": DEMO_USER_ID,
+        "user_id": resolved_user_id,
         "merchant": as_str(trusted_slot(intent, ("merchant",), "merchant"), "merchant"),
         "amount_cents": as_money(
             trusted_slot(intent, ("amount", "amount_cents"), "amount"), "amount"

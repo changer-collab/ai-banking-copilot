@@ -55,9 +55,10 @@ _ACTION_LABELS: dict[str, str] = {
     "card.report_lost": "卡片挂失",
     "card.apply_virtual": "申请虚拟卡",
     "card.set_limit": "调整卡片额度",
+    "password.change": "修改交易密码",
     "funds.freeze": "冻结资金",
     "funds.release": "解冻资金",
-    "merchant.order": "演示商户订单登记（不扣款）",
+    "merchant.order": "向商户下单（从冻结预算结算）",
 }
 
 
@@ -71,6 +72,19 @@ class PlanTriple:
 
 
 @dataclass(frozen=True)
+class PlanLine:
+    """结构化计划卡的一行（键值对）。`lines` 的纯文本版原样保留。"""
+
+    label: str
+    value: str
+    emphasis: bool = False
+    """关键行（金额）加粗；由渲染层决定视觉，不承载判定。"""
+
+    def to_dict(self) -> dict[str, object]:
+        return {"label": self.label, "value": self.value, "emphasis": self.emphasis}
+
+
+@dataclass(frozen=True)
 class PlanCard:
     """计划卡：`requires` 由 `level` 单向推导，禁止外部自由填写。"""
 
@@ -81,6 +95,19 @@ class PlanCard:
     requires: tuple[str, ...]
     expires_at: datetime | None = None
     """服务端下发的过期时刻（G-02）：过期后原计划不得再被确认；`None` = 未设置。"""
+
+    balance_trace: tuple[str, ...] = ()
+    """预算冻结类计划的**可用余额轨迹**（冻结 → 扣款 → 释放），逐节点给出执行后可用余额。
+
+    与 `lines` 分离：`lines` 是受润色守卫约束的三元组文案（行数不得变），轨迹是纯追加的
+    事实回显，不参与润色。非冻结类计划为空。
+    """
+
+    summary: tuple[PlanLine, ...] = ()
+    """结构化摘要（动作 / 金额 / 对象 / 时间），供前端优先渲染。
+
+    与 `lines` 同源同值，只是拆成键值对；润色只改 `lines`，不改本字段。
+    """
 
     def __post_init__(self) -> None:
         if not self.card_id:
@@ -128,7 +155,73 @@ def render_plan_card(
         lines=lines,
         requires=_requires_for_level(decision.level),
         expires_at=expires_at,
+        balance_trace=_balance_trace(plan, gateway),
+        summary=plan_summary(plan, gateway),
     )
+
+
+_TRACE_ACTIONS = frozenset({"funds.freeze", "funds.release", "merchant.order", "transfer.create"})
+"""余额轨迹覆盖的资金动作：冻结 / 解冻 / 冻结额度内扣款 / 转账。"""
+
+_TRACE_LABELS: dict[str, str] = {
+    "funds.freeze": "冻结",
+    "funds.release": "解冻",
+    "merchant.order": "扣款",
+    "transfer.create": "转账",
+}
+
+
+def _balance_trace(plan: Plan, gateway: FactGateway) -> tuple[str, ...]:
+    """预算冻结类计划的可用余额轨迹（其余计划返回空）。
+
+    数值只来自 `PlanNode.params` 与 `FactGateway`，本函数**不生成**任何数字；`merchant.order`
+    从冻结额度结算，可用余额在冻结时已扣减，因此只标注扣款额而不再次扣减。
+    """
+    if not any(node.action in ("funds.freeze", "funds.release") for node in plan.nodes):
+        return ()
+    account_id = _trace_account_id(plan, gateway)
+    if account_id is None:
+        return ()
+    try:
+        available = gateway.account(account_id).payload.balance.cents
+    except GatewayNotFoundError:
+        return ()
+    trace = [f"执行前可用余额 {Money(available).yuan} 元"]
+    for node in plan.nodes:
+        if node.action not in _TRACE_ACTIONS:
+            continue
+        cents = node.params.get("amount_cents")
+        if not isinstance(cents, int) or isinstance(cents, bool):
+            continue
+        if node.action == "funds.freeze":
+            available -= cents
+        elif node.action == "funds.release":
+            available += cents
+        elif node.action == "transfer.create":
+            available -= cents
+        note = "（从冻结预算结算）" if node.action == "merchant.order" else ""
+        trace.append(
+            f"{_TRACE_LABELS[node.action]} {Money(cents).yuan} 元{note}"
+            f" → 可用 {Money(available).yuan} 元"
+        )
+    return tuple(trace)
+
+
+def _trace_account_id(plan: Plan, gateway: FactGateway) -> str | None:
+    """轨迹账户：优先取节点自带 `account_id`，否则由冻结记录反查。"""
+    for node in plan.nodes:
+        account_id = _str_param(node, "account_id")
+        if account_id is not None:
+            return account_id
+    for node in plan.nodes:
+        hold_id = _str_param(node, "hold_id") or _str_param(node, "budget_hold_id")
+        if hold_id is None:
+            continue
+        try:
+            return gateway.hold(hold_id).payload.account_id
+        except GatewayNotFoundError:
+            return None
+    return None
 
 
 def plan_triples(plan: Plan, gateway: FactGateway) -> tuple[PlanTriple, ...]:
@@ -141,6 +234,38 @@ def plan_triples(plan: Plan, gateway: FactGateway) -> tuple[PlanTriple, ...]:
         )
         for node in plan.nodes
     )
+
+
+def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
+    """把三元组拆成结构化键值对（单节点）或逐步摘要（多节点）。
+
+    数值一律复用 `_amount_value`（与 `lines` 同源），不新增计算口径。
+    """
+    triples = plan_triples(plan, gateway)
+    if len(plan.nodes) == 1:
+        node = plan.nodes[0]
+        triple = triples[0]
+        rows = [PlanLine("动作", _ACTION_LABELS.get(node.action, node.action))]
+        amount = _amount_value(node)
+        if amount:
+            rows.append(PlanLine("金额", amount, emphasis=True))
+        rows.append(PlanLine("对象", triple.object_label))
+        if triple.when_label != "—":
+            rows.append(PlanLine("时间", triple.when_label))
+        return tuple(rows)
+    return tuple(
+        PlanLine(
+            f"{index}. {_ACTION_LABELS.get(node.action, node.action)}",
+            _step_value(node, triple),
+        )
+        for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
+    )
+
+
+def _step_value(node: PlanNode, triple: PlanTriple) -> str:
+    amount = _amount_value(node)
+    head = f"{triple.object_label} {amount}" if amount else triple.object_label
+    return f"{head}（{triple.when_label}）"
 
 
 def polish_plan_card(
@@ -178,6 +303,8 @@ def _requires_for_level(level: Level) -> tuple[str, ...]:
 
 
 def _object_label(node: PlanNode, gateway: FactGateway) -> str:
+    if node.action == "password.change":
+        return "本人交易密码"
     if node.action == "account.balance":
         account_id = _str_param(node, "account_id")
         if account_id is not None:
@@ -258,6 +385,17 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
         end = _str_param(node, "end")
         if start is not None and end is not None:
             return f"{start}~{end}"
+    if node.action == "bills.monthly":
+        # 账期是计划参数：计划卡必须把它写出来，否则「查 2019 年 1 月」和「查本月」
+        # 在卡上长得一模一样，用户无法在确认前核对查的是哪个月。
+        year = node.params.get("year")
+        month = node.params.get("month")
+        if (
+            isinstance(year, int) and not isinstance(year, bool)
+            and isinstance(month, int) and not isinstance(month, bool)
+        ):
+            return f"{year}-{month:02d}"
+        return "—"
     if node.action == "bills.yearly":
         year = node.params.get("year")
         if isinstance(year, int) and not isinstance(year, bool):
@@ -291,6 +429,20 @@ def _amount_label(node: PlanNode) -> str:
     limit = node.params.get("daily_limit_cents")
     if isinstance(limit, int) and not isinstance(limit, bool):
         return f" 额度 {Money(limit).yuan} 元"
+    return ""
+
+
+def _amount_value(node: PlanNode) -> str:
+    """金额 / 额度的事实值（无则为空串）；与 `_amount_label` 同源同值。"""
+
+    cents = node.params.get("amount_cents")
+    if isinstance(cents, int) and not isinstance(cents, bool):
+        currency = _str_param(node, "currency")
+        suffix = f"（{currency.upper()}）" if currency is not None else ""
+        return f"{Money(cents).yuan} 元{suffix}"
+    limit = node.params.get("daily_limit_cents")
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        return f"{Money(limit).yuan} 元"
     return ""
 
 

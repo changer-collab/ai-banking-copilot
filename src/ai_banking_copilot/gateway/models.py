@@ -78,6 +78,12 @@ class Transaction:
     category: str
     channel: str
     direction: str
+    booked_at: str | None = None
+    """发生时刻（`YYYY-MM-DDTHH:MM:SS`，可空）。「深夜」判据的唯一时间来源。"""
+    city: str | None = None
+    """消费发生地城市（可空）。「异地」判据的唯一地点来源。"""
+    card_tail: str | None = None
+    """付款卡尾号（可空）；缺失时不得从账户或商户推断。"""
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,16 @@ class WealthProduct:
     term_days: int
     yield_bp: int
     min_amount: Money
+
+
+@dataclass(frozen=True)
+class WealthHolding:
+    """理财持仓（只读事实）：金额与申购/赎回同源，`purchased_on` 为起息日。"""
+
+    product_id: str
+    user_id: str
+    amount: Money
+    purchased_on: date
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,7 @@ def test_submit_then_confirm_over_http(deps: AppDeps) -> None:
     assert submitted["state"] == "awaiting_confirm"
     card = submitted["card"]
     assert card["level"] == "YELLOW"
+    assert card["balance_trace"] == []
     confirmed = client.post(
         "/api/confirm",
         json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},

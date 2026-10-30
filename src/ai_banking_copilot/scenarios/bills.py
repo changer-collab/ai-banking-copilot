@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import date
@@ -51,6 +52,7 @@ from ai_banking_copilot.policy.pep import (
     require_str,
 )
 from ai_banking_copilot.scenarios.base import (
+    ClarificationRequired,
     ScenarioHandler,
     ScenarioRefused,
     as_int,
@@ -74,6 +76,51 @@ BILLS_ACTIONS = frozenset(
 
 ANOMALY_THRESHOLD_CENTS: int = 500_000
 """异常大额阈值（**单位=分**，= 5000 元）。**展示层谓词**，不进算子 / PDP / PEP。"""
+
+_CAPABILITY_BOUNDARIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("导出", "excel", "邮箱", "发我邮件"),
+        "暂不支持导出 Excel 或发送邮件：当前只提供页面账单分析与记录页查询。",
+    ),
+    (
+        ("深夜", "凌晨"),
+        "暂不支持按时间点筛选交易；账单面板已把深夜交易标为可疑，请到「可疑清单」查看。",
+    ),
+    (
+        ("在上海", "在深圳", "在北京", "在广州", "在杭州", "刷过吗", "哪个城市"),
+        "暂不支持按城市筛选交易；账单面板已标记异地交易，请到「可疑清单」查看。",
+    ),
+    (
+        ("退款", "退货", "到账了吗"),
+        "暂不支持按退款状态查询到账；如需核对请提供具体交易日期与商户。",
+    ),
+)
+"""能力边界（场景层）：不支持的问法一律明确说做不到，不拿大额扫描结果冒充答案。"""
+
+_VAGUE_TRANSACTION = re.compile(
+    r"(?:这|那)(?:一)?笔|是不是我刷的|是我刷的"
+)
+"""指代不明的「某笔消费核实」（如「这笔 6800 是不是我刷的」）。
+
+这类问法没有可定位的键：流水里既没有用户口中的单据号，也没有「这笔」指向哪一行的确证。
+**不允许**拿默认账户的当月大额扫描结果顶替答案（那会把"没找到大额"说成"不是你刷的"）。
+"""
+
+_VAGUE_TRANSACTION_PROMPT = (
+    "无法定位你说的那一笔：交易流水里没有可反查的单据号，也没有「这笔」指向哪一行的依据。"
+    "请补充交易日期与商户（例如「9 月 27 日凌晨那笔 6880」），"
+    "或到「记录页 → 可疑清单」逐笔核对（那里带时间、城市、商户与置信度）。"
+)
+"""追问话术：给两个可执行出口（补日期商户 / 去可疑清单），不替用户猜是哪一笔。"""
+
+
+def _vague_transaction(intents: Sequence[Intent]) -> bool:
+    """判断这组意图里有没有「指代某笔」的原话片段（只看 span，不用它填任何控制槽）。"""
+    for intent in intents:
+        span = intent.slots.get("span")
+        if isinstance(span, str) and _VAGUE_TRANSACTION.search(span):
+            return True
+    return False
 
 
 def large_transactions(
@@ -139,6 +186,11 @@ class BillsHandler(ScenarioHandler):
         return any(intent.action in BILLS_ACTIONS for intent in intents)
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+        boundary = _capability_boundary(intents)
+        if boundary is not None:
+            raise ScenarioRefused(boundary)
+        if _vague_transaction(intents):
+            raise ClarificationRequired("transaction", _VAGUE_TRANSACTION_PROMPT)
         balances = [intent for intent in intents if intent.action == "account.balance"]
         account_txn = [
             intent for intent in intents if intent.action == "account.transactions"
@@ -265,20 +317,91 @@ def _category_expense_cents(summary: BillSummary, category: str) -> int:
     raise ScenarioRefused(f"当期账单不存在支出分类：{category}")
 
 
+def _capability_boundary(intents: Sequence[Intent]) -> str | None:
+    """命中能力边界时返回一句人话；未命中返回 `None`（照常出计划卡）。"""
+    text = " ".join(
+        str(intent.slots.get("span") or intent.evidence or "") for intent in intents
+    ).lower()
+    for keywords, message in _CAPABILITY_BOUNDARIES:
+        if any(keyword in text for keyword in keywords):
+            return message
+    return None
+
+
+_EXPLICIT_PERIOD = re.compile(r"(?P<year>\d{4})\s*(?:年|[-/.])\s*(?P<month>\d{1,2})\s*月?")
+"""原话里**明确写出**的账期：「2019 年 1 月」「2026-09」「2019/1」（年份越界由白名单拒绝）。"""
+
+_RELATIVE_PERIOD = re.compile(r"(?P<rel>去年|今年|明年)\s*(?P<month>\d{1,2})\s*月")
+"""相对年份 + 月份：「去年 12 月」。只认这三种相对词，不猜「上上个月」之类。"""
+
+_STATED_YEAR = re.compile(r"(?P<year>\d{4})\s*年|(?P<rel>去年|今年|明年)")
+"""年度账单的年份：「2019 年的年度账单」「去年的年度账单」。"""
+
+_RELATIVE_YEAR_OFFSET = {"去年": -1, "今年": 0, "明年": 1}
+
+
+def _checked_year(year: int) -> int:
+    """年份白名单：与 `/api/bills/analysis` 同口径（2000–2100）。"""
+    if not 2000 <= year <= 2100:
+        raise ScenarioRefused(f"账期超出支持范围：{year} 年（只支持 2000–2100 年）")
+    return year
+
+
+def _checked_period(year: int, month: int) -> tuple[int, int]:
+    """账期白名单校验：与 `/api/bills/analysis` 同口径（2000–2100 年、1–12 月）。"""
+    _checked_year(year)
+    if not 1 <= month <= 12:
+        raise ScenarioRefused(f"账期不合法：{month} 月（应为 1–12 月）")
+    return year, month
+
+
+def _stated_period(intents: Sequence[Intent]) -> tuple[int, int] | None:
+    """从意图原话里取**写明**的账期；没写就返回 `None`（保持「缺省 = 上一个月」）。
+
+    只看 `span`（报文回指的原文片段），不改任何控制槽：`bills.monthly` 是纯查询，
+    账期只是查询参数。解析是确定性的，零模型参与；越界一律拒绝，不静默换成本月。
+    """
+    for intent in intents:
+        span = intent.slots.get("span")
+        if not isinstance(span, str):
+            continue
+        match = _EXPLICIT_PERIOD.search(span)
+        if match is not None:
+            return _checked_period(int(match["year"]), int(match["month"]))
+        match = _RELATIVE_PERIOD.search(span)
+        if match is not None:
+            year = DEFAULT_BOOKING_DATE.year + _RELATIVE_YEAR_OFFSET[match["rel"]]
+            return _checked_period(year, int(match["month"]))
+    return None
+
+
 def _period(intents: Sequence[Intent]) -> tuple[int, int]:
     for intent in intents:
         if intent.action in BILLS_ACTIONS and "year" in intent.slots and "month" in intent.slots:
             year = as_int(require_trusted(intent.slots["year"], "year"), "year")
             month = as_int(require_trusted(intent.slots["month"], "month"), "month")
             return year, month
+    stated = _stated_period(intents)
+    if stated is not None:
+        return stated
     return _previous_month(DEFAULT_BOOKING_DATE.year, DEFAULT_BOOKING_DATE.month)
 
 
 def _year(intents: Sequence[Intent]) -> int:
-    """年度账单的年份：取可信 `year` 槽；缺省用基准记账日的年份（不猜）。"""
+    """年度账单的年份：取可信 `year` 槽，其次取原话写明的年份；都没有才用基准年（不猜）。"""
     for intent in intents:
         if intent.action == "bills.yearly" and "year" in intent.slots:
             return as_int(require_trusted(intent.slots["year"], "year"), "year")
+    for intent in intents:
+        span = intent.slots.get("span")
+        if not isinstance(span, str):
+            continue
+        match = _STATED_YEAR.search(span)
+        if match is None:
+            continue
+        if match["year"]:
+            return _checked_year(int(match["year"]))
+        return _checked_year(DEFAULT_BOOKING_DATE.year + _RELATIVE_YEAR_OFFSET[match["rel"]])
     return DEFAULT_BOOKING_DATE.year
 
 

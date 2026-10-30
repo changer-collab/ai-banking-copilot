@@ -1,0 +1,49 @@
+{
+  "schema": "aib.wealth.graph/1",
+  "note": "轻量理财知识图谱（产品-风险-费率-起购-客群）：只给产品卡做解释，不引入图数据库、不新增业务动作、不参与任何写路径。",
+  "data_source": "内置演示数据（gateway/seed.py，非真实在售产品）",
+  "suitability_rule": "产品风险等级 ≤ 本人有效测评等级才可申购（由服务端 assess_suitability 判定，本图只解释、不改变判据）",
+  "risk_scale_note": "等级相对位置：R1 最保守 → R5 最激进；只表相对高低，不含任何收益判断。",
+  "risk_levels": {
+    "R1": "最保守",
+    "R2": "偏保守",
+    "R3": "中等",
+    "R4": "偏激进",
+    "R5": "最激进"
+  },
+  "fee": "未知（产品数据未提供费率，本图不做费率测算）",
+  "products": [
+    {
+      "id": "wp_cash",
+      "name": "活期理财篮子",
+      "risk_level": "R1",
+      "term_days": 0,
+      "min_amount_yuan": "1.00",
+      "audience": "测评等级 ≥ R1 且测评在有效期内的客户"
+    },
+    {
+      "id": "wp_bond",
+      "name": "稳利债券 A",
+      "risk_level": "R2",
+      "term_days": 90,
+      "min_amount_yuan": "1000.00",
+      "audience": "测评等级 ≥ R2 且测评在有效期内的客户"
+    },
+    {
+      "id": "wp_mix",
+      "name": "均衡配置 B",
+      "risk_level": "R3",
+      "term_days": 180,
+      "min_amount_yuan": "5000.00",
+      "audience": "测评等级 ≥ R3 且测评在有效期内的客户"
+    },
+    {
+      "id": "wp_equity",
+      "name": "成长精选 C",
+      "risk_level": "R4",
+      "term_days": 365,
+      "min_amount_yuan": "10000.00",
+      "audience": "测评等级 ≥ R4 且测评在有效期内的客户"
+    }
+  ]
+}

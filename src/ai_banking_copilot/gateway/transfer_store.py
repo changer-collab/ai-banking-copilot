@@ -1,6 +1,6 @@
 """转账线独立持久化：AA **收款**请求与定时转账**登记**（**不改** 01 的 `SCHEMA_SQL`）。
 
-口径（`docs/plans/11-p2-scenario-coverage.md` §2.4）：
+口径（`docs/archive/plans/11-p2-scenario-coverage.md` §2.4）：
 - `collection_requests`：AA **收款**请求（待收款，**不产生资金流**）；
 - `scheduled_transfers`：未来转账**登记**（**登记时不扣款**；真正扣款由到期派发后的
   `transfer.create` 承担）；

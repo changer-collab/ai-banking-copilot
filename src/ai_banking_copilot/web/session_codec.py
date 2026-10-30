@@ -38,7 +38,7 @@ def _constructors() -> dict[str, Callable[..., object]]:
     from ai_banking_copilot.planning.reviewer import ReviewReport
     from ai_banking_copilot.policy.pep import ExecResult
     from ai_banking_copilot.policy.session_recovery import InFlightNode
-    from ai_banking_copilot.web.plan_card import PlanCard
+    from ai_banking_copilot.web.plan_card import PlanCard, PlanLine
     from ai_banking_copilot.web.session import (
         ConfirmationRecord,
         DailyQuota,
@@ -49,7 +49,7 @@ def _constructors() -> dict[str, Callable[..., object]]:
     return {
         "Plan": Plan, "PlanNode": PlanNode, "IntentRef": IntentRef,
         "Decision": Decision, "Value": Value, "Slot": Slot, "Money": Money,
-        "PlanCard": PlanCard, "ConfirmationRecord": ConfirmationRecord,
+        "PlanCard": PlanCard, "PlanLine": PlanLine, "ConfirmationRecord": ConfirmationRecord,
         "DailyQuota": DailyQuota, "TakeoverPackage": TakeoverPackage,
         "ChallengeRecord": ChallengeRecord, "VerificationBinding": VerificationBinding,
         "_Pending": _Pending, "ExecResult": ExecResult,

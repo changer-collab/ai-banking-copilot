@@ -51,6 +51,7 @@ def check_invariants(
     i4, a4 = _i4_prime(results)
     purity, a5 = _green_purity(results)
     degeneracy = _non_degeneracy(
+        cases,
         results,
         (
             ("I1′ 金额序关系", a1),
@@ -168,23 +169,41 @@ def _green_purity(results: Sequence[CaseResult]) -> tuple[InvariantResult, int]:
     return InvariantResult("绿色纯度", not violations, detail), applicable
 
 
+def _declared_levels(cases: Sequence[EvalCase]) -> tuple[Level, ...]:
+    """集合**自己声明**的档位；`NONE`（不产级别）不参与覆盖要求。"""
+    declared = {case.expect_level for case in cases}
+    return tuple(level for level in _LEVELS if level.name in declared)
+
+
 def _non_degeneracy(
-    results: Sequence[CaseResult], applicable: Sequence[tuple[str, int]]
+    cases: Sequence[EvalCase],
+    results: Sequence[CaseResult],
+    applicable: Sequence[tuple[str, int]],
 ) -> InvariantResult:
-    """全局非退化：各级别各 ≥1；某不变式在集上恒真 → 判为无效。"""
+    """全局非退化：**集合自己声明的档位**各 ≥1；某不变式在集上恒真 → 判为无效。
+
+    覆盖要求按 `cases` 的 `expect_level` 派生，而非恒定五档：
+    `heldout_v1` 是意图级留出集，设计上只有 GREEN/YELLOW/RED/MANUAL 四档
+    （14 条 `expect_blocked` 走「不产级别」通道；`DENY` 只在迭代集的 `blocked_object` 上出现）。
+    拿五档去要求它，等于用**别的集合的设计**判本集合失效。
+    """
     problems: list[str] = []
-    counts = dict.fromkeys(_LEVELS, 0)
+    declared = _declared_levels(cases)
+    counts = dict.fromkeys(declared, 0)
     for result in results:
-        if result.level is not None:
+        if result.level is not None and result.level in counts:
             counts[result.level] += 1
-    missing = [level.name for level in _LEVELS if counts[level] == 0]
+    missing = [level.name for level in declared if counts[level] == 0]
     if missing:
         problems.append(f"缺少级别覆盖：{missing}")
     inert = [name for name, count in applicable if count == 0]
     if inert:
         problems.append(f"不变式恒真（无效）：{inert}")
     if not problems:
-        problems.append("各级别各 ≥1 且 I1′–I4′ / 绿色纯度均有可判定样本")
+        problems.append(
+            f"已声明档位 {[level.name for level in declared]} 各 ≥1"
+            " 且 I1′–I4′ / 绿色纯度均有可判定样本"
+        )
     return InvariantResult("全局非退化", not problems_are_fatal(problems), "；".join(problems))
 
 
@@ -198,9 +217,23 @@ def problems_are_fatal(problems: Sequence[str]) -> bool:
 def _must_pass(
     cases: Sequence[EvalCase], results: Sequence[CaseResult]
 ) -> tuple[InvariantResult, int]:
-    """must-pass 外部锚：锚定用例必须全部通过。"""
+    """must-pass 外部锚：**集合里出现的外部锚**必须全部通过。
+
+    `MUST_PASS_IDS` 属于迭代集（`cases.json` / `adversarial.json`）；
+    意图级留出集（`heldout_v1`）按设计不含外部锚，一条都不出现时判「不适用」而非失败。
+    但只要**部分出现**，缺的仍按缺失判失败——防止从迭代集删掉几条锚来「洗绿」。
+    """
     case_by_id = {case.id: case for case in cases}
     result_by_id = {result.case.id: result for result in results}
+    if not any(anchor_id in case_by_id for anchor_id in MUST_PASS_IDS):
+        return (
+            InvariantResult(
+                "must-pass 外部锚",
+                True,
+                "不适用：本集合不含 must-pass 外部锚（外部锚专属于迭代集）",
+            ),
+            len(MUST_PASS_IDS),
+        )
     violations: list[str] = []
     for anchor_id in MUST_PASS_IDS:
         case = case_by_id.get(anchor_id)
@@ -246,6 +279,9 @@ def assert_non_degenerate(
     判据来自两处：`invariants` 里的『全局非退化』项（含"不变式恒真"），
     以及**直接按 `results` 复核的级别覆盖**——保证即便传入的是旧的不变式快照，
     只要当前 `results` 缺级也会 fail-closed（计划实现仅读 `invariants`，与计划测试 2 矛盾）。
+
+    ⚠ 这里按**恒定五档**复核，只适用于「五档全覆盖的迭代集」；
+    意图级留出集（`heldout_v1`）设计上没有 `DENY` 档，不要对它调用本函数。
     """
     degeneracy = next((item for item in invariants if item.name == "全局非退化"), None)
     if degeneracy is None:

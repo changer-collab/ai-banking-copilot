@@ -13,7 +13,7 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.gateway.transaction_facts import TransactionFacts
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind
-from ai_banking_copilot.planning.net_effect import NetEffect
+from ai_banking_copilot.planning.net_effect import NEUTRAL_NET_ACTIONS, NetEffect
 from ai_banking_copilot.policy.pdp import DAILY_LIMIT_YUAN, evaluate, evaluate_plan
 from ai_banking_copilot.scenarios.authorization import AuthorizationFacts, node_policy_request
 from ai_banking_copilot.tools.registry import ToolRegistry
@@ -74,20 +74,18 @@ def assess_plan(
             raw = node.params.get(spec.money_param or "amount_cents")
             if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
                 raise ValueError(f"节点 {node.node_id} 缺少有效流出金额")
+            # 冻结仍计入当日累计流出（额度占用是真实的），只是不计入计划级净效应。
             outflow += raw
-            net_cents += raw
+            if node.action not in NEUTRAL_NET_ACTIONS:
+                net_cents += raw
             settlement_days.add(_settlement_day(node, today))
         elif kind is ActionKind.INFLOW:
-            if node.action == "funds.release":
-                hold_id = node.params.get("hold_id")
-                if not isinstance(hold_id, str):
-                    raise ValueError(f"节点 {node.node_id} 缺少冻结记录")
-                net_cents -= gateway.hold(hold_id).payload.amount.cents
-            else:
-                raw = node.params.get("amount_cents")
-                if isinstance(raw, bool) or not isinstance(raw, int):
-                    raise ValueError(f"节点 {node.node_id} 缺少有效金额")
-                net_cents -= raw
+            if node.action in NEUTRAL_NET_ACTIONS:
+                continue
+            raw = node.params.get("amount_cents")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise ValueError(f"节点 {node.node_id} 缺少有效金额")
+            net_cents -= raw
         elif kind is ActionKind.CANCEL_OUTFLOW:
             raw = node.params.get("subscription_id")
             if not isinstance(raw, str):

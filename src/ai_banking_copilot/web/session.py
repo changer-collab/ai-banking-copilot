@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -34,7 +34,8 @@ from ai_banking_copilot.contracts.security import (
 )
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError
-from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.gateway.facts import Record
+from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
@@ -64,6 +65,8 @@ from ai_banking_copilot.planning.slots import (
     REQUIRED_SLOTS,
     SLOT_PARAMS,
     SlotInputs,
+    SlotQuestion,
+    _payee_label,
     fill_control_slots,
 )
 from ai_banking_copilot.policy.audit import (
@@ -130,8 +133,18 @@ from ai_banking_copilot.scenarios.registry import (
 )
 from ai_banking_copilot.scenarios.wealth import (
     FORBIDDEN_HINTS,
+    WEALTH_ACTIONS,
+    RiskAssessment,
+    describe_assessment,
+    holdings_payload,
     is_recommendation_request,
+    suitability_refusal,
     to_risk_assessment,
+)
+from ai_banking_copilot.scenarios.wealth_assessment import (
+    invitation_message,
+    is_assessment_request,
+    questionnaire_payload,
 )
 from ai_banking_copilot.tools.registry import ToolCall
 from ai_banking_copilot.web.plan_card import (
@@ -185,6 +198,8 @@ FABRICATION_MARKERS: tuple[str, ...] = (
 
 _RETURN_PROMISE_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝以收益承诺为前提的请求"
 _FABRICATION_REFUSAL = "不生成事实（H1）：无法提供事实网关之外的数值或预测，安全拒绝"
+_MERCHANT_CANCEL_REFUSAL = "只能报告本地真实订阅状态；商户取消尚未接入，当前没有商户确认回执。"
+_REFUND_GUARANTEE_REFUSAL = "退款与保证商户未来不再扣款均未接入，无法执行或承诺。"
 
 
 class SessionState(StrEnum):
@@ -223,6 +238,9 @@ PLAN_TTL_S = 300
 
 MAX_CONFIRM_STEPS = 20
 """`confirm(steps=...)` 的上界：仅用于「分步执行 / 中断恢复」演示，不得借它改变授权语义。"""
+
+_PAYEE_HISTORY_DAYS = 365
+"""同名候选上「最近一次转账」的回看窗口（天）：只查已记账流水，没有就说「暂无」。"""
 
 
 class SessionRiskSource(Protocol):
@@ -294,11 +312,28 @@ class DailyQuota:
 
 
 @dataclass(frozen=True)
+class ClarificationChoice:
+    """一条**可点选**的澄清候选：`label` 给人看，`value` 回填输入框后提交。
+
+    标签里的信息全部来自名册与已记账流水（手机尾号 / 账号尾号 / 最近一次转账日期），
+    不补全号码中间位——名册只存后四位，编造前半段就是生成事实。
+    """
+
+    label: str
+    value: str
+
+
+@dataclass(frozen=True)
 class ClarificationAsk:
-    """一条待澄清提问：`slot` 为需补齐的槽位名（与 `selected` 同口径），`prompt` 为文案。"""
+    """一条待澄清提问：`slot` 为需补齐的槽位名（与 `selected` 同口径），`prompt` 为文案。
+
+    `candidates` 只在一句话能落到**有限几个名册对象**时给出（当前是同名收款人），
+    用户点一下就答完，不必回头查自己的账号尾号。
+    """
 
     slot: str
     prompt: str
+    candidates: tuple[ClarificationChoice, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -316,6 +351,9 @@ class SubmissionView:
 
     clarifications: tuple[ClarificationAsk, ...] = ()
     """待澄清的**结构化**提问（槽位 + 文案）：渠道层据此渲染「回答即可继续」的闭环输入。"""
+
+    questionnaire: tuple[dict[str, object], ...] = ()
+    """风险测评问卷（题号 / 题干 / 选项，不含分值）：仅「我要做风险测评」时下发。"""
 
 
 @dataclass(frozen=True)
@@ -439,6 +477,8 @@ class Session:
         """**会话级熔断器**（README 裁决 #27）：触发 3 / 4 / 5 的**作用域**——只让本会话转人工接管，
         不波及其他会话。全局熔断器（`deps.breaker`）只由**系统性**信号触发（触发 1 / 2）。"""
         self._reversed_records: list[str] = []
+        self._released_holds: set[str] = set()
+        """已被终态收尾释放的冻结记录（幂等去重，避免重复释放被重复计数）。"""
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
         self._last_selected: Mapping[str, object] | None = None
@@ -615,6 +655,14 @@ class Session:
         """当前待确认的计划卡（无则 `None`）。"""
         return self._pending.card if self._pending is not None else None
 
+    def last_utterance(self) -> str | None:
+        """尚待澄清的原指令（无则 `None`）。
+
+        只读投影：`clarify` 成功后原指令会被清空，因此渠道层需要在调用前取用，
+        用于把「续答后成卡」的同一次生活事件也登记到记录表（不读信前端自称）。
+        """
+        return self._last_utterance
+
     def confirmation(self) -> ConfirmationRecord | None:
         """确认记录（未确认则 `None`）。"""
         return self._confirmation
@@ -630,11 +678,15 @@ class Session:
         *,
         selected: Mapping[str, object] | None = None,
         now: datetime | None = None,
+        on_stage: Callable[[str], None] | None = None,
     ) -> SubmissionView:
-        """一次新的用户意图拥有独立执行身份，即使内容完全相同。"""
+        """一次新的用户意图拥有独立执行身份，即使内容完全相同。
+
+        `on_stage` 是**旁路观测**回调（阶段可见），不参与任何判定，异常一律吞掉。
+        """
         return self._submit(
             utterance, selected=selected, now=now,
-            execution_id=secrets.token_hex(16),
+            execution_id=secrets.token_hex(16), on_stage=on_stage,
         )
 
     def _submit(
@@ -645,70 +697,116 @@ class Session:
         now: datetime | None = None,
         execution_id: str,
         clarification_keys: frozenset[str] = frozenset(),
+        on_stage: Callable[[str], None] | None = None,
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
         会话风控信号（G-03）**只**来自服务端可信源 `AppDeps.session_risk`，本方法不接受任何
         客户端风控入参。
         """
-        self._reset()
-        self._execution_id = execution_id
-        moment = now if now is not None else datetime.now()
-        self._last_utterance = utterance
-        self._last_selected = dict(selected) if selected is not None else None
-        self._clarification_keys = clarification_keys
-        # 注入是提交入口的系统性信号；即使后续在意图装配前被拒绝，也必须触发全局熔断。
-        injection_detected = detect_injection(utterance)
-        if injection_detected:
-            self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
-        refusal = _guard_utterance(utterance)
-        if refusal is not None:
-            return self._refuse(refusal, utterance)
-        invalid = self._invalid_selection(selected or {})
-        if invalid is not None:
-            return self._refuse(invalid, utterance)
-        intents, asks, notes = self._assemble_intents(utterance, selected)
-        if asks:
-            self._state = SessionState.NEEDS_CLARIFICATION
-            self._message = _with_notes(
-                "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
-            )
-            return SubmissionView(
-                self._state, self._message, None, None, None,
-                tuple(ask.prompt for ask in asks), clarifications=asks,
-            )
-        if not intents:
-            return self._refuse(
-                _with_notes("未知意图：无法匹配任何场景", notes),
-                utterance,
-                capability_boundary=True,
-            )
         try:
-            handler = select_handler(intents)
-        except UnknownScenarioError:
-            return self._refuse(
-                _with_notes("未知意图：无法匹配任何场景", notes),
+            _notify(on_stage, "guard")
+            self._reset()
+            self._execution_id = execution_id
+            moment = now if now is not None else datetime.now()
+            self._last_utterance = utterance
+            self._last_selected = dict(selected) if selected is not None else None
+            self._clarification_keys = clarification_keys
+            # 注入是提交入口的系统性信号；即使后续在意图装配前被拒绝，也必须触发全局熔断。
+            injection_detected = detect_injection(utterance)
+            if injection_detected:
+                self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
+            refusal = _guard_utterance(utterance)
+            if refusal is not None:
+                return self._refuse(refusal, utterance)
+            if (
+                any(word in utterance for word in ("所有", "全部"))
+                and any(word in utterance for word in ("退订", "取消"))
+                and any(word in utterance for word in ("退订", "订阅", "会员", "代扣"))
+            ):
+                merchants = "、".join(
+                    record.payload.merchant
+                    for record in self._deps.gateway.subscriptions_of(self._deps.user_id)
+                )
+                return self._refuse(
+                    f"不支持批量取消，也不能跳过确认。请选择一项订阅后确认：{merchants}。",
+                    utterance,
+                )
+            invalid = self._invalid_selection(selected or {})
+            if invalid is not None:
+                return self._refuse(invalid, utterance)
+            # 第三人账户属于**能力边界**（不支持代他人操作），不是策略拒绝。
+            third_party = _third_party_account_refusal(utterance)
+            if third_party is not None:
+                return self._refuse(third_party, utterance, capability_boundary=True)
+            # 「改余额 + 买理财」同属**能力边界**：余额只能由真实资金变动产生，
+            # 整句拒绝，避免拿伪造的余额去生成申购卡（S6-7）。
+            balance_tamper = _balance_tamper_refusal(utterance)
+            if balance_tamper is not None:
+                return self._refuse(balance_tamper, utterance, capability_boundary=True)
+            # 明确要测评就先出问卷：测评是申购的前置，即使句子里还挂着第二件事
+            # （「先做个风险测评，再买理财」）也先测再办。第二件事由话术挂回来
+            # （「测完再发我一次」），既不静默吞掉半句，也不反过来先追问金额。
+            if _is_assessment_request(utterance):
+                return self._assessment_invitation(defer=_has_second_clause(utterance))
+            fact_answer = self._wealth_fact_answer(utterance)
+            if fact_answer is not None:
+                return fact_answer
+            _notify(on_stage, "understand")
+            try:
+                intents, asks, notes = self._assemble_intents(utterance, selected)
+            except _WealthRefusal as refusal:
+                return self._refuse(str(refusal), utterance)
+            if asks:
+                self._state = SessionState.NEEDS_CLARIFICATION
+                self._message = _with_notes(
+                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+                )
+                return SubmissionView(
+                    self._state, self._message, None, None, None,
+                    tuple(ask.prompt for ask in asks), clarifications=asks,
+                )
+            if not intents:
+                return self._refuse(
+                    _with_notes("未知意图：无法匹配任何场景", notes),
+                    utterance,
+                    capability_boundary=True,
+                )
+            try:
+                handler = select_handler(intents)
+            except UnknownScenarioError:
+                return self._refuse(
+                    _with_notes("未知意图：无法匹配任何场景", notes),
+                    utterance,
+                    capability_boundary=True,
+                )
+            _notify(on_stage, "plan")
+            outcome = run_scenario(handler, intents, self._deps.gateway)
+            if outcome.plan is not None:
+                self._note_risky_activity(
+                    now=moment, risky=not plan_is_pure_query(outcome.plan)
+                )
+            _notify(on_stage, "review")
+            return self._after_outcome(
+                outcome,
                 utterance,
-                capability_boundary=True,
+                asks,
+                candidate_actions=tuple(intent.action for intent in intents),
+                accepted_intents=intents,
+                notes=notes,
+                now=moment,
+                injection_already_tripped=injection_detected,
             )
-        outcome = run_scenario(handler, intents, self._deps.gateway)
-        if outcome.plan is not None:
-            self._note_risky_activity(
-                now=moment, risky=not plan_is_pure_query(outcome.plan)
-            )
-        return self._after_outcome(
-            outcome,
-            utterance,
-            asks,
-            candidate_actions=tuple(intent.action for intent in intents),
-            accepted_intents=intents,
-            notes=notes,
-            now=moment,
-            injection_already_tripped=injection_detected,
-        )
+        finally:
+            _notify(on_stage, "done")
 
     @_serialized
-    def clarify(self, answers: Mapping[str, object]) -> SubmissionView:
+    def clarify(
+        self,
+        answers: Mapping[str, object],
+        *,
+        on_stage: Callable[[str], None] | None = None,
+    ) -> SubmissionView:
         """澄清闭环：用**补充答案**重跑上一次的指令（用户不必整句重述）。
 
         `answers` 是「槽位名 → 值」，与 `selected` 同口径——因此模板通道与 LLM 通道都能用，
@@ -722,6 +820,7 @@ class Session:
         return self._submit(
             self._last_utterance, selected=merged, execution_id=execution_id,
             clarification_keys=self._clarification_keys | frozenset(answers),
+            on_stage=on_stage,
         )
 
     @_serialized
@@ -1042,9 +1141,16 @@ class Session:
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
-        chosen: dict[str, object] = (
-            dict(selected) if selected is not None else _default_selected(self._deps)
+        cards = tuple(
+            record.payload for record in self._deps.gateway.cards_of(self._deps.user_id)
         )
+        # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径（丢弃空值后
+        # 按受信任默认值补齐账户），否则同一句话会白问一轮账户。
+        chosen: dict[str, object] = {
+            key: value for key, value in (selected or {}).items() if value is not None
+        }
+        for key, value in _default_selected(self._deps).items():
+            chosen.setdefault(key, value)
         # `action` / `intent_spans` 是会话澄清用的元数据，不能作为场景槽位透传。
         extras = {
             key: value for key, value in chosen.items()
@@ -1063,6 +1169,25 @@ class Session:
             intent.action for intent in proposal.intents
             if intent.confidence < CONFIDENCE_THRESHOLD
         )
+        if not candidates:
+            # 页面已受信任选中产品、用户只说「买 1000 元」：模型不给意图时，
+            # 由**受信任选中值 + 明确动词**确定性合成申购意图（不猜产品、不猜金额）。
+            synthetic = _subscribe_from_page_selection(
+                utterance, chosen,
+                tuple(
+                    record.payload for record in self._deps.gateway.wealth_products()
+                ) if chosen.get("product") else (),
+            )
+            if synthetic is not None:
+                candidates = (synthetic,)
+                # 同一动作已由确定性合成采纳，再说「另有意图未采纳」会自相矛盾。
+                dropped = [action for action in dropped if action != synthetic.action]
+        wealth_records = (
+            tuple(self._deps.gateway.wealth_products())
+            if any(intent.action in WEALTH_ACTIONS for intent in candidates)
+            else ()
+        )
+        products = tuple(record.payload for record in wealth_records)
         local_slots = _local_intent_slots(candidates)
 
         # 多动作时每个动作必须回指用户原文中的**不同片段**。模型省略 span，或把
@@ -1137,6 +1262,14 @@ class Session:
                 if intent.action == "transfer.book" else span
             )
             slot_selected = _per_intent_selected(intent.action, intent_selected, self._deps)
+            if intent.action == "subscription.cancel" and "subscription" not in slot_selected:
+                matches = [
+                    record.payload.subscription_id
+                    for record in self._deps.gateway.subscriptions_of(self._deps.user_id)
+                    if record.payload.merchant in span
+                ]
+                if len(matches) == 1:
+                    slot_selected["subscription"] = matches[0]
             if (
                 intent.action in {"account.balance", "account.transactions"}
                 and selected is None
@@ -1150,7 +1283,14 @@ class Session:
                     text=slot_text,
                     today=self._deps.today,
                     payees=payees,
+                    cards=cards,
                     selected=slot_selected,
+                    products=products,
+                    default_product=(
+                        _SUBSCRIBE_DEFAULT_PRODUCT
+                        if intent.action == "wealth.subscribe"
+                        else None
+                    ),
                 ),
             )
             if fill.negated:
@@ -1215,6 +1355,7 @@ class Session:
             if remark is not None:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
             _inject_assessment(intent.action, slots, self._deps)
+            _precheck_wealth(intent.action, slots, wealth_records, self._deps)
             asks.extend(
                 ClarificationAsk(
                     slot=(
@@ -1225,6 +1366,7 @@ class Session:
                         f"第 {index + 1} 项{_intent_label(intent.action)}：{question.prompt}"
                         if len(candidates) > 1 else question.prompt
                     ),
+                    candidates=self._clarification_choices(question),
                 )
                 for question in fill.questions
             )
@@ -1237,6 +1379,64 @@ class Session:
                 )
             )
         return tuple(intents), tuple(asks), _dropped_notes(dropped)
+
+    def _clarification_choices(
+        self, question: SlotQuestion
+    ) -> tuple[ClarificationChoice, ...]:
+        """同名候选的可点选版本：补「手机尾号 / 账号尾号 / 最近一次转账」，回填值用 `payee_id`。
+
+        `planning.slots` 已判定「必须澄清」并给出候选标签，本层只补事实（名册 + 已记账流水），
+        **不改判定**。名册只存后四位，故不渲染完整号码——补全中间位就是生成事实。
+
+        回填值必须是人名册里的 `payee_id`：`_invalid_selection` 只认本人事实列表中的对象 ID，
+        自由文本（哪怕是「王伟 8812」）会被当成越权选择拒绝。
+        """
+        if not question.candidates:
+            return ()
+        roster = {
+            _payee_label(record.payload): record.payload
+            for record in self._deps.gateway.payees_of(self._deps.user_id)
+        }
+        choices: list[ClarificationChoice] = []
+        for label in question.candidates:
+            payee = roster.get(label)
+            if payee is None:
+                continue
+            last = self._last_transfer_on(payee)
+            when = f"最近一次转账 {last.isoformat()}" if last is not None else "暂无转账记录"
+            choices.append(
+                ClarificationChoice(
+                    label=(
+                        f"{payee.full_name} · 手机尾号 {payee.phone_tail}"
+                        f" · 账号尾号 {payee.account_tail} · {when}"
+                    ),
+                    value=payee.payee_id,
+                )
+            )
+        return tuple(choices)
+
+    def _last_transfer_on(self, payee: Payee) -> date | None:
+        """该收款人最近一次**已记账**的转出日期（事实来自 01 网关；没有记录返回 `None`）。
+
+        只认 `category=转账 / direction=out` 且有对应商户标记的流水：定时登记（未执行）
+        不算「转过」，避免把「计划」说成「事实」。
+        """
+        merchants = {f"转给{payee.payee_id}", f"转给{payee.full_name}"}
+        latest: date | None = None
+        start = self._deps.today - timedelta(days=_PAYEE_HISTORY_DAYS)
+        for account in self._deps.gateway.accounts_of(payee.user_id):
+            for record in self._deps.gateway.transactions_between(
+                account.payload.account_id, start, self._deps.today
+            ):
+                txn = record.payload
+                if (
+                    txn.category == "转账"
+                    and txn.direction == "out"
+                    and txn.merchant in merchants
+                    and (latest is None or txn.booked_on > latest)
+                ):
+                    latest = txn.booked_on
+        return latest
 
     def _render_card(
         self, plan: Plan, decision: Decision, *, now: datetime | None = None,
@@ -1393,6 +1593,51 @@ class Session:
         if not capability_boundary:
             self._note_policy_rejection()
         return SubmissionView(self._state, self._message, card, decision, plan, ())
+
+    def _assessment_invitation(self, *, defer: bool = False) -> SubmissionView:
+        """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。
+
+        `defer=True`：句子里还挂着第二件事（「先做测评，再买理财」）。问卷照出，另加
+        一句把第二件事挂回来，避免半句被静默丢掉。
+        """
+        self._state = SessionState.IDLE
+        message = invitation_message()
+        if defer:
+            message = (
+                f"{message}\n"
+                "测评完成后，把你后面那句（买哪只、多少钱）再发我一次，我接着办。"
+            )
+        self._message = message
+        return SubmissionView(
+            self._state,
+            self._message,
+            None,
+            None,
+            None,
+            (),
+            questionnaire=questionnaire_payload(),
+        )
+
+    def _wealth_fact_answer(self, utterance: str) -> SubmissionView | None:
+        """理财**事实**直答（确定性判据，不经模型）：风险等级 / 收益 / 持仓对账。
+
+        只陈述事实，不给建议、不推算收益；命中即早退，避免被低置信度意图丢掉。
+        带动作词的句子（买 / 赎回 / 推荐 / 比较 …）一律交回意图装配，不在此接管。
+        """
+        text = utterance.strip()
+        if len(text) > _WEALTH_FACT_MAX_LENGTH:
+            return None
+        if _WEALTH_ACTION_WORDS.search(text) is not None:
+            return None
+        if _ASSESSMENT_QUESTION.search(text):
+            answer = _assessment_answer(self._deps)
+        elif _INCOME_QUESTION.search(text) or _HOLDINGS_QUESTION.search(text):
+            answer = _holdings_answer(self._deps)
+        else:
+            return None
+        self._state = SessionState.IDLE
+        self._message = answer
+        return SubmissionView(self._state, self._message, None, None, None, ())
 
     def _enter_takeover(self, reason: str, pending: _Pending) -> None:
         self._state = SessionState.TAKEN_OVER
@@ -1872,6 +2117,7 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
+                self._release_open_holds(reason="tool_hook_blocked")
                 return self._execution_view()
             except CommittedWriteError as error:
                 self._unverified_results[node_id] = ExecResult(
@@ -1888,6 +2134,28 @@ class Session:
                 self._state = (
                     SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
                 )
+                self._release_open_holds(reason="gateway_or_authorization_failed")
+                return self._execution_view()
+            except Exception as error:
+                # 未预期异常同样属于「本计划不会再有后续成功」：先把已冻结预算退回，再如实报错，
+                # 绝不把冻结额悬空在核心银行。
+                self._in_flight = None
+                self._message = f"执行失败（{node.action}）：{type(error).__name__}: {error}"
+                self._state = (
+                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+                )
+                self._audit(
+                    "execution_error",
+                    {
+                        "node_id": node_id,
+                        "action": node.action,
+                        "error": f"{type(error).__name__}: {error}",
+                        "user_id": self._deps.user_id,
+                        "session_id": self._session_id,
+                        "execution_id": self._execution_id,
+                    },
+                )
+                self._release_open_holds(reason="unexpected_error")
                 return self._execution_view()
             self._unverified_results.pop(node_id, None)
             self._exec_results.append(result)
@@ -2013,6 +2281,66 @@ class Session:
             raise SessionStateError("当前无人工接管上下文包")
         return self._takeover
 
+    def _release_open_holds(self, *, reason: str) -> tuple[str, ...]:
+        """终态失败收尾：把本次执行已冻结的预算退回可用余额（不静默吞钱）。
+
+        调用时机：**本计划不会再有后续成功**（安全策略拦截 / 执行受阻 / 未预期异常 /
+        用户放弃 / 会话重置）。`WritePreconditionError`（可重新确认后继续）与
+        `CommittedWriteError`（可恢复核对后重试）**不**收尾，否则会抽走后续节点依赖的冻结额。
+
+        返回实际释放的记录；审计携带用户 / 会话 / 执行身份与原因，便于对账。
+        """
+        records = tuple(
+            record_id
+            for result in self._exec_results
+            for record_id in result.record_ids
+            if record_id.startswith("holds:") and record_id not in self._released_holds
+        )
+        # 只释放**仍处于冻结中**的记录：已完成计划里的冻结可能已由 `funds.release` 解冻，
+        # 重复解冻是幂等空操作，不应计为一次新的退回。
+        records = tuple(record for record in records if self._hold_is_active(record))
+        if not records:
+            return ()
+        context: dict[str, object] = {
+            "subject": "holds",
+            "reason": reason,
+            "user_id": self._deps.user_id,
+            "session_id": self._session_id,
+            "execution_id": self._execution_id,
+            "requested": list(records),
+        }
+        service = self._deps.reversal
+        if service is None:
+            self._message = f"{self._message}；冻结预算未释放（未装配冲正通道）"
+            self._audit(KIND_REVERSAL, {**context, "outcome": "release_unavailable"})
+            return ()
+        try:
+            released = service.compensate(records)
+        except CompensationError as error:
+            self._message = f"{self._message}；冻结预算释放失败：{error}"
+            self._audit(
+                KIND_REVERSAL,
+                {**context, "outcome": "release_failed", "error": str(error)},
+            )
+            return ()
+        self._released_holds.update(records)
+        self._message = f"{self._message}；已释放冻结预算 {len(released)} 笔"
+        self._audit(
+            KIND_REVERSAL,
+            {**context, "outcome": "released_on_failure", "records": list(released)},
+        )
+        return tuple(released)
+
+    def _hold_is_active(self, record: str) -> bool:
+        """冻结记录是否仍占用可用余额（读不到时按「需要释放」处理，交由冲正通道如实报错）。"""
+        hold_id = record.partition(":")[2]
+        if not hold_id:
+            return False
+        try:
+            return self._deps.gateway.hold(hold_id).payload.status == "active"
+        except Exception:
+            return True
+
     def _compensation(self, subject: str) -> Callable[[], str]:
         """补偿动作：调用**组合根注入**的冲正通道（`AppDeps.reversal`）。
 
@@ -2096,6 +2424,9 @@ class Session:
         if self._state not in (SessionState.AWAITING_CONFIRM, SessionState.INTERRUPTED):
             raise SessionStateError(f"当前状态不可放弃：{self._state.value}")
         self._invalidate_verification("plan_rejected")
+        self._message = ""
+        released = self._release_open_holds(reason="plan_rejected")
+        release_note = self._message
         self._audit(KIND_DECISION, {
             "kind": "plan_rejected",
             "user_id": self._deps.user_id,
@@ -2111,6 +2442,10 @@ class Session:
         self._quota = None
         self._state = SessionState.IDLE
         self._message = "已放弃当前计划：原计划作废，如仍需办理请重新提交"
+        if released:
+            self._message += f"；已退回冻结预算 {len(released)} 笔"
+        elif release_note:
+            self._message += release_note
         return SessionView(self._state, self._message)
 
     def _execution_view(self) -> ExecutionView:
@@ -2177,10 +2512,15 @@ class Session:
     def _reset(self) -> None:
         if self._recovery_blocked or self._unverified_results:
             raise SessionStateError("存在待核对业务回执，不能用新计划覆盖")
+        # 上一计划若被中断 / 失败后直接重新提交，已冻结的预算必须先退回，否则新计划一开
+        # 就永久悬空一笔冻结额。
+        self._message = ""
+        self._release_open_holds(reason="session_reset")
+        release_note = self._message
         self._invalidate_verification("plan_changed")
         self._execution_id = secrets.token_hex(16)
         self._state = SessionState.IDLE
-        self._message = "会话已重置"
+        self._message = "会话已重置" + release_note
         self._pending = None
         self._confirmation = None
         self._takeover = None
@@ -2199,6 +2539,7 @@ class Session:
         self._recovery_blocked = False
         self._planner_channel = None
         self._model_calls = []
+        self._released_holds.clear()
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:
@@ -2238,12 +2579,207 @@ def _plan_has_outflow(plan: Plan) -> bool:
     return any(ACTION_KINDS.get(node.action) is ActionKind.OUTFLOW for node in plan.nodes)
 
 
+def _notify(on_stage: Callable[[str], None] | None, stage: str) -> None:
+    """阶段旁路通知：进度写失败不得影响状态机（观测层永远是从属的）。"""
+
+    if on_stage is None:
+        return
+    try:
+        on_stage(stage)
+    except Exception:  # noqa: BLE001 - 观测失败必须静默
+        return
+
+
 def _guard_utterance(utterance: str) -> str | None:
     if any(hint in utterance for hint in FORBIDDEN_HINTS):
         return _RETURN_PROMISE_REFUSAL
     if any(marker in utterance for marker in FABRICATION_MARKERS):
         return _FABRICATION_REFUSAL
+    if "别管商户有没有回复" in utterance or "商户已经取消" in utterance:
+        return _MERCHANT_CANCEL_REFUSAL
+    if (
+        "第三方商户" in utterance
+        and ("退回" in utterance or "退款" in utterance)
+        and "保证" in utterance
+    ):
+        return _REFUND_GUARANTEE_REFUSAL
     return None
+
+
+class _WealthRefusal(Exception):
+    """意图装配阶段的理财拒绝（先拒后问）：由 `_submit` 转成安全拒绝视图。"""
+
+
+_THIRD_PARTY_MARKERS = (
+    "老婆", "老公", "媳妇", "爱人", "妻子", "丈夫", "爸爸", "妈妈", "父亲", "母亲",
+    "儿子", "女儿", "朋友", "同事", "别人", "他人", "亲戚", "家人",
+)
+_ACCOUNT_MARKERS = ("账户", "帐户", "银行卡", "储蓄卡", "卡")
+_WEALTH_MARKERS = ("买", "申购", "认购", "赎回", "理财", "产品")
+_THIRD_PARTY_REFUSAL = (
+    "能力边界：仅支持操作你本人名下的账户与银行卡，不支持代他人申购或赎回理财；"
+    "如需帮家人办理，请由账户本人登录后操作。"
+)
+
+
+def _third_party_account_refusal(utterance: str) -> str | None:
+    """第三人账户的**能力边界**话术（不是策略拒绝，不计触发 4）。
+
+    三条件同时满足才算：第三人标记 + 账户 / 卡标记 + 理财动作词。只出现
+    「帮朋友转账」这类不带理财动作的句子不受影响。
+    """
+    if not any(marker in utterance for marker in _THIRD_PARTY_MARKERS):
+        return None
+    if not any(marker in utterance for marker in _ACCOUNT_MARKERS):
+        return None
+    if not any(marker in utterance for marker in _WEALTH_MARKERS):
+        return None
+    return _THIRD_PARTY_REFUSAL
+
+
+_BALANCE_MARKERS = ("余额", "存款")
+_BALANCE_TAMPER_VERBS = (
+    "改成", "改为", "改到", "改掉", "改一下",
+    "设为", "设置成", "设置",
+    "调到", "调成", "调整成", "调整到",
+    "修改成", "修改为", "修改",
+)
+_BALANCE_TAMPER_REFUSAL = (
+    "能力边界：不能修改账户余额（余额只能由真实资金变动产生）；"
+    "我只能查询余额，并按你账户里的真实可用资金申购或赎回理财。"
+)
+
+
+def _balance_tamper_refusal(utterance: str) -> str | None:
+    """「改余额 + 理财动作」的**能力边界**话术（不是策略拒绝，不计触发 4）。
+
+    三条件同时满足才算：余额 / 存款标记 + 篡改动词 + 理财动作词。只出现「改余额」
+    而没有理财动作的句子，仍按原路径落到「未知意图」（不改变他人场景的既有结论）。
+    命中的是**整句**——只有把「改余额做不到」说出来、并整句拒绝，才不会拿伪造的
+    余额去生成申购卡（S6-7 的缺陷形态）。
+    """
+    if not any(marker in utterance for marker in _BALANCE_MARKERS):
+        return None
+    if not any(verb in utterance for verb in _BALANCE_TAMPER_VERBS):
+        return None
+    if not any(marker in utterance for marker in _WEALTH_MARKERS):
+        return None
+    return _BALANCE_TAMPER_REFUSAL
+
+
+_WEALTH_FACT_MAX_LENGTH = 24
+"""理财事实直答的长度上界：超过即视为还有别的事，交回意图装配。"""
+
+_WEALTH_ACTION_WORDS = re.compile(
+    r"买|申购|认购|赎回|卖|转|付|扣|改|退|推荐|哪只|哪款|比较|对比"
+)
+_ASSESSMENT_QUESTION = re.compile(r"风险(?:测评)?(?:等级|级别)|测评等级")
+_INCOME_QUESTION = re.compile(r"(?:收益|赚|盈亏|赔)[^，,。；;]{0,6}(?:多少|几|如何|怎么样)")
+_HOLDINGS_QUESTION = re.compile(r"持仓|持有")
+
+
+def _assessment_answer(deps: AppDeps) -> str:
+    """本人风险测评事实：等级 / 日期 / 有效期 / 来源（seed 必须如实标注）。"""
+    if deps.risk is None:
+        return "当前没有可用的风险测评数据源，无法给出你的风险测评等级。"
+    assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
+    if assessment is None:
+        return "你还没有完成风险测评；未测评时不能申购理财，可以先做一次 5 题测评。"
+    return describe_assessment(assessment, deps.today)
+
+
+def _holdings_answer(deps: AppDeps) -> str:
+    """持仓与收益口径：金额与起息日来自网关，收益无净值数据 ⇒ 如实标未知。"""
+    rows = holdings_payload(deps.gateway, deps.user_id)
+    if not rows:
+        return "你当前没有理财持仓（演示数据）。"
+    lines = ["你的理财持仓（演示数据）："]
+    lines.extend(
+        f"- {row['name']}（{row['risk_level']}）{row['amount_yuan']} 元"
+        f"，申购日 {row['purchased_on']}，当前收益 {row['current_income']}"
+        for row in rows
+    )
+    return "\n".join(lines)
+
+
+_SUBSCRIBE_VERB = re.compile(r"买|申购|认购")
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _subscribe_from_page_selection(
+    utterance: str, chosen: Mapping[str, object], products: Sequence[WealthProduct],
+) -> Intent | None:
+    """页面已受信任选中产品 + 明确动词 + 金额 ⇒ 确定性合成申购意图。
+
+    **只**在模型没有给出任何可用意图时兜底，且产品必须命中目录；金额仍由槽位解析器
+    从原文读取，这里不猜金额、不猜产品。
+    """
+    product = chosen.get("product")
+    if not isinstance(product, str) or not product:
+        return None
+    if not any(item.product_id == product for item in products):
+        return None
+    if _SUBSCRIBE_VERB.search(utterance) is None or _HAS_DIGIT.search(utterance) is None:
+        return None
+    return Intent(action="wealth.subscribe", confidence=1.0, evidence=utterance)
+
+
+def _slot_str(slots: Mapping[str, object], key: str) -> str | None:
+    value = slots.get(key)
+    if isinstance(value, Value):
+        value = value.raw
+    return value if isinstance(value, str) else None
+
+
+def _precheck_wealth(
+    action: str,
+    slots: Mapping[str, object],
+    records: Sequence[Record[WealthProduct]],
+    deps: AppDeps,
+) -> None:
+    """先拒后问：产品已定但适当性不通过时，不等用户补金额就先给拒绝与替代。
+
+    只覆盖 `wealth.subscribe`（申购闸门）；赎回不做适当性判定。
+    """
+    if action != "wealth.subscribe" or not records:
+        return
+    product_id = _slot_str(slots, "product")
+    product = next(
+        (record.payload for record in records if record.payload.product_id == product_id),
+        None,
+    )
+    if product is None:
+        return
+    raw = slots.get("assessment")
+    assessment = raw if isinstance(raw, RiskAssessment) else None
+    reason = suitability_refusal(assessment, product, records, deps.today)
+    if reason is not None:
+        raise _WealthRefusal(reason)
+
+
+_MEASUREMENT_ONLY_MAX_LENGTH = 24
+"""整句只问测评的长度上界：超过即视为还有别的事，交回意图装配。"""
+
+
+def _is_assessment_request(utterance: str) -> bool:
+    """命中测评话术即「先做测评」（长度仍设上界，避免把整段长句当测评）。
+
+    与旧判据 `_is_pure_assessment_request` 的差别：**不再**因为句子里带第二件事的
+    衔接词（逗号 / 再 / 然后 / 顺便 / 并且）就整句交回意图装配——那样
+    「我想先做个风险测评，再买理财」会被当成申购去追问金额，把「先做测评」吞掉。
+    第二件事是否要挂回来只影响话术，由 `_has_second_clause` 决定。
+    """
+    if not is_assessment_request(utterance):
+        return False
+    return len(utterance) <= _MEASUREMENT_ONLY_MAX_LENGTH
+
+
+_SECOND_CLAUSE_MARKERS = ("，", ",", "再", "然后", "顺便", "并且")
+
+
+def _has_second_clause(utterance: str) -> bool:
+    """句子是否还挂着第二件事（衔接词判据）：只用于在问卷话术里把它挂回来。"""
+    return any(marker in utterance for marker in _SECOND_CLAUSE_MARKERS)
 
 
 def _default_selected(deps: AppDeps) -> dict[str, object]:
@@ -2287,11 +2823,13 @@ def _scoped_intent_selected(
 def _per_intent_selected(
     action: str, chosen: Mapping[str, object], deps: AppDeps
 ) -> dict[str, object]:
-    """身份始终取服务端；申购另补默认产品，不改共享的选中对象。"""
+    """身份始终取服务端；**不再**预置默认产品。
+
+    默认产品曾在此静默覆盖「买 1000 元 R2」的等级意图（买成 R1）。现在产品槽由
+    `planning.slots` 先按原文解析，解析不到才在**申购**动作上用兜底产品（记 `server_default`）。
+    """
     selected = dict(chosen)
     selected["user_id"] = deps.user_id
-    if action == "wealth.subscribe":
-        selected.setdefault("product", _SUBSCRIBE_DEFAULT_PRODUCT)
     return selected
 
 

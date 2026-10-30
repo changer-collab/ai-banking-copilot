@@ -1,6 +1,6 @@
 """商户下单与用户生日资料：独立持久化模块（**不改** 01 的 `SCHEMA_SQL`）。
 
-口径见 `docs/plans/11-p2-scenario-coverage.md` §2.4（「各自独立的表 / 文件」）。
+口径见 `docs/archive/plans/11-p2-scenario-coverage.md` §2.4（「各自独立的表 / 文件」）。
 
 - `merchant_orders`：`merchant.order` 写动作的落点（PK `order_id`）；由
   `CoreBank.place_merchant_order` 写入，运行期经 `FactGateway` 回读做**出处校验**（H1）；

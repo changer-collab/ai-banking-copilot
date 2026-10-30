@@ -20,7 +20,7 @@
 | 06 | `06-web-channel.md` | 03,04,05 | 已出 |
 | 07 | `07-eval-and-docs.md` | 01–06 | 已出 |
 
-> 依赖表与门禁见 `../roadmap.md`。
+> 依赖表与门禁见 `../archive/roadmap.md`。
 
 ---
 
@@ -76,7 +76,7 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 | 模块 | 冻结符号 |
 |---|---|
 | `tools.registry` | `RiskClass`(READ_ONLY/NOTIFY/SMALL_CHANGE/LARGE_FUNDS/IRREVERSIBLE) · `ParamSpec(name, slot, py_type, required)` · `ToolSpec(action, risk, params, is_pure_query, reversible, money_param, description)` · `ToolCall(action, params)` · `ToolRegistry`（`register` / `get` / `actions` / `validate_params`）· `UnknownActionError` / `ParamValidationError` / `ForbiddenParamError` |
-| `tools.catalog` | `build_default_registry() -> ToolRegistry`（**全量 24 个动作**，七域：transfer / bills / wealth / cards / subscriptions / cross / merchant） |
+| `tools.catalog` | `build_default_registry() -> ToolRegistry`（**全量 25 个动作**，七域：transfer / bills / wealth / cards / subscriptions / cross / merchant） |
 
 ### 03 `policy`
 
@@ -190,12 +190,12 @@ tests/           # 与 src/ 同构（tests/gateway/、tests/policy/ …）
 
 27. **熔断作用域分层 · 状态持久化 · 运维解锁出口 · 对手方口径**（2026-10-08，`docs/已修复清单-2026-10-08.md` P0-5 / P2-3；先改本表再回溯）：① **计数语义修正**——`未识别 / 无匹配场景` 是**能力边界**而非策略拒绝，`web.session._refuse(..., capability_boundary=True)` 不再计入触发 4（此前会计入；`e2e_check.py` 自身第 [6] 步即因此累加，跑 2–3 次就打开全局熔断、此后同一进程内恒红）；② **作用域分层**——`web.session` 新增**会话级** `CircuitBreaker`：触发 3（高频）/ 4（连续策略拒绝）/ 5（会话异常）落**会话级**（只让本会话在确认时转人工接管，其他会话不受影响），触发 1（连续授权失败）/ 2（注入检测）仍落**全局**（跨会话、跨 worker）。判据：全局熔断会拒绝**所有**用户的非纯查询动作，只有**系统性**威胁配得上；单个会话的行为异常应精确落在该会话。`_breaker_blocks`：**纯查询永不受阻**，其余看「全局 open 或本会话 open」；③ **状态持久化**——`policy.breaker` 新增 `BreakerSnapshot` / `BreakerStateStore` 接缝与 `policy.breaker_store.StoreBreakerStateStore`（SQLite **独立表** `breaker_state`，**不并入 01 的 `SCHEMA_SQL`**），`CircuitBreaker(store=…)` 构造装载 / 变更落盘 / 读取前刷新；`compose.build_breaker` **默认落盘**（`AIB_BREAKER_STATE=memory` 退回进程内）——内存态下「重启即复位」等于给安全机制留了一条绕过路径；④ **运维解锁出口**——`POST /api/operator/breaker-unlock`：口令取自 `AIB_OPERATOR_TOKEN`（**未配置 / 空白 ⇒ 403 fail-closed**，定长比较防时序侧信道），**必须给理由**（空 ⇒ 400），解锁前后状态 + 触发项 + 理由写入审计链（新增 `policy.audit.KIND_OPERATOR`）；`unlock()` 仍是**唯一**降级出口；⑤ **对手方口径**——`scenarios.authorization.COUNTERPARTY_PARAMS = ("payee_id", "payer_id")`：**收款**请求的对手方是付款方，阻断名册必须对它同等生效（否则给被冻结 / 涉诈对手方留了资金入口），`object_state_for_node` 只认该元组内的参数名。**三条硬约束不变**：`unlock()` 仍需显式 + 带理由 + 留痕（不可自动 / 静默），`record_success()` 在 `OPEN` 时仍不改状态，纯查询在熔断打开时仍可用。`contracts/` **零改动**。
 
-28. **P2 场景覆盖收口 + 种子补种语义（additive / 结构修正；先改表再回溯）**（2026-10-08，依据 [`11-p2-scenario-coverage.md`](11-p2-scenario-coverage.md) 与 `docs/已修复清单-2026-10-08.md` 第八节；组长授权「按**逻辑通顺度与完整度**裁决，**允许大改**」）：
+28. **P2 场景覆盖收口 + 种子补种语义（additive / 结构修正；先改表再回溯）**（2026-10-08，依据 [`11-p2-scenario-coverage.md`](../archive/plans/11-p2-scenario-coverage.md) 与 `docs/已修复清单-2026-10-08.md` 第八节；组长授权「按**逻辑通顺度与完整度**裁决，**允许大改**」）：
     ① **规范动作表 20 → 24**（上表已改）：新增 `bills.yearly`（QUERY / READ_ONLY）· `transfer.book`（STATE / LARGE_FUNDS）· `transfer.request_collection`（STATE / SMALL_CHANGE）· `merchant.order`（OUTFLOW / LARGE_FUNDS，**新域** `merchant`）。**既有 20 个动作的名字 / `RiskClass` / `ActionKind` / 参数槽零改动**；`contracts/` **零改动**；三处一致性断言（`ACTION_KINDS` / `REQUIRED_SLOTS` / PEP 读·写分派）仍为「派生结果 == 注册表」，故 24 个动作自动成立。
     ② **能力子集声明（是**有意不做**，不是缺口）**：`merchant.order` 与 `transfer.book` **无独立 NL 触发规则**（**不可口述触达**），仅由场景层函数装配（`scenarios.cross.birthday_plan` / `scenarios.transfer.due_transfer_plan`）。故 `tests/eval/test_cases_data.py` 的 `_CAPABILITY_SUBSET_CATEGORIES = {"merchant"}` 段内是**安全拒绝负例**（断言「不外泄、不误执行」），**不是**放宽断言；`merchant.order` 的槽位名冲突（`when` 同名映射不同参数名会在构造期抛）以 `slot_name=None` 规避（由场景层填充，与 `ParamSpec.slot_name` 判据「是否由规划层补全」一致）。
     ③ **`bills.yearly` 采用「同期（YTD）」口径**：本金区间 = 本年 `1 月 .. 基准月`（`scenarios.bills.ytd_end_month`），对照区间 = 上年同月段；两侧各走 `sum`、同比走 `yoy`，派生数字**只走算子白名单**且携带全部 `record_id`。「上年同期**无数据**」与「上年同期**为 0**」分别呈现（**不编造**）。
     ④ **`gateway.seed` 由「早退」改为「逐行 `INSERT OR IGNORE` 补种」**（`seed_database` 的**符号与签名零改动**）：幂等语义由「查 `schema_meta.seeded` 即返回」改为**逐行忽略已存在行**。理由：种子扩充后**既有演示库必须自动补行**，否则演示仍显示「同比不可判」。覆盖由 **3 → 21** 个月（`_SEED_FIRST/LAST = 2025-01..2026-09`）；`2025` 金额按 **85%** 确定性**整数**缩放（`_YEAR_SCALE`，`2026 = 100` ⇒ 既有 24 条流水**逐字段不变**），使演示同期同比产出真实百分比 **`+17.65%`**。同时**不覆盖**演示过程中产生的真实变更（余额 / 卡片状态 / 订阅状态 / 用户发起的交易都不在种子行内）。冻结面表 `gateway.seed` 行已按本条更新。
-    ⑤ **`planning.llm::_TEMPLATE_RULES` 再加 2 条**（`transfer.request_collection` 置于**首位**；`bills.yearly` 须位于 `bills.monthly` **之前**——否则「年度账单」会被更宽的 `账单` 抢先命中），**其余规则零改动**，现行共 **20** 条；冻结面表 `planning.llm` 行已按本条更新。⑥ **冻结面表 `tools.catalog` 行**由「六场景全量动作」订正为「**全量 24 个动作**，七域」。⑦ **「四人」口径**——[`11-p2-scenario-coverage.md`](11-p2-scenario-coverage.md) 的四人计划由**单一执行者（AI 会话）一次性全部完成**（四条分支配四个子代理并行跑），其**「甲 / 乙 / 丙 / 丁」为工作流代号**，不是四位成员分别认领的记录；该计划、`docs/已修复清单-2026-10-08.md` 第七节、`AGENTS.md` 第 3 节与 `docs/变更同步-2026-10-08.md` 均已加执行说明。
+    ⑤ **`planning.llm::_TEMPLATE_RULES` 再加 2 条**（`transfer.request_collection` 置于**首位**；`bills.yearly` 须位于 `bills.monthly` **之前**——否则「年度账单」会被更宽的 `账单` 抢先命中），**其余规则零改动**，现行共 **20** 条；冻结面表 `planning.llm` 行已按本条更新。⑥ **冻结面表 `tools.catalog` 行**由「六场景全量动作」订正为「**全量 24 个动作**，七域」。⑦ **「四人」口径**——[`11-p2-scenario-coverage.md`](../archive/plans/11-p2-scenario-coverage.md) 的四人计划由**单一执行者（AI 会话）一次性全部完成**（四条分支配四个子代理并行跑），其**「甲 / 乙 / 丙 / 丁」为工作流代号**，不是四位成员分别认领的记录；该计划、`docs/已修复清单-2026-10-08.md` 第七节、`AGENTS.md` 第 3 节与 `docs/archive/2026-10-08/变更同步-2026-10-08.md` 均已加执行说明。
 
 ### 跨计划硬约束（每份计划都生效）
 
