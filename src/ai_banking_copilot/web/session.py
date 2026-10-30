@@ -357,6 +357,17 @@ class SubmissionView:
 
 
 @dataclass(frozen=True)
+class NodeProgress:
+    """单节点执行进度（**服务端唯一判据**：前端只渲染，不推导）。
+
+    取值：`pending` / `completed` / `unverified` / `reversed` / `suspended` / `skipped`。
+    """
+
+    node_id: str
+    status: str
+
+
+@dataclass(frozen=True)
 class ExecutionView:
     """一次执行的产出（`record_ids` 为全部回执记录标识，供外部对账）。"""
 
@@ -368,6 +379,10 @@ class ExecutionView:
     card: PlanCard | None = None
     quota: DailyQuota | None = None
     decision: Decision | None = None
+    plan: Plan | None = None
+    """本次执行对应的冻结计划（供前端渲染任务 DAG；**只读**）。"""
+    node_progress: tuple[NodeProgress, ...] = ()
+    """逐节点执行状态；`()` = 无计划可展示。"""
     bill_advice: tuple[BillAdvice, ...] = ()
     """月账单执行完成后的只读消费建议；不改变计划和授权。"""
     bill_advice_message: str = ""
@@ -2475,11 +2490,46 @@ class Session:
             card=self.card(),
             quota=self._quota,
             decision=self._pending.decision if self._pending is not None else None,
+            plan=self._pending.plan if self._pending is not None else None,
+            node_progress=self._node_progress(),
             bill_advice=bill_advice,
             bill_advice_message=bill_advice_message,
             bill_findings=bill_findings,
             hook_status=self._hook_status,
         )
+
+    def _node_progress(self) -> tuple[NodeProgress, ...]:
+        """逐节点执行状态：由会话的完成记录唯一决定，前端不得自行推导。"""
+        pending = self._pending
+        if pending is None:
+            return ()
+        done = set(self._completed_node_ids)
+        unverified = set(self._unverified_results)
+        stopped = self._state in {
+            SessionState.FAILED,
+            SessionState.PARTIAL,
+            SessionState.REVERSED,
+            SessionState.BLOCKED,
+            SessionState.TAKEN_OVER,
+        }
+        rows: list[NodeProgress] = []
+        for node in pending.plan.nodes:
+            if node.node_id in done:
+                status = (
+                    "reversed"
+                    if self._state is SessionState.REVERSED
+                    else "completed"
+                )
+            elif node.node_id in unverified:
+                status = "unverified"
+            elif self._state is SessionState.INTERRUPTED:
+                status = "suspended"
+            elif stopped:
+                status = "skipped"
+            else:
+                status = "pending"
+            rows.append(NodeProgress(node_id=node.node_id, status=status))
+        return tuple(rows)
 
     def _completed_bill_advice(self) -> tuple[BillAdvice, ...]:
         if self._state is not SessionState.COMPLETED or self._pending is None:

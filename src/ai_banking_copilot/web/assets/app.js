@@ -69,6 +69,7 @@ const state = {
   decision: null,
   questions: [],
   stepStates: [],
+  nodeStatus: {},
   phase: "idle",
   chain: [],
   verification: null,
@@ -2161,6 +2162,49 @@ function stepHtml(line, index, stepStates, readOnly) {
   </li>`;
 }
 
+const DAG_STATE = {
+  pending: "待执行",
+  completed: "已执行",
+  unverified: "已提交·待核验",
+  reversed: "已冲正",
+  suspended: "已挂起",
+  skipped: "未执行",
+};
+
+/* 任务 DAG：节点、依赖、状态**全部来自服务端**，前端只排版，不推导、不补节点。
+   单节点计划不画 DAG（一句计划卡就够），回落到原步骤列表。 */
+function dagHtml(nodes, lines, statuses, readOnly) {
+  if (!Array.isArray(nodes) || nodes.length < 2) return "";
+  const indexOf = (id) => {
+    const found = nodes.findIndex((item) => item.node_id === id);
+    return found >= 0 ? String(found + 1).padStart(2, "0") : String(id);
+  };
+  const items = nodes.map((node, index) => {
+    const key = readOnly ? "pending" : (statuses && statuses[node.node_id]) || "pending";
+    const label = readOnly ? "计划项" : DAG_STATE[key] || "待执行";
+    const deps = Array.isArray(node.depends_on) ? node.depends_on : [];
+    const edge = index === 0
+      ? ""
+      : deps.length
+        ? `<span class="dag__edge dag__edge--serial">依赖 ${deps.map(indexOf).join("、")} · 串行（${esc(node.resource_label || "前置步骤")}）</span>`
+        : `<span class="dag__edge dag__edge--parallel">并行（不同资源）</span>`;
+    const text = stripNo(lines[index] || "") || node.label || node.action;
+    return `<li class="dag__node dag__node--${readOnly ? "snapshot" : key}">
+      ${edge}
+      <div class="dag__row">
+        <span class="dag__no">${String(index + 1).padStart(2, "0")}</span>
+        <span class="dag__main"><span class="dag__action">${esc(node.label || node.action)}</span><span class="dag__text">${esc(text)}</span></span>
+        <span class="dag__state">${esc(label)}</span>
+      </div>
+    </li>`;
+  }).join("");
+  return `<div class="dag">
+    <div class="dag__title">任务 DAG · ${nodes.length} 个节点 · 依赖由服务端机械推导</div>
+    <ol class="dag__nodes">${items}</ol>
+    ${readOnly ? "" : `<p class="dag__note">同资源串行、异资源并行；冲正仅回补本项目模拟核心银行的记账，不等价于真实银行退回。</p>`}
+  </div>`;
+}
+
 function rulesHtml(reasons) {
   if (!reasons.length) return '<span class="muted">—</span>';
   return reasons
@@ -2265,7 +2309,8 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
 
     ${previewHtml(card, reasons)}
 
-    ${lines.length ? `<ol class="steps">${lines.map((line, index) => stepHtml(line, index, stepStates, readOnly)).join("")}</ol>` : ""}
+    ${dagHtml(card.nodes, lines, opts.nodeStatus || state.nodeStatus, readOnly)}
+    ${(card.nodes || []).length > 1 ? "" : (lines.length ? `<ol class="steps">${lines.map((line, index) => stepHtml(line, index, stepStates, readOnly)).join("")}</ol>` : "")}
 
     ${traceHtml(card.balance_trace)}
 
@@ -2592,6 +2637,7 @@ function reset(keepUtterance) {
   state.decision = null;
   state.questions = [];
   state.stepStates = [];
+  state.nodeStatus = {};
   state.phase = "idle";
   state.chain = [];
   state.panel = "";
@@ -2625,6 +2671,8 @@ async function applySubmission(data) {
     state.card = data.card;
     state.decision = data.decision || null;
     state.stepStates = (data.card.lines || []).map(() => "pending");
+    state.nodeStatus = {};
+    (data.card.nodes || []).forEach((node) => { state.nodeStatus[node.node_id] = "pending"; });
     state.phase = "awaiting_confirm";
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
@@ -2963,6 +3011,8 @@ function applyExecution(data) {
   if (data.decision) state.decision = data.decision;
   if (data.state === "awaiting_confirm") state.verification = null;
   renderSubscriptionCancel(data.subscription_cancel);
+  const progress = Array.isArray(data.node_progress) ? data.node_progress : [];
+  progress.forEach((row) => { state.nodeStatus[row.node_id] = row.status; });
   const results = data.results || [];
   results.forEach((item, index) => {
     if (state.stepStates[index] !== undefined) state.stepStates[index] = "done";
@@ -3034,6 +3084,9 @@ async function onInterrupt() {
     return;
   }
   state.phase = "interrupted";
+  Object.keys(state.nodeStatus || {}).forEach((nodeId) => {
+    if (state.nodeStatus[nodeId] === "pending") state.nodeStatus[nodeId] = "suspended";
+  });
   state.notice = `<div class="takeover"><p>${esc(result.data.message || "已中断：已执行节点保留、未执行节点挂起")}</p></div>`;
   timelineAdd("用户中断：已执行节点保留、未执行节点挂起", "warn");
   renderStage();
@@ -3065,6 +3118,7 @@ async function onReject() {
   state.card = null;
   state.decision = null;
   state.stepStates = [];
+  state.nodeStatus = {};
   state.verification = null;
   state.phase = "idle";
   state.notice = `<div class="takeover"><p>${esc(result.data.message || "已放弃当前计划：原计划作废")}</p></div>`;
@@ -3096,6 +3150,11 @@ async function onReverse() {
   const reversed = data.state === "reversed";
   state.phase = reversed ? "reversed" : "failed";
   if (reversed) state.stepStates = state.stepStates.map((step) => step === "done" ? "rolled" : step);
+  if (reversed) {
+    Object.keys(state.nodeStatus || {}).forEach((nodeId) => {
+      if (state.nodeStatus[nodeId] === "completed") state.nodeStatus[nodeId] = "reversed";
+    });
+  }
   state.notice = reversed
     ? `<div class="takeover"><p>${esc(data.message || "已完成回退")}</p></div>`
     : interceptHtml("回退未完成", data.message || "服务端未确认回退完成，请核对已执行结果。", false);
@@ -3330,6 +3389,8 @@ async function openConversation(sessionId) {
     state.card = data.card;
     state.decision = null;
     state.stepStates = (data.card.lines || []).map(() => "pending");
+    state.nodeStatus = {};
+    (data.card.nodes || []).forEach((node) => { state.nodeStatus[node.node_id] = "pending"; });
     state.phase = "awaiting_confirm";
     state.historyRestored = true;
     state.response = appendMessage("assistant");
@@ -5004,11 +5065,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-<<<<<<< HEAD
-navigator.serviceWorker.register("/assets/sw.js?v=55", { scope: "/" }).catch(() => {
-=======
-navigator.serviceWorker.register("/assets/sw.js?v=35", { scope: "/" }).catch(() => {
->>>>>>> 01b0639 (fix(bills): 账期解析——原话写明的账期不再被改成本月)
+navigator.serviceWorker.register("/assets/sw.js?v=56", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

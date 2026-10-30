@@ -19,6 +19,7 @@ from ai_banking_copilot.contracts.plan import Plan, PlanNode, cfhash, validate_p
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
+from ai_banking_copilot.planning.kernel import resource_key
 from ai_banking_copilot.scenarios import bills, subscriptions, wealth
 
 PROMPT_USER_CONFIRM = "user_confirm"
@@ -451,3 +452,43 @@ def _str_param(node: PlanNode, key: str) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+_RESOURCE_LABELS: dict[str, str] = {
+    "account_id": "同一账户",
+    "card_id": "同一张卡",
+    "subscription_id": "同一订阅",
+    "hold_id": "同一笔冻结",
+    "merchant": "同一商户",
+}
+"""资源键参数 → 中文标签（只用于**解释为什么串行**，不参与任何判定）。"""
+
+
+def _resource_label(node: PlanNode) -> str:
+    key = resource_key(node)
+    if key is None:
+        return ""
+    param = key.split(":", 1)[0]
+    return _RESOURCE_LABELS.get(param, "同一对象")
+
+
+def plan_nodes_payload(plan: Plan | None) -> list[dict[str, object]]:
+    """把**冻结计划**投影成前端可渲染的节点数组。
+
+    只回显服务端已有字段（`node_id` / `action` / `depends_on` / 资源键），
+    依赖与资源键均由规划内核机械推导——前端不推导、不补节点、不改顺序。
+    """
+    if plan is None:
+        return []
+    rows: list[dict[str, object]] = []
+    for index, node in enumerate(plan.nodes, start=1):
+        rows.append({
+            "node_id": node.node_id,
+            "action": node.action,
+            "label": _ACTION_LABELS.get(node.action, node.action),
+            "depends_on": list(node.depends_on),
+            "resource": resource_key(node) or "",
+            "resource_label": _resource_label(node),
+            "index": index,
+        })
+    return rows

@@ -2164,3 +2164,32 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .cards-hint { margin: var(--s-2) 0 0; font-size: 12px; }
 .card-actions .btn[disabled] { opacity: 0.55; cursor: not-allowed; }
 .records-note { margin-top: var(--s-2); font-size: 12px; }
+
+/* ---------------- ⑤ 任务 DAG：节点 / 依赖边 / 执行状态（2026-10-30） ---------------- */
+.dag { margin: var(--s-3) 0; padding: var(--s-3); border: 1px solid var(--pg-line); border-radius: 12px; background: #fbfdff; }
+.dag__title { margin: 0 0 var(--s-2); font-size: 12px; color: #6b7a90; letter-spacing: 0.02em; }
+.dag__nodes { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.dag__node { position: relative; padding-top: 18px; }
+.dag__node:first-child { padding-top: 0; }
+.dag__edge { position: absolute; top: 0; left: 14px; padding: 0 4px; background: #fbfdff; font-size: 11px; color: #6b7a90; }
+.dag__edge--serial { color: #0b4fd8; }
+.dag__edge--parallel { color: #6b7a90; }
+.dag__row { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--pg-line); border-radius: 10px; background: #fff; }
+.dag__no { font-size: 12px; color: #6b7a90; font-variant-numeric: tabular-nums; }
+.dag__main { display: grid; gap: 2px; min-width: 0; }
+.dag__action { font-size: 12px; color: #6b7a90; }
+.dag__text { font-size: 13px; color: #16233a; }
+.dag__state { padding: 2px 8px; border-radius: 999px; background: #eef2f7; color: #44546a; font-size: 11px; white-space: nowrap; }
+.dag__node--completed .dag__row { border-color: #0f9d58; }
+.dag__node--completed .dag__state { background: #e7f6ec; color: #0f7a44; }
+.dag__node--reversed .dag__row { border-color: #b26a00; }
+.dag__node--reversed .dag__state { background: #fff3e0; color: #b26a00; }
+.dag__node--unverified .dag__row { border-color: #b26a00; }
+.dag__node--unverified .dag__state { background: #fff3e0; color: #b26a00; }
+.dag__node--suspended .dag__row { border-style: dashed; }
+.dag__node--skipped .dag__row { opacity: 0.6; }
+.dag__note { margin: var(--s-2) 0 0; font-size: 11px; color: #6b7a90; }
+@media (max-width: 520px) {
+  .dag__row { grid-template-columns: 24px 1fr; }
+  .dag__state { grid-column: 2; justify-self: start; }
+}

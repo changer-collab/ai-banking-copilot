@@ -150,7 +150,11 @@ from ai_banking_copilot.web.life_event_store import (
     LifeEventStore,
 )
 from ai_banking_copilot.web.page import INDEX_HTML, LOGIN_HTML
-from ai_banking_copilot.web.plan_card import PlanCard, describe_decision
+from ai_banking_copilot.web.plan_card import (
+    PlanCard,
+    describe_decision,
+    plan_nodes_payload,
+)
 from ai_banking_copilot.web.progress import ProgressRegistry
 from ai_banking_copilot.web.session import (
     MAX_CONFIRM_STEPS,
@@ -797,7 +801,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             LOGGER.warning("对话历史写入失败：%s / %s", user_id, session_id, exc_info=True)
 
     def _record_answer(user_id: str, session_id: str, view: SubmissionView) -> None:
-        card = _card_payload(view.card)
+        card = _card_payload(view.card, view.plan)
         if card is not None:
             _record_message(
                 user_id, session_id, "assistant", "plan_card", view.message, {"card": card},
@@ -1657,7 +1661,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             "state": view.state.value,
             "snapshot_state": snapshot_state,
             "frozen_hash": view.frozen_hash,
-            "card": _card_payload(view.card),
+            "card": _card_payload(view.card, view.plan),
             "available": store is not None,
         }
 
@@ -2379,7 +2383,7 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
 
 
 def _submission_payload(view: SubmissionView) -> dict[str, object]:
-    card = _card_payload(view.card)
+    card = _card_payload(view.card, view.plan)
     if card is not None and view.quota is not None:
         card = {
             **card,
@@ -2435,7 +2439,7 @@ def _subscription_cancel_payload(view: ExecutionView) -> dict[str, object] | Non
 
 
 def _execution_payload(view: ExecutionView) -> dict[str, object]:
-    card = _card_payload(view.card)
+    card = _card_payload(view.card, view.plan)
     if card is not None and view.quota is not None:
         card = {
             **card,
@@ -2447,6 +2451,9 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
         "message": view.message,
         "frozen_hash": view.frozen_hash,
         "card": card,
+        "node_progress": [
+            {"node_id": row.node_id, "status": row.status} for row in view.node_progress
+        ],
         "decision": _decision_payload(view.decision),
         "record_ids": list(view.record_ids),
         "bill_advice": [
@@ -2515,7 +2522,7 @@ def _takeover_payload(package: TakeoverPackage) -> dict[str, object]:
         "level": package.level.name,
         "intent_text": package.intent_text,
         "frozen_hash": package.frozen_hash,
-        "card": _card_payload(package.card),
+        "card": _card_payload(package.card, package.plan),
         "plan": _plan_payload(package.plan),
         "hit_rules": list(package.hit_rules),
         "audit_ids": list(package.audit_ids),
@@ -2532,7 +2539,9 @@ def _plan_payload(plan: Plan | None) -> dict[str, object] | None:
     }
 
 
-def _card_payload(card: PlanCard | None) -> dict[str, object] | None:
+def _card_payload(
+    card: PlanCard | None, plan: Plan | None = None
+) -> dict[str, object] | None:
     if card is None:
         return None
     return {
@@ -2544,6 +2553,7 @@ def _card_payload(card: PlanCard | None) -> dict[str, object] | None:
         "requires": list(card.requires),
         "expires_at": card.expires_at.isoformat() if card.expires_at is not None else None,
         "balance_trace": list(card.balance_trace),
+        "nodes": plan_nodes_payload(plan),
     }
 
 

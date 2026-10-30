@@ -208,6 +208,15 @@ def _resource_key(node: PlanNode) -> str | None:
     return None
 
 
+def resource_key(node: PlanNode) -> str | None:
+    """节点资源键（`参数名:值`）：**供展示层标注「同资源串行」**。
+
+    判定仍只走 `_wire_dependencies`（唯一真源）；本函数只是把同一份映射公开出去，
+    避免展示层复制一份资源键表。
+    """
+    return _resource_key(node)
+
+
 def _anchor_id(node: PlanNode) -> str:
     if node.intent is None:
         raise ValueError(f"节点 {node.node_id} 缺少意图锚点")
