@@ -1,5 +1,6 @@
 """端到端集成验收：HTTP 全链路 + 审计链 + 冻结绑定 + 竞态诚实性（只依赖已交付公开接口）。"""
 
+import re
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -43,8 +44,13 @@ def test_web_layer_never_touches_the_core_bank_directly() -> None:
 def test_channel_health_page_has_a_stable_product_table(deps: AppDeps) -> None:
     client = TestClient(create_app(deps))
     html = client.get("/").text
-    script = client.get("/assets/app.js?v=39").text
-    stylesheet = client.get("/assets/workspace.css?v=20").text
+    # 版本号只从页面取，测试内不再硬编码：避免每次抬版本链都要改这条断言
+    script_path = re.search(r'src="(/assets/app\.js\?v=\d+)"', html)
+    stylesheet_path = re.search(r'href="(/assets/workspace\.css\?v=\d+)"', html)
+    assert script_path is not None
+    assert stylesheet_path is not None
+    script = client.get(script_path.group(1)).text
+    stylesheet = client.get(stylesheet_path.group(1)).text
 
     headers = ("渠道", "状态", "最后事件", "成功", "失败", "限流", "回放模式")
     positions = [html.index(f"<th>{header}</th>") for header in headers]
