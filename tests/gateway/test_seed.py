@@ -99,6 +99,19 @@ def test_seed_has_ambiguous_name_and_blocked_payee(seeded_db: Path) -> None:
     store.close()
 
 
+def test_seed_payees_carry_full_mobile_or_explicit_null(seeded_db: Path) -> None:
+    """名册要么登记完整 11 位号码，要么如实为空（关系未知），不得只留尾号。"""
+    store = Store(seeded_db)
+    rows = store.query("SELECT payee_id, phone FROM payees")
+    by_id = {row["payee_id"]: row["phone"] for row in rows}
+    assert by_id["p_lina"] == "13812342210"
+    # 赵六被阻断且刻意不登记号码：用于证明「关系未知」不会被完整号码命中。
+    assert by_id["p_zhaoliu"] is None
+    for payee_id, phone in by_id.items():
+        assert phone is None or (len(phone) == 11 and phone.isdigit()), payee_id
+    store.close()
+
+
 def test_seed_merchant_text_carries_injection_sample(seeded_db: Path) -> None:
     store = Store(seeded_db)
     rows = store.query("SELECT merchant FROM transactions WHERE merchant LIKE '%忽略以上%'")

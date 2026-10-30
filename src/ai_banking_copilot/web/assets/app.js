@@ -2205,6 +2205,18 @@ function dagHtml(nodes, lines, statuses, readOnly) {
   </div>`;
 }
 
+/* 单节点计划不画 DAG，但「本地冲正」的边界声明不能丢（P-4）：冲正后才出现。
+   多节点由 dagHtml 的脚注统一声明，这里不重复。 */
+function reversalNoteHtml(nodes, statuses, readOnly) {
+  if (readOnly) return "";
+  if (Array.isArray(nodes) && nodes.length > 1) return "";
+  const reversed =
+    state.phase === "reversed" || Object.values(statuses || {}).includes("reversed");
+  return reversed
+    ? '<p class="dag__note">本地冲正：仅回补本项目模拟核心银行的记账，不等价于真实银行退回。</p>'
+    : "";
+}
+
 function rulesHtml(reasons) {
   if (!reasons.length) return '<span class="muted">—</span>';
   return reasons
@@ -2313,6 +2325,7 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
 
     ${dagHtml(card.nodes, lines, opts.nodeStatus || state.nodeStatus, readOnly)}
     ${(card.nodes || []).length > 1 ? "" : (lines.length ? `<ol class="steps">${lines.map((line, index) => stepHtml(line, index, stepStates, readOnly)).join("")}</ol>` : "")}
+    ${reversalNoteHtml(card.nodes, opts.nodeStatus || state.nodeStatus, readOnly)}
 
     ${traceHtml(card.balance_trace)}
 
@@ -5067,7 +5080,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=56", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=57", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

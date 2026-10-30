@@ -99,9 +99,11 @@ class TemporalParse:
 
 
 def resolve_payees(payees: Sequence[Payee], text: str) -> PayeeResolution:
-    """按手机尾号 / 完整 11 位手机号（取后四位） / 卡号尾号 / 姓名匹配名册。
+    """按手机尾号 / 完整 11 位手机号 / 卡号尾号 / 姓名匹配名册。
 
-    **只认名册，不产出新实体**；完整手机号按后四位匹配属于能力子集（库内只存尾号）。
+    **只认名册，不产出新实体**。完整 11 位手机号**逐位精确匹配** `Payee.phone`：
+    未命中即零候选，**不回退按后四位匹配**（两个不同号码后四位相同不得指向同一个人）；
+    `phone` 为 `None`（关系未知）的收款人只保留尾号匹配。
     """
     hits: dict[str, Candidate] = {}
     trace: list[str] = []
@@ -120,12 +122,12 @@ def resolve_payees(payees: Sequence[Payee], text: str) -> PayeeResolution:
             for payee in matched_accounts:
                 hits[payee.payee_id] = _candidate(payee)
         if _MOBILE_FULL.fullmatch(run) is not None:
-            tail_hits = [payee for payee in payees if payee.phone_tail == run[-4:]]
-            if tail_hits:
+            full_hits = [payee for payee in payees if payee.phone == run]
+            if full_hits:
                 trace.append(
-                    f"phone_full:{_mask_mobile(run)} -> {','.join(p.payee_id for p in tail_hits)}"
+                    f"phone_full:{_mask_mobile(run)} -> {','.join(p.payee_id for p in full_hits)}"
                 )
-                for payee in tail_hits:
+                for payee in full_hits:
                     hits.setdefault(payee.payee_id, _candidate(payee))
 
     for payee in payees:

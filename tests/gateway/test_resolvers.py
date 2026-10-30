@@ -140,18 +140,19 @@ def test_parse_amount_bare_number_ignores_long_digit_runs() -> None:
 
 
 MOBILE_PAYEES = (
-    Payee("p_lina", "u_demo", "李娜", "9021", "3721", True, False),
-    Payee("p_wangwei", "u_demo", "王伟", "8812", "3301", True, False),
+    Payee("p_lina", "u_demo", "李娜", "9021", "3721", True, False, "13812343721"),
+    Payee("p_wangwei", "u_demo", "王伟", "8812", "3301", True, False, "13900003301"),
 )
 
 TAIL_COLLISION_PAYEES = (
-    Payee("p_zhangwei_a", "u_demo", "张伟", "8812", "3721", True, False),
-    Payee("p_zhangwei_b", "u_demo", "张伟", "4417", "3721", False, False),
+    # 尾号同为 3721，但完整号码不同：完整号码必须逐位精确匹配，不得按尾号误命中。
+    Payee("p_zhangwei_a", "u_demo", "张伟", "8812", "3721", True, False, "13812343721"),
+    Payee("p_zhangwei_b", "u_demo", "张伟", "4417", "3721", False, False, "13900003721"),
 )
 
 
-def test_resolution_by_full_mobile_matches_payee_tail() -> None:
-    """完整 11 位手机号按后四位匹配名册（库内只存尾号），且 trace 必须脱敏。"""
+def test_resolution_by_full_mobile_matches_registered_number() -> None:
+    """完整 11 位手机号逐位精确匹配名册，且 trace 必须脱敏。"""
     result = resolve_payees(MOBILE_PAYEES, "给 13812343721 转五百")
     assert [item.payee_id for item in result.candidates] == ["p_lina"]
     assert result.needs_clarification is False
@@ -159,13 +160,27 @@ def test_resolution_by_full_mobile_matches_payee_tail() -> None:
     assert all("13812343721" not in trace for trace in result.parse_trace)
 
 
-def test_resolution_by_full_mobile_with_tail_collision_forces_clarification() -> None:
-    result = resolve_payees(TAIL_COLLISION_PAYEES, "给 13812343721 转五百")
-    assert [item.payee_id for item in result.candidates] == [
-        "p_zhangwei_a",
-        "p_zhangwei_b",
-    ]
-    assert result.needs_clarification is True
+def test_resolution_by_full_mobile_with_tail_collision_stays_precise() -> None:
+    """两个收款人尾号相同、完整号码不同：给准确号码时只命中一个，不再强制澄清。"""
+    result = resolve_payees(TAIL_COLLISION_PAYEES, "给 13900003721 转五百")
+    assert [item.payee_id for item in result.candidates] == ["p_zhangwei_b"]
+    assert result.needs_clarification is False
+
+
+def test_resolution_by_unregistered_full_mobile_never_falls_back_to_tail() -> None:
+    """未登记的完整号码不得回退成后四位匹配（否则同尾号的另一个人会被误命中）。"""
+    result = resolve_payees(TAIL_COLLISION_PAYEES, "给 13899993721 转五百")
+    assert result.candidates == ()
+    assert result.needs_clarification is False
+
+
+def test_resolution_ignores_full_mobile_when_payee_phone_unknown() -> None:
+    """名册未登记完整号码（关系未知）时，完整号码不命中；4 位尾号仍可命中。"""
+    unknown = (Payee("p_zhaoliu", "u_demo", "赵六", "0001", "3721", False, True),)
+    assert resolve_payees(unknown, "给 13812343721 转五百").candidates == ()
+    assert [
+        item.payee_id for item in resolve_payees(unknown, "给 3721 转五百").candidates
+    ] == ["p_zhaoliu"]
 
 
 def test_resolution_by_unknown_full_mobile_fabricates_nothing() -> None:

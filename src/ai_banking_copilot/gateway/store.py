@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
@@ -33,11 +33,16 @@ _OPTIONAL_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "transactions": _TRANSACTIONS_OPTIONAL_COLUMNS,
     "cards": (("account_id", "TEXT"),),
     "subscriptions": (("card_id", "TEXT"),),
+    "payees": (("phone", "TEXT"),),
 }
-"""可空关系列（v4）：`cards.account_id`（卡绑定账户）与 `subscriptions.card_id`（代扣绑定卡）。
+"""可空关系列（v4 / v5）。
 
-两者都**可空**：旧库与旧数据保持 `NULL`，读取层必须把它当作"关系未知"，
-不得据此推断「这张卡没有代扣」——未知不等于零。
+- v4：`cards.account_id`（卡绑定账户）与 `subscriptions.card_id`（代扣绑定卡）；
+- v5：`payees.phone`（名册登记的完整 11 位手机号）。
+
+三者都**可空**：旧库与旧数据保持 `NULL`，读取层必须把它当作"关系未知"，
+不得据此推断「这张卡没有代扣」「这个收款人没有手机号」——未知不等于零。
+`phone` 为 `NULL` 的收款人**不能**用完整手机号命中（只保留 4 位尾号匹配）。
 """
 
 SCHEMA_SQL = """
@@ -67,7 +72,8 @@ CREATE TABLE IF NOT EXISTS payees (
     account_tail       TEXT NOT NULL,
     phone_tail         TEXT NOT NULL,
     identity_confirmed INTEGER NOT NULL CHECK (identity_confirmed IN (0, 1)),
-    blocked            INTEGER NOT NULL CHECK (blocked IN (0, 1))
+    blocked            INTEGER NOT NULL CHECK (blocked IN (0, 1)),
+    phone              TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cards (
@@ -160,7 +166,7 @@ def init_schema(store: Store) -> None:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """旧库幂等迁移：按表补可空列（v1/v2 → v3 补流水列；v3 → v4 补关系列）。
+    """旧库幂等迁移：按表补可空列（v3 补流水列；v4 补关系列；v5 补完整手机号）。
 
     `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
     先查 `PRAGMA table_info` 再补，重复执行零副作用。

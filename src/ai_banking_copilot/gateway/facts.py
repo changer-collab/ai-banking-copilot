@@ -326,6 +326,7 @@ class FactGateway:
             phone_tail=str(row["phone_tail"]),  # type: ignore[index]
             identity_confirmed=bool(row["identity_confirmed"]),  # type: ignore[index]
             blocked=bool(row["blocked"]),  # type: ignore[index]
+            phone=_optional_text(row["phone"]),  # type: ignore[index]
         )
         return _record("payees", payload.payee_id, payload)
 

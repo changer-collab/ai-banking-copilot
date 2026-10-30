@@ -6,7 +6,12 @@ import sqlite3
 from datetime import date
 
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
-from ai_banking_copilot.gateway.facts import Record, _asset_band_limit_cents, _record
+from ai_banking_copilot.gateway.facts import (
+    Record,
+    _asset_band_limit_cents,
+    _optional_text,
+    _record,
+)
 from ai_banking_copilot.gateway.models import Hold, Money, Payee, Subscription
 
 
@@ -26,6 +31,7 @@ class TransactionFacts:
             phone_tail=str(row["phone_tail"]),
             identity_confirmed=bool(row["identity_confirmed"]),
             blocked=bool(row["blocked"]),
+            phone=_optional_text(row["phone"]),
         )
         return _record("payees", payload.payee_id, payload)
 

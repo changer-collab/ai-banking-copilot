@@ -56,6 +56,12 @@ class Payee:
     phone_tail: str
     identity_confirmed: bool = False
     blocked: bool = False
+    phone: str | None = None
+    """名册登记的完整 11 位手机号（可空 = 关系未知）。
+
+    只有非空且**逐位相等**才允许用完整手机号命中；`None` 时不得退回尾号匹配——
+    否则两个不同号码只要后四位相同就会指向同一个人。
+    """
 
 
 @dataclass(frozen=True)

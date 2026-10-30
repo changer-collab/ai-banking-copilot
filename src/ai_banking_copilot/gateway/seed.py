@@ -27,11 +27,13 @@ _ACCOUNTS = (
 )
 
 _PAYEES = (
-    ("p_wangwei_a", DEMO_USER_ID, "王伟", "8812", "3301", 1, 0),
-    ("p_wangwei_b", DEMO_USER_ID, "王伟", "4417", "7788", 0, 0),
-    ("p_lina", DEMO_USER_ID, "李娜", "9021", "2210", 1, 0),
-    ("p_zhangqiang", DEMO_USER_ID, "张强", "6633", "5566", 0, 0),
-    ("p_zhaoliu", DEMO_USER_ID, "赵六", "0001", "0001", 0, 1),
+    # (payee_id, user_id, full_name, account_tail, phone_tail, identity_confirmed, blocked, phone)
+    ("p_wangwei_a", DEMO_USER_ID, "王伟", "8812", "3301", 1, 0, "13812343301"),
+    ("p_wangwei_b", DEMO_USER_ID, "王伟", "4417", "7788", 0, 0, "13900007788"),
+    ("p_lina", DEMO_USER_ID, "李娜", "9021", "2210", 1, 0, "13812342210"),
+    ("p_zhangqiang", DEMO_USER_ID, "张强", "6633", "5566", 0, 0, "13700005566"),
+    # 赵六（已阻断）刻意不登记完整号码：用于证明「关系未知」的收款人不会被完整号码命中。
+    ("p_zhaoliu", DEMO_USER_ID, "赵六", "0001", "0001", 0, 1, None),
 )
 
 _CARDS = (
@@ -149,8 +151,14 @@ def seed_database(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
-            " identity_confirmed, blocked) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            " identity_confirmed, blocked, phone) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             _PAYEES,
+        )
+        # 既有库（v5 之前的 payees 无 phone 列）由 `init_schema` 补列后为 NULL：
+        # `INSERT OR IGNORE` 不会更新已存在行，故此处幂等回填，且只填空值不覆盖演示中的改动。
+        conn.executemany(
+            "UPDATE payees SET phone = ? WHERE payee_id = ? AND phone IS NULL",
+            [(row[7], row[0]) for row in _PAYEES if row[7] is not None],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
@@ -279,9 +287,9 @@ _SECONDARY_ACCOUNTS = (
 
 _SECONDARY_PAYEES = (
     # 一组同名候选（刘伟 ×2）+ 1 个 blocked 收款人：跨用户隔离测试要能区分对象归属。
-    ("p_b_liuwei_a", SECONDARY_USER_ID, "刘伟", "5521", "6602", 1, 0),
-    ("p_b_liuwei_b", SECONDARY_USER_ID, "刘伟", "1138", "4457", 0, 0),
-    ("p_b_sunli", SECONDARY_USER_ID, "孙丽", "7788", "9021", 0, 1),
+    ("p_b_liuwei_a", SECONDARY_USER_ID, "刘伟", "5521", "6602", 1, 0, "13612346602"),
+    ("p_b_liuwei_b", SECONDARY_USER_ID, "刘伟", "1138", "4457", 0, 0, "13500004457"),
+    ("p_b_sunli", SECONDARY_USER_ID, "孙丽", "7788", "9021", 0, 1, "13712349021"),
 )
 
 _SECONDARY_CARDS = (
@@ -338,8 +346,12 @@ def seed_secondary_user(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
-            " identity_confirmed, blocked) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            " identity_confirmed, blocked, phone) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             _SECONDARY_PAYEES,
+        )
+        conn.executemany(
+            "UPDATE payees SET phone = ? WHERE payee_id = ? AND phone IS NULL",
+            [(row[7], row[0]) for row in _SECONDARY_PAYEES if row[7] is not None],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"

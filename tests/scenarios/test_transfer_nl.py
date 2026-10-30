@@ -68,8 +68,8 @@ def test_full_sentence_with_remark_keeps_amount_intact(gateway: FactGateway) -> 
     assert _asked(fill) == set()
 
 
-def test_full_mobile_number_matches_payee_by_last_four(gateway: FactGateway) -> None:
-    """完整 11 位手机号 + 中文数字金额：李娜尾号 2210。"""
+def test_full_mobile_number_matches_payee_by_exact_number(gateway: FactGateway) -> None:
+    """完整 11 位手机号 + 中文数字金额：名册里李娜登记的号码就是 13812342210。"""
     fill = _fill(gateway, "给 13812342210 转五百")
     assert fill.slots["payee"] == "p_lina"
     assert fill.slots["amount"] == 50000
