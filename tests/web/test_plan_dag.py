@@ -8,9 +8,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
+from ai_banking_copilot.contracts.authorization import Decision, Level, ReasonCode
 from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode
+from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.web.app import AppDeps, create_app
-from ai_banking_copilot.web.plan_card import plan_nodes_payload
+from ai_banking_copilot.web.plan_card import plan_nodes_payload, render_plan_card
 
 
 def _node(
@@ -52,6 +55,34 @@ def test_nodes_payload_keeps_mechanical_dependencies() -> None:
 
 def test_nodes_payload_is_empty_without_plan() -> None:
     assert plan_nodes_payload(None) == []
+
+
+def test_card_lock_lists_bound_subscriptions_as_impact(gateway: FactGateway) -> None:
+    """挂失/锁卡前必须说清该卡上已有的代扣——关系来自库，不是推测。"""
+    node = _node("n1", "card.lock", {"card_id": "card_debit"})
+    plan = Plan(plan_id="p", nodes=(node,))
+
+    card = render_plan_card(
+        plan,
+        Decision(Level.RED, (ReasonCode.IRREVERSIBLE,)),
+        gateway,
+        user_id=DEMO_USER_ID,
+    )
+
+    text = "；".join(card.impact)
+    assert "2 个在扣订阅" in text
+    assert "视频会员" in text and "音乐会员" in text
+    assert "不会自动取消商户侧代扣" in text
+
+
+def test_impact_is_hidden_without_user_id(gateway: FactGateway) -> None:
+    node = _node("n1", "card.lock", {"card_id": "card_debit"})
+    card = render_plan_card(
+        Plan(plan_id="p", nodes=(node,)),
+        Decision(Level.RED, (ReasonCode.IRREVERSIBLE,)),
+        gateway,
+    )
+    assert card.impact == ()
 
 
 def test_due_plan_exposes_dependency_edges(tmp_path: Path) -> None:

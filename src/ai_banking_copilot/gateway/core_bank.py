@@ -495,10 +495,14 @@ class CoreBank:
             if user is None:
                 raise CoreBankError(f"用户不存在：{user_id}")
             card_id = _effect_id("card", "apply_virtual_card", idempotency_key)
+            # 演示口径：虚拟卡默认绑定本人**主储蓄账户**（卡必须落在某个结算账户上）。
+            # 绑定关系只用于「影响面预演」，不参与任何资金判据。
             conn.execute(
-                "INSERT INTO cards(card_id, user_id, card_type, status, daily_limit_cents)"
-                " VALUES(?, ?, 'virtual', 'active', ?)",
-                (card_id, user_id, daily_limit.cents),
+                "INSERT INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
+                " account_id) VALUES(?, ?, 'virtual', 'active', ?,"
+                " (SELECT account_id FROM accounts WHERE user_id = ? AND kind = 'savings'"
+                "  ORDER BY account_id LIMIT 1))",
+                (card_id, user_id, daily_limit.cents, user_id),
             )
             return WriteReceipt(
                 idempotency_key=idempotency_key,
@@ -596,7 +600,10 @@ class CoreBank:
             subscription_id = _effect_id("sub", "sign_subscription", idempotency_key)
             conn.execute(
                 "INSERT INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
-                " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, 'active')",
+                " period, next_charge_on, status, card_id)"
+                " VALUES(?, ?, ?, ?, ?, ?, 'active',"
+                " (SELECT card_id FROM cards WHERE user_id = ? AND status = 'active'"
+                "  ORDER BY (card_type = 'debit') DESC, card_id LIMIT 1))",
                 (
                     subscription_id,
                     user_id,
@@ -604,6 +611,7 @@ class CoreBank:
                     amount.cents,
                     period,
                     next_charge_on.isoformat(),
+                    user_id,
                 ),
             )
             return WriteReceipt(

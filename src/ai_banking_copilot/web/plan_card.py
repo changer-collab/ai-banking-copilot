@@ -110,6 +110,12 @@ class PlanCard:
     与 `lines` 同源同值，只是拆成键值对；润色只改 `lines`，不改本字段。
     """
 
+    impact: tuple[str, ...] = ()
+    """**连带影响**（只读事实）：卡/账户上已有的代扣、预约、冻结。
+
+    只描述"当前库里真实存在的关联事实"，关系列缺失时明说"未知"，不按 0 计。
+    """
+
     def __post_init__(self) -> None:
         if not self.card_id:
             raise ValueError("card_id 不得为空")
@@ -136,10 +142,12 @@ class PolishRejectedError(ValueError):
 def render_plan_card(
     plan: Plan, decision: Decision, gateway: FactGateway, *,
     expires_at: datetime | None = None,
+    user_id: str | None = None,
 ) -> PlanCard:
     """用确定性模板渲染计划卡（输入 = 已裁决 DAG + 事实网关数值）。
 
     `expires_at` 由**服务端**在生成计划卡时写入，不进入冻结哈希（卡片元数据）。
+    `user_id` 只用于查**连带影响**（卡上的代扣 / 账户上的预约），缺省不展示。
     """
     validate_plan(plan)
     frozen_hash = cfhash(plan.nodes)
@@ -158,6 +166,7 @@ def render_plan_card(
         expires_at=expires_at,
         balance_trace=_balance_trace(plan, gateway),
         summary=plan_summary(plan, gateway),
+        impact=_impact_lines(plan, gateway, user_id),
     )
 
 
@@ -492,3 +501,103 @@ def plan_nodes_payload(plan: Plan | None) -> list[dict[str, object]]:
             "index": index,
         })
     return rows
+
+
+_IMPACT_CARD_ACTIONS = frozenset({"card.report_lost", "card.lock"})
+"""不可逆 / 半不可逆的卡动作：预演它会让哪些**已有关系**受影响。"""
+
+_IMPACT_MONEY_ACTIONS = frozenset({"transfer.create", "funds.freeze"})
+"""动钱动作：预演该账户上已有的预约与冻结。"""
+
+_MAX_IMPACT_LINES = 4
+
+_PERIOD_LABELS = {"monthly": "月", "yearly": "年"}
+
+
+def _impact_lines(
+    plan: Plan, gateway: FactGateway, user_id: str | None
+) -> tuple[str, ...]:
+    """连带影响：**只陈述库里已有的关系事实**，不做因果推测。
+
+    - 卡：该卡绑定几个在扣订阅、关联账户还有几笔未到期预约；
+    - 账户：还有几笔未到期预约、几笔未完成冻结（合计金额）。
+    - 关系列缺失（旧库 / 历史数据）时明说「关系未知」，**不按 0 计**。
+    """
+    if user_id is None:
+        return ()
+    lines: list[str] = []
+    for node in plan.nodes:
+        if node.action in _IMPACT_CARD_ACTIONS:
+            lines.extend(_card_impact(node, gateway))
+        elif node.action in _IMPACT_MONEY_ACTIONS:
+            lines.extend(_account_impact(node, gateway, user_id))
+    unique: list[str] = []
+    for line in lines:
+        if line not in unique:
+            unique.append(line)
+    return tuple(unique[:_MAX_IMPACT_LINES])
+
+
+def _card_impact(node: PlanNode, gateway: FactGateway) -> tuple[str, ...]:
+    card_id = _str_param(node, "card_id")
+    if card_id is None:
+        return ()
+    try:
+        card = gateway.card(card_id).payload
+    except GatewayNotFoundError:
+        return ()
+    lines: list[str] = []
+    subscriptions = [
+        record.payload
+        for record in gateway.subscriptions_of(card.user_id)
+        if record.payload.card_id == card_id and record.payload.status == "active"
+    ]
+    if subscriptions:
+        detail = "、".join(
+            f"{item.merchant} {item.amount.yuan} 元/"
+            f"{_PERIOD_LABELS.get(item.period, item.period)}"
+            for item in subscriptions[:2]
+        )
+        more = f" 等 {len(subscriptions)} 个" if len(subscriptions) > 2 else ""
+        lines.append(
+            f"该卡绑定 {len(subscriptions)} 个在扣订阅：{detail}{more}；"
+            "本操作不会自动取消商户侧代扣"
+        )
+    if card.account_id is None:
+        lines.append("该卡未登记绑定账户与代扣关系（关系未知，不按 0 计）")
+        return tuple(lines)
+    pending = [
+        record
+        for record in gateway.scheduled_transfers_of(card.user_id, status="scheduled")
+        if record.payload.account_id == card.account_id
+    ]
+    if pending:
+        lines.append(f"该卡绑定的账户还有 {len(pending)} 笔未到期预约转账")
+    return tuple(lines)
+
+
+def _account_impact(
+    node: PlanNode, gateway: FactGateway, user_id: str
+) -> tuple[str, ...]:
+    account_id = _str_param(node, "account_id")
+    if account_id is None:
+        return ()
+    lines: list[str] = []
+    pending = [
+        record
+        for record in gateway.scheduled_transfers_of(user_id, status="scheduled")
+        if record.payload.account_id == account_id
+    ]
+    if pending:
+        lines.append(f"该账户还有 {len(pending)} 笔未到期预约转账")
+    holds = [
+        record.payload
+        for record in gateway.holds_of(account_id)
+        if record.payload.status == "active"
+    ]
+    if holds:
+        total = sum(item.amount.cents for item in holds)
+        lines.append(
+            f"该账户当前有 {len(holds)} 笔未完成冻结（合计 {Money(total).yuan} 元）"
+        )
+    return tuple(lines)

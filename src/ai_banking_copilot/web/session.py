@@ -33,13 +33,19 @@ from ai_banking_copilot.contracts.security import (
     detect_injection,
 )
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
-from ai_banking_copilot.gateway.errors import GatewayError
+from ai_banking_copilot.gateway.errors import GatewayError, GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import Record
 from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
     WritePreconditionError,
+)
+from ai_banking_copilot.planning.anaphora import (
+    DialogueMemory,
+    Reference,
+    ReferenceKind,
+    resolve_reference,
 )
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
@@ -497,6 +503,8 @@ class Session:
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
         self._last_selected: Mapping[str, object] | None = None
+        self._memory: DialogueMemory | None = None
+        """上一笔**已成功执行**的转账事实（跨 `_reset` 保留）：只服务多轮指代。"""
         self._review_intents: list[dict[str, object]] = []
         self._clarification_keys: frozenset[str] = frozenset()
         self._review_report: ReviewReport | None = None
@@ -699,10 +707,120 @@ class Session:
 
         `on_stage` 是**旁路观测**回调（阶段可见），不参与任何判定，异常一律吞掉。
         """
-        return self._submit(
-            utterance, selected=selected, now=now,
+        reference = resolve_reference(utterance, self._memory)
+        if reference.kind is ReferenceKind.UNDO:
+            return self._undo_last()
+        rewrite = self._reference_rewrite(reference)
+        if rewrite is None:
+            return self._submit(
+                utterance, selected=selected, now=now,
+                execution_id=secrets.token_hex(16), on_stage=on_stage,
+            )
+        rewritten, inherited, note = rewrite
+        applied = {**inherited, **(selected or {})}
+        view = self._submit(
+            rewritten, selected=applied, now=now,
             execution_id=secrets.token_hex(16), on_stage=on_stage,
         )
+        return replace(view, message=f"{view.message}；{note}" if view.message else note)
+
+    def _undo_last(self) -> SubmissionView:
+        """「刚才那笔取消」：走会话级冲正，**不产生新的业务动作**。"""
+        if self._confirmation is None and not self._exec_results:
+            return SubmissionView(
+                state=self._state,
+                message="没有可撤回的上一笔：本会话还没有执行过计划",
+                card=None, decision=None, plan=None, questions=(),
+            )
+        try:
+            outcome = self.reverse()
+        except SessionStateError as error:
+            return SubmissionView(
+                state=self._state,
+                message=f"撤回未执行：{error}",
+                card=None, decision=None, plan=None, questions=(),
+            )
+        self._memory = None
+        return SubmissionView(
+            state=(
+                SessionState.REVERSED
+                if outcome.state is ReversalState.REVERSED
+                else SessionState.FAILED
+            ),
+            message=outcome.message,
+            card=None, decision=None, plan=None, questions=(),
+        )
+
+    def _reference_rewrite(
+        self, reference: Reference
+    ) -> tuple[str, dict[str, object], str] | None:
+        """把指代改写成**完整一句**，并给出补全说明。
+
+        只支持上一笔是 `transfer.create` 的场景：收款人、账户、金额全部来自
+        上一笔**已执行**的冻结计划与事实网关；任何一项取不到就返回 `None`（走正常澄清）。
+        """
+        memory = self._memory
+        if memory is None or memory.action != "transfer.create":
+            return None
+        if reference.kind is ReferenceKind.NONE:
+            return None
+        amount = (
+            reference.amount_cents
+            if reference.kind is ReferenceKind.AMOUNT_ONLY
+            else memory.amount_cents
+        )
+        if amount is None or memory.payee_id is None:
+            return None
+        try:
+            payee = self._deps.gateway.payee(memory.payee_id).payload
+        except GatewayNotFoundError:
+            return None
+        account_id = memory.account_id
+        notes: list[str] = []
+        if reference.kind is ReferenceKind.SWITCH_ACCOUNT:
+            other = self._other_account_id(account_id)
+            if other is None:
+                notes.append("只有这一个可用账户，已沿用原账户")
+            else:
+                account_id = other
+                notes.append("已按上一笔改换账户")
+        inherited: dict[str, object] = {"payee": memory.payee_id}
+        if account_id is not None:
+            inherited["account"] = account_id
+        note = (
+            f"已按上一笔补全：收款人 {payee.full_name}、金额 {Money(amount).yuan} 元"
+            + ("；" + "；".join(notes) if notes else "")
+        )
+        rewritten = f"转给{payee.full_name} {Money(amount).yuan} 元"
+        return rewritten, inherited, note
+
+    def _other_account_id(self, current: str | None) -> str | None:
+        """换账户：取本人名下另一个账户（确定序，不随机）。"""
+        for record in self._deps.gateway.accounts_of(self._deps.user_id):
+            if record.payload.account_id != current:
+                return record.payload.account_id
+        return None
+
+    def _remember(self, plan: Plan) -> None:
+        """记住最近一笔**已成功执行**的转账，供「再转一次 / 再转 200」使用。"""
+        memory: DialogueMemory | None = None
+        for node in plan.nodes:
+            if node.action != "transfer.create":
+                continue
+            payee_id = node.params.get("payee_id")
+            amount_cents = node.params.get("amount_cents")
+            account_id = node.params.get("account_id")
+            if not isinstance(payee_id, str) or not isinstance(amount_cents, int):
+                continue
+            if isinstance(amount_cents, bool):
+                continue
+            memory = DialogueMemory(
+                action=node.action,
+                payee_id=payee_id,
+                account_id=account_id if isinstance(account_id, str) else None,
+                amount_cents=amount_cents,
+            )
+        self._memory = memory
 
     def _submit(
         self,
@@ -1459,6 +1577,7 @@ class Session:
         card = render_plan_card(
             plan, decision, self._deps.gateway,
             expires_at=_naive_moment(now) + timedelta(seconds=PLAN_TTL_S),
+            user_id=self._deps.user_id,
         )
         # 相同内容的新提交也不能接受上一轮的确认请求。
         return replace(card, card_id=f"{card.card_id}_{self._execution_id}")
@@ -2182,6 +2301,8 @@ class Session:
         if len(self._completed_node_ids) == len(pending.node_ids):
             self._state = SessionState.COMPLETED
             self._message = f"计划执行完成（{len(self._completed_node_ids)} 步）"
+            # 只有**全部执行成功**才记为「上一笔」：半成功不得被「再转一次」复刻。
+            self._remember(pending.plan)
         else:
             self._state = SessionState.EXECUTING
             self._message = (

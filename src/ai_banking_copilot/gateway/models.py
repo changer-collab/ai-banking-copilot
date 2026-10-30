@@ -65,6 +65,8 @@ class Card:
     card_type: str
     status: str
     daily_limit: Money
+    account_id: str | None = None
+    """绑定的结算账户（可空 = 关系未知；不得据此推断"无账户"）。"""
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,8 @@ class Subscription:
     period: str
     next_charge_on: date
     status: str
+    card_id: str | None = None
+    """代扣绑定的卡（可空 = 关系未知；不得据此推断"不限卡"）。"""
 
 
 @dataclass(frozen=True)

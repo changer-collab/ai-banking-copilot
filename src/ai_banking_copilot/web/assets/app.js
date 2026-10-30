@@ -2253,6 +2253,7 @@ function previewHtml(card, decisionReasons) {
   if (!card || !card.level || card.level === "GREEN") return "";
   const rows = card.summary || [];
   const trace = card.balance_trace || [];
+  const impactLines = card.impact || [];
   const reasons = Array.isArray(decisionReasons)
     ? decisionReasons
     : state.decision ? state.decision.reasons || [] : [];
@@ -2265,6 +2266,7 @@ function previewHtml(card, decisionReasons) {
     <summary>确认后会发生什么</summary>
     ${impact ? `<div class="preview__block"><span class="preview__title">影响面</span>${impact}</div>` : ""}
     ${trace.length ? `<div class="preview__block"><span class="preview__title">可用余额轨迹</span><ol class="preview__list">${trace.map((row) => `<li>${esc(row)}</li>`).join("")}</ol></div>` : ""}
+    ${impactLines.length ? `<div class="preview__block"><span class="preview__title">连带影响</span><ol class="preview__list">${impactLines.map((row) => `<li>${esc(row)}</li>`).join("")}</ol></div>` : ""}
     <div class="preview__block"><span class="preview__title">命中规则</span><p class="preview__rules">${rulesHtml(reasons)}</p></div>
     <p class="muted preview__note">以上数字均取自服务端计划卡，前端未做二次计算。</p>
   </details>`;

@@ -336,6 +336,7 @@ class FactGateway:
             card_type=str(row["card_type"]),  # type: ignore[index]
             status=str(row["status"]),  # type: ignore[index]
             daily_limit=Money(int(row["daily_limit_cents"])),  # type: ignore[index]
+            account_id=_optional_text(row["account_id"]),  # type: ignore[index]
         )
         return _record("cards", payload.card_id, payload)
 
@@ -365,6 +366,7 @@ class FactGateway:
             period=str(row["period"]),  # type: ignore[index]
             next_charge_on=date.fromisoformat(str(row["next_charge_on"])),  # type: ignore[index]
             status=str(row["status"]),  # type: ignore[index]
+            card_id=_optional_text(row["card_id"]),  # type: ignore[index]
         )
         return _record("subscriptions", payload.subscription_id, payload)
 

@@ -35,8 +35,9 @@ _PAYEES = (
 )
 
 _CARDS = (
-    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000),
-    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000),
+    # (card_id, user_id, card_type, status, daily_limit_cents, account_id)
+    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000, "acc_savings"),
+    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000, "acc_savings"),
 )
 
 _WEALTH_PRODUCTS = (
@@ -54,9 +55,10 @@ _WEALTH_HOLDINGS = (
 """两笔种子持仓：赎回必须校验持仓（H1），因此种子库必须**有持仓可赎**。"""
 
 _SUBSCRIPTIONS = (
-    ("sub_video", DEMO_USER_ID, "视频会员", 2500, "monthly", "2026-10-08", "active"),
-    ("sub_music", DEMO_USER_ID, "音乐会员", 1200, "monthly", "2026-10-15", "active"),
-    ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active"),
+    # (subscription_id, user_id, merchant, amount_cents, period, next_charge_on, status, card_id)
+    ("sub_video", DEMO_USER_ID, "视频会员", 2500, "monthly", "2026-10-08", "active", "card_debit"),
+    ("sub_music", DEMO_USER_ID, "音乐会员", 1200, "monthly", "2026-10-15", "active", "card_debit"),
+    ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active", "card_credit"),
 )
 
 _SEED_FIRST: tuple[int, int] = (2025, 1)
@@ -151,8 +153,8 @@ def seed_database(store: Store) -> None:
             _PAYEES,
         )
         conn.executemany(
-            "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents)"
-            " VALUES(?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
+            " account_id) VALUES(?, ?, ?, ?, ?, ?)",
             _CARDS,
         )
         conn.executemany(
@@ -167,7 +169,7 @@ def seed_database(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
-            " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            " period, next_charge_on, status, card_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             _SUBSCRIPTIONS,
         )
         conn.executemany(
@@ -283,8 +285,8 @@ _SECONDARY_PAYEES = (
 )
 
 _SECONDARY_CARDS = (
-    ("card_b_debit", SECONDARY_USER_ID, "debit", "active", 1500000),
-    ("card_b_credit", SECONDARY_USER_ID, "credit", "active", 3000000),
+    ("card_b_debit", SECONDARY_USER_ID, "debit", "active", 1500000, "acc_b_savings"),
+    ("card_b_credit", SECONDARY_USER_ID, "credit", "active", 3000000, "acc_b_savings"),
 )
 
 _SECONDARY_HOLDINGS = (
@@ -293,8 +295,10 @@ _SECONDARY_HOLDINGS = (
 )
 
 _SECONDARY_SUBSCRIPTIONS = (
-    ("sub_b_video", SECONDARY_USER_ID, "视频会员", 2500, "monthly", "2026-10-12", "active"),
-    ("sub_b_cloud", SECONDARY_USER_ID, "云盘会员", 19800, "yearly", "2027-04-01", "active"),
+    ("sub_b_video", SECONDARY_USER_ID, "视频会员", 2500, "monthly",
+     "2026-10-12", "active", "card_b_debit"),
+    ("sub_b_cloud", SECONDARY_USER_ID, "云盘会员", 19800, "yearly",
+     "2027-04-01", "active", "card_b_credit"),
 )
 
 _SECONDARY_FIRST: tuple[int, int] = (2025, 10)
@@ -338,8 +342,8 @@ def seed_secondary_user(store: Store) -> None:
             _SECONDARY_PAYEES,
         )
         conn.executemany(
-            "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents)"
-            " VALUES(?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
+            " account_id) VALUES(?, ?, ?, ?, ?, ?)",
             _SECONDARY_CARDS,
         )
         conn.executemany(
@@ -349,7 +353,7 @@ def seed_secondary_user(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO subscriptions(subscription_id, user_id, merchant, amount_cents,"
-            " period, next_charge_on, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            " period, next_charge_on, status, card_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             _SECONDARY_SUBSCRIPTIONS,
         )
         conn.executemany(

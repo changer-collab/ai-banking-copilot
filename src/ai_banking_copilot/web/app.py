@@ -2553,6 +2553,7 @@ def _card_payload(
         "requires": list(card.requires),
         "expires_at": card.expires_at.isoformat() if card.expires_at is not None else None,
         "balance_trace": list(card.balance_trace),
+        "impact": list(card.impact),
         "nodes": plan_nodes_payload(plan),
     }
 

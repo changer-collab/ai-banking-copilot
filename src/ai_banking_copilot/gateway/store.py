@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
@@ -27,6 +27,17 @@ _TRANSACTIONS_OPTIONAL_COLUMNS = (
 """`transactions` 的**可空**扩展列（v3）。
 
 判据层（如账单「深夜 / 异地」）必须能跳过 `NULL`——旧库升级后历史行为 `NULL`。
+"""
+
+_OPTIONAL_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
+    "transactions": _TRANSACTIONS_OPTIONAL_COLUMNS,
+    "cards": (("account_id", "TEXT"),),
+    "subscriptions": (("card_id", "TEXT"),),
+}
+"""可空关系列（v4）：`cards.account_id`（卡绑定账户）与 `subscriptions.card_id`（代扣绑定卡）。
+
+两者都**可空**：旧库与旧数据保持 `NULL`，读取层必须把它当作"关系未知"，
+不得据此推断「这张卡没有代扣」——未知不等于零。
 """
 
 SCHEMA_SQL = """
@@ -64,7 +75,8 @@ CREATE TABLE IF NOT EXISTS cards (
     user_id           TEXT NOT NULL REFERENCES users(user_id),
     card_type         TEXT NOT NULL CHECK (card_type IN ('debit', 'credit', 'virtual')),
     status            TEXT NOT NULL CHECK (status IN ('active', 'lost', 'locked')),
-    daily_limit_cents INTEGER NOT NULL CHECK (daily_limit_cents >= 0)
+    daily_limit_cents INTEGER NOT NULL CHECK (daily_limit_cents >= 0),
+    account_id        TEXT REFERENCES accounts(account_id)
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -106,7 +118,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     amount_cents    INTEGER NOT NULL CHECK (amount_cents > 0),
     period          TEXT NOT NULL CHECK (period IN ('monthly', 'yearly')),
     next_charge_on  TEXT NOT NULL,
-    status          TEXT NOT NULL CHECK (status IN ('active', 'cancelled'))
+    status          TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+    card_id         TEXT REFERENCES cards(card_id)
 );
 
 CREATE TABLE IF NOT EXISTS holds (
@@ -147,15 +160,16 @@ def init_schema(store: Store) -> None:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """v1 / v2 → v3 幂等迁移：给 `transactions` 补可空列。
+    """旧库幂等迁移：按表补可空列（v1/v2 → v3 补流水列；v3 → v4 补关系列）。
 
     `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
     先查 `PRAGMA table_info` 再补，重复执行零副作用。
     """
-    existing = {str(row["name"]) for row in conn.execute("PRAGMA table_info(transactions)")}
-    for column, column_type in _TRANSACTIONS_OPTIONAL_COLUMNS:
-        if column not in existing:
-            conn.execute(f"ALTER TABLE transactions ADD COLUMN {column} {column_type}")
+    for table, columns in _OPTIONAL_COLUMNS.items():
+        existing = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, column_type in columns:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 class Store:

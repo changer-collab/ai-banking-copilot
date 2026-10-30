@@ -145,7 +145,7 @@ def test_s6_sign_requires_strong_verify_and_never_charges_early(
     assert len(added) == 1
     subscription = next(iter(added))
     assert subscription[1:] == (
-        http.deps.user_id, "视频会员", 2500, "monthly", "2026-11-01", "active",
+        http.deps.user_id, "视频会员", 2500, "monthly", "2026-11-01", "active", "card_debit",
     )
     assert after["transactions"] == before["transactions"]
     assert after["accounts"] == before["accounts"]
@@ -170,7 +170,7 @@ def test_s6_cancel_is_yellow_local_only(
     assert http.deps.gateway.subscription("sub_music").payload.status == "active"
     after = http.snapshot()
     assert set(after["subscriptions"]) - set(before["subscriptions"]) == {
-        (*row[:-1], "cancelled")
+        (*row[:-2], "cancelled", row[-1])
         for row in before["subscriptions"] if row[0] == "sub_video"
     }
     assert set(before["subscriptions"]) - set(after["subscriptions"]) == {

@@ -89,7 +89,7 @@ def test_init_schema_migrates_v2_transactions_to_v3_idempotently(tmp_path: Path)
     )[0]["value"]
 
     assert columns["card_tail"] == "TEXT"
-    assert version == "3"
+    assert version == str(SCHEMA_VERSION)
     assert dict(old_row) == {
         "txn_id": "txn_old",
         "booked_at": "2026-09-18T20:30:00",
