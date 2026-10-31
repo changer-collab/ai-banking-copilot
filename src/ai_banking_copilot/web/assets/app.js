@@ -2526,7 +2526,10 @@ function hasUnfinishedTask() {
 function requestStart(start) {
   if (hasUnfinishedTask()) {
     state.pendingStart = start;
-    el("task-guard-title").textContent = hasUnfinishedTask() ? "当前办理尚未结束" : "请先核对当前办理结果";
+    el("task-guard-title").textContent = "当前办理尚未结束";
+    /* 提示条是全局浮层，但对话内容在 #view-chat 里：先切回去，
+       否则用户在记录页/场景页点「新建对话」会以为没反应。 */
+    if (el("app")?.dataset.viewName !== "chat") navigate("chat", {});
     el("task-guard").hidden = false;
     el("btn-continue-task").focus();
     return false;

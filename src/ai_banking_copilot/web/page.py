@@ -191,16 +191,6 @@ _PAGE_HTML = """<!DOCTYPE html>
       </section>
     </div>
 
-    <section id="task-guard" class="task-guard" role="alertdialog" aria-modal="false"
-             aria-labelledby="task-guard-title" hidden>
-      <h2 id="task-guard-title">当前办理尚未结束</h2>
-      <p>您可以继续当前办理，或结束后开始新的办理。结束仅放弃未执行部分，不会冲正已执行的资金操作；如需退回，请先使用当前计划的回退入口。</p>
-      <div class="btn-row">
-        <button class="btn btn--primary" id="btn-continue-task" type="button">继续当前办理</button>
-        <button class="btn" id="btn-end-task" type="button">结束并新建</button>
-      </div>
-    </section>
-
     <div id="actions-parking" hidden>
       <div class="task-actions" id="task-actions">
         <button class="btn btn--primary" id="btn-confirm" type="button" disabled>确认并执行</button>
@@ -499,6 +489,16 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div id="view-me-body"><p class="muted">正在读取账户信息…</p></div>
     </section>
   </main>
+
+  <section id="task-guard" class="task-guard" role="alertdialog" aria-modal="false"
+           aria-labelledby="task-guard-title" hidden>
+    <h2 id="task-guard-title">当前办理尚未结束</h2>
+    <p>您可以继续当前办理，或结束后开始新的办理。结束仅放弃未执行部分，不会冲正已执行的资金操作；如需退回，请先使用当前计划的回退入口。</p>
+    <div class="btn-row">
+      <button class="btn btn--primary" id="btn-continue-task" type="button">继续当前办理</button>
+      <button class="btn" id="btn-end-task" type="button">结束并新建</button>
+    </div>
+  </section>
 
   <aside class="trace rail" id="trace" aria-label="处理详情" aria-hidden="true">
     <div class="trace__head">

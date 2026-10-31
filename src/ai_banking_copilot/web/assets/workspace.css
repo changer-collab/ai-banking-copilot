@@ -339,8 +339,14 @@ body { background: var(--pg-bg); line-height: 1.52; }
 
 /* 未结束办理的拦截条 */
 .task-guard {
-  flex: none;
-  margin: 0 var(--s-6) var(--s-3);
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--s-6) + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(560px, calc(100% - var(--s-6) * 2));
+  box-sizing: border-box;
+  margin: 0;
   padding: var(--s-4);
   border: 1px solid var(--lvl-yellow);
   border-radius: var(--r-card);
@@ -514,7 +520,6 @@ body { background: var(--pg-bg); line-height: 1.52; }
   .trace__head #btn-close-trace { display: inline-flex; }
   .topbar { padding: var(--s-3) var(--s-4); }
   #stage.stream { padding: var(--s-4) var(--s-4) var(--s-2); }
-  .task-guard { margin: 0 var(--s-4) var(--s-3); }
   .composer { padding: var(--s-3) var(--s-4) var(--s-4); }
 }
 
@@ -1921,7 +1926,8 @@ body { background: var(--pg-bg); line-height: 1.52; }
   .composer .object-context,
   .composer-footer { display: none; }
   #stage.stream { padding: var(--s-3) var(--s-4) var(--s-2); gap: var(--s-4); }
-  .task-guard { margin: 0 var(--s-4) var(--s-3); padding: var(--s-3); }
+  /* 窄屏底部有绝对定位的 Tab 栏：提示条抬高到 Tab 栏之上，沿用本文件 64px 的 Tab 高度口径 */
+  .task-guard { padding: var(--s-3); bottom: calc(64px + var(--s-3) + env(safe-area-inset-bottom, 0px)); }
   .chat-message { gap: 9px; }
   .chat-message--user .message-body { max-width: 86%; padding: 10px 14px; font-size: 15px; }
   #conversation-welcome { padding: var(--s-3) 0 var(--s-4); }
