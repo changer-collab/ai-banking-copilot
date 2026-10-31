@@ -2537,6 +2537,13 @@ function requestStart(start) {
   return true;
 }
 
+/* 任务操作条在任务之间复用同一个 DOM 节点，`<details>` 的 open 状态会被浏览器带过去；
+   每次新计划卡生成时强制收起，避免上一笔展开的「更多办理操作」串到下一笔。 */
+function collapseTaskMore() {
+  const more = el("task-actions")?.querySelector("details");
+  if (more) more.open = false;
+}
+
 function beginTask(text, selected = {}) {
   archiveTask();
   reset(true);
@@ -2563,6 +2570,7 @@ function beginTask(text, selected = {}) {
   }
   clearObjectSelections();
   advanceResponse();
+  collapseTaskMore();
   task.appendChild(el("task-actions"));
   setMobileDrawer("scenes", false);
 }
@@ -2692,6 +2700,7 @@ async function applySubmission(data) {
     state.nodeStatus = {};
     (data.card.nodes || []).forEach((node) => { state.nodeStatus[node.node_id] = "pending"; });
     state.phase = "awaiting_confirm";
+    collapseTaskMore();
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
     renderStage();
     const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
