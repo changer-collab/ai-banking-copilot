@@ -340,6 +340,24 @@ python -m pytest -q                   # junit：tests=2025 failures=0 errors=0 s
 
 ---
 
+### 16. 场景页打磨后基线（2026-10-31，`7f0ebdc` 之后 33 个提交）
+
+```
+python -m ruff check .                # All checks passed!（本轮未改源码，见下方「工作树」说明）
+python -m pytest -q --junitxml=runtime/junit-2026-10-31.xml
+                                      # junit：tests=2064 failures=0 errors=0 skipped=0（459.5s）
+```
+
+- 提交：`f966264`（`docs: 整理订阅与渠道实测问题 (#43)`）。跑数时工作树仅有**文档**改动（PPT 大纲 / 视频脚本 / 作品简介 / 官方要求对照表 / 赛题核验表 / 两份手机号口径纠错），**无源码改动**，故本节的测试数字即该提交的代码基线。
+- 较 §15 的 **2025** 增加 **39** 条：10-31 场景页打磨（转账页名册点选与备注、卡片真实卡面与动作分组、订阅三行卡与详情弹层、理财大类聚合与模拟净值、计划卡卡名尾号、未识别输入三分类、每条回复独立处理详情快照）及对应的 `tests/web/`、`tests/scenarios/` 用例。
+- 计数口径：一律以 `--junitxml` 的 `tests=` 为准（命令行再传 `-q` 会抑制汇总行，§14 已记录）。`pytest --collect-only` 同口径为 **2064**，与 junit 一致。
+- 唯一 warning 与既往一致（`StarletteDeprecationWarning`，非阻断）。本轮全量**一次通过**，未出现 §15 那两条高负载抖动。
+- 前端静态壳：`app.js?v=66` / `workspace.css?v=42` / `aib-static-shell-v60`（`web/page.py`、`web/assets/sw.js`、`web/assets/app.js` 注册行、`tests/web/test_pwa.py`、`scripts/check_served_page.py` 五处同步）。
+- 数据库 schema 升到 **v7**：v5 `payees.phone`（11 位逐位精确匹配）→ v6 `cards.last4`（演示卡尾号，只作展示标识）→ v7 `wealth_nav`（模拟净值序列，`/api/wealth/overview` 附 `simulated: true`）。
+- 未随本节复跑：`scripts/check_served_page.py`、`scripts/e2e_check.py`、`scripts/check_design_sync.py`（需起服务；`check_design_sync.py` 的既有漂移见 §14 残留，本轮未处理）。
+
+---
+
 ## 四个数字的口径（2026-10-27 冻结）
 
 > 本节只冻结「怎么算」，**不填数**。实测值在跑数日由 `runtime/benchmark/results.json` 回填，并注明提交号与数据集哈希。
