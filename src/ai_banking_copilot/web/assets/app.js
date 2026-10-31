@@ -4512,6 +4512,10 @@ function onConversationClick(event) {
     openConversation(openButton.dataset.openSession).catch(() => {
       timelineAdd("历史对话读取失败，请稍后重试。", "warn");
     });
+    if (el("app")?.classList.contains("is-scenes-open")) {
+      setMobileDrawer("scenes", false);
+      syncColumnButtons();
+    }
     return;
   }
   const deleteButton = target.closest("[data-delete-session]");

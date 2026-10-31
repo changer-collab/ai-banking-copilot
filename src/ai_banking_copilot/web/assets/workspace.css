@@ -2291,3 +2291,17 @@ body { background: var(--pg-bg); line-height: 1.52; }
   background: var(--blue-050);
   font-size: var(--fs-small);
 }
+/* APP 版式（≤600px）默认由底部 Tab 导航、左栏不出现；只有点顶栏「历史」时才把左栏
+   作为整高抽屉打开（`is-scenes-open` 仅由该按钮切换），再点一次 / Esc 收起。 */
+#btn-history-mobile { display: none; }
+@media (max-width: 600px) {
+  #btn-history-mobile { display: inline-flex; }
+  #app.is-scenes-open > .side {
+    display: flex;
+    position: fixed;
+    z-index: 44;
+    inset: 0 auto 0 0;
+    width: min(320px, 88vw);
+    box-shadow: var(--sh-3);
+  }
+}
