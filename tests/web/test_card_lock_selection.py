@@ -87,7 +87,11 @@ def test_channel_binds_the_credit_card_from_the_utterance(deps) -> None:  # type
     data = response.json()
     assert data["state"] == "awaiting_confirm"
     assert data["card"]["level"] == "YELLOW"
-    assert "card_credit" in data["card"]["lines"][0]
+    # 计划卡显示卡名与尾号，不回显内部 ID（CLR-03）。
+    line = data["card"]["lines"][0]
+    assert "招商银行信用卡" in line
+    assert "尾号 9021" in line
+    assert "card_credit" not in line
 
 
 def test_channel_answers_the_bulk_request_with_the_boundary(deps) -> None:  # type: ignore[no-untyped-def]

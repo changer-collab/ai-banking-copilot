@@ -37,10 +37,11 @@ _PAYEES = (
 )
 
 _CARDS = (
-    # (card_id, user_id, card_type, status, daily_limit_cents, account_id)
-    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000, "acc_savings"),
-    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000, "acc_savings"),
+    # (card_id, user_id, card_type, status, daily_limit_cents, account_id, last4)
+    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000, "acc_savings", "4471"),
+    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000, "acc_savings", "9021"),
 )
+"""`last4` 为**演示卡号后四位**（不是真实卡号），只用于界面显示「尾号 9021」。"""
 
 _WEALTH_PRODUCTS = (
     ("wp_cash", "活期理财篮子", "R1", 0, 180, 100),
@@ -162,8 +163,14 @@ def seed_database(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
-            " account_id) VALUES(?, ?, ?, ?, ?, ?)",
+            " account_id, last4) VALUES(?, ?, ?, ?, ?, ?, ?)",
             _CARDS,
+        )
+        # 既有库（v6 之前的 cards 无 last4 列）由 `init_schema` 补列后为 NULL：
+        # `INSERT OR IGNORE` 不会更新已存在行，故此处幂等回填，且只填空值不覆盖人工改动。
+        conn.executemany(
+            "UPDATE cards SET last4 = ? WHERE card_id = ? AND last4 IS NULL",
+            [(last4, card_id) for card_id, _u, _t, _s, _l, _a, last4 in _CARDS],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO wealth_products(product_id, name, risk_level, term_days,"
@@ -293,8 +300,8 @@ _SECONDARY_PAYEES = (
 )
 
 _SECONDARY_CARDS = (
-    ("card_b_debit", SECONDARY_USER_ID, "debit", "active", 1500000, "acc_b_savings"),
-    ("card_b_credit", SECONDARY_USER_ID, "credit", "active", 3000000, "acc_b_savings"),
+    ("card_b_debit", SECONDARY_USER_ID, "debit", "active", 1500000, "acc_b_savings", "3120"),
+    ("card_b_credit", SECONDARY_USER_ID, "credit", "active", 3000000, "acc_b_savings", "7745"),
 )
 
 _SECONDARY_HOLDINGS = (
@@ -355,8 +362,13 @@ def seed_secondary_user(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
-            " account_id) VALUES(?, ?, ?, ?, ?, ?)",
+            " account_id, last4) VALUES(?, ?, ?, ?, ?, ?, ?)",
             _SECONDARY_CARDS,
+        )
+        # 与主用户同口径：旧库加列后为 NULL 的行幂等回填，只填空值。
+        conn.executemany(
+            "UPDATE cards SET last4 = ? WHERE card_id = ? AND last4 IS NULL",
+            [(last4, card_id) for card_id, _u, _t, _s, _l, _a, last4 in _SECONDARY_CARDS],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO wealth_holdings(product_id, user_id, amount_cents,"

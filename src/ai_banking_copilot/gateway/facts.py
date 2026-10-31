@@ -338,6 +338,7 @@ class FactGateway:
             status=str(row["status"]),  # type: ignore[index]
             daily_limit=Money(int(row["daily_limit_cents"])),  # type: ignore[index]
             account_id=_optional_text(row["account_id"]),  # type: ignore[index]
+            last4=_optional_text(row["last4"]),  # type: ignore[index]
         )
         return _record("cards", payload.card_id, payload)
 

@@ -73,6 +73,8 @@ class Card:
     daily_limit: Money
     account_id: str | None = None
     """绑定的结算账户（可空 = 关系未知；不得据此推断"无账户"）。"""
+    last4: str | None = None
+    """演示卡号后四位：**不是真实卡号**，仅用于界面显示「尾号 9021」；旧库为 NULL。"""
 
 
 @dataclass(frozen=True)

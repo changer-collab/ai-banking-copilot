@@ -11,6 +11,7 @@ from ai_banking_copilot.contracts.plan import (
     cfhash,
 )
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.plan_card import (
     PROMPT_STRONG_VERIFY,
     PROMPT_USER_CONFIRM,
@@ -21,6 +22,7 @@ from ai_banking_copilot.web.plan_card import (
     polish_plan_card,
     render_plan_card,
 )
+from ai_banking_copilot.web.session import Session
 
 
 def _plan() -> Plan:
@@ -275,4 +277,15 @@ def test_balance_trace_does_not_touch_polish_lines(gateway: FactGateway) -> None
     card = render_plan_card(plan, _decision(Level.RED), gateway)
     assert len(card.lines) == len(plan.nodes)
     assert all("可用余额" not in line for line in card.lines)
+
+
+def test_lost_card_plan_names_the_real_card_not_the_internal_id(deps: AppDeps) -> None:
+    session = Session(deps)
+    view = session.submit("把我的卡挂失")
+    if view.card is None:  # 名下有 2 张卡 ⇒ 先出澄清，指定一张再办
+        view = session.clarify({"card": "card_credit"})
+    assert view.card is not None
+    text = "\n".join(view.card.lines)
+    assert "card_credit" not in text
+    assert "尾号 9021" in text
 

@@ -62,6 +62,13 @@ _ACTION_LABELS: dict[str, str] = {
     "merchant.order": "向商户下单（从冻结预算结算）",
 }
 
+_CARD_TYPE_LABELS = {
+    "debit": "招商银行借记卡",
+    "credit": "招商银行信用卡",
+    "virtual": "招商银行虚拟卡",
+}
+"""演示卡名：真实银行名称只用于展示，界面上与「演示环境」标注同时出现。"""
+
 
 @dataclass(frozen=True)
 class PlanTriple:
@@ -375,7 +382,11 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
         return subscription.merchant
     card_id = _str_param(node, "card_id")
     if card_id is not None:
-        return f"卡片 {card_id}"
+        try:
+            card = gateway.card(card_id).payload
+        except GatewayNotFoundError:
+            return f"卡片 {card_id}"
+        return f"{_CARD_TYPE_LABELS.get(card.card_type, '银行卡')} · 尾号 {card.last4 or '未知'}"
     hold_id = _str_param(node, "hold_id")
     if hold_id is not None:
         return f"冻结记录 {hold_id}"

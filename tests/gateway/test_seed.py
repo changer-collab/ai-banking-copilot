@@ -6,7 +6,7 @@ from ai_banking_copilot.gateway.seed import (
     DEMO_USER_ID,
     seed_database,
 )
-from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.scenarios.bills import ytd_end_month
 from ai_banking_copilot.scenarios.scheduling import REFERENCE_DATE
 
@@ -136,4 +136,16 @@ def test_seed_subscription_charges_have_explicit_card_tail(seeded_db: Path) -> N
     assert all(row["booked_at"] is not None for row in video_charges)
     assert {row["card_tail"] for row in video_charges} == {"4821"}
     assert invalid_tails == []
+    store.close()
+
+
+def test_cards_carry_demo_last_four(seeded_db: Path) -> None:
+    from ai_banking_copilot.gateway.facts import FactGateway
+
+    store = Store(seeded_db, StoreMode.READ_ONLY)
+    cards = FactGateway(store).cards_of(DEMO_USER_ID)
+    tails = {record.payload.card_id: record.payload.last4 for record in cards}
+    assert tails["card_credit"] == "9021"
+    assert tails["card_debit"] == "4471"
+    assert all(value and len(value) == 4 and value.isdigit() for value in tails.values())
     store.close()
