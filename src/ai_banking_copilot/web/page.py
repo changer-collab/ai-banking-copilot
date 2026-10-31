@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=45" />
+<link rel="stylesheet" href="/assets/workspace.css?v=46" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -55,7 +55,6 @@ _PAGE_HTML = """<!DOCTYPE html>
         </div>
         <p class="side__label">工具</p>
         <button class="appnav__item" type="button" data-nav="records">记录与明细</button>
-        <button class="appnav__item" type="button" data-nav="health">渠道健康</button>
       </nav>
       <p class="side__label">历史对话</p>
       <div class="convs" id="conversation-list"><p class="muted convs__empty">开始办理后，对话会保存在这里。</p></div>
@@ -175,7 +174,6 @@ _PAGE_HTML = """<!DOCTYPE html>
         <p class="panel__title">工具</p>
         <div class="btn-row">
           <button class="btn" type="button" data-nav="records">记录与明细</button>
-          <button class="btn" type="button" data-nav="health">渠道健康</button>
           <button class="btn" type="button" data-nav="me">我的</button>
         </div>
       </section>
@@ -579,7 +577,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="sub-detail-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=69"></script>
+<script src="/assets/app.js?v=70"></script>
 </body>
 </html>
 """

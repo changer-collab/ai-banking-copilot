@@ -68,13 +68,15 @@ def test_subscription_records_and_health_have_human_states(deps: AppDeps) -> Non
     assert 'state.optionsStatus = "ready"' in script
 
 
-def test_home_routes_reach_subscriptions_records_and_health_within_three_clicks(
+def test_home_routes_reach_subscriptions_and_records_within_three_clicks(
     deps: AppDeps,
 ) -> None:
     html = TestClient(create_app(deps)).get("/").text
     home = html.split('id="view-home"', 1)[1].split('id="view-chat"', 1)[0]
     assert 'data-nav="scene" data-scene="subscriptions"' in home
     assert 'data-nav="records"' in home
-    assert 'data-nav="health"' in home
+    # 渠道并入「我的」：左栏与首页工具区不再有入口，/health 视图（书签与演示脚本）保留
+    assert 'data-nav="health"' not in html
+    assert 'id="view-health"' in html
     assert 'data-record-tab="charges"' in html
     assert 'data-nav="records" data-record-tab="charges"' in html

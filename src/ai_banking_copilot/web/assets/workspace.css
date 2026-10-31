@@ -1058,6 +1058,24 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .profile-card--fold > summary::after { content: "展开"; color: var(--ink-3); font-size: var(--fs-small); font-weight: 400; }
 .profile-card--fold[open] > summary::after { content: "收起"; }
 .profile-card--fold > * + * { margin-top: var(--s-2); }
+/* 卡片内的标题行：标题在左、动作按钮右对齐；说明文字紧跟标题，行距收紧 */
+.profile-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.profile-card__head h3 { min-width: 0; }
+.profile-card__head > .btn { flex: none; }
+.profile-card__note { margin: var(--s-1) 0 0; color: var(--ink-3); font-size: var(--fs-small); }
+.profile-card__body { display: grid; gap: var(--s-2); min-width: 0; }
+/* 渠道状态（并入「我的」）：两行键值，不再单独占一页 */
+.channel-status { display: grid; gap: var(--s-1); min-width: 0; }
+.channel-status__row { display: flex; align-items: baseline; gap: var(--s-2); margin: 0; }
+.channel-status__name { flex: none; min-width: 40px; color: var(--ink-3); font-size: var(--fs-small); }
+.channel-status__state { color: var(--ink-2); font-weight: 600; overflow-wrap: anywhere; }
+.channel-status__note { margin: 0; color: var(--ink-3); font-size: var(--fs-small); }
 .profile-entry { max-width: 168px; }
 .profile-entry__name { display: inline-block; max-width: 132px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: bottom; }
 

@@ -3847,7 +3847,34 @@ function loginSummary(record) {
   return `${momentLabel(record.issued_at)} · ${clientLabel(record.client_ip)} · ${deviceLabel(record.user_agent)}`;
 }
 
-function renderProfile(me, audit) {
+/* 「我的」里的渠道状态卡：只列 Web / 飞书两行，数据全部来自 /api/channels/health。
+   configured=false 就写「未配置」，不把 stub / replay 说成可用；读不到时如实报错。 */
+const CHANNEL_CARD_LABELS = { web: "Web", feishu: "飞书" };
+
+function channelStatusLabel(name, item, stats) {
+  if (item.configured === false) {
+    return item.mode === "replay" || stats.replay_mode ? "未配置 · 演示模式" : "未配置";
+  }
+  if (name === "web") return "正常";
+  return channelStateLabel(item, stats);
+}
+
+function channelStatusHtml(data) {
+  if (!data) {
+    return '<p class="channel-status__note">渠道状态读取失败，点击刷新重试</p>';
+  }
+  const channels = data.channels || {};
+  const health = data.health || {};
+  const rows = CHANNEL_ORDER.map((name) => {
+    const item = channels[name] || {};
+    const state = channelStatusLabel(name, item, health[name] || {});
+    return `<p class="channel-status__row"><span class="channel-status__name">${esc(CHANNEL_CARD_LABELS[name] || name)}</span>` +
+      `<span class="channel-status__state">${esc(state)}</span></p>`;
+  });
+  return rows.join("");
+}
+
+function renderProfile(me, audit, channelHealth) {
   const targets = [el("profile-body"), el("view-me-body")].filter(Boolean);
   if (!targets.length) return;
   const user = me.user || {};
@@ -3873,17 +3900,20 @@ function renderProfile(me, audit) {
       (digest ? `<details><summary>同摘要关联</summary><p class="mono audit-digest">${esc(digest)}</p></details>` : "") + "</li>";
   }).join("");
   const feishu = me.feishu || null;
-  const feishuHtml = !feishu
-    ? '<p class="muted">渠道信息读取失败，请稍后重试。</p>'
-    : !feishu.configured
-      ? '<p class="muted">飞书渠道未接入：服务器还没有配置飞书应用凭据，配好后这里会出现「连接飞书」。</p>'
-      : feishu.linked
-        ? `<p class="muted">已连接：可以直接在飞书里对「AI Banking」机器人说「查余额」「给李娜转五百」。</p>
-           <div class="btn-row"><button class="btn btn--ghost" id="btn-feishu-unlink" type="button">解除绑定</button></div>
-           <div id="feishu-link-result"></div>`
-        : `<p class="muted">未连接：点「连接飞书」生成 6 位绑定码，再到飞书里把这 6 位数字发给机器人。</p>
-           <div class="btn-row"><button class="btn" id="btn-feishu-link" type="button">连接飞书</button></div>
-           <div id="feishu-link-result"></div>`;
+  /* 绑定 / 解绑按钮进标题行右对齐；正文只放状态说明与绑定码结果 */
+  let feishuAction = "";
+  let feishuBody = "";
+  if (!feishu) {
+    feishuBody = '<p class="muted">渠道信息读取失败，请稍后重试。</p>';
+  } else if (!feishu.configured) {
+    feishuBody = '<p class="muted">飞书渠道未接入：服务器还没有配置飞书应用凭据，配好后这里会出现「连接飞书」。</p>';
+  } else if (feishu.linked) {
+    feishuAction = '<button class="btn btn--sm btn--ghost" id="btn-feishu-unlink" type="button">解除绑定</button>';
+    feishuBody = '<p class="muted">已连接：可以直接在飞书里对「AI Banking」机器人说「查余额」「给李娜转五百」。</p>';
+  } else {
+    feishuAction = '<button class="btn btn--sm" id="btn-feishu-link" type="button">连接飞书</button>';
+    feishuBody = '<p class="muted">未连接：点「连接飞书」生成 6 位绑定码，再到飞书里把这 6 位数字发给机器人。</p>';
+  }
   const html = `
     <section class="profile-head">
       <span class="profile-avatar" aria-hidden="true">${esc(initial)}</span>
@@ -3918,8 +3948,19 @@ function renderProfile(me, audit) {
       </section>
     </div>
     <section class="profile-card">
-      <h3>飞书渠道</h3>
-      ${feishuHtml}
+      <div class="profile-card__head">
+        <h3>渠道状态</h3>
+        <button class="btn btn--sm" type="button" data-channel-refresh>刷新</button>
+      </div>
+      <div class="channel-status" data-channel-status>${channelStatusHtml(channelHealth)}</div>
+    </section>
+    <section class="profile-card">
+      <div class="profile-card__head">
+        <h3>飞书渠道</h3>
+        ${feishuAction}
+      </div>
+      <p class="profile-card__note">绑定后可在飞书里直接办理；未绑定只影响飞书入口，网页端不受影响。</p>
+      <div class="profile-card__body" id="feishu-link-result">${feishuBody}</div>
     </section>
     <section class="profile-card">
       <h3>登录安全</h3>
@@ -3960,18 +4001,41 @@ function renderProfile(me, audit) {
 async function loadProfile(target, loadingText) {
   if (target) target.innerHTML = `<p class="muted">${loadingText}</p>`;
   try {
-    const [me, audit] = await Promise.all([
+    const [me, audit, channelHealth] = await Promise.all([
       apiFetch("GET", "/api/me"),
       apiFetch("GET", "/api/audit?limit=8"),
+      /* 渠道状态失败不拖垮整页：卡片里如实显示「读取失败」，不编造状态 */
+      apiFetch("GET", "/api/channels/health").catch(() => ({ ok: false })),
     ]);
     if (!me.ok) {
       if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
       return;
     }
-    renderProfile(me.data || {}, audit.ok ? audit.data || {} : { available: false });
+    renderProfile(
+      me.data || {},
+      audit.ok ? audit.data || {} : { available: false },
+      channelHealth.ok ? channelHealth.data || {} : null,
+    );
   } catch (_) {
     if (target) target.innerHTML = '<p class="muted">账户信息读取失败，请稍后重试。</p>';
   }
+}
+
+/* 「渠道状态」卡的刷新：只重拉渠道健康并重绘卡片，不动身份 / 登录等其它卡片 */
+async function refreshProfileChannels() {
+  const boxes = Array.from(document.querySelectorAll("[data-channel-status]"));
+  const buttons = Array.from(document.querySelectorAll("[data-channel-refresh]"));
+  boxes.forEach((box) => { box.innerHTML = '<p class="channel-status__note">正在读取渠道状态…</p>'; });
+  buttons.forEach((button) => { button.disabled = true; });
+  let data = null;
+  try {
+    const result = await apiFetch("GET", "/api/channels/health");
+    if (result.ok) data = result.data || {};
+  } catch (_) {
+    /* 读取失败走下面的「读取失败」文案 */
+  }
+  boxes.forEach((box) => { box.innerHTML = channelStatusHtml(data); });
+  buttons.forEach((button) => { button.disabled = false; });
 }
 
 async function openProfile() {
@@ -4694,6 +4758,10 @@ async function onFeishuAction(action, button) {
 async function onProfileClick(event) {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  if (target.closest("[data-channel-refresh]")) {
+    await refreshProfileChannels();
+    return;
+  }
   if (target.id === "btn-feishu-link") {
     await onFeishuAction("link", target);
     return;
@@ -5585,7 +5653,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=63", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=64", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
