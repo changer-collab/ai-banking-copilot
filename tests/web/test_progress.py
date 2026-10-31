@@ -82,3 +82,19 @@ def test_clear_and_rewrite_are_independent() -> None:
     registry.start("u_demo", "s1", "r1")
     registry.start("u_demo", "s1", "r1")
     assert registry.get("u_demo", "s1", "r1") is not None
+
+
+def test_stage_durations_come_from_real_boundaries() -> None:
+    moment = [_T0]
+    registry = ProgressRegistry(clock=lambda: moment[0])
+    registry.start("u_demo", "s1", "r1")
+    moment[0] = _T0 + timedelta(milliseconds=50)
+    registry.advance("u_demo", "s1", "r1", "plan")
+    moment[0] = _T0 + timedelta(milliseconds=80)
+    registry.finish("u_demo", "s1", "r1")
+
+    payload = registry.get("u_demo", "s1", "r1").to_dict()
+    durations = {item["key"]: item["duration_ms"] for item in payload["stages"]}
+    assert durations["guard"] == 50
+    assert durations["understand"] is None
+    assert durations["plan"] == 30

@@ -153,8 +153,8 @@ function newSessionId() {
 let SESSION_ID = newSessionId();
 
 /* 阶段步进器：服务端在 guard / understand / plan / review 四个真实边界推进，
-   `finally` 里补 done。前端 500ms 轮询 + 400ms 最短展示，答案生成后收起。 */
-const PROGRESS_POLL_MS = 500;
+   `finally` 里补 done。前端 250ms 轮询 + 400ms 最短展示，答案生成后收起。 */
+const PROGRESS_POLL_MS = 250;
 const PROGRESS_MIN_MS = 400;
 
 /* 生活事件记录状态（与服务端 LifeEventStore 的 status 取值同口径） */
@@ -298,7 +298,8 @@ function renderProgressSteps(payload) {
   list.innerHTML = stages
     .map((stage) => {
       const phaseName = stage.done ? "done" : stage.active ? "active" : "pending";
-      return `<li class="run-chain__step run-chain__step--${phaseName}">${esc(stage.label)}</li>`;
+      const cost = Number.isFinite(stage.duration_ms) ? ` · ${stage.duration_ms}ms` : "";
+      return `<li class="run-chain__step run-chain__step--${phaseName}">${esc(stage.label)}${esc(cost)}</li>`;
     })
     .join("");
   const doneCount = stages.filter((stage) => stage.done).length;

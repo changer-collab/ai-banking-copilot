@@ -1,7 +1,7 @@
 """问答阶段进度：**旁路观测**，绝不参与状态机。
 
 用户在答案生成前需要看到「现在走到哪一步」。做法是进程内一张小表：
-`submit` 在 4 个真实边界回调阶段，接口层写入；前端 500ms 轮询，终态即停。
+`submit` 在 4 个真实边界回调阶段，接口层写入；前端 250ms 轮询，终态即停。
 
 纪律：
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 STAGES = ("guard", "understand", "plan", "review", "done")
@@ -35,28 +35,47 @@ PROGRESS_TTL_SECONDS = 120
 
 @dataclass(frozen=True)
 class ProgressState:
-    """一次问答的当前阶段。"""
+    """一次问答的当前阶段，以及每阶段**首次进入**的服务端时间。"""
 
     stage: str
     finished: bool
     updated_at: str
+    stage_timestamps: dict[str, str] = field(default_factory=dict)
+    finished_at: str = ""
 
     def to_dict(self) -> dict[str, object]:
         index = STAGES.index(self.stage)
+        marks = dict(self.stage_timestamps)
+        end = self.finished_at or self.updated_at
+        stages: list[dict[str, object]] = []
+        for position, key in enumerate(STAGES):
+            started = marks.get(key)
+            following = next(
+                (marks[other] for other in STAGES[position + 1:] if other in marks), None
+            )
+            duration = _duration_ms(started, following or end) if started else None
+            stages.append({
+                "key": key,
+                "label": STAGE_LABELS[key],
+                "done": position < index or self.finished,
+                "active": position == index and not self.finished,
+                "duration_ms": duration,
+            })
         return {
             "stage": self.stage,
-            "stages": [
-                {
-                    "key": key,
-                    "label": STAGE_LABELS[key],
-                    "done": position < index or self.finished,
-                    "active": position == index and not self.finished,
-                }
-                for position, key in enumerate(STAGES)
-            ],
+            "stages": stages,
             "finished": self.finished,
             "updated_at": self.updated_at,
         }
+
+
+def _duration_ms(started: str, ended: str) -> int:
+    """两个 ISO 时间串之间的毫秒差；解析失败返回 0（进度只是过程反馈，不抛错）。"""
+    try:
+        delta = datetime.fromisoformat(ended) - datetime.fromisoformat(started)
+    except ValueError:
+        return 0
+    return max(0, int(delta.total_seconds() * 1000))
 
 
 class ProgressRegistry:
@@ -106,10 +125,20 @@ class ProgressRegistry:
         self, user_id: str, session_id: str, request_id: str, stage: str, *, finished: bool
     ) -> None:
         moment = self._clock()
-        state = ProgressState(stage=stage, finished=finished, updated_at=moment.isoformat())
+        key = (user_id, session_id, request_id)
         with self._lock:
+            previous = self._states.get(key)
+            marks = dict(previous[1].stage_timestamps) if previous is not None else {}
+            marks.setdefault(stage, moment.isoformat())
+            state = ProgressState(
+                stage=stage,
+                finished=finished,
+                updated_at=moment.isoformat(),
+                stage_timestamps=marks,
+                finished_at=moment.isoformat() if finished else "",
+            )
             self._purge(moment)
-            self._states[(user_id, session_id, request_id)] = (moment + self._ttl, state)
+            self._states[key] = (moment + self._ttl, state)
 
     def _purge(self, moment: datetime) -> None:
         for key, (expires_at, _) in tuple(self._states.items()):
