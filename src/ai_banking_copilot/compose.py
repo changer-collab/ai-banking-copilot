@@ -33,7 +33,7 @@ from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
 from ai_banking_copilot.planning.analysis_codegen import AnalysisTask, generate_analysis_code
 from ai_banking_copilot.planning.call_observation import CallObserver
 from ai_banking_copilot.planning.llm import (
-    FallbackIntentModel,
+    ArbitratedIntentModel,
     IntentModel,
     LlmIntentModel,
     TemplateIntentModel,
@@ -101,7 +101,7 @@ def build_intent_model(
     env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
     observer: CallObserver | None = None,
 ) -> IntentModel:
-    """装配意图通道：默认"真模型优先 + 失败降级模板"；`AIB_DISABLE_LLM` 真值时只用模板。
+    """装配意图通道：默认"规则 + 真模型双通道仲裁"；`AIB_DISABLE_LLM` 真值时只用模板。
 
     端点与模型可经 `AI_BASE_URL`（或 `OPENAI_API_BASE_URL`）/ `AI_MODEL` 覆盖，
     未提供时沿用 `LlmIntentModel` 的默认值。
@@ -109,8 +109,8 @@ def build_intent_model(
     settings = config if config is not None else ModelConfig.from_env(env)
     if settings.disable_llm:
         return TemplateIntentModel()
-    return FallbackIntentModel(LlmIntentModel(
-        config=settings, observer=observer, prompt_version="planner-v1",
+    return ArbitratedIntentModel(LlmIntentModel(
+        config=settings, observer=observer, prompt_version="planner-v2",
     ))
 
 

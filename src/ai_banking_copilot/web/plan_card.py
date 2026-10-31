@@ -349,6 +349,7 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
             return (
                 f"订阅：{subscriptions.describe_upcoming_charges(upcoming)}"
                 f"；{subscriptions.describe_detected_charges(detected)}"
+                f"；{subscriptions.SUBSCRIPTION_CANCEL_BOUNDARY_SHORT}"
             )
     if node.action == "account.transactions":
         account_id = _str_param(node, "account_id")

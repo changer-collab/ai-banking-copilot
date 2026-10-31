@@ -50,24 +50,12 @@ def test_channel_health_page_has_a_stable_product_table(deps: AppDeps) -> None:
     assert script_path is not None
     assert stylesheet_path is not None
     script = client.get(script_path.group(1)).text
-    stylesheet = client.get(stylesheet_path.group(1)).text
 
-    headers = ("渠道", "状态", "最后事件", "成功", "失败", "限流", "回放模式")
-    positions = [html.index(f"<th>{header}</th>") for header in headers]
-    assert positions == sorted(positions)
-    assert 'id="channel-health-body"' in html
-    assert 'class="channel-health-table-wrap"' in html
-
+    # 渠道健康页已下线：不再有独立视图与表格，只在「我的」保留紧凑渠道状态卡
+    assert 'id="view-health"' not in html
+    assert "channel-health-table" not in html
     assert 'const CHANNEL_ORDER = ["web", "feishu"]' in script
-    assert "data.health" in script
-    assert "未接入" in script
-    assert "暂无事件" in script
-    assert "渠道状态暂不可用，请稍后重试。" in script
-
-    assert ".channel-health-table" in stylesheet
-    assert "table-layout: fixed" in stylesheet
-    assert ".channel-health-table-wrap" in stylesheet
-    assert "overflow-x: auto" in stylesheet
+    assert "未绑定 · replay" in script
 
 
 def test_http_end_to_end_keeps_the_audit_chain_intact(deps: AppDeps) -> None:

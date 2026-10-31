@@ -21,7 +21,7 @@ from datetime import date
 from typing import Protocol
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
-from ai_banking_copilot.gateway.models import Card, Payee
+from ai_banking_copilot.gateway.models import Card, Money, Payee
 from ai_banking_copilot.gateway.resolvers import (
     parse_amount,
     parse_temporal,
@@ -177,6 +177,19 @@ class _ProductView(Protocol):
     def risk_level(self) -> str: ...
 
 
+class _HoldView(Protocol):
+    """解冻候选的入参形状：网关 `Hold` 满足（只读候选，不在此层做裁决）。"""
+
+    @property
+    def hold_id(self) -> str: ...
+
+    @property
+    def amount(self) -> Money: ...
+
+    @property
+    def reason(self) -> str: ...
+
+
 @dataclass(frozen=True)
 class SlotInputs:
     """补全输入：文本 + 受信任上下文（日期 / 名册 / 已选对象 / 产品目录）。"""
@@ -193,10 +206,18 @@ class SlotInputs:
     """受信任产品目录（`gateway.wealth_products()`）；只用于**原文匹配**，不新增实体。"""
     default_product: str | None = None
     """兜底产品（仅申购）：原文没点名 / 没给等级时才用，且必须记 `default product:<id>`。"""
+    holds: Sequence[_HoldView] = ()
+    """本人当前有效冻结（只读）：用于把「取消冻结」从自由文本变成可选列表。"""
 
 
 _BARE_AMOUNT_ACTIONS = frozenset(
-    {"transfer.create", "transfer.schedule", "transfer.book", "wealth.subscribe", "wealth.redeem"}
+    {
+        "transfer.create", "transfer.schedule", "transfer.book",
+        "wealth.subscribe", "wealth.redeem",
+        # 冻结是「先冻 3000」这类口语的高频写法；裸数字仍受日期 / 序数 / 5 位以上限制，
+        # 不会被当成手机号或日期。方向风险由「冻结」这个动作本身决定，不改写金额符号。
+        "funds.freeze",
+    }
 )
 """允许**无歧义裸数字**当金额的动作：转账族（「转给李娜 500」）与理财申购 / 赎回
 （「赎回 500」）。
@@ -304,6 +325,18 @@ def _resolve_slot(
         raw = inputs.selected[slot]
         if _is_trusted(raw):
             notes.append(f"selected:{slot}")
+            if slot in {"payee", "payer"}:
+                chosen, question, payee_notes = _resolve_selected_payee(slot, raw, inputs)
+                notes.extend(payee_notes)
+                if chosen is not None:
+                    return chosen, None, tuple(notes)
+                return None, question, tuple(notes)
+            if slot == "hold":
+                chosen, question, hold_notes = _resolve_selected_hold(raw, inputs)
+                notes.extend(hold_notes)
+                if chosen is not None:
+                    return chosen, None, tuple(notes)
+                return None, question, tuple(notes)
             value = _normalize_selected(
                 slot,
                 raw.raw if isinstance(raw, Value) else raw,
@@ -317,6 +350,8 @@ def _resolve_slot(
         notes.append(f"rejected unverified:{slot}")
     if slot in {"payee", "payer"}:
         return _resolve_payee(inputs, notes)
+    if slot == "hold":
+        return _resolve_hold(inputs, notes)
     if slot in {"amount", "amount_cents"}:
         return _resolve_amount(inputs, notes, slot, bare_amount=bare_amount)
     if slot == "product":
@@ -406,6 +441,66 @@ def _resolve_payee(
     chosen = resolution.candidates[0]
     notes.append(f"resolved payee:{chosen.payee_id}")
     return chosen.payee_id, None, tuple(notes)
+
+
+def _resolve_selected_payee(
+    slot: str, raw: object, inputs: SlotInputs,
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """澄清表单里的收款人：**先认 payee_id，再按名册解析人名**。
+
+    之前把自由文本直接当 `payee_id` 透传，导致「李娜」被判成「所选对象不存在」；
+    名册里没有（例如「妈妈」）时不再直接拒绝，而是列出本人名册让用户点选。
+    """
+    text = raw.raw if isinstance(raw, Value) else raw
+    text = str(text).strip()
+    notes: list[str] = []
+    if any(payee.payee_id == text for payee in inputs.payees):
+        notes.append(f"selected payee id:{text}")
+        return text, None, tuple(notes)
+    resolution = resolve_payees(inputs.payees, text)
+    if resolution.needs_clarification:
+        labels = tuple(_payee_label(item) for item in resolution.candidates)
+        notes.append("clarify selected payee")
+        return None, SlotQuestion(slot, _PROMPTS[slot], labels), tuple(notes)
+    if resolution.candidates:
+        chosen = resolution.candidates[0]
+        notes.append(f"resolved selected payee:{chosen.payee_id}")
+        return chosen.payee_id, None, tuple(notes)
+    labels = tuple(_payee_label(payee) for payee in inputs.payees)
+    notes.append("unmatched selected payee")
+    prompt = f"名册里没有「{text}」，请选择要转给谁。"
+    return None, SlotQuestion(slot, prompt, labels), tuple(notes)
+
+
+def _hold_label(hold: _HoldView) -> str:
+    return f"冻结 {hold.amount.yuan} 元 · {hold.reason}"
+
+
+def _resolve_hold(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """解冻对象：只从本人当前有效冻结里选，不从自由文本猜 hold id。"""
+    if not inputs.holds:
+        notes.append("no active hold")
+        return None, SlotQuestion("hold", "当前没有可解冻的冻结记录。"), tuple(notes)
+    labels = tuple(_hold_label(item) for item in inputs.holds)
+    notes.append(f"clarify hold:{len(labels)}")
+    return None, SlotQuestion("hold", _PROMPTS["hold"], labels), tuple(notes)
+
+
+def _resolve_selected_hold(
+    raw: object, inputs: SlotInputs,
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    text = raw.raw if isinstance(raw, Value) else raw
+    text = str(text).strip()
+    notes: list[str] = []
+    for hold in inputs.holds:
+        if hold.hold_id == text:
+            notes.append(f"selected hold:{text}")
+            return text, None, tuple(notes)
+    labels = tuple(_hold_label(item) for item in inputs.holds)
+    notes.append("unmatched selected hold")
+    return None, SlotQuestion("hold", _PROMPTS["hold"], labels), tuple(notes)
 
 
 _CARD_KIND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (

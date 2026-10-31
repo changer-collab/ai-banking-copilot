@@ -883,6 +883,8 @@ def create_app(deps: AppDeps) -> FastAPI:
                 # 具体事件：优先用该类型的「常见事件」名，否则压掉金额后的原话
                 event_title=_life_event_title(utterance, fallback=event_name),
                 amount_cents=amount if amount is not None else _utterance_amount_cents(utterance),
+                steps=_life_plan_steps(view.plan),
+                due_on=_life_plan_due_on(view.plan),
             )
         except Exception:
             LOGGER.warning("生活事件写入失败：%s / %s", user_id, session_id, exc_info=True)
@@ -1734,6 +1736,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             "feishu": {
                 "configured": feishu.configured,
                 "mode": feishu.config.mode,
+                "replay": feishu.replay_mode,
                 "linked": _feishu_linked(user_id),
             },
             "payees": len(deps.gateway.payees_of(user_id)),
@@ -2031,6 +2034,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             channels[CHANNEL_FEISHU] = {
                 "configured": feishu.configured,
                 "mode": feishu.config.mode,
+                "linked": _feishu_linked(user_id),
                 "reason": (
                     "replay_mode" if feishu.replay_mode
                     else ("" if feishu.configured else "not_configured")
@@ -2539,6 +2543,10 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
                     {"label": choice.label, "value": choice.value}
                     for choice in ask.candidates
                 ],
+                "options": [
+                    {"label": choice.label, "value": choice.value}
+                    for choice in ask.options
+                ],
             }
             for ask in view.clarifications
         ],
@@ -2754,6 +2762,48 @@ def _user_payload(user: AuthUser) -> dict[str, object]:
 def _empty_progress() -> dict[str, object]:
     """没有进行中的请求时的进度外形：前端按同一结构渲染，不特判缺字段。"""
     return {"stage": "", "stages": [], "finished": True, "updated_at": ""}
+
+
+def _life_plan_steps(plan: object) -> tuple[dict[str, object], ...]:
+    """计划步骤的只读摘要：动作中文名 + 金额 + 日期，供生活页记录抽屉回放。"""
+    nodes = getattr(plan, "nodes", ())
+    labels = {
+        "funds.freeze": "冻结预算",
+        "funds.release": "解冻剩余",
+        "merchant.order": "商户下单",
+        "transfer.create": "转账",
+        "transfer.schedule": "定期转出",
+        "wealth.redeem": "赎回",
+        "card.set_limit": "调整限额",
+        "card.lock": "锁卡",
+        "bills.yearly": "年度账单",
+        "transfer.request_collection": "发起分摊",
+    }
+    steps: list[dict[str, object]] = []
+    for index, node in enumerate(nodes, start=1):
+        params = node.params if isinstance(node.params, dict) else {}
+        date_value = (
+            params.get("order_on") or params.get("booked_on") or params.get("executed_on")
+        )
+        steps.append(
+            {
+                "index": index,
+                "action": node.action,
+                "label": labels.get(node.action, node.action),
+                "amount_cents": params.get("amount_cents"),
+                "date": str(date_value) if date_value is not None else None,
+            }
+        )
+    return tuple(steps)
+
+
+def _life_plan_due_on(plan: object) -> str | None:
+    for node in getattr(plan, "nodes", ()):
+        params = node.params if isinstance(node.params, dict) else {}
+        value = params.get("order_on") or params.get("booked_on")
+        if value is not None:
+            return str(value)
+    return None
 
 
 def _life_event_name(event_id: str) -> str:

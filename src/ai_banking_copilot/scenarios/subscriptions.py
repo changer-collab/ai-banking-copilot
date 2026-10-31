@@ -229,6 +229,11 @@ SUBSCRIPTION_CANCEL_BOUNDARY = (
 )
 """能力边界，必须随取消结果一起展示。"""
 
+SUBSCRIPTION_CANCEL_BOUNDARY_SHORT = (
+    "本地取消只改本应用状态，商户侧是否停扣以商户回执为准。"
+)
+"""计划卡对象行用的短口径（长口径见 `SUBSCRIPTION_CANCEL_BOUNDARY`）。"""
+
 
 
 def cancel_state_from_receipt(*, status: str, external_status: str) -> str:
@@ -261,6 +266,7 @@ class _Outflow:
     channel: str = ""
     booked_at: str | None = None
     card_tail: str | None = None
+    account_id: str | None = None
 
     @property
     def merchant_key(self) -> str:
@@ -285,6 +291,8 @@ class SubscriptionEvidence:
     channel: str = ""
     booked_at: str | None = None
     card_tail: str | None = None
+    account_id: str | None = None
+    """这笔扣费从哪个账户支出（前端按账户事实映射名称与当前余额，不在前端推导）。"""
 
 
 @dataclass(frozen=True)
@@ -310,6 +318,10 @@ class SubscriptionInsight:
     cycle: str
     cycle_label: str
     last_charged_on: date | None
+    current_period_label: str
+    """本期口径：月度 `YYYY-MM`、年度 `YYYY 年`；周期未知时为空串。"""
+    charged_this_period: bool | None
+    """本期是否已扣款；没有历史流水时为 `None`（未知，不推断）。"""
     next_charge_on: date | None
     next_charge_is_prediction: bool
     next_charge_basis: str
@@ -435,6 +447,8 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                 "last_charged_on": (
                     item.last_charged_on.isoformat() if item.last_charged_on else None
                 ),
+                "current_period_label": item.current_period_label,
+                "charged_this_period": item.charged_this_period,
                 "next_charge_on": (
                     item.next_charge_on.isoformat() if item.next_charge_on else None
                 ),
@@ -460,6 +474,7 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                         "amount_cents": evidence.amount_cents,
                         "merchant_label": evidence.merchant_label,
                         "channel": evidence.channel,
+                        "account_id": evidence.account_id,
                     }
                     for evidence in item.evidence
                 ],
@@ -472,6 +487,24 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
         ],
         "notes": list(report.notes),
     }
+
+
+def _current_period(
+    cycle: str, as_of: date, last_charged_on: date | None
+) -> tuple[str, bool | None]:
+    """本期是否已扣：月度按自然月、年度按自然年；无历史扣费时如实返回未知。"""
+    if cycle == CYCLE_MONTHLY:
+        label = as_of.strftime("%Y-%m")
+        charged = (
+            None if last_charged_on is None
+            else last_charged_on.strftime("%Y-%m") == label
+        )
+        return label, charged
+    if cycle == CYCLE_YEARLY:
+        label = f"{as_of.year} 年"
+        charged = None if last_charged_on is None else last_charged_on.year == as_of.year
+        return label, charged
+    return "", None
 
 
 def _registered_insight(
@@ -549,6 +582,9 @@ def _registered_insight(
         suggestion = "如仍在使用可保留；不再使用可在订阅管理中取消。"
 
     increased, price_from, price_to = _price_change_12m(items, as_of)
+    period_label, charged_this_period = _current_period(
+        cycle, as_of, items[-1].booked_on if items else None
+    )
     return SubscriptionInsight(
         insight_id=f"subscription:{subscription.subscription_id}",
         merchant=subscription.merchant,
@@ -560,6 +596,8 @@ def _registered_insight(
         cycle=cycle,
         cycle_label=_CYCLE_LABELS[cycle],
         last_charged_on=items[-1].booked_on if items else None,
+        current_period_label=period_label,
+        charged_this_period=charged_this_period,
         next_charge_on=next_charge_on,
         next_charge_is_prediction=is_prediction,
         next_charge_basis=basis,
@@ -607,6 +645,7 @@ def _unregistered_insight(
     ))
     latest = items[-1]
     increased, price_from, price_to = _price_change_12m(items, as_of)
+    period_label, charged_this_period = _current_period(cycle, as_of, latest.booked_on)
     return SubscriptionInsight(
         insight_id=f"outflow:{key}",
         merchant=latest.merchant_label,
@@ -618,6 +657,8 @@ def _unregistered_insight(
         cycle=cycle,
         cycle_label=_CYCLE_LABELS[cycle],
         last_charged_on=latest.booked_on,
+        current_period_label=period_label,
+        charged_this_period=charged_this_period,
         next_charge_on=(
             latest.booked_on + timedelta(days=median_gap) if median_gap is not None else None
         ),
@@ -745,6 +786,7 @@ def _outflows(gateway: FactGateway, user_id: str, as_of: date) -> tuple[_Outflow
                 channel=transaction.channel,
                 booked_at=transaction.booked_at,
                 card_tail=transaction.card_tail,
+                account_id=account.payload.account_id,
             )
     return tuple(sorted(
         collected.values(),
@@ -829,6 +871,7 @@ def _evidence(flow: _Outflow) -> SubscriptionEvidence:
         channel=flow.channel,
         booked_at=flow.booked_at,
         card_tail=flow.card_tail,
+        account_id=flow.account_id,
     )
 
 
@@ -962,11 +1005,17 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
 
 
 def _subscription_list(context: QueryContext) -> QueryResult:
-    subscriptions = context.gateway.subscriptions_of(require_str(context.params, "user_id"))
+    user_id = require_str(context.params, "user_id")
+    subscriptions = context.gateway.subscriptions_of(user_id)
+    upcoming = upcoming_charges(context.gateway, user_id)
+    # 与计划卡对象行同源（都取有效且未到期的订阅），避免同一回答里出现两个不一致的总数。
+    detail = f"有效订阅 {len(upcoming)} 项"
+    if len(upcoming) != len(subscriptions):
+        detail += f"（全部 {len(subscriptions)} 项，含已取消）"
     return QueryResult(
         record_ids=tuple(item.record_id for item in subscriptions),
         provenance=tuple((item.record_id, item.content_hash) for item in subscriptions),
-        detail=f"共 {len(subscriptions)} 项订阅",
+        detail=detail,
     )
 
 

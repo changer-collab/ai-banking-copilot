@@ -41,7 +41,7 @@ from ai_banking_copilot.gateway.preconditions import (
     PreconditionStatus,
     WritePreconditionError,
 )
-from ai_banking_copilot.gateway.resolvers import parse_amount
+from ai_banking_copilot.gateway.resolvers import parse_amount, parse_temporal
 from ai_banking_copilot.planning.anaphora import (
     DialogueMemory,
     Reference,
@@ -71,6 +71,7 @@ from ai_banking_copilot.planning.reviewer import (
 from ai_banking_copilot.planning.slots import (
     REQUIRED_SLOTS,
     SLOT_PARAMS,
+    SlotFill,
     SlotInputs,
     SlotQuestion,
     _payee_label,
@@ -133,6 +134,7 @@ from ai_banking_copilot.scenarios.base import (
 )
 from ai_banking_copilot.scenarios.bill_advice import BillAdvice, build_bill_advice
 from ai_banking_copilot.scenarios.bill_findings import analyze_bill, report_payload
+from ai_banking_copilot.scenarios.life_events import detect_life_event, flower_offers
 from ai_banking_copilot.scenarios.pending import PendingHandler
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
@@ -228,14 +230,33 @@ _NO_DOUBLE_REFUSAL = (
     "不承诺收益、不预测涨跌，也不推荐所谓能翻倍的产品。"
     "能给的是产品事实：风险等级、期限、起购金额。"
 )
+_SCAM_REFUSAL = (
+    "先别按对方说的操作：银行或平台客服不会要求你先取消代扣、再私下退款。"
+    "建议立刻结束对话，用银行卡背面的官方客服电话或官方 App 核实；"
+    "不要提供验证码、密码，也不要共享屏幕或远程协助。"
+    "如果已经按对方指示操作，请立即查询扣款并联系银行止付。本次没有执行任何取消动作。"
+)
+
+# 电信诈骗的确定性组合：对方自称客服/商家 + 要求退款/配合 + 指向代扣或验证码。
+# 命中后**不进入规划**，先给安全指引——这类输入不能按普通取消订阅去执行。
+_SCAM_LURE = re.compile(
+    r"(?:客服|工作人员|公检法|平台|商家|快递).{0,20}(?:退款|退费|理赔|配合|解冻|验证)"
+)
+_SCAM_CANCEL = re.compile(r"取消|关闭|解绑|停掉")
+_SCAM_TARGET = re.compile(r"代扣|自动续费|自动扣款|免密|银行卡|验证码|屏幕共享")
 
 # 「保本吗 / 是不是保本」= 用户在问常识，要正面解释；「保证收益」= 在索取承诺，维持硬拒。
 _GUARANTEE_QUESTION = re.compile(r"保本.{0,6}(吗|么|呢|？|\?)|是不是保本|不是保本")
 # 只认**显式要求跳过验证**的说法。「忽略…规则」不在此列：那句话可能只是取消订阅这类
 # 批量操作的噪音，交给场景层的批量拒绝去回，免得把话术抢错（实测 10-31 订阅回归用例）。
 _SKIP_VERIFY = re.compile(r"不用验证|不需要验证|不验证|跳过验证|别验证|无需验证")
-_FAKE_RECEIPT = re.compile(r"(你就说|就说|假装|当作|硬说).{0,10}(成功|已完成|成交)|把回执念")
+_FAKE_RECEIPT = re.compile(
+    r"(你就说|就说|假装|当作|硬说).{0,12}(成功|已完成|成交|送到|送达|到了|签收)|把回执念"
+)
 _DOUBLE_MONEY = re.compile(r"翻倍|翻一番")
+_HOLD_QUERY = re.compile(r"冻结|押金|预授权|hold", re.IGNORECASE)
+_HOLD_STATUS = re.compile(r"退回来|退回|还在|还有|状态|怎么样了|到账|没")
+_HOLD_ACTION = re.compile(r"取消|解冻|释放|退回给|转回")
 
 
 class SessionState(StrEnum):
@@ -370,6 +391,9 @@ class ClarificationAsk:
     slot: str
     prompt: str
     candidates: tuple[ClarificationChoice, ...] = ()
+    options: tuple[ClarificationChoice, ...] = ()
+    """通用可选项（商户 / 花束 / 档位）：与 `candidates` 一样点一下就答完，
+    区别是值可能是业务名称而不是名册 ID。"""
 
 
 @dataclass(frozen=True)
@@ -546,6 +570,8 @@ class Session:
         self._review_intents: list[dict[str, object]] = []
         self._clarification_keys: frozenset[str] = frozenset()
         self._review_report: ReviewReport | None = None
+        self._recent: list[dict[str, object]] = []
+        """最近几轮的「用户原话 + 已采纳意图」摘要：只用于理解层上下文，不参与裁决。"""
 
     def snapshot(self) -> SessionSnapshot:
         payload = {name: getattr(self, f"_{name}") for name in self._SNAPSHOT_FIELDS}
@@ -869,12 +895,24 @@ class Session:
         execution_id: str,
         clarification_keys: frozenset[str] = frozenset(),
         on_stage: Callable[[str], None] | None = None,
+        allow_freeform_clarification: bool = True,
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
         会话风控信号（G-03）**只**来自服务端可信源 `AppDeps.session_risk`，本方法不接受任何
         客户端风控入参。
         """
+        if (
+            allow_freeform_clarification
+            and self._state is SessionState.NEEDS_CLARIFICATION
+            and self._last_utterance is not None
+            and utterance.strip() != self._last_utterance.strip()
+        ):
+            # 有待澄清项时，用户在聊天框里补一句（「李娜」「3000」）也应并入待补槽位，
+            # 而不是被当成一条全新指令。解析不到任何槽位时照常走新指令。
+            freeform = self._freeform_answers(utterance)
+            if freeform:
+                return self.clarify(freeform, on_stage=on_stage)
         try:
             _notify(on_stage, "guard")
             self._reset()
@@ -926,6 +964,9 @@ class Session:
             fact_answer = self._wealth_fact_answer(utterance)
             if fact_answer is not None:
                 return fact_answer
+            hold_answer = self._hold_fact_answer(utterance)
+            if hold_answer is not None:
+                return hold_answer
             recall = self._wealth_recall_answer(utterance)
             if recall is not None:
                 return recall
@@ -1010,12 +1051,26 @@ class Session:
             raise SessionStateError("尚无上一条指令：无法澄清")
         merged: dict[str, object] = dict(self._last_selected or {})
         merged.update(answers)
+        delivery_time = answers.get("delivery_time")
+        if isinstance(delivery_time, str) and delivery_time.strip():
+            # 送达日期就是订单日期：让计划卡与记录显示用户确认的那一天。
+            merged.setdefault("order_on", delivery_time.strip())
         execution_id = self._execution_id if self._pending is None else secrets.token_hex(16)
-        return self._submit(
+        view = self._submit(
             self._last_utterance, selected=merged, execution_id=execution_id,
             clarification_keys=self._clarification_keys | frozenset(answers),
             on_stage=on_stage,
+            allow_freeform_clarification=False,
         )
+        delivery = {
+            key: str(value) for key, value in answers.items()
+            if key in {"delivery_address", "delivery_time"} and value
+        }
+        if delivery and view.card is not None:
+            labels = {"delivery_address": "配送地址", "delivery_time": "送达时间"}
+            note = "；".join(f"{labels[key]}：{value}" for key, value in delivery.items())
+            view = replace(view, message=f"{view.message}\n配送信息（演示，不实际配送）——{note}")
+        return view
 
     @_serialized
     def check_due(self) -> SubmissionView:
@@ -1063,7 +1118,13 @@ class Session:
                 value = selected.get(key)
                 if isinstance(value, Value):
                     value = value.raw
-                if isinstance(value, str) and value not in identifiers:
+                if not isinstance(value, str):
+                    continue
+                if slot in {"payee", "payer"} and not value.startswith("p_"):
+                    # 收款人允许用户填人名：交给名册解析（唯一命中才绑定，多个/没有都转澄清），
+                    # 不能在这里先按「内部 ID」拒掉「李娜」这种正常输入。
+                    continue
+                if value not in identifiers:
                     return "所选对象不存在、已失效或不属于当前用户，请重新选择。"
         return None
 
@@ -1321,22 +1382,110 @@ class Session:
         )
         return SubmissionView(self._state, self._message, card, decision, plan, (), quota)
 
+    def _intent_context(self) -> dict[str, object]:
+        """给理解层的会话上下文：最近几轮、上一个计划摘要、已选对象。
+
+        只读摘要，不含控制事实；模型可据此理解「再下单」「那个冻结」这类指代，
+        但槽位仍必须由服务端解析器或用户确认。
+        """
+        last_plan: list[dict[str, object]] = []
+        if self._pending is not None:
+            for node in self._pending.plan.nodes:
+                keys = (
+                    "merchant", "amount_cents", "order_on", "account_id", "payee_id",
+                    "subscription_id", "card_id", "product_id", "budget_hold_id",
+                )
+                last_plan.append({
+                    "action": node.action,
+                    "params": {key: node.params[key] for key in keys if key in node.params},
+                })
+        selected: dict[str, object] = {}
+        for key, value in (self._last_selected or {}).items():
+            if key not in {"payee", "payer", "account", "card", "subscription", "product", "hold"}:
+                continue
+            if value is None:
+                continue
+            selected[key] = value.raw if isinstance(value, Value) else value
+        return {
+            "today": self._deps.today,
+            "recent": list(self._recent[-3:]),
+            "last_plan": last_plan,
+            "selected": selected,
+        }
+
+    def _freeform_answers(self, utterance: str) -> dict[str, object]:
+        """把聊天框里的短补充解析成待澄清槽位；解析不到任何槽位就返回空。
+
+        只认金额 / 日期 / 收款人 / 简短商户名，不把完整新指令（含动作词）当答案。
+        """
+        text = utterance.strip()
+        if not text or len(text) > 30:
+            return {}
+        candidate = text
+        for prefix in ("收款人", "付款人", "金额", "商户名", "商户", "日期", "时间", "预算"):
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix):].lstrip("：: ")
+        if not candidate:
+            return {}
+        answers: dict[str, object] = {}
+        amount = parse_amount(candidate, bare_amounts=True)
+        if amount.matched and amount.value is not None:
+            answers["amount"] = f"{amount.value.yuan} 元"
+        parsed_date = parse_temporal(candidate, self._deps.today)
+        if parsed_date.matched and parsed_date.when is not None:
+            answers["when"] = parsed_date.when.isoformat()
+        payees = tuple(
+            record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
+        )
+        if any(payee.full_name and payee.full_name in candidate for payee in payees):
+            answers["payee"] = candidate
+        elif candidate in {"妈妈", "妈", "爸爸", "爸", "爱人", "老婆", "老公"}:
+            answers["payee"] = candidate
+        if not answers and re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9（）()·\s]{1,12}", candidate):
+            if not re.search(r"取消|查|转|买|卖|冻结|解冻|订阅|账单|余额", candidate):
+                answers["merchant"] = candidate
+        return answers
+
+    def _remember_turn(self, utterance: str, intents: Sequence[Intent]) -> None:
+        slots = {"merchant", "amount_cents", "budget", "order_on", "payee", "payee_id", "hold"}
+        summary = [
+            {
+                "action": intent.action,
+                "slots": {
+                    key: (value.raw if isinstance(value, Value) else value)
+                    for key, value in intent.slots.items()
+                    if key in slots
+                },
+            }
+            for intent in intents
+        ]
+        entry: dict[str, object] = {"user": utterance, "intents": summary}
+        if self._recent and self._recent[-1].get("user") == utterance:
+            self._recent[-1] = entry
+        else:
+            self._recent.append(entry)
+            del self._recent[:-3]
+
     def _assemble_intents(
         self, utterance: str, selected: Mapping[str, object] | None,
     ) -> tuple[tuple[Intent, ...], tuple[ClarificationAsk, ...], tuple[str, ...]]:
         """装配意图，并返回**未采纳提示**（低置信度意图不再静默丢弃，必须让用户看得见）。"""
         observations = self._deps.model_observations
+        intent_context = self._intent_context()
         if observations is None:
-            proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
+            proposal = self._deps.intent_model.propose(utterance, intent_context)
         else:
             with observations.scope(self._execution_id):
-                proposal = self._deps.intent_model.propose(utterance, {"today": self._deps.today})
+                proposal = self._deps.intent_model.propose(utterance, intent_context)
         self._planner_channel = proposal.channel or "injected"
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
         cards = tuple(
             record.payload for record in self._deps.gateway.cards_of(self._deps.user_id)
+        )
+        holds = tuple(
+            record.payload for record in self._deps.gateway.active_holds_of(self._deps.user_id)
         )
         # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径（丢弃空值后
         # 按受信任默认值补齐账户），否则同一句话会白问一轮账户。
@@ -1355,6 +1504,7 @@ class Session:
         intents: list[Intent] = []
         asks: list[ClarificationAsk] = []
         dropped: list[str] = []
+        life_event_id = detect_life_event(utterance)
         candidates = tuple(
             intent for intent in proposal.intents
             if intent.confidence >= CONFIDENCE_THRESHOLD
@@ -1363,6 +1513,25 @@ class Session:
             intent.action for intent in proposal.intents
             if intent.confidence < CONFIDENCE_THRESHOLD
         )
+        if life_event_id == "L1":
+            # 「先把预算锁了，别让我乱花」只冻结、不下单：同一句里已有冻结意图，
+            # 且没有任何下单 / 订花措辞时，丢掉被「生日」二字带出来的下单意图，
+            # 并把重复的冻结意图去重（分句后可能命中多次）。
+            order_words = re.search(r"订|买|送|花|蛋糕|礼物|安排|准备|庆祝|惊喜", utterance)
+            if order_words is None and any(
+                intent.action == "funds.freeze" for intent in candidates
+            ):
+                kept: list[Intent] = []
+                freeze_seen = False
+                for intent in candidates:
+                    if intent.action == "merchant.order":
+                        continue
+                    if intent.action == "funds.freeze":
+                        if freeze_seen:
+                            continue
+                        freeze_seen = True
+                    kept.append(intent)
+                candidates = tuple(kept)
         if not candidates:
             # 页面已受信任选中产品、用户只说「买 1000 元」：模型不给意图时，
             # 由**受信任选中值 + 明确动词**确定性合成申购意图（不猜产品、不猜金额）。
@@ -1480,6 +1649,7 @@ class Session:
                     cards=cards,
                     selected=slot_selected,
                     products=products,
+                    holds=holds,
                     default_product=(
                         _SUBSCRIBE_DEFAULT_PRODUCT
                         if intent.action == "wealth.subscribe"
@@ -1489,6 +1659,30 @@ class Session:
             )
             if fill.negated:
                 continue
+            scenario_asks: tuple[ClarificationAsk, ...] = ()
+            if life_event_id == "L1" and intent.action == "merchant.order":
+                fill, scenario_asks = _l1_fill(fill, span, self._deps.today)
+            if (
+                intent.action == "funds.release"
+                and "hold" not in fill.slots
+                and "budget_hold_id" not in fill.slots
+                and holds
+            ):
+                # `hold` 在目录里是可选槽（跨场景预算链自带 budget_hold_id）；
+                # 用户单独说「取消冻结」时必须从本人有效冻结里选，不能空着去执行。
+                options = tuple(
+                    ClarificationChoice(
+                        label=f"冻结 {hold.amount.yuan} 元 · {hold.reason}", value=hold.hold_id,
+                    )
+                    for hold in holds
+                )
+                scenario_asks = (*scenario_asks, ClarificationAsk(
+                    slot="hold", prompt="请选择要解冻的冻结记录。", options=options,
+                ))
+            # 只过滤「用户已经答过」的槽位；默认值仍要把候选给用户确认一次。
+            scenario_asks = tuple(
+                ask for ask in scenario_asks if ask.slot not in slot_selected
+            )
             sources: dict[str, str] = {}
             for slot in fill.slots:
                 if f"selected:{slot}" in fill.trace:
@@ -1550,6 +1744,7 @@ class Session:
                 slots["remark"] = Value(remark, Trust.UNVERIFIED)
             _inject_assessment(intent.action, slots, self._deps)
             _precheck_wealth(intent.action, slots, wealth_records, self._deps)
+            asks.extend(scenario_asks)
             asks.extend(
                 ClarificationAsk(
                     slot=(
@@ -1572,6 +1767,7 @@ class Session:
                     evidence=intent.evidence,
                 )
             )
+        self._remember_turn(utterance, intents)
         return tuple(intents), tuple(asks), _dropped_notes(dropped)
 
     def _clarification_choices(
@@ -1587,6 +1783,16 @@ class Session:
         """
         if not question.candidates:
             return ()
+        if question.slot == "hold":
+            holds = {
+                f"冻结 {record.payload.amount.yuan} 元 · {record.payload.reason}": record.payload
+                for record in self._deps.gateway.active_holds_of(self._deps.user_id)
+            }
+            return tuple(
+                ClarificationChoice(label=label, value=hold.hold_id)
+                for label in question.candidates
+                if (hold := holds.get(label)) is not None
+            )
         roster = {
             _payee_label(record.payload): record.payload
             for record in self._deps.gateway.payees_of(self._deps.user_id)
@@ -1895,6 +2101,41 @@ class Session:
             )
         else:
             return None
+        self._state = SessionState.IDLE
+        self._message = answer
+        return SubmissionView(self._state, self._message, None, None, None, ())
+
+    def _hold_fact_answer(self, utterance: str) -> SubmissionView | None:
+        """冻结事实直答：「上次那笔冻结退回来没」不猜 hold id，只陈述当前有效冻结。
+
+        带「取消 / 解冻」动作词的句子交回意图装配（用户要办解冻，不是只问状态）。
+        """
+        text = utterance.strip()
+        if not (_HOLD_QUERY.search(text) and _HOLD_STATUS.search(text)):
+            return None
+        holds = tuple(
+            record.payload for record in self._deps.gateway.active_holds_of(self._deps.user_id)
+        )
+        if _HOLD_ACTION.search(text):
+            # 要解冻：有冻结就交回意图装配（由 hold 候选选择）；没有就直接说清。
+            if holds:
+                return None
+            self._state = SessionState.IDLE
+            self._message = "当前没有可解冻的冻结记录：之前冻结的资金已释放，不占用可用余额。"
+            return SubmissionView(self._state, self._message, None, None, None, ())
+        if not holds:
+            answer = (
+                "当前没有有效冻结记录：之前冻结的资金已不再占用可用余额。"
+                "历史冻结与释放的明细可在「记录与明细」查看。"
+            )
+        else:
+            lines = "；".join(
+                f"{hold.reason}（冻结 {hold.amount.yuan} 元）" for hold in holds
+            )
+            answer = (
+                f"当前还有 {len(holds)} 笔有效冻结：{lines}。"
+                "这些资金仍占用可用余额；如需退回，请说要解冻哪一笔。"
+            )
         self._state = SessionState.IDLE
         self._message = answer
         return SubmissionView(self._state, self._message, None, None, None, ())
@@ -2915,6 +3156,13 @@ def _guard_utterance(utterance: str) -> _RefusalCopy | None:
         return _RefusalCopy(_NO_DOUBLE_REFUSAL, capability_boundary=True)
     if "保本" in utterance and _GUARANTEE_QUESTION.search(utterance):
         return _RefusalCopy(_NOT_GUARANTEED_REFUSAL, capability_boundary=True)
+    if (
+        _SCAM_LURE.search(utterance)
+        and _SCAM_CANCEL.search(utterance)
+        and _SCAM_TARGET.search(utterance)
+    ):
+        # 诈骗话术是**能力边界**而不是策略拒绝：不惩罚受害者，也不计入会话熔断。
+        return _RefusalCopy(_SCAM_REFUSAL, capability_boundary=True)
     if any(hint in utterance for hint in FORBIDDEN_HINTS):
         return _RefusalCopy(_RETURN_PROMISE_REFUSAL)
     if any(marker in utterance for marker in FABRICATION_MARKERS):
@@ -2975,18 +3223,14 @@ _BALANCE_TAMPER_REFUSAL = (
 
 
 def _balance_tamper_refusal(utterance: str) -> str | None:
-    """「改余额 + 理财动作」的**能力边界**话术（不是策略拒绝，不计触发 4）。
+    """「改余额」的**能力边界**话术（不是策略拒绝，不计触发 4）。
 
-    三条件同时满足才算：余额 / 存款标记 + 篡改动词 + 理财动作词。只出现「改余额」
-    而没有理财动作的句子，仍按原路径落到「未知意图」（不改变他人场景的既有结论）。
-    命中的是**整句**——只有把「改余额做不到」说出来、并整句拒绝，才不会拿伪造的
-    余额去生成申购卡（S6-7 的缺陷形态）。
+    只要求「余额 / 存款标记 + 篡改动词」：改余额本身在任何场景都不被支持，
+    不再要求句子里同时出现理财动作——那会让「把余额改成 100 万」漏到未知意图。
     """
     if not any(marker in utterance for marker in _BALANCE_MARKERS):
         return None
     if not any(verb in utterance for verb in _BALANCE_TAMPER_VERBS):
-        return None
-    if not any(marker in utterance for marker in _WEALTH_MARKERS):
         return None
     return _BALANCE_TAMPER_REFUSAL
 
@@ -3459,13 +3703,96 @@ def _has_immediate_transfer_marker(utterance: str) -> bool:
 
 
 def _multi_intent_span_questions(intents: tuple[Intent, ...]) -> tuple[ClarificationAsk, ...]:
-    return tuple(
-        ClarificationAsk(
-            slot=f"intent_{index}_span",
-            prompt=f"请复制第 {index + 1} 项{_intent_label(intent.action)}对应的原话，包含金额。",
-        )
-        for index, intent in enumerate(intents)
+    """多意图拆解：不再让用户复制原话，按**每一项**问它缺的金额 / 必要信息。
+
+    `intent_<i>_<slot>` 与 `_per_intent_selected` 同口径，答案会回填到对应意图；
+    金额类动作问金额，其余动作才退回问「对应哪句」。
+    """
+    asks: list[ClarificationAsk] = []
+    for index, intent in enumerate(intents):
+        label = _intent_label(intent.action)
+        if "amount" in REQUIRED_SLOTS.get(intent.action, ()):
+            asks.append(ClarificationAsk(
+                slot=f"intent_{index}_amount",
+                prompt=f"第 {index + 1} 项「{label}」：请给出金额（元）。",
+            ))
+        else:
+            asks.append(ClarificationAsk(
+                slot=f"intent_{index}_span",
+                prompt=f"第 {index + 1} 项「{label}」：请补充对应信息（金额或日期）。",
+            ))
+    return tuple(asks)
+
+
+_LIFE_BUDGET_WINDOW = re.compile(
+    r"(?:预算|上限|以内|不超过|最多|控制在)[^，,。；;]{0,16}"
+)
+
+
+def _life_budget_cents(text: str) -> int | None:
+    """从「预算 1000 以内 / 最多 500」这类片段取预算上限；读不到返回 None。"""
+    for match in _LIFE_BUDGET_WINDOW.finditer(text):
+        parsed = parse_amount(match.group(0), bare_amounts=True)
+        if parsed.matched and parsed.value is not None:
+            return parsed.value.cents
+    return None
+
+
+def _l1_fill(
+    fill: SlotFill, text: str, today: date,
+) -> tuple[SlotFill, tuple[ClarificationAsk, ...]]:
+    """L1 预算锁定：把通用「商户 + 金额」追问换成场景问题（花店 / 花束 / 配送）。
+
+    商户由系统按距离推荐（演示白名单），不再让用户填「视频会员」；预算只作上限，
+    花束档位只列预算内的选项。地址与时间仅作演示字段，不写入执行计划。
+    """
+    budget = _life_budget_cents(text) or 100000
+    offers = flower_offers(budget) or flower_offers()
+    nearest = offers[0]
+    bundle_label, bundle_price = nearest.bundles[0] if nearest.bundles else ("花束", 29900)
+    slots = dict(fill.slots)
+    slots.setdefault("budget_cents", budget)
+    slots.setdefault("merchant", nearest.merchant)
+    # 用户选过花束档位（`amount`）时以它为准；`amount_cents` 是 L1 场景读取的别名，
+    # 两者必须同值，否则场景层会先读到默认档位而忽略用户选择。
+    chosen_amount = slots.get("amount")
+    if isinstance(chosen_amount, int) and chosen_amount > 0:
+        slots["amount_cents"] = chosen_amount
+    else:
+        slots.setdefault("amount_cents", bundle_price)
+    parsed_day = parse_temporal(text, today)
+    if parsed_day.matched and parsed_day.when is not None:
+        slots.setdefault("order_on", parsed_day.when.isoformat())
+    questions = tuple(
+        question for question in fill.questions
+        if question.slot not in {"merchant", "amount", "amount_cents"}
     )
+    merchant_options = tuple(
+        ClarificationChoice(
+            label=f"{offer.merchant} · 距离 {offer.distance_km} km", value=offer.merchant,
+        )
+        for offer in offers
+    )
+    amount_options = tuple(
+        ClarificationChoice(label=f"{label} · {price // 100} 元", value=f"{price // 100} 元")
+        for label, price in nearest.bundles
+    ) or (ClarificationChoice(label=f"{bundle_label} · {bundle_price // 100} 元",
+                              value=f"{bundle_price // 100} 元"),)
+    asks = (
+        ClarificationAsk(
+            slot="merchant",
+            prompt="选一家花店（演示推荐，按距离排序；不会真实配送）。",
+            options=merchant_options,
+        ),
+        ClarificationAsk(
+            slot="amount",
+            prompt="选一个花束档位（都不超过你的预算）。",
+            options=amount_options,
+        ),
+        ClarificationAsk(slot="delivery_address", prompt="送到哪里？（演示字段，不会真实配送）"),
+        ClarificationAsk(slot="delivery_time", prompt="希望哪天送达？（演示字段）"),
+    )
+    return replace(fill, slots=slots, questions=questions), asks
 
 
 def _booking_semantics_question(index: int, count: int) -> ClarificationAsk:
@@ -3496,9 +3823,21 @@ def _intent_label(action: str) -> str:
     return {
         "funds.freeze": "冻结资金",
         "funds.release": "解冻资金",
-        "transfer.book": "登记预约转账",
+        "merchant.order": "向商户下单",
         "transfer.create": "立即转账",
+        "transfer.book": "登记预约转账",
         "transfer.schedule": "定时转账",
+        "transfer.request_collection": "发起分摊收款",
+        "wealth.redeem": "赎回理财",
+        "wealth.subscribe": "申购理财",
+        "card.lock": "锁定卡片",
+        "card.set_limit": "调整卡片限额",
+        "bills.yearly": "年度账单",
+        "bills.monthly": "月度账单",
+        "subscription.list": "订阅查询",
+        "subscription.cancel": "取消订阅",
+        "account.balance": "查询余额",
+        "account.transactions": "查询交易",
     }.get(action, action)
 
 

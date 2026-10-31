@@ -38,7 +38,7 @@ def test_charge_records_share_the_generic_records_table(deps: AppDeps) -> None:
     assert "charge-records-table" not in stylesheet
     # 列定义仍由 `RECORD_HEADERS` 提供，且顺序固定
     headers_block = script.split("charges: [", 1)[1].split("]", 1)[0]
-    headers = ("商户", "金额", "扣费日", "渠道", "记录号")
+    headers = ("商户", "金额", "扣费日", "扣款账户", "记录号")
     positions = [headers_block.index(f'"{header}"') for header in headers]
     assert positions == sorted(positions)
     assert "evidence.booked_on" in script
@@ -60,7 +60,6 @@ def test_subscription_records_and_health_have_human_states(deps: AppDeps) -> Non
         "正在读取订阅识别结果…", "未识别到订阅。", "订阅数据暂不可用，请稍后重试。",
         "扣款记录", "正在读取${esc(spec.label)}…", "${esc(spec.label)} · 暂无记录",
         "${spec.label}读取失败，请稍后重试。",
-        "正在读取渠道状态…", "暂无渠道状态。", "渠道状态暂不可用，请稍后重试。",
     ):
         assert text in script
     assert 'optionsStatus: "loading"' in script
@@ -75,8 +74,9 @@ def test_home_routes_reach_subscriptions_and_records_within_three_clicks(
     home = html.split('id="view-home"', 1)[1].split('id="view-chat"', 1)[0]
     assert 'data-nav="scene" data-scene="subscriptions"' in home
     assert 'data-nav="records"' in home
-    # 渠道并入「我的」：左栏与首页工具区不再有入口，/health 视图（书签与演示脚本）保留
+    # 渠道并入「我的」：左栏与首页工具区不再有入口；独立渠道健康页已下线
     assert 'data-nav="health"' not in html
-    assert 'id="view-health"' in html
+    assert 'id="view-health"' not in html
+    assert 'id="view-me"' in html
     assert 'data-record-tab="charges"' in html
     assert 'data-nav="records" data-record-tab="charges"' in html

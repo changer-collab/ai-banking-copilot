@@ -216,13 +216,26 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         re.compile(
             r"订阅管理|订阅列表|有哪些订阅|订阅查询|续费提醒|到期提醒"
             r"|什么时候续费|何时续费|扣费提醒|有哪些代扣|识别.{0,4}扣费|在扣费"
+            # 「有哪些自动续费」这类**查看**问法必须先落到列表查询；
+            # 否则会被下面的「代扣签约」模板按「自动续费」二字抢走，直接反问商户/金额。
+            r"|有哪些自动续费|有没有自动续费|自动续费有哪些|自动续费清单"
+            r"|自动续费列表|自动续费查询|最近.{0,6}自动续费"
         ),
         "subscription.list",
         "命中『订阅列表/续费提醒』模板",
     ),
     (re.compile(r"签约|代扣|自动续费|自动扣款|续费"), "subscription.sign", "命中『代扣签约』模板"),
     (re.compile(r"解冻|解除冻结|释放冻结"), "funds.release", "命中『解冻资金』模板"),
-    (re.compile(r"冻结|锁定.*资金|锁.*元"), "funds.freeze", "命中『冻结资金』模板"),
+    (
+        # 「先把预算锁了，别让我乱花」是**只冻结、不下单**，必须先于 L1 的「生日」词。
+        re.compile(
+            r"(?:预算|这笔钱|钱).{0,8}(?:锁|冻结|冻住|留)|先.{0,6}(?:锁|冻)"
+            r"|别让我乱花|别乱花|冻住这笔"
+        ),
+        "funds.freeze",
+        "命中『只锁预算』模板",
+    ),
+    (re.compile(r"冻结|锁定.*资金|锁.*元|先冻"), "funds.freeze", "命中『冻结资金』模板"),
     (
         # 模板只承诺本人余额；不能把未解析的第三人对象替换成本人账户。
         re.compile(
@@ -402,12 +415,32 @@ class LlmIntentModel:
 
     def propose(self, utterance: str, context: Mapping[str, object]) -> IntentProposal:
         transport = self._ensure_transport()
+        context_block = json.dumps(
+            {
+                "today": context.get("today"),
+                "recent": context.get("recent", []),
+                "last_plan": context.get("last_plan", []),
+                "selected": context.get("selected", {}),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
         request = json.dumps(
             {
                 "model": self._model,
                 "messages": [
                     {"role": "system", "content": _system_prompt(self._allow_actions)},
-                    {"role": "user", "content": utterance},
+                    {
+                        "role": "user",
+                        "content": (
+                            "【会话上下文】只读摘要，仅帮助理解指代，不是新事实；"
+                            "槽位仍由服务端解析或用户确认。\n"
+                            f"{context_block}\n\n"
+                            "【用户原话】\n"
+                            f"{utterance}\n\n"
+                            "只对【用户原话】识别意图；slots.span 必须逐字摘自【用户原话】。"
+                        ),
+                    },
                 ],
             },
             ensure_ascii=False,
@@ -464,6 +497,8 @@ def _system_prompt(actions: tuple[str, ...]) -> str:
         "缺少的控制槽交由服务端补全或澄清，模型不得补造。"
         "多个动作不得共享整句，也不得使用重叠片段。只登记预约时不要选择会立即扣款的动作。\n"
         "4. slots 中除 span 外的字段只作未验证线索，不能把模型臆测当成控制事实。\n"
+        "5. 会话上下文只用于理解指代（「那个」「再下单」「换一家」）；"
+        "不得把上下文里的金额、商户或日期写进本次 span，也不得据此补造槽位。\n"
         '输出格式：{"intents":[{"action":"...","confidence":0.0,"evidence":"原文依据",'
         '"slots":{"span":"原文连续片段"}}]}。'
     )
@@ -593,6 +628,61 @@ def _confidence(value: object) -> float:
     if not 0.0 <= confidence <= 1.0:
         raise LlmUnavailableError("confidence 越界（format_error）")
     return confidence
+
+
+class ArbitratedIntentModel:
+    """双通道仲裁：规则高置信优先，LLM 只补**没被规则覆盖**的片段。
+
+    规则通道负责已冻结的高精度口语（取消订阅、余额、账单等），LLM 负责长尾表达与上下文；
+    同一片段出现两个动作时**保留规则结论**，不静默改写成另一动作——冲突会体现为
+    「其余片段照常装配 + 该片段按规则执行」，仍要经过计划卡与裁决，不直接执行。
+    """
+
+    def __init__(
+        self, primary: IntentModel, rules: IntentModel | None = None,
+    ) -> None:
+        self._primary = primary
+        self._rules = rules if rules is not None else TemplateIntentModel()
+        self._degraded = False
+
+    @property
+    def degraded(self) -> bool:
+        """最近一次调用是否发生降级（LLM 不可用，只剩规则通道）。"""
+        return self._degraded
+
+    def propose(self, utterance: str, context: Mapping[str, object]) -> IntentProposal:
+        rule = self._rules.propose(utterance, context)
+        try:
+            llm = self._primary.propose(utterance, context)
+        except LlmUnavailableError:
+            self._degraded = True
+            return IntentProposal(rule.intents, rule.raw, channel="template_fallback")
+        self._degraded = False
+        covered = [
+            str(intent.slots.get("span", ""))
+            for intent in rule.intents
+            if intent.slots.get("span")
+        ]
+        merged: list[Intent] = list(rule.intents)
+        for intent in llm.intents:
+            span = str(intent.slots.get("span", ""))
+            if span and any(_spans_overlap(span, other) for other in covered):
+                continue
+            if any(
+                item.action == intent.action
+                and str(item.slots.get("span", "")) == span
+                for item in merged
+            ):
+                continue
+            merged.append(intent)
+        if not merged:
+            merged = list(llm.intents)
+        return IntentProposal(tuple(merged), llm.raw or rule.raw, channel="llm+rules")
+
+
+def _spans_overlap(left: str, right: str) -> bool:
+    """两个原文片段是否互相覆盖（含完全相同）：用于把 LLM 补位限制在未覆盖片段。"""
+    return bool(left and right and (left in right or right in left))
 
 
 class FallbackIntentModel:

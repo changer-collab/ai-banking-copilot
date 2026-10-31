@@ -42,6 +42,13 @@ _LIFE_SIGNAL = re.compile(r"生日|纪念日|结婚|过寿|满月|周岁|房租|
 _WEALTH_SIGNAL = re.compile(
     r"理财|申购|赎回|净值|风险等级|R[1-5]|收益|存款|定期|补仓|加仓|闲钱"
 )
+_SUBSCRIPTION_SIGNAL = re.compile(
+    r"本地取消|商户.{0,8}取消|取消.{0,8}商户|商户.{0,6}还.{0,3}扣"
+    r"|取消后.{0,6}(?:商户|还.{0,3}扣)|订阅.{0,4}边界|代扣.{0,4}边界"
+)
+_REPAYMENT_SIGNAL = re.compile(
+    r"花呗|借呗|白条|信用卡.{0,6}还款|自动还款|贷款.{0,6}还款|房贷|车贷|分期还款"
+)
 _BUSINESS_VERB = re.compile(r"转|汇|查|看|买|卖|赎回|取消|挂失|锁卡|解锁|额度|账单|余额")
 _SMALLTALK = re.compile(
     r"天气|心情|开心|难过|无聊|你好|您好|在吗|谢谢|谢了|再见|拜拜|早上好|晚上好"
@@ -75,11 +82,40 @@ _AMBIGUOUS_MESSAGE = (
     "没太确定您的意思。如果是想给家人过生日、提前把钱留出来，"
     "我可以用「冻结预算 → 下单 → 释放余额」帮您办；也可以直接告诉我您要办的业务。"
 )
+_LIFE_GUIDE_MESSAGE = (
+    "听起来是生日、纪念日这类生活安排，我猜可能是下面几种之一："
+    "先锁一笔预算、给商户下单、或者查一下之前的冻结。"
+    "您点一个方向，我再按缺的信息问；没给金额我不会猜着执行。"
+)
 
 _WEALTH_MESSAGE = (
     "这类问题我给不了投资建议：不比较收益、不预测涨跌、也不替您决定买哪只。"
     "我能做的是把产品事实摆出来——风险等级、期限、起购金额——由您自己判断；"
     "要办申赎请告诉我产品名和金额。"
+)
+
+_REPAYMENT_MESSAGE = (
+    "还款代扣不在本应用的订阅管理范围内：这里只管理订阅类商户扣费，"
+    "没有接入信用卡、花呗或贷款的还款代扣。擅自关闭还款代扣可能导致逾期、罚息，"
+    "也可能影响征信；如需关闭，请到发卡行 App 或支付宝「设置 → 支付设置 → 免密支付/自动扣款」操作。"
+)
+
+_SUBSCRIPTION_BOUNDARY_MESSAGE = (
+    "「本地取消」和「商户取消」是两件事：在本应用点取消订阅，只会把本应用里的订阅状态改为已取消，"
+    "不会通知商户；商户侧是否停止扣费，以商户回执或商户后台为准。"
+    "所以本地显示已取消，不等于下一期不会再扣——建议同时在商户 App 的自动续费管理里关闭。"
+)
+
+_SUBSCRIPTION_SUGGESTIONS: tuple[TriageSuggestion, ...] = (
+    TriageSuggestion(label="查看我的订阅", text="查一下我的订阅"),
+    TriageSuggestion(label="取消视频会员", text="把视频会员的自动续费取消"),
+    TriageSuggestion(label="查上月账单", text="查一下上月账单"),
+)
+
+_REPAYMENT_SUGGESTIONS: tuple[TriageSuggestion, ...] = (
+    TriageSuggestion(label="查看我的订阅", text="查一下我的订阅"),
+    TriageSuggestion(label="查一下余额", text="查一下余额"),
+    TriageSuggestion(label="查上月账单", text="查一下上月账单"),
 )
 
 _WEALTH_SUGGESTIONS: tuple[TriageSuggestion, ...] = (
@@ -128,10 +164,19 @@ def triage(utterance: str, *, low_confidence: bool = False) -> TriageVerdict | N
     # 理财域：出现理财信号却没装配出意图时给理财澄清，不要套用生日模板
     if _WEALTH_SIGNAL.search(text):
         return TriageVerdict("ambiguous", _WEALTH_MESSAGE, _WEALTH_SUGGESTIONS)
+    # 还款代扣（花呗 / 信用卡 / 贷款）不属于订阅管理：先说明风险与正确去处，不猜着执行。
+    if _REPAYMENT_SIGNAL.search(text):
+        return TriageVerdict("out_of_scope", _REPAYMENT_MESSAGE, _REPAYMENT_SUGGESTIONS)
+    # 「本地取消 vs 商户取消」是能力边界问答，不是无法理解的输入。
+    if _SUBSCRIPTION_SIGNAL.search(text):
+        return TriageVerdict(
+            "out_of_scope", _SUBSCRIPTION_BOUNDARY_MESSAGE, _SUBSCRIPTION_SUGGESTIONS
+        )
     if low_confidence or _LIFE_SIGNAL.search(text) or _BUSINESS_VERB.search(text):
-        # 有业务信号却没装配出意图 ⇒ 不猜，给候选句。
+        # 有业务信号却没装配出意图 ⇒ 不猜执行，但先猜方向并给候选句。
         suggestions = _BIRTHDAY_SUGGESTIONS if _LIFE_SIGNAL.search(text) else _DEFAULT_SUGGESTIONS
-        return TriageVerdict("ambiguous", _AMBIGUOUS_MESSAGE, suggestions)
+        message = _LIFE_GUIDE_MESSAGE if _LIFE_SIGNAL.search(text) else _AMBIGUOUS_MESSAGE
+        return TriageVerdict("ambiguous", message, suggestions)
     if len(text) <= _SMALLTALK_MAX_LENGTH and _SMALLTALK.search(text):
         return TriageVerdict("smalltalk", _SMALLTALK_MESSAGE, _DEFAULT_SUGGESTIONS)
     return TriageVerdict("ambiguous", _FALLBACK_MESSAGE, _DEFAULT_SUGGESTIONS)

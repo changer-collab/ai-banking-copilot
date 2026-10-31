@@ -212,6 +212,50 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
 
 
 @dataclass(frozen=True)
+class FlowerOffer:
+    """演示用花店候选：只用于「订花」澄清时给出可选项，不是真实商户签约。"""
+
+    merchant: str
+    distance_km: float
+    bundles: tuple[tuple[str, int], ...]
+    """`(花束名, 价格分)`；价格只作档位候选，不替用户决定。"""
+
+
+FLOWER_OFFERS: tuple[FlowerOffer, ...] = (
+    FlowerOffer(
+        "花间集（西湖店）", 0.8,
+        (("小束向日葵", 9900), ("经典玫瑰", 29900), ("生日花束", 52000)),
+    ),
+    FlowerOffer(
+        "鲜花礼品店", 1.6,
+        (("简约花束", 19900), ("生日花束", 29900), ("豪华花篮", 69900)),
+    ),
+    FlowerOffer(
+        "花漾工坊（滨江店）", 3.2,
+        (("迷你花束", 9900), ("香槟玫瑰", 39900), ("定制花艺", 89900)),
+    ),
+)
+"""附近花店（演示数据）：按距离升序；预算内档位由 `flower_offers` 过滤。"""
+
+
+def flower_offers(budget_cents: int | None = None) -> tuple[FlowerOffer, ...]:
+    """返回预算内的花店候选；预算为空时原样返回（由调用方决定默认档）。"""
+    if budget_cents is None:
+        return FLOWER_OFFERS
+    affordable = tuple(
+        replace(
+            offer,
+            bundles=tuple(
+                (label, price) for label, price in offer.bundles if price <= budget_cents
+            ),
+        )
+        for offer in FLOWER_OFFERS
+        if any(price <= budget_cents for _, price in offer.bundles)
+    )
+    return affordable
+
+
+@dataclass(frozen=True)
 class LifeEventCombo:
     """两条原型的串接（组合律）：第一段末尾 → 第二段根节点。"""
 
@@ -566,6 +610,9 @@ def _build_l1(
     budget = _opt_cents(params, "budget")
     budget_cents = BIRTHDAY_BUDGET_CENTS if budget is None else budget
     order = _opt_cents(params, "order_amount")
+    if order is None:
+        # 澄清表单里的花束档位写到 `amount_cents`；L1 把它当**下单金额**（预算仍是上限）。
+        order = _opt_cents(params, "amount")
     order_cents = BIRTHDAY_ORDER_CENTS if order is None else order
     if budget_cents <= 0:
         raise ScenarioRefused("生活事件预算必须为正")

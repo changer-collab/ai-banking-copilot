@@ -35,6 +35,7 @@ const SLOT_LABELS = {
   payee: "收款人", payer: "付款人", amount: "金额", amount_cents: "金额",
   daily_limit: "日限额", when: "执行日期", next_charge_on: "下次扣费日期",
   period: "扣费周期", merchant: "商户名称", product: "理财产品",
+  delivery_address: "配送地址", delivery_time: "送达时间",
 };
 const MONEY_SLOTS = new Set(["amount", "amount_cents", "daily_limit"]);
 
@@ -1710,7 +1711,6 @@ function subscriptionEvidenceHtml(item) {
 /* 只列出真实存在的对外渠道：网页端 + 飞书。
    本地 IM 只是服务端演示用的内部信道，不对外呈现，故不再出现在表格里。 */
 const CHANNEL_ORDER = ["web", "feishu"];
-const CHANNEL_LABELS = { web: "网页", feishu: "飞书" };
 const CHANNEL_STATE_LABELS = {
   web: "网页内直连",
   local: "本地演示",
@@ -1739,35 +1739,6 @@ function formatStamp(value) {
     `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-function renderChannelHealth(data) {
-  const status = el("channel-health-status");
-  const body = el("channel-health-body");
-  if (!status || !body) return;
-  const channels = data && data.channels ? data.channels : {};
-  const health = data && data.health ? data.health : {};
-  const rows = CHANNEL_ORDER.map((name) => {
-    const item = channels[name] || {};
-    const stats = health[name] || {};
-    const configured = item.configured !== false;
-    const state = configured ? channelStateLabel(item, stats) : "未接入";
-    const lastEvent = configured ? formatStamp(stats.last_event_at) : "—";
-    const replay = stats.replay_mode || item.mode === "replay" ? "是" : "否";
-    return `<tr><td>${esc(CHANNEL_LABELS[name] || name)}</td><td>${esc(state)}</td><td>${esc(lastEvent)}</td>` +
-      `<td>${esc(String(stats.ok || 0))}</td><td>${esc(String(stats.failed || 0))}</td>` +
-      `<td>${esc(String(stats.ratelimit_hits || 0))}</td><td>${replay}</td></tr>`;
-  });
-  status.textContent = data && data.health ? "渠道状态已更新" : "渠道状态已读取";
-  body.innerHTML = rows.length ? rows.join("\n") : '<tr><td colspan="7">暂无渠道状态。</td></tr>';
-}
-
-async function refreshChannelHealth() {
-  const status = el("channel-health-status");
-  if (status) status.textContent = "正在读取渠道状态…";
-  const result = await apiFetch("GET", "/api/channels/health");
-  if (!result.ok) throw new Error("无法读取渠道状态");
-  renderChannelHealth(result.data);
-}
-
 /* 订阅卡（S2）：三行——商户 + 状态角标 / 金额·周期·下次扣款 + 取消订阅 / 核对依据入口。
    依据不再占卡片版面，点第三行打开详情弹层；金额与日期全部来自服务端。 */
 function subscriptionCardHtml(item, index) {
@@ -1783,7 +1754,9 @@ function subscriptionCardHtml(item, index) {
     ? `<button class="sub-card__cancel" type="button" data-sub-cancel="${esc(item.subscription_id)}"
         data-sub-merchant="${esc(item.merchant)}" data-sub-amount="${yuan(item.amount_cents)}"
         data-sub-cycle="${esc(item.cycle_label)}" data-sub-next="${next}"
-        data-sub-last="${esc(item.last_charged_on || "")}">取消订阅</button>`
+        data-sub-last="${esc(item.last_charged_on || "")}"
+        data-sub-period="${esc(item.current_period_label || "")}"
+        data-sub-charged="${item.charged_this_period === true ? "1" : item.charged_this_period === false ? "0" : ""}">取消订阅</button>`
     : "";
   return `<article class="sub-card${cancelled ? " sub-card--off" : ""}">
     <span class="sub-card__bar" aria-hidden="true"
@@ -2135,7 +2108,8 @@ async function cardPanelTask(kind, cardId) {
 }
 
 /* 订阅取消：卡片上的「取消」只开确认弹窗，确认后才发起计划。
-   弹窗内容与卡片一致（商户 / 金额 / 周期 / 下次扣款），但形态是居中模态，不占页内版面。 */
+   弹窗内容与卡片一致（商户 / 金额 / 周期 / 下次扣款），并明确写出**本期是否已扣**，
+   避免用户在「下次扣款」是预测值时误以为本期没扣或已扣。 */
 function openSubCancelDialog(button) {
   const dialog = el("subscription-cancel-dialog");
   if (!dialog || !button) return;
@@ -2143,10 +2117,14 @@ function openSubCancelDialog(button) {
   dialog.dataset.subId = data.subCancel || "";
   const body = el("subscription-cancel-body");
   if (body) {
-    const last = data.subLast ? ` · 最近扣费 ${esc(data.subLast)}` : "";
+    const period = data.subPeriod ? `本期（${esc(data.subPeriod)}）` : "本期";
+    const periodState = data.subCharged === "1"
+      ? "已扣款" : data.subCharged === "0" ? "尚未扣款" : "扣款状态未知";
+    const last = data.subLast ? ` · 上次扣费 ${esc(data.subLast)}` : "";
     body.innerHTML = `<p class="sub-cancel-dialog__merchant">${esc(data.subMerchant || "该订阅")}</p>
       <p class="sub-cancel-dialog__amount">${esc(data.subAmount || "—")}</p>
-      <p class="muted sub-cancel-dialog__meta">${esc(data.subCycle || "")}扣费 · 下次扣款 ${esc(data.subNext || "未提供")}${last}</p>
+      <p class="sub-cancel-dialog__period">${period}${periodState}${last}</p>
+      <p class="muted sub-cancel-dialog__meta">${esc(data.subCycle || "")}扣费 · 下次扣款 ${esc(data.subNext || "未提供")}</p>
       <p class="muted sub-cancel-dialog__note">取消只在本地把状态改为「已取消订阅」；商户侧是否停止扣费以商户回执为准，本页不承诺已停扣。</p>`;
   }
   if (typeof dialog.showModal === "function") dialog.showModal();
@@ -3342,15 +3320,21 @@ function clarifyPrompt(ask) {
 function clarifyControl(ask) {
   const slot = baseSlot(ask.slot);
   const attrs = `class="input" id="ask-${esc(ask.slot)}" data-slot="${esc(ask.slot)}" required`;
-  /* 有候选（同名收款人）：点选即可，候选信息全部来自后端事实（手机尾号 / 账号尾号 / 最近一次转账） */
-  if (ask.candidates && ask.candidates.length) {
-    const options = ask.candidates
+  /* 候选优先：同名收款人来自名册；options 来自场景（花店 / 花束档位）。
+     两者都点选即可，不用用户回头查号码或自己拼商户名。 */
+  const choices = (ask.candidates && ask.candidates.length)
+    ? ask.candidates
+    : (Array.isArray(ask.options) ? ask.options : []);
+  if (choices.length) {
+    const options = choices
       .map((item) => `<option value="${esc(item.value)}">${esc(item.label)}</option>`)
       .join("");
+    const note = ask.candidates && ask.candidates.length
+      ? "候选来自名册与已记账流水，只列事实，不做猜测。"
+      : "选项来自演示白名单，只作推荐，不会自动执行。";
     return (
       `<select ${attrs}><option value="">请选择${esc(SLOT_LABELS[slot] || "其一")}</option>` +
-      `${options}</select>` +
-      `<span class="muted">候选来自名册与已记账流水，只列事实，不做猜测。</span>`
+      `${options}</select><span class="muted">${esc(note)}</span>`
     );
   }
   if (OBJECT_OPTIONS[slot] || slot === "product") return `<select ${attrs}>${optionsHtml(slot)}</select>`;
@@ -3358,7 +3342,9 @@ function clarifyControl(ask) {
     return `<select ${attrs}><option value="">请选择扣费周期</option>` +
       `<option value="monthly">每月</option><option value="yearly">每年</option></select>`;
   }
-  if (slot === "when" || slot === "next_charge_on") return `<input ${attrs} type="date" />`;
+  if (slot === "when" || slot === "next_charge_on" || slot === "delivery_time") {
+    return `<input ${attrs} type="date" />`;
+  }
   if (MONEY_SLOTS.has(slot)) {
     return `<input ${attrs} type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="金额单位：元，例如 25" />` +
       `<span class="muted">${esc(SLOT_LABELS[slot])}单位为元，例如输入 25 表示 25 元。</span>`;
@@ -4192,7 +4178,8 @@ const CHANNEL_CARD_LABELS = { web: "Web", feishu: "飞书" };
 
 function channelStatusLabel(name, item, stats) {
   if (item.configured === false) {
-    return item.mode === "replay" || stats.replay_mode ? "未配置 · 演示模式" : "未配置";
+    const replay = item.mode === "replay" || item.reason === "replay_mode" || stats.replay_mode;
+    return replay ? "未绑定 · replay" : "未绑定";
   }
   if (name === "web") return "正常";
   return channelStateLabel(item, stats);
@@ -4214,6 +4201,9 @@ function channelStatusHtml(data) {
 }
 
 function renderProfile(me, audit, channelHealth) {
+  auditCache = audit && audit.available !== false
+    ? audit
+    : { events: [], chain_ok: false, chain_head: "", available: false };
   const targets = [el("profile-body"), el("view-me-body")].filter(Boolean);
   if (!targets.length) return;
   const user = me.user || {};
@@ -4245,7 +4235,9 @@ function renderProfile(me, audit, channelHealth) {
   if (!feishu) {
     feishuBody = '<p class="muted">渠道信息读取失败，请稍后重试。</p>';
   } else if (!feishu.configured) {
-    feishuBody = '<p class="muted">飞书渠道未接入：服务器还没有配置飞书应用凭据，配好后这里会出现「连接飞书」。</p>';
+    const replay = feishu.replay === true || feishu.mode === "replay";
+    const state = `${feishu.linked ? "已绑定" : "未绑定"}${replay ? " · replay" : ""}`;
+    feishuBody = `<p class="muted"><b>${esc(state)}</b>：尚未配置飞书应用凭据，当前只能回放历史事件；配好后可绑定并直接办理。</p>`;
   } else if (feishu.linked) {
     feishuAction = '<button class="btn btn--sm btn--ghost" id="btn-feishu-unlink" type="button">解除绑定</button>';
     feishuBody = '<p class="muted">已连接：可以直接在飞书里对「AI Banking」机器人说「查余额」「给李娜转五百」。</p>';
@@ -4318,6 +4310,13 @@ function renderProfile(me, audit, channelHealth) {
               : '<p class="muted login-history__empty">暂无更早的登录记录。</p>'}
           </details>`
         : '<p class="muted">暂无可查看的登录记录。</p>'}
+    </section>
+    <section class="profile-card">
+      <div class="profile-card__head">
+        <h3>审计与溯源</h3>
+        <button class="btn btn--sm" type="button" data-audit-open>查看审计</button>
+      </div>
+      <p class="muted">哈希链${audit.chain_ok ? "校验通过" : "状态未知"} · 最近 ${(audit.events || []).length} 条事件；可按 execution_id 追到 record_id / content_hash。</p>
     </section>
     <details class="profile-card profile-card--fold">
       <summary>我的操作轨迹</summary>
@@ -4568,6 +4567,15 @@ function lifeMonthKey(date) {
 
 function lifeDateKey(value) {
   const text = String(value || "");
+  /* 带时间戳的 ISO 一律按**本地时区**归日：服务端存 UTC，直接切前 10 位会把
+     11-01 01:39（UTC+8）算到 10-31，日历与列表就对不上。纯日期字符串不转换。 */
+  if (/T|\s\d{2}:\d{2}/.test(text)) {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
+    }
+  }
   return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : "";
 }
 
@@ -4648,17 +4656,52 @@ function lifeRecordRowHtml(record) {
   const kind = lifeRecordKind(record);
   const title = record.event_title || record.event_name || record.event_id;
   const amount = typeof record.amount_cents === "number" ? ` ${yuan(record.amount_cents)}` : "";
-  return `<li><span class="life-cal__date">${esc(lifeDateKey(record.updated_at || record.created_at).slice(5))}</span>
+  return `<li data-life-record="${esc(record.record_id || "")}" role="button" tabindex="0"
+    aria-label="查看详情：${esc(title)}"><span class="life-cal__date">${esc(lifeDateKey(record.updated_at || record.created_at).slice(5))}</span>
     <span class="life-cal__kind">${kind}</span>
     <span class="life-cal__name" title="${esc(record.event_name || record.event_id)}">${esc(title)}</span>
     <span class="chip">${esc(label)}</span><span class="muted">${esc(amount)}</span></li>`;
+}
+
+/* 生活事件记录只读回放：步骤来自计划快照，状态按记录整体状态派生，不重新执行。 */
+function openLifeRecord(recordId) {
+  const record = (lifeData.records || []).find((item) => item.record_id === recordId);
+  const dialog = el("life-record-dialog");
+  const body = el("life-record-body");
+  if (!record || !dialog || !body) return;
+  const statusLabel = LIFE_EVENT_STATUS[record.status] || record.status;
+  const stepState = record.status === "executed" ? "已执行"
+    : record.status === "planned" ? "待确认"
+      : record.status === "rejected" ? "已拒绝" : "失败";
+  const title = record.event_title || record.event_name || record.event_id;
+  const steps = Array.isArray(record.steps) ? record.steps : [];
+  const stepRows = steps.length
+    ? steps.map((step, index) => {
+      const amount = typeof step.amount_cents === "number" ? yuan(step.amount_cents) : "—";
+      const when = step.date ? ` · ${esc(String(step.date))}` : "";
+      return `<li class="life-record-step">
+        <span class="life-record-step__no">${index + 1}</span>
+        <span class="life-record-step__body">
+          <b>${esc(String(step.label || step.action || "步骤"))}</b>
+          <span class="muted">${amount}${when} · ${stepState}</span>
+        </span></li>`;
+    }).join("")
+    : '<li class="muted">这条记录没有步骤摘要（旧版本记录）。</li>';
+  body.innerHTML = `<p class="life-record-detail__name">${esc(title)}</p>
+    <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))} · ${esc(statusLabel)}${
+      record.due_on ? ` · 计划日期 ${esc(record.due_on)}` : ""
+    }</p>
+    <ul class="life-record-steps">${stepRows}</ul>
+    <p class="muted">只读回放：展示历史计划的步骤与金额，不会重新执行。</p>`;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
 }
 
 /* ---------------- 组合任务台（L1 选事件 + 参数填写 + L4 日历入口） ---------------- */
 /* 原型全部来自服务端；L1 先选一个事件，选中后展开该事件的步骤与参数，
    参数折叠展开后才出现「开始组合」，避免还没填就误触。 */
 const lifePick = { event: "" };
-const lifeData = { prototypes: [] };
+const lifeData = { prototypes: [], records: [] };
 
 function lifeWorkbenchHtml(prototypes) {
   const list = Array.isArray(prototypes) ? prototypes : [];
@@ -4767,6 +4810,7 @@ async function refreshLifeEvents() {
   lifeCal.records = records;
   if (calendar) calendar.innerHTML = lifeCalendarHtml(records);
   lifeData.prototypes = prototypes;
+  lifeData.records = records;
   if (!lifePick.event && prototypes.length) {
     lifePick.event = typeof prototypes[0].event_id === "string" ? prototypes[0].event_id : "";
   }
@@ -4780,7 +4824,7 @@ async function refreshLifeEvents() {
       const kind = lifeRecordKind(record);
       const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
       const metaType = title === typeName ? "" : `${typeName} · `;
-      return `<article class="takeover insight-item life-record">
+      return `<article class="takeover insight-item life-record" data-life-record="${esc(record.record_id || "")}">
       <div class="life-record__head">
         <span class="life-record__kind">${kind}</span>
         <b>${esc(title)}</b>
@@ -4822,6 +4866,28 @@ function bindDialogDismiss(dialog) {
 let appDialogState = null;
 let appDialogResolve = null;
 let authModeCache = null;
+let auditCache = { events: [], chain_ok: false, chain_head: "", available: false };
+
+/* 审计详情：时间倒序 + 每条事件的 payload（含 record_id / content_hash / execution_id）。 */
+function openAuditDialog() {
+  const dialog = el("audit-dialog");
+  const body = el("audit-body");
+  if (!dialog || !body) return;
+  const events = Array.isArray(auditCache.events) ? auditCache.events : [];
+  const rows = events.map((event) => {
+    const payload = JSON.stringify(event.payload || {}, null, 2);
+    return `<li><p><b>${esc(profileValue(event.kind))}</b>
+      <span class="mono">${esc(momentLabel(event.timestamp))}</span></p>
+      <p class="muted mono">event_id ${esc(profileValue(event.event_id))}</p>
+      <details><summary>payload（可查 record_id / content_hash）</summary>
+        <pre class="mono audit-digest">${esc(payload)}</pre></details></li>`;
+  }).join("");
+  body.innerHTML = `<p class="muted">链头 ${esc(profileValue(auditCache.chain_head) || "—")} · ${
+    auditCache.chain_ok ? "哈希链校验通过" : "哈希链未校验"
+  }</p>` + (rows ? `<ul class="profile-trail">${rows}</ul>` : '<p class="muted">暂无审计事件。</p>');
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
 
 function settleAppDialog(value) {
   const resolve = appDialogResolve;
@@ -5016,14 +5082,31 @@ document.addEventListener("click", async (event) => {
   if (open) {
     closeLifeWorkbench();
     await openConversation(open.dataset.lifeOpen || "");
+    return;
+  }
+  const record = target.closest("[data-life-record]");
+  if (record) {
+    openLifeRecord(record.dataset.lifeRecord || "");
   }
 });
 el("btn-life-workbench")?.addEventListener("click", openLifeWorkbench);
+el("btn-life-record-close")?.addEventListener("click", () => closeDialog(el("life-record-dialog")));
 el("btn-wealth-assessment-close")?.addEventListener("click", closeWealthAssessment);
 el("btn-life-workbench-close")?.addEventListener("click", closeLifeWorkbench);
 /* 五个弹窗都支持「点外面关闭」 */
-[el("life-workbench"), el("wealth-assessment"), el("subscription-cancel-dialog"),
-  el("sub-detail"), el("app-dialog")].forEach(bindDialogDismiss);
+[el("life-workbench"), el("life-record-dialog"), el("wealth-assessment"),
+  el("subscription-cancel-dialog"), el("sub-detail"), el("audit-dialog"),
+  el("app-dialog")].forEach(bindDialogDismiss);
+/* 审计入口：我的页「查看审计」与弹窗关闭 */
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  if (target.closest("[data-audit-open]")) {
+    openAuditDialog();
+    return;
+  }
+  if (target.closest("[data-audit-close]")) closeDialog(el("audit-dialog"));
+});
 /* 通用确认弹窗：取消 / Esc / 点遮罩都按「取消」结算，口令框回车等于点确认 */
 el("app-dialog")?.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -5488,21 +5571,14 @@ const RECORD_TAB_LOADERS = {
 };
 
 const RECORD_HEADERS = {
-  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号", "详情"],
-  holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益", "渠道"],
-  cards: ["卡号", "类型", "状态", "日限额", "渠道"],
-  suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户", "渠道"],
-  charges: ["商户", "金额", "扣费日", "渠道", "记录号"],
+  transfers: ["记账日", "收款人", "金额", "状态", "记录号", "详情"],
+  holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益"],
+  cards: ["卡号", "类型", "状态", "日限额"],
+  suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户"],
+  charges: ["商户", "金额", "扣费日", "扣款账户", "记录号"],
 };
 
 let recordsRequestToken = 0;
-
-/* 业务流水当前只记 agent / 历史 seed 渠道；web / app / feishu 的逐次区分以审计事件为准。 */
-function recordChannelLabel(value) {
-  const channel = String(value || "").trim();
-  if (!channel) return "—";
-  return ({ web: "网页", app: "手机", feishu: "飞书", agent: "AI 办理" })[channel] || channel;
-}
 
 function recordsRow(cells) {
   return `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
@@ -5544,7 +5620,6 @@ function recordsRowsFor(key, payload) {
       esc(item.payee || "—"),
       `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
       esc(item.status || "—"),
-      esc(recordChannelLabel(item.channel)),
       `<span class="mono">${esc(item.record_id || "—")}</span>`,
       `<details class="records-detail"><summary>详情</summary>
         <p class="muted">${esc(item.kind === "scheduled" ? "定时登记（本次不扣款）" : "即时转账")}` +
@@ -5570,7 +5645,6 @@ function recordsRowsFor(key, payload) {
         `<span class="mono">${esc(item.amount_yuan || "0")} 元</span>`,
         `<span class="mono">${esc(item.purchased_on || "—")}</span>`,
         incomeCell,
-        esc(recordChannelLabel(item.channel)),
       ]);
     });
   }
@@ -5580,7 +5654,6 @@ function recordsRowsFor(key, payload) {
       esc(item.type_label || "—"),
       esc(item.status_label || "—"),
       `<span class="mono">${yuan(item.daily_limit_cents || 0)}</span>`,
-      "—",
     ]));
   }
   if (key === "suspicions") {
@@ -5595,14 +5668,17 @@ function recordsRowsFor(key, payload) {
         esc(confidenceLabel(item.confidence)),
         `<span class="mono">${yuan(item.impact_cents || 0)}</span>`,
         `<span class="mono">${evidenceLines || "—"}</span>`,
-        "—",
       ]);
     });
   }
   if (key === "charges") {
     /* 订阅扣款证据：`/api/options` 的 subscription_details.insights[].evidence[]，
-       同一笔流水可能被多条洞察引用，按 record_id 去重。 */
+       同一笔流水可能被多条洞察引用，按 record_id 去重。
+       扣款账户按 evidence.account_id 映射账户事实（名称 + 当前余额），前端不推导。 */
     const details = data.subscription_details || {};
+    const accountById = new Map(
+      (data.accounts || []).map((item) => [String(item.id || ""), item])
+    );
     const seen = new Set();
     const rows = [];
     (details.insights || []).forEach((item) => {
@@ -5611,11 +5687,12 @@ function recordsRowsFor(key, payload) {
         if (seen.has(key0)) return;
         seen.add(key0);
         const moment = evidence.booked_at ? String(evidence.booked_at).slice(11, 16) : "";
+        const account = accountById.get(String(evidence.account_id || ""));
         rows.push(recordsRow([
           esc(evidence.merchant_label || item.merchant || "—"),
           `<span class="mono">${yuan(Math.abs(Number(evidence.amount_cents) || 0))}</span>`,
           `<span class="mono">${esc(evidence.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
-          esc(recordChannelLabel(evidence.channel)),
+          account ? esc(account.label) : "—",
           `<span class="mono">${esc(evidence.record_id || "—")}</span>`,
         ]));
       });
@@ -5644,7 +5721,7 @@ function panelFailure(containerId, message, retryKey) {
   </article>`;
 }
 
-const VIEWS = ["home", "chat", "scene", "records", "health", "me"];
+const VIEWS = ["home", "chat", "scene", "records", "me"];
 let currentScene = "transfer";
 let currentRecordTab = "transfers";
 
@@ -5683,7 +5760,9 @@ async function renderRecordsTab(tab) {
   const rows = recordsRowsFor(key, result.data || {});
   const note = key === "suspicions"
     ? `<p class="muted records-note">识别结果只作核对线索，不当作已确认；渠道列无来源时显示「—」。数据来源：${esc((result.data || {}).data_source || "服务端事实")}。</p>`
-    : "";
+    : key === "charges"
+      ? '<p class="muted records-note">扣款账户为这笔流水所属账户；余额是账户当前余额，不是扣款时点余额。</p>'
+      : "";
   body.innerHTML = rows.length
     ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
       recordsTableHtml(RECORD_HEADERS[key], rows) + note
@@ -5730,7 +5809,6 @@ function showView(name, options) {
     });
   });
   if (next === "records") renderRecordsTab(opts.tab || currentRecordTab);
-  if (next === "health") refreshChannelHealth().catch(() => {});
   /* 窄屏「我的」是独立一页；桌面仍走弹窗，这里只在页面视图可见时补数据 */
   if (next === "me") loadProfile(el("view-me-body"), "正在读取账户信息…");
   if (next === "chat") {
@@ -5957,14 +6035,6 @@ document.addEventListener("click", (event) => {
   });
 });
 
-el("btn-health-refresh")?.addEventListener("click", () => {
-  const status = el("channel-health-status");
-  if (status) status.textContent = "正在刷新渠道状态…";
-  refreshChannelHealth().catch(() => {
-    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
-  });
-});
-
 const initialRoute = parseHash();
 if (!window.location.hash) window.history.replaceState(null, "", "#/chat");
 showView(
@@ -5985,10 +6055,6 @@ refreshOptions().catch(() => {
   if (status) status.textContent = "订阅识别读取失败，请稍后重试。";
   panelFailure("subscription-list", "订阅识别读取失败，请稍后重试。", "subscriptions");
   timelineAdd("可选对象读取失败，请重新加载页面。", "stop");
-});
-refreshChannelHealth().catch(() => {
-  const status = el("channel-health-status");
-    if (status) status.textContent = "渠道状态暂不可用，请稍后重试。";
 });
 refreshInsights().catch(() => {
   el("insights-status").textContent = "主动洞察读取失败，请稍后重试。";
@@ -6018,7 +6084,6 @@ window.addEventListener("offline", () => setOfflineState(true));
 window.addEventListener("online", () => {
   setOfflineState(false);
   refreshOptions().catch(() => {});
-  refreshChannelHealth().catch(() => {});
   refreshInsights().catch(() => {});
   refreshTransfers().catch(() => {
     el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";

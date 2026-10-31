@@ -1261,6 +1261,12 @@ body { background: var(--pg-bg); line-height: 1.52; }
 
 /* 生活日历：只落「本人生成过的记录日期」，翻月只对已读记录重绘 */
 .life-cal { display: grid; gap: var(--s-2); margin-top: var(--s-2); }
+@media (max-width: 720px) {
+  /* 窄屏：保持整月网格，只把行高压到 26px，避免日历占掉半屏 */
+  .life-cal { gap: 6px; }
+  .life-cal__cell, .life-cal__cell--blank { min-height: 26px; }
+  .life-cal__week li { font-size: 9px; }
+}
 .life-cal__head { display: flex; align-items: center; gap: var(--s-2); }
 .life-cal__month { color: var(--ink); font-size: var(--fs-small); }
 .life-cal__count { margin-left: auto; }
@@ -1273,8 +1279,8 @@ body { background: var(--pg-bg); line-height: 1.52; }
   place-items: center;
   gap: 2px;
   width: 100%;
-  min-height: 34px;
-  padding: 3px 0;
+  min-height: 28px;
+  padding: 2px 0;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -1285,7 +1291,7 @@ body { background: var(--pg-bg); line-height: 1.52; }
   cursor: pointer;
 }
 .life-cal__cell:hover { border-color: var(--rule-strong); }
-.life-cal__cell--blank { min-height: 34px; border: 0; }
+.life-cal__cell--blank { min-height: 28px; border: 0; }
 .life-cal__cell.is-marked { border-color: var(--rule); background: var(--voucher-alt); color: var(--ink); }
 .life-cal__cell.is-today { border-color: var(--blue-600); }
 .life-cal__cell.is-picked {
@@ -1933,6 +1939,12 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .sub-cancel-dialog__merchant { margin: 0; font-weight: 600; }
 .sub-cancel-dialog__amount { margin: 0; font-size: 22px; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .sub-cancel-dialog__meta { margin: 0; font-size: 12px; }
+.sub-cancel-dialog__period {
+  margin: 0; font-size: 13px; font-weight: 600;
+  color: var(--ink);
+  padding: 4px 8px; border-radius: 6px;
+  background: var(--voucher-alt);
+}
 .sub-cancel-dialog__note { margin: var(--s-2) 0 0; font-size: 12px; line-height: 1.5; }
 .sub-cancel-dialog__foot {
   flex: none;
@@ -2355,21 +2367,23 @@ body { background: var(--pg-bg); line-height: 1.52; }
 }
 .subscription-price { color: var(--blue-700); font-weight: 600; }
 .audit-digest { margin: 4px 0 0; word-break: break-all; }
-.channel-health-table-wrap { overflow-x: auto; }
-.channel-health-table {
-  width: 100%;
-  min-width: 760px;
-  table-layout: fixed;
-  border-collapse: collapse;
-  font-size: 13px;
+/* 生活事件记录抽屉：只读步骤回放 */
+.life-dialog__body { display: grid; gap: var(--s-2); overflow: auto; }
+.life-record-detail__name { margin: 0; font-weight: 600; font-size: var(--fs-h2); }
+.life-record-steps { display: grid; gap: var(--s-2); list-style: none; padding: 0; margin: var(--s-2) 0; }
+.life-record-step { display: flex; gap: var(--s-2); align-items: flex-start; }
+.life-record-step__no {
+  flex: none; width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--blue-600); color: var(--blue-700);
+  display: grid; place-items: center; font-size: 11px;
 }
-.channel-health-table th,
-.channel-health-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--pg-line);
-  text-align: left;
-}
-.channel-health-table th { color: #6b7a90; font-weight: 600; background: #f7f9fd; }
+.life-record-step__body { display: grid; gap: 2px; min-width: 0; font-size: var(--fs-body); }
+.life-record-step__body .muted { font-size: var(--fs-small); }
+.life-cal__list > li[data-life-record],
+.life-record[data-life-record] { cursor: pointer; }
+.life-cal__list > li[data-life-record]:hover,
+.life-record[data-life-record]:hover { border-color: var(--rule-strong); }
+
 /* ---------------- ② 账单：画像 / 图表 / 可疑前 3（2026-10-28） ---------------- */
 .bills-charts { display: grid; gap: var(--s-3); margin: var(--s-3) 0; }
 .bills-trend { width: 100%; height: auto; color: #16233a; }

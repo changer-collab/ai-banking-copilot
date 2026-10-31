@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=49" />
+<link rel="stylesheet" href="/assets/workspace.css?v=51" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -465,6 +465,13 @@ _PAGE_HTML = """<!DOCTYPE html>
           </div>
           <div id="life-workbench-body"><p class="muted">尚未读取事件原型。</p></div>
         </dialog>
+        <dialog class="life-dialog" id="life-record-dialog">
+          <div class="life-dialog__head">
+            <p class="panel__title">生活事件详情</p>
+            <button class="btn btn--sm btn--ghost" type="button" id="btn-life-record-close">关闭</button>
+          </div>
+          <div class="life-dialog__body" id="life-record-body"></div>
+        </dialog>
       </div>
     </section>
 
@@ -472,7 +479,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>记录与明细</h2>
-          <p class="muted">AI 做过的事都在这里查得到；渠道列区分 web / app / feishu。</p>
+          <p class="muted">AI 做过的事都在这里查得到；扣款记录按账户显示这笔钱从哪扣出。</p>
         </div>
       </header>
       <div class="tabs" id="records-tabs" role="tablist" aria-label="记录分类">
@@ -483,26 +490,6 @@ _PAGE_HTML = """<!DOCTYPE html>
         <button class="tab" type="button" role="tab" data-record-tab="charges" aria-selected="false">扣款记录</button>
       </div>
       <div id="records-body"></div>
-    </section>
-
-    <section class="view" id="view-health" hidden>
-      <header class="view__head">
-        <div>
-          <h2>渠道健康</h2>
-          <p class="muted">未接入的渠道如实显示 replay/未接入；这一页是网页 / APP 里唯一的渠道产品页，不是聊天页。</p>
-        </div>
-        <button class="btn btn--sm" type="button" id="btn-health-refresh">刷新</button>
-      </header>
-      <section class="panel" id="channel-health-panel">
-        <p class="panel__title">渠道状态</p>
-        <p class="muted" id="channel-health-status">正在读取渠道状态…</p>
-        <div class="channel-health-table-wrap" id="channel-health-list">
-          <table class="channel-health-table">
-            <thead><tr><th>渠道</th><th>状态</th><th>最后事件</th><th>成功</th><th>失败</th><th>限流</th><th>回放模式</th></tr></thead>
-            <tbody id="channel-health-body"><tr><td colspan="7">尚未读取渠道状态。</td></tr></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <section class="view" id="view-me" hidden>
@@ -594,7 +581,15 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="sub-detail-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=73"></script>
+<dialog class="sub-detail" id="audit-dialog" aria-labelledby="audit-dialog-title">
+  <div class="sub-detail__head">
+    <p class="panel__title" id="audit-dialog-title">审计与溯源</p>
+    <button class="btn btn--sm btn--ghost" type="button" data-audit-close>关闭</button>
+  </div>
+  <div class="sub-detail__body" id="audit-body"></div>
+</dialog>
+
+<script src="/assets/app.js?v=75"></script>
 </body>
 </html>
 """
@@ -646,6 +641,21 @@ LOGIN_HTML = """<!DOCTYPE html>
   }
   .demo b { color: #16233a; font-weight: 600; }
   .foot { margin-top: 16px; font-size: 12px; color: #93a0b4; text-align: center; }
+  .preview {
+    margin-top: 16px; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6;
+    background: #fbfcfe; color: #40506b; border: 1px solid #e3ebf7;
+  }
+  .preview summary { cursor: pointer; font-weight: 600; color: #16233a; }
+  .preview-grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px; margin: 10px 0 8px;
+  }
+  .preview-grid span {
+    padding: 6px 8px; border-radius: 8px; background: #eef4ff; color: #0b4fd8;
+    font-weight: 600; text-align: center;
+  }
+  .preview ul { margin: 0; padding-left: 18px; }
+  .preview li { margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -663,6 +673,19 @@ LOGIN_HTML = """<!DOCTYPE html>
     模拟银行环境，不连接真实银行账户。对话与办理记录只存在本演示库的本人账户下，
     演示结束后由部署方整体清除；AI 回复由上游模型服务生成，请勿输入真实敏感信息。
   </div>
+  <details class="preview">
+    <summary>先逛逛：功能预览（只读，不会办理）</summary>
+    <div class="preview-grid">
+      <span>智能转账</span><span>账单分析</span><span>卡片管理</span>
+      <span>理财</span><span>订阅管理</span><span>生活事件</span>
+    </div>
+    <ul>
+      <li>AI 先出计划卡，确认后才执行；高风险动作需强验证。</li>
+      <li>每一步都有审计 ID，可在「我的 → 审计与溯源」追溯。</li>
+      <li>演示环境使用模拟资金，不连接真实银行账户。</li>
+    </ul>
+    <p class="muted">登录后可进入对话办理；未登录不展示任何账户数据。</p>
+  </details>
   <p class="foot">模拟银行环境 · 不连接真实银行账户</p>
 </form>
 <script>

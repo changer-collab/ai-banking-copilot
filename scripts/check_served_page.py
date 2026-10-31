@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=49")
-    js = _get(base, "/assets/app.js?v=73")
+    workspace_css = _get(base, "/assets/workspace.css?v=51")
+    js = _get(base, "/assets/app.js?v=75")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -49,9 +49,9 @@ def run(base: str) -> list[str]:
             'class="topbar"' in html and 'class="layout layout--workspace"' in html
             and 'class="side"' in html and 'class="main"' in html and 'class="trace rail"' in html
         ),
-        "page: 视图层（首页/对话/记录/渠道/我的）": (
+        "page: 视图层（首页/对话/记录/我的）": (
             'id="view-home"' in html and 'id="view-chat"' in html
-            and 'id="view-records"' in html and 'id="view-health"' in html
+            and 'id="view-records"' in html and 'id="view-health"' not in html
             and 'id="view-me"' in html and 'id="profile-panel"' in html
         ),
         "page: 窄屏首页列表容器": 'id="home-scene-list"' in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=49" in html
-            and "/assets/app.js?v=73" in html
+            and "/assets/workspace.css?v=51" in html
+            and "/assets/app.js?v=75" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html

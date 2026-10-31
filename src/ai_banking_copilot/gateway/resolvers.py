@@ -54,6 +54,14 @@ _CN_TEN_THOUSAND = ("万", "萬")
 _CN_SCALE_HINT = frozenset("十拾百佰千仟万萬")
 _ISO_DATE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
 _MONTHLY_DAY = re.compile(r"每月\s*(?P<day>\d{1,2})\s*号")
+_NEXT_MONTH_DAY = re.compile(r"下个?月\s*(?P<day>\d{1,2})\s*[号日]")
+_MONTH_DAY = re.compile(
+    r"(?:(?P<year>\d{4})\s*年)?(?P<month>\d{1,2})\s*月\s*(?P<day>\d{1,2})\s*[日号]"
+)
+_WEEKDAY_INDEX = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+_WEEKDAY_PHRASE = re.compile(
+    r"(?P<prefix>下下|下|本|这|上)?(?:周|星期|礼拜)(?P<day>[一二三四五六日天])"
+)
 _NEGATION_WORDS = ("不要", "别", "不用", "不转", "不办", "暂不", "拒绝")
 _RELATIVE_DAYS = {"今天": 0, "明天": 1, "后天": 2, "大后天": 3}
 _UNIT_MULTIPLIER = {"元": 1, "块": 1, "块钱": 1, "人民币": 1, "万": 10000, "k": 1000, "K": 1000}
@@ -315,6 +323,66 @@ def parse_temporal(text: str, today: date) -> TemporalParse:
             return TemporalParse(
                 matched=True, when=today + timedelta(days=offset), negation=False, evidence=word
             )
+
+    next_month = _NEXT_MONTH_DAY.search(text)
+    if next_month is not None:
+        day = int(next_month.group("day"))
+        year = today.year + (1 if today.month == 12 else 0)
+        month = 1 if today.month == 12 else today.month + 1
+        try:
+            return TemporalParse(
+                matched=True,
+                when=date(year, month, day),
+                negation=False,
+                evidence=next_month.group(0),
+            )
+        except ValueError:
+            return TemporalParse(
+                matched=False, when=None, negation=False, evidence=next_month.group(0)
+            )
+
+    month_day = _MONTH_DAY.search(text)
+    if month_day is not None:
+        month = int(month_day.group("month"))
+        day = int(month_day.group("day"))
+        year_text = month_day.group("year")
+        year = int(year_text) if year_text else today.year
+        try:
+            target = date(year, month, day)
+        except ValueError:
+            return TemporalParse(
+                matched=False, when=None, negation=False, evidence=month_day.group(0)
+            )
+        if year_text is None and target < today:
+            # 没写年份的「11 月 8 日」默认指**下一个**该日期，而不是已经过去的那天。
+            try:
+                target = date(year + 1, month, day)
+            except ValueError:
+                return TemporalParse(
+                    matched=False, when=None, negation=False, evidence=month_day.group(0)
+                )
+        return TemporalParse(
+            matched=True, when=target, negation=False, evidence=month_day.group(0)
+        )
+
+    weekday = _WEEKDAY_PHRASE.search(text)
+    if weekday is not None:
+        index = _WEEKDAY_INDEX[weekday.group("day")]
+        prefix = weekday.group("prefix") or ""
+        monday = today - timedelta(days=today.weekday())
+        if prefix in {"下", "下下"}:
+            weeks = 1 if prefix == "下" else 2
+            target = monday + timedelta(days=7 * weeks + index)
+        elif prefix == "上":
+            target = monday - timedelta(days=7 - index)
+        else:
+            # 「周三」「本周三」：本周已过就顺延到下周同一天。
+            target = monday + timedelta(days=index)
+            if target < today:
+                target += timedelta(days=7)
+        return TemporalParse(
+            matched=True, when=target, negation=False, evidence=weekday.group(0)
+        )
 
     if "下周" in text:
         days_ahead = (7 - today.weekday()) % 7
