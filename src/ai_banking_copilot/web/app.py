@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import time
+from calendar import monthrange
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -1099,14 +1100,18 @@ def create_app(deps: AppDeps) -> FastAPI:
     ) -> dict[str, object]:
         """只读账单异常识别 + 结论式解释；不写事实、不产生执行授权。
 
-        缺省账期为服务端时钟的上一个月；金额全部来自确定性识别引擎并按分返回，
+        缺省账期为服务端时钟的**当月**（数据截至今日）；显式传 `year` / `month` 时按参数。
+        `period_basis` 如实说明账期来源，`data_through` 为该账期的数据截止日
+        （当月最后一天与今日取小）。金额全部来自确定性识别引擎并按分返回，
         模型只补充文字解释（失败时 `narrative.degraded=true`，不得当作成功分析）。
         """
-        target = deps.today.replace(day=1) - timedelta(days=1)
-        target_year = target.year if year is None else year
-        target_month = target.month if month is None else month
+        explicit = year is not None or month is not None
+        target_year = deps.today.year if year is None else year
+        target_month = deps.today.month if month is None else month
         if not 2000 <= target_year <= 2100 or not 1 <= target_month <= 12:
             raise HTTPException(status_code=400, detail="账期非法，需为 2000-2100 年与 1-12 月")
+        period_end = date(target_year, target_month, monthrange(target_year, target_month)[1])
+        data_through = min(period_end, deps.today)
         report = analyze_bill(
             deps.gateway, user_id, target_year, target_month, as_of=deps.today,
         )
@@ -1114,6 +1119,8 @@ def create_app(deps: AppDeps) -> FastAPI:
         profile = bill_profile(deps.gateway, user_id, report)
         return {
             **report_payload(report),
+            "period_basis": "explicit" if explicit else "current_month",
+            "data_through": data_through.isoformat(),
             "trend": [
                 {"period": point.period, "expense_cents": point.expense_cents}
                 for point in expense_trend(deps.gateway, user_id, target_year, target_month)

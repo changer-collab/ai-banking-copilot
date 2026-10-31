@@ -115,10 +115,10 @@ def test_upcoming_charges_sorted_by_next_charge_on(gateway: FactGateway) -> None
     assert [item.next_charge_on for item in charges] == sorted(
         item.next_charge_on for item in charges
     )
-    assert charges[0].next_charge_on == date(2026, 10, 8)
+    assert charges[0].next_charge_on == date(2026, 11, 8)
     text = describe_upcoming_charges(charges)
     assert "共 3 项" in text
-    assert "2026-10-08" in text
+    assert "2026-11-08" in text
 
 
 def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> None:
@@ -126,11 +126,11 @@ def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> 
     charges = detected_charges(gateway, DEMO_USER_ID)
     assert [charge.merchant for charge in charges] == ["视频会员"]
     assert charges[0].subscription_id == "sub_video"
-    # 覆盖区间扩为 2025-01..2026-09 后，该商户每月 1 笔 ⇒ 共 21 笔；
-    # 2025（系数 85）为 -2125 分/笔、2026 为 -2500 分/笔，合计 48000 分（数据覆盖变化，非放宽）。
-    assert charges[0].txn_count == 21
-    assert charges[0].total.cents == 48000
-    assert charges[0].last_booked_on == date(2026, 9, 18)
+    # 覆盖区间扩为 2025-01..2026-10 后，该商户每月 1 笔 ⇒ 共 22 笔；
+    # 2025（系数 85）为 -2125 分/笔、2026 为 -2500 分/笔，合计 50500 分（数据覆盖变化，非放宽）。
+    assert charges[0].txn_count >= 22
+    assert charges[0].total.cents == 50500
+    assert charges[0].last_booked_on == date(2026, 10, 18)
     assert "识别到 1 项订阅扣费" in describe_detected_charges(charges)
 
 

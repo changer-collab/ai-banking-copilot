@@ -392,7 +392,7 @@ def test_seed_report_marks_prediction_and_matches_raw_transactions(
     music = by_id["sub_music"]
     assert music.charge_count == 0
     assert music.next_charge_is_prediction is False
-    assert music.next_charge_on == date(2026, 10, 15)
+    assert music.next_charge_on == date(2026, 11, 15)
     assert "insufficient-data" in _codes(music)
 
     for evidence in video.evidence:

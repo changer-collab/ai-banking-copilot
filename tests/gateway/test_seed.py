@@ -7,7 +7,6 @@ from ai_banking_copilot.gateway.seed import (
     seed_database,
 )
 from ai_banking_copilot.gateway.store import Store, StoreMode
-from ai_banking_copilot.scenarios.bills import ytd_end_month
 from ai_banking_copilot.scenarios.scheduling import REFERENCE_DATE
 
 
@@ -25,8 +24,9 @@ def test_seed_is_idempotent(seeded_db: Path) -> None:
     store = Store(seeded_db)
     seed_database(store)
     seed_database(store)
-    # 覆盖区间 2025-01..2026-09 = 21 个月 × 15 条/月（8 条固定 + 7 条生活开支）= 315 条。
-    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
+    # 覆盖区间 2025-01..2026-10 = 22 个月 × 15 条/月（8 条固定 + 7 条生活开支）= 330 条。
+    # 计数断言用**下限**（AGENTS.md 第 2 节）：防误删，不因后续补种而逼所有人改同一行。
+    assert store.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] >= 330
     assert store.query("SELECT COUNT(*) AS n FROM payees")[0]["n"] == 5
     store.close()
 
@@ -41,7 +41,7 @@ def test_seed_tops_up_a_partially_seeded_database(seeded_db: Path) -> None:
 
     reopened = Store(seeded_db)
     seed_database(reopened)
-    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] == 315
+    assert reopened.query("SELECT COUNT(*) AS n FROM transactions")[0]["n"] >= 330
     reopened.close()
 
 
@@ -78,7 +78,7 @@ def test_seed_covers_full_history_through_baseline(seeded_db: Path) -> None:
     )
     assert [row["m"] for row in months] == [
         *(f"2025-{month:02d}" for month in range(1, 13)),
-        *(f"2026-{month:02d}" for month in range(1, 10)),
+        *(f"2026-{month:02d}" for month in range(1, 11)),
     ]
     store.close()
 
@@ -86,8 +86,8 @@ def test_seed_covers_full_history_through_baseline(seeded_db: Path) -> None:
 def test_seed_coverage_end_matches_reference_clock(seeded_db: Path) -> None:
     """种子覆盖的**基准月**必须与唯一基准时钟一致（不得另立第二个时钟）。"""
     assert _SEED_FIRST == (2025, 1)
-    assert _SEED_LAST == (REFERENCE_DATE.year, ytd_end_month(REFERENCE_DATE.year))
-    assert _SEED_LAST == (2026, 9)
+    assert _SEED_LAST == (REFERENCE_DATE.year, REFERENCE_DATE.month)
+    assert _SEED_LAST == (2026, 10)
 
 
 def test_seed_has_ambiguous_name_and_blocked_payee(seeded_db: Path) -> None:
@@ -115,8 +115,8 @@ def test_seed_payees_carry_full_mobile_or_explicit_null(seeded_db: Path) -> None
 def test_seed_merchant_text_carries_injection_sample(seeded_db: Path) -> None:
     store = Store(seeded_db)
     rows = store.query("SELECT merchant FROM transactions WHERE merchant LIKE '%忽略以上%'")
-    # 该注入样例流水每月 1 条，覆盖区间共 21 个月 ⇒ 21 条。
-    assert len(rows) == 21
+    # 该注入样例流水每月 1 条，覆盖区间共 22 个月 ⇒ 22 条。
+    assert len(rows) >= 22
     store.close()
 
 

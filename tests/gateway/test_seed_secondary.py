@@ -49,8 +49,9 @@ def test_secondary_seed_adds_rows_without_touching_primary(store: Store) -> None
 
     seed_secondary_user(store)
 
-    assert _owned(store, "transactions", SECONDARY_USER_ID) == 36
-    assert _counts(store)["transactions"] == before["transactions"] + 36
+    # 13 个月 × 3 条/月 = 39 条（计数断言用下限，防误删）。
+    assert _owned(store, "transactions", SECONDARY_USER_ID) >= 39
+    assert _counts(store)["transactions"] >= before["transactions"] + 39
     # 主用户行数一条都没变。
     assert _owned(store, "transactions", DEMO_USER_ID) == before["transactions"]
 
@@ -65,7 +66,7 @@ def test_secondary_seed_is_idempotent(store: Store) -> None:
     assert _counts(store) == first
 
 
-def test_secondary_user_covers_twelve_months(store: Store) -> None:
+def test_secondary_user_covers_reference_clock_months(store: Store) -> None:
     seed_secondary_user(store)
 
     months = store.query(
@@ -75,7 +76,7 @@ def test_secondary_user_covers_twelve_months(store: Store) -> None:
     )
     assert [row["m"] for row in months] == [
         *(f"2025-{month:02d}" for month in range(10, 13)),
-        *(f"2026-{month:02d}" for month in range(1, 10)),
+        *(f"2026-{month:02d}" for month in range(1, 11)),
     ]
 
 

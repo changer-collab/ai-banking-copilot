@@ -59,18 +59,19 @@ _WEALTH_HOLDINGS = (
 
 _SUBSCRIPTIONS = (
     # (subscription_id, user_id, merchant, amount_cents, period, next_charge_on, status, card_id)
-    ("sub_video", DEMO_USER_ID, "视频会员", 2500, "monthly", "2026-10-08", "active", "card_debit"),
-    ("sub_music", DEMO_USER_ID, "音乐会员", 1200, "monthly", "2026-10-15", "active", "card_debit"),
+    ("sub_video", DEMO_USER_ID, "视频会员", 2500, "monthly", "2026-11-08", "active", "card_debit"),
+    ("sub_music", DEMO_USER_ID, "音乐会员", 1200, "monthly", "2026-11-15", "active", "card_debit"),
     ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active", "card_credit"),
 )
 
 _SEED_FIRST: tuple[int, int] = (2025, 1)
-_SEED_LAST: tuple[int, int] = (2026, 9)
-"""流水覆盖区间（含两端）：`2025-01 .. 2026-09`，共 **21 个月**。
+_SEED_LAST: tuple[int, int] = (2026, 10)
+"""流水覆盖区间（含两端）：`2025-01 .. 2026-10`，共 **22 个月**。
 
-**基准月 = `2026-09`**：等于 `scenarios.scheduling.REFERENCE_DATE`
-（= `gateway.core_bank.DEFAULT_BOOKING_DATE` = `2026-10-01`）**所在月的前一个月**，
-与 `scenarios.bills._period` 的缺省账期口径一致——账期只到最近一个**完整月份**为止。
+**覆盖到基准时钟所在月**：`scenarios.scheduling.REFERENCE_DATE`
+（= `gateway.core_bank.DEFAULT_BOOKING_DATE` = `2026-10-31`）的当月也要有流水，
+故末月为 `2026-10`。10 月按 `_TXN_SPECS` 的固定日铺开（最大 day=27），
+最后一条不晚于 `2026-10-31`（基准日），不产生「未来已发生」的流水。
 分层纪律：种子层（gateway）**不得** import 上层（scenarios），故此处用与基准时钟一致的
 **显式常量**，并由 `tests/gateway/test_seed.py` 守卫「与该基准时钟一致」。
 """
@@ -136,7 +137,7 @@ def seed_database(store: Store) -> None:
 
     三条后果，都是我们要的：
     1. **重复调用零副作用**——已存在的行被忽略；
-    2. **种子扩充后无需重建库**——新增的历史数据自动补进既有库（例：3 个月 → 21 个月）；
+    2. **种子扩充后无需重建库**——新增的历史数据自动补进既有库（例：3 个月 → 22 个月）；
     3. **不覆盖演示过程中产生的真实变更**——余额、卡片状态、订阅状态、用户发起的交易都不在种子行里
        （`transactions` 的种子主键是 `txn_{YYYYMMDD}`，与用户产生的 `txn_*` 不会撞）。
     """
@@ -311,14 +312,15 @@ _SECONDARY_HOLDINGS = (
 
 _SECONDARY_SUBSCRIPTIONS = (
     ("sub_b_video", SECONDARY_USER_ID, "视频会员", 2500, "monthly",
-     "2026-10-12", "active", "card_b_debit"),
+     "2026-11-12", "active", "card_b_debit"),
     ("sub_b_cloud", SECONDARY_USER_ID, "云盘会员", 19800, "yearly",
      "2027-04-01", "active", "card_b_credit"),
 )
 
 _SECONDARY_FIRST: tuple[int, int] = (2025, 10)
-_SECONDARY_LAST: tuple[int, int] = (2026, 9)
-"""第二用户流水覆盖 **12 个完整月**：够跑月度账单 / 同比，又不与主用户共用主键。"""
+_SECONDARY_LAST: tuple[int, int] = (2026, 10)
+"""第二用户流水覆盖 **13 个月**（`2025-10 .. 2026-10`）：够跑月度账单 / 同比，
+又不与主用户共用主键；末月与主用户同口径，不晚于基准日 `2026-10-31`。"""
 
 _SECONDARY_TXN_SPECS = (
     # (day, account_id, amount_cents, category, merchant, channel, time, city, card_tail)
@@ -330,7 +332,7 @@ _SECONDARY_TXN_SPECS = (
 _SECONDARY_RISK = (SECONDARY_USER_ID, "R2", "2026-09-01", 365, "seed")
 
 _SECONDARY_BIRTHDAY = "07-18"
-"""与陈明（`10-03`）不同：证明生日类生活事件按用户取。"""
+"""与陈明（`11-02`）不同：证明生日类生活事件按用户取。"""
 
 
 def seed_secondary_user(store: Store) -> None:

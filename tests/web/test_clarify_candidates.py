@@ -110,5 +110,5 @@ def test_recent_transfer_shows_up_after_a_real_transfer(deps: AppDeps) -> None:
     choices = _payee_ask(again)["candidates"]
     assert isinstance(choices, list)
     labels = {str(item["value"]): str(item["label"]) for item in choices}
-    assert "最近一次转账 2026-10-01" in labels["p_wangwei_a"]
+    assert "最近一次转账 2026-10-31" in labels["p_wangwei_a"]
     assert "暂无转账记录" in labels["p_wangwei_b"]

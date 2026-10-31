@@ -249,7 +249,7 @@ def _yearly_result(gateway: FactGateway) -> QueryResult:
 def test_yearly_bill_reads_same_period_of_two_years(gateway: FactGateway) -> None:
     """年度**同期同比**的出处 = 本年与上年**同期区间**各自的月度账单事实（H1）。"""
     result = _yearly_result(gateway)
-    # 基准月 = 2026-09（基准时钟 2026-10-01 的前一月）⇒ 本年 1–9 月 + 上年 1–9 月 = 18 条。
+    # 基准月 = 2026-09（基准时钟 2026-10-31 的前一月）⇒ 本年 1–9 月 + 上年 1–9 月 = 18 条。
     assert len(result.record_ids) == 18
     assert len(result.provenance) == 18
     assert len(set(result.record_ids)) == 18

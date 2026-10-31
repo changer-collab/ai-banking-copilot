@@ -90,7 +90,7 @@ def test_l2_schedules_monthly_contribution_then_lists_subscriptions(
     schedule = plan.nodes[0]
     assert schedule.params["amount_cents"] == 200000
     assert schedule.params["currency"] == "CNY"
-    assert schedule.params["booked_on"] == "2026-10-01"
+    assert schedule.params["booked_on"] == "2026-10-31"
     assert plan.nodes[1].depends_on == ("n1",)
 
 

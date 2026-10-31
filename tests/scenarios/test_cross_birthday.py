@@ -36,10 +36,10 @@ from ai_banking_copilot.scenarios.registry import QUERY_HANDLERS, WRITE_HANDLERS
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ToolCall
 
-_DUE = date(2026, 10, 1)
-"""生日（演示播种 `10-03`）前 2 天，恰为统一基准日。"""
+_DUE = date(2026, 10, 31)
+"""生日（演示播种 `11-02`）前 2 天，恰为统一基准日。"""
 
-_BEFORE = date(2026, 9, 30)
+_BEFORE = date(2026, 10, 30)
 _TEST_VERIFICATION_KEY = b"birthday-test-verification-key"
 
 

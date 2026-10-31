@@ -42,7 +42,7 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
     response = _client(deps).get("/api/options")
     assert response.status_code == 200
     details = response.json()["subscription_details"]
-    assert details["as_of"] == "2026-10-01"
+    assert details["as_of"] == "2026-10-31"
     assert details["data_source_is_demo"] is True
     assert details["external_cancel_status"] == "not_integrated"
 
@@ -52,7 +52,7 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
     assert video["amount_cents"] == 2500
     assert video["currency"] == "CNY"
     assert video["cycle"] == "monthly"
-    assert video["last_charged_on"] == "2026-09-18"
+    assert video["last_charged_on"] == "2026-10-18"
     assert video["next_charge_is_prediction"] is True
     assert "预测" in video["next_charge_basis"]
     assert video["evidence"]
@@ -71,7 +71,7 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
     assert video["price_change_12m_from_cents"] == 2125
     assert video["price_change_12m_to_cents"] == 2500
     latest = video["evidence"][-1]
-    assert latest["booked_at"] == "2026-09-18T20:30:00"
+    assert latest["booked_at"] == "2026-10-18T20:30:00"
     assert latest["card_tail"] == "4821"
     assert latest["channel"] == "app"
     music = by_id["subscription:sub_music"]

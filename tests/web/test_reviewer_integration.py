@@ -188,7 +188,7 @@ def test_due_review_uses_current_records_and_stays_unapproved(
     assert schedule["amount_cents"] == 10000
     assert schedule["booked_on"] == "2026-10-01"
     assert deps.gateway.scheduled_transfer(schedule["schedule_id"]).payload.status == "scheduled"
-    assert facts["user_profiles:u_demo"]["birthday"] == "10-03"
+    assert facts["user_profiles:u_demo"]["birthday"] == "11-02"
     assert any(fact.get("source") == "demo_configuration" for fact in request.slot_sources["facts"])
 
 

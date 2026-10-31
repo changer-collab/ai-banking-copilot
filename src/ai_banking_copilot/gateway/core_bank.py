@@ -47,7 +47,7 @@ from ai_banking_copilot.gateway.transfer_store import (
 )
 
 # 演示与评测的基准记账日（固定值，保证评测可复现）
-DEFAULT_BOOKING_DATE = date(2026, 10, 1)
+DEFAULT_BOOKING_DATE = date(2026, 10, 31)
 
 EXTERNAL_STATUS_NOT_INTEGRATED = "not_integrated"
 """外部商户系统回执状态：本演示**没有**接入任何商户/支付系统，只做本地库变更。"""

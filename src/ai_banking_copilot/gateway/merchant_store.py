@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 MERCHANT_TABLE = "merchant_orders"
 PROFILE_TABLE = "user_profiles"
 
-DEMO_BIRTHDAY = "10-03"
-"""演示生日（`MM-DD`）：使「生日前 2 天」恰好落在统一基准日（2026-10-01）。"""
+DEMO_BIRTHDAY = "11-02"
+"""演示生日（`MM-DD`）：使「生日前 2 天」恰好落在统一基准日（2026-10-31）。"""
 
 
 @dataclass(frozen=True)

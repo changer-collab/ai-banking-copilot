@@ -490,7 +490,7 @@ def _category_trend(context: QueryContext) -> QueryResult:
 def ytd_end_month(year: int) -> int:
     """同期同比的**基准月**：只来自唯一基准时钟（`scenarios.scheduling.REFERENCE_DATE`）。
 
-    基准时钟为 `2026-10-01`，其**所在月的前一个月**（`2026-09`）即最近一个完整账期，
+    基准时钟为 `2026-10-31`，其**所在月的前一个月**（`2026-09`）即最近一个完整账期，
     与 `_period` 的缺省账期口径一致。**仅当请求年份等于基准年时**取 YTD（`1..基准月`）；
     其余年份按**整年**（`1..12`，历史完整年），否则口径不可比。
     """

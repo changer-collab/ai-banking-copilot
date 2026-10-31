@@ -69,17 +69,21 @@ class _Narrator:
         }
 
 
-def test_analysis_is_read_only_and_defaults_to_last_month(deps: AppDeps, db_path: Path) -> None:
+def test_analysis_is_read_only_and_defaults_to_current_month(
+    deps: AppDeps, db_path: Path
+) -> None:
     before = _snapshot(db_path)
     client = TestClient(create_app(deps))
     response = client.get("/api/bills/analysis")
     assert response.status_code == 200
     body = response.json()
 
-    assert body["period"] == "2026-09"
+    assert body["period"] == "2026-10"
+    assert body["period_basis"] == "current_month"
+    assert body["data_through"] == "2026-10-31"
     assert body["data_source_is_demo"] is True
     assert "演示" in body["data_source"]
-    assert body["as_of"] == "2026-10-01"
+    assert body["as_of"] == "2026-10-31"
     assert body["transactions"]
     assert body["confirmed_saving_cents"] == 0
     summary = body["summary"]

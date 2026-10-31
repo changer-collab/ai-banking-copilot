@@ -58,7 +58,7 @@ def test_options_are_real_owned_records(tmp_path: Path) -> None:
     response = client.get("/api/options")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["today"] == "2026-10-01"
+    assert payload["today"] == "2026-10-31"
     assert {item["id"] for item in payload["accounts"]} == {
         record.payload.account_id for record in deps.gateway.accounts_of(deps.user_id)
     }

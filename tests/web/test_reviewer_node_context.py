@@ -83,7 +83,7 @@ def test_due_nodes_link_independent_facts_and_rule_without_authorizing(
                 *birthday_refs, f"accounts:{node.params['account_id']}",
             }
             assert basis["rule"] == "birthday_budget"
-            assert basis["order_on"] == "2026-10-01"
+            assert basis["order_on"] == "2026-10-31"
         elif node.action == "funds.release":
             assert set(context["fact_refs"]) == birthday_refs
             assert basis["rule"] == "birthday_budget"
@@ -92,8 +92,8 @@ def test_due_nodes_link_independent_facts_and_rule_without_authorizing(
             assert node.action == "merchant.order"
             assert set(context["fact_refs"]) == birthday_refs
             assert basis["rule"] == "birthday_order"
-            assert basis["birthday_on"] == "2026-10-03"
-            assert basis["order_on"] == "2026-10-01"
+            assert basis["birthday_on"] == "2026-11-02"
+            assert basis["order_on"] == "2026-10-31"
             assert basis["occasion_completed"] is False
             assert basis["source"] == "server_rule"
     assert len(facts) == len(request.slot_sources["facts"])
