@@ -1536,6 +1536,38 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-reason { margin: 0; color: var(--lvl-denied); font-size: 12px; }
 .wealth-result { margin-top: 0; }
 
+/* 模拟净值迷你折线：内联 SVG + 右上角常驻「模拟净值」标注（不是真实行情） */
+.wealth-row__curve { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+.nav-spark {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-end;
+  width: 132px;
+  height: 40px;
+  padding: 2px 0 4px;
+}
+.nav-spark svg { display: block; width: 100%; height: 100%; }
+.nav-spark__tag {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0 6px;
+  border-radius: var(--r-chip);
+  background: var(--blue-050);
+  color: var(--blue-700);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.nav-spark--empty {
+  width: auto;
+  height: auto;
+  padding: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.wealth-viz__note { font-size: 12px; }
+
 /* 场景页可视化：等级条 / 持仓占比 / 持仓合计（数据全部来自接口） */
 #wealth-viz { display: grid; gap: var(--s-3); margin: var(--s-2) 0 var(--s-3); }
 .wealth-overview { display: grid; gap: var(--s-3); }

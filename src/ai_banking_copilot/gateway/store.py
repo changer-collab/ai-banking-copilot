@@ -17,7 +17,8 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+"""schema 版本：v7 新增 `wealth_nav`（**模拟净值**序列，演示数据，非真实行情）。"""
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
@@ -117,6 +118,13 @@ CREATE TABLE IF NOT EXISTS wealth_holdings (
     amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
     purchased_on TEXT NOT NULL,
     PRIMARY KEY (product_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS wealth_nav (
+    product_id TEXT NOT NULL REFERENCES wealth_products(product_id),
+    on_date    TEXT NOT NULL,
+    nav_bp     INTEGER NOT NULL,
+    PRIMARY KEY (product_id, on_date)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

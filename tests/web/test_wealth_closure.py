@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ai_banking_copilot.planning.llm import Intent, IntentProposal
+from ai_banking_copilot.scenarios.wealth import HOLDING_INCOME_UNKNOWN
 from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.session import Session, SessionState
 
@@ -45,22 +46,24 @@ def test_risk_level_question_is_answered_from_the_risk_store(deps: AppDeps) -> N
     assert "演示 seed 数据（非真实测评）" in view.message
 
 
-def test_income_question_answers_holdings_with_unknown_income(deps: AppDeps) -> None:
-    """「收益多少」⇒ 持仓金额来自网关，收益无净值数据 ⇒ 如实标未知。"""
+def test_income_question_answers_holdings_with_reference_income(deps: AppDeps) -> None:
+    """「收益多少」⇒ 持仓金额来自网关，收益由**模拟净值**折算并如实标注。"""
     view = Session(deps).submit("收益多少")
     assert view.state is SessionState.IDLE
     assert view.card is None
     assert "活期理财篮子" in view.message
     assert "稳利债券 A" in view.message
-    assert "当前收益 未知（演示环境无净值数据，不推算盈亏）" in view.message
+    assert "参考收益（模拟净值）" in view.message
+    assert HOLDING_INCOME_UNKNOWN not in view.message
 
 
-def test_earnings_question_shares_the_same_unknown_income_answer(deps: AppDeps) -> None:
-    """「我赚了多少」与「收益多少」同一条口径，不得编造盈亏。"""
+def test_earnings_question_shares_the_same_reference_income_answer(deps: AppDeps) -> None:
+    """「我赚了多少」与「收益多少」同一条口径：只给模拟净值折算的参考值，不编造盈亏。"""
     view = Session(deps).submit("我赚了多少")
     assert view.state is SessionState.IDLE
-    assert "未知（演示环境无净值数据，不推算盈亏）" in view.message
-    assert "赚" not in view.message.replace("不推算盈亏", "")
+    assert "参考收益（模拟净值）" in view.message
+    assert HOLDING_INCOME_UNKNOWN not in view.message
+    assert "赚" not in view.message
 
 
 def test_holdings_dispute_is_answered_with_gateway_facts(deps: AppDeps) -> None:

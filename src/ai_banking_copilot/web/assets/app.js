@@ -507,7 +507,15 @@ function wealthProductHtml(item) {
   const disabled = item.eligible === false;
   const min = esc(item.min_amount_yuan);
   const fee = esc(item.fee || "未知");
-  const meta = `期限 ${esc(item.term_days)} 天 · 起购 ${min} 元 · 费率 ${fee}`;
+  const yieldPct = Number.isFinite(Number(item.yield_bp))
+    ? (Number(item.yield_bp) / 100).toFixed(2)
+    : null;
+  /* 指标全部来自接口；年化是种子里的事实，必须紧跟「模拟」标注，不能读成真实行情 */
+  const minText = yuan(Math.round((Number(item.min_amount_yuan) || 0) * 100));
+  const metaParts = [];
+  if (yieldPct) metaParts.push(`参考年化（模拟）${yieldPct}%`);
+  metaParts.push(`期限 ${esc(item.term_days)} 天`, `起购 ${minText}`, `费率 ${fee}`);
+  const meta = metaParts.join(" · ");
   const action = disabled
     ? '<span class="chip chip--denied">不可买</span>'
     : `<input class="input input--amount" type="number" inputmode="decimal" min="${min}" step="0.01"`
@@ -517,8 +525,10 @@ function wealthProductHtml(item) {
   return `<article class="wealth-row${disabled ? " wealth-row--off" : ""}">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
-        <span class="chip">${esc(item.risk_level)}</span></div>
+        <span class="chip">${esc(item.risk_level)}</span>
+        ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
       <p class="wealth-row__meta">${meta}</p>
+      <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
       ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
     </div>
     <div class="wealth-row__act">${action}</div>
@@ -533,9 +543,11 @@ function wealthHoldingHtml(item) {
   return `<article class="wealth-row">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
-        <span class="chip">${esc(item.risk_level)}</span></div>
+        <span class="chip">${esc(item.risk_level)}</span>
+        ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
       <p class="wealth-row__meta">金额 ${esc(item.amount_yuan)} 元 · 起息 ${esc(item.purchased_on)}` +
         ` · 收益 ${esc(item.current_income)}</p>
+      <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
     </div>
     <div class="wealth-row__act">
       <input class="input input--amount" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01"
@@ -553,21 +565,47 @@ function holdingsTotal(holdings) {
   return (holdings || []).reduce((sum, item) => sum + (Number(item.amount_yuan) || 0), 0);
 }
 
-/* 持仓占比：金额全部来自接口，只做本人持仓内部的相对占比（合计 100%） */
-function holdingsShareHtml(holdings) {
-  const rows = (holdings || []).map((item) => ({
-    label: item.name || "—",
-    value: Number(item.amount_yuan) || 0,
+/* 持仓占比：先按**产品大类**聚合（货币 / 债券 / 混合 / 权益），产品级明细留在下方列表。
+   金额全部来自接口，只做本人持仓内部的相对占比；未持有的大类也列出并标「未持有」。 */
+function holdingsCategoryRows(holdings) {
+  const totals = new Map(WEALTH_CATEGORY_ORDER.map((name) => [name, 0]));
+  (holdings || []).forEach((item) => {
+    const name = item.category || "未分类";
+    totals.set(name, (totals.get(name) || 0) + (Number(item.amount_yuan) || 0));
+  });
+  return Array.from(totals.entries()).map(([label, value], index) => ({
+    label,
+    value,
+    note: value > 0 ? "" : "¥0.00 · 未持有",
+    color: sceneColor(index),
   }));
-  if (!rows.length) {
+}
+
+function holdingsShareHtml(holdings) {
+  const rows = holdingsCategoryRows(holdings);
+  const total = rows.reduce((sum, row) => sum + row.value, 0);
+  if (!total) {
+    const legend = rows.map((row) =>
+      `<li><i class="chart-dot" style="background:${row.color}"></i>` +
+      `<span class="chart-legend__name">${esc(row.label)}</span>` +
+      `<span class="chart-legend__val">¥0.00 · 未持有</span></li>`).join("");
     return `<div class="wealth-viz__block">
-      <p class="wealth-viz__k">持仓占比</p>
+      <p class="wealth-viz__k">持仓占比（按大类）</p>
       <p class="muted">当前没有持仓，暂无可计算的占比。</p>
+      <ul class="chart-legend">${legend}</ul>
     </div>`;
   }
   return `<div class="wealth-viz__block">
-    <p class="wealth-viz__k">持仓占比</p>
-    ${donutChartHtml(rows, { label: "本人持仓占比", size: 132, stroke: 15, empty: "暂无可绘制占比" })}
+    <p class="wealth-viz__k">持仓占比（按大类）</p>
+    ${donutChartHtml(rows, {
+      label: "本人持仓大类占比",
+      size: 132,
+      stroke: 15,
+      empty: "暂无可绘制占比",
+      percentDigits: 1,
+      showZeroRows: true,
+    })}
+    <p class="muted wealth-viz__note">金额来自本人持仓事实；产品级明细见下方「我的持仓」。</p>
   </div>`;
 }
 
@@ -585,12 +623,12 @@ function holdingsTotalHtml(holdings) {
       <p class="muted">还没有理财申购记录；在上方产品行输入金额申购后，这里会出现持仓。</p>
     </div>`;
   }
-  const unknown = rows.filter(incomeUnknown).length;
+  const unknown = rows.filter((row) => incomeUnknown(row) || row.income_cents == null).length;
   const note = unknown === rows.length
     ? `收益未知（${rows.length} 笔均无净值数据，不推算盈亏）`
     : unknown
-      ? `收益未知（${unknown}/${rows.length} 笔无净值数据）`
-      : "收益按服务端回执展示";
+      ? `收益未知（${unknown}/${rows.length} 笔无净值数据，不推算盈亏）`
+      : "收益为「参考收益（模拟净值）」，由演示净值折算，不是真实行情";
   const list = rows.map((item) => `<li><span>${esc(item.name || "—")}</span>
       <em>${yuan(Math.round((Number(item.amount_yuan) || 0) * 100))}</em></li>`).join("");
   return `<div class="wealth-viz__block">
@@ -1078,11 +1116,18 @@ function donutChartHtml(rows, options) {
     offset += dash;
     return circle;
   }).join("");
-  const legend = list.map((row, index) => {
-    const pct = Math.round((Number(row.value) / total) * 100);
+  /* 图例默认只列有值的行；wealth 需要把「未持有」大类也列出来（showZeroRows）。 */
+  const digits = Number.isInteger(spec.percentDigits) ? spec.percentDigits : 0;
+  const legendRows = spec.showZeroRows ? (rows || []) : list;
+  const legend = legendRows.map((row, index) => {
+    const value = Number(row.value) || 0;
+    const pct = ((value / total) * 100).toFixed(digits);
+    const valText = value > 0
+      ? `${pct}%${row.note ? ` · ${esc(row.note)}` : ""}`
+      : esc(row.note || `${pct}%`);
     return `<li><i class="chart-dot" style="background:${row.color || sceneColor(index)}"></i>` +
       `<span class="chart-legend__name">${esc(row.label)}</span>` +
-      `<span class="chart-legend__val">${pct}%${row.note ? ` · ${esc(row.note)}` : ""}</span></li>`;
+      `<span class="chart-legend__val">${valText}</span></li>`;
   }).join("");
   return `<div class="chart-donut">
     <svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="${esc(spec.label || "占比图")}">
@@ -1133,6 +1178,40 @@ function lineChartHtml(rows, options) {
       ${dots}${valueLabels}${labels}
     </svg>
     ${spec.note ? `<p class="muted chart-line__note">${esc(spec.note)}</p>` : ""}
+  </div>`;
+}
+
+const WEALTH_CATEGORY_ORDER = ["货币类", "债券类", "混合类", "权益类"];
+
+/* 模拟净值迷你折线：内联 SVG（不引图表库）；右上角常驻「模拟净值」标注。
+   数据只来自接口的 `nav_series`，前端不生成任何净值。 */
+function navSparkHtml(series, options) {
+  const spec = options || {};
+  const points = (series || [])
+    .map((point) => Number(point && point.nav))
+    .filter((value) => Number.isFinite(value));
+  if (points.length < 2) {
+    return `<span class="nav-spark nav-spark--empty">模拟净值 · ${esc(spec.empty || "暂无序列")}</span>`;
+  }
+  const width = 120;
+  const height = 36;
+  const pad = 2;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const step = (width - pad * 2) / (points.length - 1);
+  const coords = points.map((value, index) => {
+    const x = pad + step * index;
+    const y = height - pad - ((value - min) / span) * (height - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return `<div class="nav-spark">
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
+      aria-label="${esc(spec.label || "模拟净值走势（演示数据，非真实行情）")}">
+      <polyline points="${coords}" fill="none" stroke="var(--blue-600)" stroke-width="1.6"
+        stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+    </svg>
+    <span class="nav-spark__tag">模拟净值</span>
   </div>`;
 }
 
@@ -5372,10 +5451,13 @@ function recordsRowsFor(key, payload) {
   if (key === "holdings") {
     return (data.holdings || []).map((item) => {
       const income = String(item.current_income || "");
-      /* 收益列只给短标；「无净值数据」的完整口径放进 title，不占列宽 */
+      /* 收益列只给短标；完整口径（含「模拟净值」）放进 title，不占列宽 */
       const incomeCell = incomeUnknown(item)
         ? `<span title="${esc(income)}">未知</span>`
-        : esc(income || "—");
+        : item.income_cents != null
+          ? `<span class="mono" title="${esc(income)}">参考 ${item.income_cents >= 0 ? "+" : "-"}` +
+            `${yuan(Math.abs(item.income_cents))}</span>`
+          : esc(income || "—");
       return recordsRow([
         esc(item.name || "—"),
         esc(item.risk_level || "—"),
@@ -5885,7 +5967,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=65", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=66", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

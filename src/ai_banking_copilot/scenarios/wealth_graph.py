@@ -171,6 +171,49 @@ def fee_label() -> str:
     return "未知" if label.startswith("未知") else label
 
 
+def _yield_text(raw: object) -> str | None:
+    """年化基点 → `3.20`（整数运算，不经过浮点）；缺失 / 非法 ⇒ `None`（不编造）。"""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return f"{raw // 100}.{raw % 100:02d}"
+
+
+def _metric_reasons(item: Mapping[str, object], eligible: bool) -> tuple[str, ...]:
+    """把产品目录里的真实指标摊进推荐理由（数值全部来自 `product_catalog` 的 payload）。
+
+    措辞刻意避开 `FORBIDDEN_HINTS` 的收益暗示词：用「参考报价」陈述产品属性，
+    并明确标注为**模拟数据、不代表未来表现**，不构成任何承诺。
+    """
+    metrics: list[str] = []
+    category = item.get("category")
+    if isinstance(category, str) and category:
+        metrics.append(f"类别 {category}")
+    quote = _yield_text(item.get("yield_bp"))
+    if quote is not None:
+        metrics.append(f"参考报价 {quote}%/年")
+    term = item.get("term_days")
+    if isinstance(term, int) and not isinstance(term, bool):
+        metrics.append(f"期限 {term} 天")
+    minimum = item.get("min_amount_yuan")
+    if isinstance(minimum, str) and minimum:
+        metrics.append(f"起购 {minimum} 元")
+    fee = item.get("fee")
+    if isinstance(fee, str) and fee:
+        metrics.append(f"费率 {fee}")
+    if not metrics:
+        return ()
+    lines = [
+        "参考指标：" + "；".join(metrics)
+        + "（参考报价为模拟数据，不代表未来表现，不构成承诺）。"
+    ]
+    if eligible:
+        lines.append(
+            "本次按 风险等级、期限、起购金额、参考报价 四项指标匹配"
+            "（演示目录共 4 只，非真实海量产品池）。"
+        )
+    return tuple(lines)
+
+
 def explain_product(
     item: Mapping[str, object], risk_profile: str | None
 ) -> dict[str, object]:
@@ -206,6 +249,7 @@ def explain_product(
             if isinstance(reason, str) and reason
             else "当前不可申购（服务端未给出原因，不编造）"
         )
+    reasons.extend(_metric_reasons(item, eligible))
     reasons.append(f"适合人群：{facts.audience}。")
     reasons.append(
         f"期限 {facts.term_days} 天、起购 {facts.min_amount_yuan} 元，"

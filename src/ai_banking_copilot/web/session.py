@@ -2878,14 +2878,14 @@ def _assessment_answer(deps: AppDeps) -> str:
 
 
 def _holdings_answer(deps: AppDeps) -> str:
-    """持仓与收益口径：金额与起息日来自网关，收益无净值数据 ⇒ 如实标未知。"""
+    """持仓与收益口径：金额与起息日来自网关；收益为**模拟净值**折算的参考值，缺数据标未知。"""
     rows = holdings_payload(deps.gateway, deps.user_id)
     if not rows:
         return "你当前没有理财持仓（演示数据）。"
     lines = ["你的理财持仓（演示数据）："]
     lines.extend(
         f"- {row['name']}（{row['risk_level']}）{row['amount_yuan']} 元"
-        f"，申购日 {row['purchased_on']}，当前收益 {row['current_income']}"
+        f"，申购日 {row['purchased_on']}，{row['current_income']}"
         for row in rows
     )
     return "\n".join(lines)

@@ -69,7 +69,13 @@ def test_catalog_keeps_unassessed_cards_out_and_marks_reason(deps: AppDeps) -> N
     assert assessment["source"] == "seed"
     for row in _by_product(payload, "products").values():
         assert row["data_source"] == PRODUCT_DATA_SOURCE
+        # 大类 + 指标 + 模拟净值曲线都随产品目录下发（曲线必须标 simulated）
+        assert row["category"] in {"货币类", "债券类", "混合类", "权益类"}
+        assert isinstance(row["yield_bp"], int)
+        assert row["simulated"] is True
+        assert isinstance(row["nav_series"], list) and len(row["nav_series"]) == 90
     assert _by_product(payload, "products")["wp_mix"]["eligible"] is True
+    assert _by_product(payload, "products")["wp_mix"]["category"] == "混合类"
 
 
 def test_expired_assessment_never_defaults_to_a_level(
@@ -85,20 +91,45 @@ def test_expired_assessment_never_defaults_to_a_level(
         assert row["reason"] == PRODUCT_NOT_ASSESSED
 
 
-def test_holdings_expose_real_facts_and_mark_income_unknown(deps: AppDeps) -> None:
+def test_holdings_expose_real_facts_and_reference_income_from_simulated_nav(
+    deps: AppDeps,
+) -> None:
     payload = _overview(deps)
     holdings = _by_product(payload, "holdings")
     assert set(holdings) == {"wp_cash", "wp_bond"}
 
     assert holdings["wp_cash"]["name"] == "活期理财篮子"
+    assert holdings["wp_cash"]["category"] == "货币类"
     assert holdings["wp_cash"]["amount_yuan"] == "500.00"
     assert holdings["wp_cash"]["purchased_on"] == "2026-06-10"
     assert holdings["wp_bond"]["name"] == "稳利债券 A"
+    assert holdings["wp_bond"]["category"] == "债券类"
     assert holdings["wp_bond"]["amount_yuan"] == "3000.00"
     assert holdings["wp_bond"]["purchased_on"] == "2026-03-18"
     for row in holdings.values():
-        assert row["current_income"] == HOLDING_INCOME_UNKNOWN
+        # 有模拟净值：收益是参考值（必须带「模拟净值」标注），不是真实行情
+        assert row["simulated"] is True
+        assert str(row["current_income"]).startswith("参考收益（模拟净值）")
+        assert isinstance(row["nav_series"], list) and len(row["nav_series"]) == 90
+        assert row["nav_series"][0]["on_date"] == "2026-08-03"
+        assert str(row["nav_start"]).endswith(row["nav_series"][0]["nav"])
+        assert row["nav_now"] == row["nav_series"][-1]["nav"]
+        assert isinstance(row["income_cents"], int)
+        assert row["income_cents"] > 0
         assert str(row["record_id"]).startswith("wealth_holdings:")
+
+
+def test_holdings_without_nav_keep_income_unknown_and_null(deps: AppDeps, rw_store: Store) -> None:
+    """旧库没有净值行：不得补 0、不得推算盈亏，收益与接口字段都如实标未知/null。"""
+    with rw_store.transaction() as conn:
+        conn.execute("DELETE FROM wealth_nav")
+    holdings = _by_product(_overview(deps), "holdings")
+    for row in holdings.values():
+        assert row["nav_series"] == []
+        assert row["nav_start"] is None
+        assert row["nav_now"] is None
+        assert row["income_cents"] is None
+        assert row["current_income"] == HOLDING_INCOME_UNKNOWN
 
 
 def test_overview_is_read_only(deps: AppDeps, rw_store: Store) -> None:

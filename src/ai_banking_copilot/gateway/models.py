@@ -119,6 +119,19 @@ class WealthHolding:
 
 
 @dataclass(frozen=True)
+class WealthNav:
+    """单只产品的单日净值。
+
+    `nav_bp` 为净值 × 10000（10000 = 净值 1.0000）。**演示用模拟序列**，非真实净值；
+    由 `gateway/seed.py` 的确定性公式生成，不接任何行情源。
+    """
+
+    product_id: str
+    on_date: date
+    nav_bp: int
+
+
+@dataclass(frozen=True)
 class Subscription:
     subscription_id: str
     user_id: str

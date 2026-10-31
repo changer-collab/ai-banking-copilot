@@ -25,7 +25,7 @@ from ai_banking_copilot.contracts.plan import (
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway, Record
-from ai_banking_copilot.gateway.models import Money, WealthProduct
+from ai_banking_copilot.gateway.models import Money, WealthNav, WealthProduct
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import (
@@ -193,6 +193,42 @@ def product_comparison(gateway: FactGateway) -> tuple[str, ...]:
 PRODUCT_DATA_SOURCE = "内置演示数据（gateway/seed.py，非真实在售产品）"
 """产品目录出处：当前只有 4 只写死产品，**必须**如实标注为演示数据。"""
 
+PRODUCT_CATEGORY: Mapping[str, str] = {
+    "wp_cash": "货币类",
+    "wp_bond": "债券类",
+    "wp_mix": "混合类",
+    "wp_equity": "权益类",
+}
+"""产品大类（场景层字段，不进 `contracts/`）：持仓占比按大类聚合，产品明细仍逐只展示。"""
+
+
+def _nav_text(nav_bp: int) -> str:
+    """净值 × 10000 → 四位小数字符串（不走浮点，避免精度丢失）。"""
+    return f"{nav_bp // 10000}.{nav_bp % 10000:04d}"
+
+
+def nav_series_payload(
+    gateway: FactGateway, product_id: str, *, days: int = 90
+) -> tuple[dict[str, object], ...]:
+    """单只产品的模拟净值序列（日期正序）；无数据 ⇒ 空元组，调用方不得补 0。"""
+    return tuple(
+        {"on_date": record.payload.on_date.isoformat(), "nav": _nav_text(record.payload.nav_bp)}
+        for record in gateway.wealth_nav_of(product_id, days=days)
+    )
+
+
+def nav_by_product(
+    gateway: FactGateway, products: Sequence[Record[WealthProduct]], *, days: int = 90
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """产品目录的迷你曲线数据：按 `product_id` 一次取齐（同一份事实，不另生成数字）。"""
+    return {
+        record.payload.product_id: nav_series_payload(
+            gateway, record.payload.product_id, days=days
+        )
+        for record in products
+    }
+
+
 _UNDISCLOSED = "未知（产品数据未提供）"
 """目录缺该字段时的统一标注：标未知，不编造。"""
 
@@ -277,12 +313,18 @@ PRODUCT_NOT_ASSESSED = "未完成风险测评：完成测评后才能判断你�
 
 
 def product_catalog(
-    products: Sequence[Record[WealthProduct]], risk_profile: str | None
+    products: Sequence[Record[WealthProduct]],
+    risk_profile: str | None,
+    *,
+    nav: Mapping[str, tuple[dict[str, object], ...]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """页面产品目录：**逐只**给出可申购判定与原因（不可申购的保留并写明原因，不隐藏）。
 
     `risk_profile` 只接受服务端算出的有效等级；`None` ⇒ 全部标"未测评"，
     **不默认任何等级**（与 `recommend_products` 同一口径）。
+
+    `nav` 为可选的**模拟净值**序列（按 `product_id`）；缺失时序列为空数组，
+    前端不画曲线，不进任何真实行情。
     """
     limit = _RISK_ORDER.get(risk_profile) if risk_profile is not None else None
     catalog: list[dict[str, object]] = []
@@ -295,20 +337,31 @@ def product_catalog(
             reason = ""
         else:
             reason = f"风险等级 {product.risk_level} 高于你的测评等级 {risk_profile}，不能申购"
+        category = PRODUCT_CATEGORY.get(product.product_id, "未分类")
+        fee = fee_label()
         catalog.append(
             {
                 "product_id": product.product_id,
                 "name": product.name,
+                "category": category,
                 "risk_level": product.risk_level,
                 "term_days": product.term_days,
+                "yield_bp": product.yield_bp,
                 "min_amount_yuan": str(product.min_amount.yuan),
-                "fee": fee_label(),
+                "fee": fee,
                 "eligible": eligible,
                 "reason": reason,
+                "nav_series": list((nav or {}).get(product.product_id, ())),
+                "simulated": True,
                 "data_source": PRODUCT_DATA_SOURCE,
                 "explanation": explain_product(
                     {
                         "product_id": product.product_id,
+                        "category": category,
+                        "yield_bp": product.yield_bp,
+                        "term_days": product.term_days,
+                        "min_amount_yuan": str(product.min_amount.yuan),
+                        "fee": fee,
                         "eligible": eligible,
                         "reason": reason,
                     },
@@ -320,10 +373,31 @@ def product_catalog(
 
 
 HOLDING_INCOME_UNKNOWN = "未知（演示环境无净值数据，不推算盈亏）"
+"""旧库 / 无净值数据时的统一口径：标未知，**不补 0**、不按份额倒推。"""
+
+INCOME_SIMULATED_PREFIX = "参考收益（模拟净值）"
+"""有模拟净值时的收益标签：必须让读者一眼看出是演示数据。"""
+
+
+def _nav_at(series: Sequence[Record[WealthNav]], purchased_on: date) -> Record[WealthNav]:
+    """买入日对应的净值：取 `purchased_on` 当天或之前最近一天；早于序列起点则取首日。"""
+    before = [point for point in series if point.payload.on_date <= purchased_on]
+    return before[-1] if before else series[0]
+
+
+def _income_text(cents: int) -> str:
+    sign = "+" if cents >= 0 else "-"
+    return f"{INCOME_SIMULATED_PREFIX} {sign}{abs(Money(cents).yuan)} 元"
 
 
 def holdings_payload(gateway: FactGateway, user_id: str) -> tuple[dict[str, object], ...]:
-    """本人持仓视图：产品名 / 金额 / 起息日 / 当前收益（无净值数据 ⇒ 如实标未知）。"""
+    """本人持仓视图：产品名 / 大类 / 金额 / 起息日 / 模拟净值与参考收益。
+
+    - 有净值序列：按「买入日（或序列首日）→ 最新一日」的模拟净值折算**参考收益**，
+      并如实标 `simulated=true`；
+    - 无净值数据（旧库）：`nav_series` 空数组、`income_cents=null`、`current_income` 标未知，
+      **不填 0**、不推算盈亏。
+    """
     products = {
         record.payload.product_id: record.payload for record in gateway.wealth_products()
     }
@@ -331,14 +405,41 @@ def holdings_payload(gateway: FactGateway, user_id: str) -> tuple[dict[str, obje
     for record in gateway.wealth_holdings_of(user_id):
         holding = record.payload
         product = products.get(holding.product_id)
+        series = gateway.wealth_nav_of(holding.product_id)
+        simulated = tuple(
+            {
+                "on_date": point.payload.on_date.isoformat(),
+                "nav": _nav_text(point.payload.nav_bp),
+            }
+            for point in series
+        )
+        income_cents: int | None
+        if series:
+            start = _nav_at(series, holding.purchased_on)
+            now = series[-1]
+            difference = (
+                holding.amount.cents * (now.payload.nav_bp - start.payload.nav_bp)
+                // start.payload.nav_bp
+            )
+            income_cents = difference
+            current_income = _income_text(difference)
+        else:
+            income_cents = None
+            current_income = HOLDING_INCOME_UNKNOWN
         rows.append(
             {
                 "product_id": holding.product_id,
                 "name": product.name if product is not None else "未知（产品目录中已无该产品）",
+                "category": PRODUCT_CATEGORY.get(holding.product_id, "未分类"),
                 "risk_level": product.risk_level if product is not None else "未知",
                 "amount_yuan": str(holding.amount.yuan),
                 "purchased_on": holding.purchased_on.isoformat(),
-                "current_income": HOLDING_INCOME_UNKNOWN,
+                "nav_series": list(simulated),
+                "nav_start": _nav_text(series[0].payload.nav_bp) if series else None,
+                "nav_now": _nav_text(series[-1].payload.nav_bp) if series else None,
+                "income_cents": income_cents,
+                "current_income": current_income,
+                "simulated": True,
                 "record_id": record.record_id,
             }
         )

@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.store import Store
 
 DEMO_USER_ID = "u_demo"
@@ -49,6 +51,34 @@ _WEALTH_PRODUCTS = (
     ("wp_mix", "均衡配置 B", "R3", 180, 480, 500000),
     ("wp_equity", "成长精选 C", "R4", 365, 750, 1000000),
 )
+
+_NAV_DAYS = 90
+"""净值曲线长度：从「基准日 − 89 天」到基准日，共 90 个自然日。"""
+
+
+def _build_nav_rows() -> tuple[tuple[object, ...], ...]:
+    """生成 90 天**模拟净值**序列（零随机、可复现）。
+
+    公式（与设计稿 §4.2 一致）：
+
+    ``nav_bp = 10000 + yield_bp * i // 365 + int(amplitude * sin(i / 9))``
+
+    其中 `i = 0` 对应「基准日 − 89 天」，`i = 89` 对应基准日，
+    `amplitude = max(1, yield_bp // 40)`。**没有 random**：同一份种子在任何机器、
+    任何次数播种都得到逐字节一致的序列；`INSERT OR IGNORE` 保证重复播种幂等。
+
+    这是**演示用模拟数据**，不是真实净值，也不接任何行情源。
+    """
+    start = DEFAULT_BOOKING_DATE - timedelta(days=_NAV_DAYS - 1)
+    rows: list[tuple[object, ...]] = []
+    for product_id, _name, _risk, _term, yield_bp, _min_cents in _WEALTH_PRODUCTS:
+        amplitude = max(1, yield_bp // 40)
+        for i in range(_NAV_DAYS):
+            nav_bp = 10000 + yield_bp * i // 365 + int(amplitude * math.sin(i / 9))
+            on_date = (start + timedelta(days=i)).isoformat()
+            rows.append((product_id, on_date, nav_bp))
+    return tuple(rows)
+
 
 _WEALTH_HOLDINGS = (
     # (product_id, user_id, amount_cents, purchased_on)
@@ -177,6 +207,10 @@ def seed_database(store: Store) -> None:
             "INSERT OR IGNORE INTO wealth_products(product_id, name, risk_level, term_days,"
             " yield_bp, min_amount_cents) VALUES(?, ?, ?, ?, ?, ?)",
             _WEALTH_PRODUCTS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO wealth_nav(product_id, on_date, nav_bp) VALUES(?, ?, ?)",
+            _build_nav_rows(),
         )
         conn.executemany(
             "INSERT OR IGNORE INTO wealth_holdings(product_id, user_id, amount_cents,"

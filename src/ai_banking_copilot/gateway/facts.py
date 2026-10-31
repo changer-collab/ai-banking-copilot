@@ -26,6 +26,7 @@ from ai_banking_copilot.gateway.models import (
     Subscription,
     Transaction,
     WealthHolding,
+    WealthNav,
     WealthProduct,
 )
 from ai_banking_copilot.gateway.security_store import PasswordChangeEvent
@@ -122,6 +123,21 @@ class FactGateway:
             (user_id,),
         )
         return tuple(self._wealth_holding(row) for row in rows)
+
+    def wealth_nav_of(
+        self, product_id: str, *, days: int = 90
+    ) -> tuple[Record[WealthNav], ...]:
+        """单只产品最近 `days` 天的净值序列（按日期**正序**）。
+
+        **模拟数据**：仅用于演示曲线，不代表任何真实净值或行情。
+        旧库没有净值行时返回空元组，调用方必须如实标「未知」，不得补 0。
+        """
+        rows = self._store.query(
+            "SELECT * FROM wealth_nav WHERE product_id = ?"
+            " ORDER BY on_date DESC LIMIT ?",
+            (product_id, days),
+        )
+        return tuple(self._wealth_nav(row) for row in reversed(rows))
 
     def transactions_between(
         self, account_id: str, start: date, end: date
@@ -391,6 +407,14 @@ class FactGateway:
             purchased_on=date.fromisoformat(str(row["purchased_on"])),  # type: ignore[index]
         )
         return _record("wealth_holdings", payload.product_id, payload)
+
+    def _wealth_nav(self, row: object) -> Record[WealthNav]:
+        payload = WealthNav(
+            product_id=str(row["product_id"]),  # type: ignore[index]
+            on_date=date.fromisoformat(str(row["on_date"])),  # type: ignore[index]
+            nav_bp=int(row["nav_bp"]),  # type: ignore[index]
+        )
+        return _record("wealth_nav", f"{payload.product_id}:{payload.on_date}", payload)
 
     def _hold(self, row: object) -> Record[Hold]:
         payload = Hold(

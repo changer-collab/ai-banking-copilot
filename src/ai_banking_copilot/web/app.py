@@ -92,6 +92,7 @@ from ai_banking_copilot.scenarios.wealth import (
     PRODUCT_DATA_SOURCE,
     AssessmentState,
     holdings_payload,
+    nav_by_product,
     product_catalog,
     to_risk_assessment,
 )
@@ -1100,7 +1101,9 @@ def create_app(deps: AppDeps) -> FastAPI:
 
         - 等级只认服务端测评事实：未测评 / 过期 ⇒ 目录全部标「未测评」，不默认等级；
         - 不可申购的产品**保留并写明原因**（页面据此灰显，不隐藏、不编造）；
-        - 持仓金额 / 起息日来自 gateway 事实；当前收益无净值数据 ⇒ 如实标未知。
+        - 持仓金额 / 起息日来自 gateway 事实；净值曲线是 `gateway/seed.py` 生成的
+          **模拟序列**（`simulated=true`），不接任何行情源；旧库无净值 ⇒ 空数组 + null，
+          不填 0。
         """
         assessment = _risk_payload(deps, user_id)
         raw_profile = assessment["risk_profile"]
@@ -1110,9 +1113,14 @@ def create_app(deps: AppDeps) -> FastAPI:
             and assessment["state"] == AssessmentState.VALID.value
             else None
         )
+        products = deps.gateway.wealth_products()
         return {
             "assessment": assessment,
-            "products": list(product_catalog(deps.gateway.wealth_products(), risk_profile)),
+            "products": list(
+                product_catalog(
+                    products, risk_profile, nav=nav_by_product(deps.gateway, products)
+                )
+            ),
             "holdings": list(holdings_payload(deps.gateway, user_id)),
             "data_source": PRODUCT_DATA_SOURCE,
         }
