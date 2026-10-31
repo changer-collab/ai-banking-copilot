@@ -216,7 +216,7 @@ def test_wealth_list_card_shows_product_facts(gateway: FactGateway) -> None:
 def test_subscription_list_card_shows_next_charge(gateway: FactGateway) -> None:
     """⑤ 续费提醒：计划卡行含最近到期日（next_charge_on 升序首项）。"""
     card = render_plan_card(_subscription_list_plan(), _decision(Level.GREEN), gateway)
-    assert "2026-10-08" in card.lines[0]
+    assert "2026-11-08" in card.lines[0]
 
 
 def test_account_transactions_card_shows_range_and_anomaly(gateway: FactGateway) -> None:

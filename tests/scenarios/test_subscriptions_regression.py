@@ -82,6 +82,13 @@ def subscription_http(tmp_path: Path) -> Iterator[SubscriptionHttp]:
                 "UPDATE subscriptions SET next_charge_on = '2026-11-15' "
                 "WHERE subscription_id = 'sub_music'"
             )
+            # 种子已覆盖 10 月，但本用例要的是「同月恰好两笔」的确定场景：
+            # 先移除种子自带的同商户流水，再插入两笔同月独立扣款。
+            connection.execute(
+                "DELETE FROM transactions WHERE user_id = ? AND merchant = '视频会员'"
+                " AND booked_on LIKE '2026-10%'",
+                (deps.user_id,),
+            )
             # 同月两笔真实独立流水：既可核对扣款次数，也可查疑似重复扣款证据。
             for index in (1, 2):
                 connection.execute(

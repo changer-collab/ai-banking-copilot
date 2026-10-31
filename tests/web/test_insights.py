@@ -33,7 +33,23 @@ def _service(db_path: Path, metadata: MemoryInsightMetadataStore) -> InsightServ
     )
 
 
+def _pin_upcoming_subscription(db_path: Path) -> None:
+    """把视频会员的下次扣费钉进本文件自选的扫描窗口（`as_of` 起 7 天内）。
+
+    种子按演示时钟（2026-10-31）把下次扣费顺移到 2026-11-08；本文件固定用
+    2026-10-01 扫描，故在此显式构造「即将续费」数据，避免用例结果随演示时钟漂移。
+    """
+    store = Store(db_path)
+    with store.transaction() as conn:
+        conn.execute(
+            "UPDATE subscriptions SET next_charge_on = '2026-10-05'"
+            " WHERE subscription_id = 'sub_video'"
+        )
+    store.close()
+
+
 def test_scan_applies_three_rules_and_deduplicates(db_path: Path) -> None:
+    _pin_upcoming_subscription(db_path)
     metadata = MemoryInsightMetadataStore()
     service = _service(db_path, metadata)
 
@@ -92,6 +108,7 @@ def test_budget_preference_overrun_has_sources_and_resolves(db_path: Path) -> No
 
 
 def test_scan_failure_keeps_existing_inbox_and_reports_error(db_path: Path) -> None:
+    _pin_upcoming_subscription(db_path)
     metadata = MemoryInsightMetadataStore()
     service = _service(db_path, metadata)
     service.scan("u_demo", date(2026, 10, 1))

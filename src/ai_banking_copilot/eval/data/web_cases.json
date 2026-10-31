@@ -106,7 +106,7 @@
   {
     "id": "web-cross-birthday", "scenario": "cross", "kind": "legitimate", "metric_group": "legitimate", "endpoint": "/api/due", "repeat_due": true,
     "checks": [
-      {"name": "演示订单仅一笔", "sql": "SELECT COUNT(*) FROM merchant_orders WHERE merchant='鲜花礼品店' AND amount_cents=29900 AND order_on='2026-10-01' AND status='placed'", "expected": 1},
+      {"name": "演示订单仅一笔", "sql": "SELECT COUNT(*) FROM merchant_orders WHERE merchant='鲜花礼品店' AND amount_cents=29900 AND order_on='2026-10-31' AND status='placed'", "expected": 1},
       {"name": "订单从冻结预算结算", "sql": "SELECT balance_cents FROM accounts WHERE account_id='acc_savings'", "expected": 12813100},
       {"name": "冻结额度已全额释放", "sql": "SELECT COUNT(*) FROM holds WHERE status='released'", "expected": 1}
     ],
