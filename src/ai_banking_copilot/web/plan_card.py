@@ -532,7 +532,7 @@ def _impact_lines(
 
     - 卡：该卡绑定几个在扣订阅、关联账户还有几笔未到期预约；
     - 账户：还有几笔未到期预约、几笔未完成冻结（合计金额）。
-    - 关系列缺失（旧库 / 历史数据）时明说「关系未知」，**不按 0 计**。
+    - 关系列缺失（旧库 / 历史数据）时如实说「没有登记」，**不得当成 0 条关系**。
     """
     if user_id is None:
         return ()
@@ -574,8 +574,10 @@ def _card_impact(node: PlanNode, gateway: FactGateway) -> tuple[str, ...]:
             f"该卡绑定 {len(subscriptions)} 个在扣订阅：{detail}{more}；"
             "本操作不会自动取消商户侧代扣"
         )
+        lines.append("挂失不可撤销；如需继续用卡，可以申请补卡（虚拟卡）")
     if card.account_id is None:
-        lines.append("该卡未登记绑定账户与代扣关系（关系未知，不按 0 计）")
+        lines.append("这张卡没有登记绑定的账户与代扣关系，挂失后我们无法自动替您核对受影响的扣款")
+        lines.append("如需继续用卡，可以申请补卡（虚拟卡）")
         return tuple(lines)
     pending = [
         record
@@ -584,6 +586,7 @@ def _card_impact(node: PlanNode, gateway: FactGateway) -> tuple[str, ...]:
     ]
     if pending:
         lines.append(f"该卡绑定的账户还有 {len(pending)} 笔未到期预约转账")
+    lines.append("挂失不可撤销；如需继续用卡，可以申请补卡（虚拟卡）")
     return tuple(lines)
 
 

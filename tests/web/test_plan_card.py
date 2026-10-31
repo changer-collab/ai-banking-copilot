@@ -289,3 +289,14 @@ def test_lost_card_plan_names_the_real_card_not_the_internal_id(deps: AppDeps) -
     assert "card_credit" not in text
     assert "尾号 9021" in text
 
+
+def test_lost_card_impact_explains_follow_ups_in_plain_words(deps: AppDeps) -> None:
+    session = Session(deps)
+    view = session.submit("把我的卡挂失")
+    if view.card is None:
+        view = session.clarify({"card": "card_credit"})
+    assert view.card is not None
+    impact = "\n".join(view.card.impact)
+    assert "关系未知，不按 0 计" not in impact, "技术口径不该直接甩给用户"
+    assert "补卡" in impact
+

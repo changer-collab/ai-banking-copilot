@@ -2722,6 +2722,10 @@ async function applySubmission(data) {
     state.phase = "awaiting_confirm";
     collapseTaskMore();
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
+    if ((data.card.nodes || []).some((node) => node.action === "card.report_lost")) {
+      state.notice += `<div class="btn-row"><button class="btn btn--sm btn--ghost" type="button"
+        data-prefill="申请一张虚拟卡">申请补卡</button></div>`;
+    }
     renderStage();
     const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
@@ -5150,6 +5154,13 @@ document.addEventListener("click", (event) => {
     document.querySelectorAll("[data-suggestion]").forEach((node) => node.remove());
     const input = el("utterance");
     if (input) input.value = text;
+    if (!el("btn-submit").disabled) action(onSubmit)();
+    return;
+  }
+  const prefill = target.closest("[data-prefill]");
+  if (prefill && prefill.dataset.prefill) {
+    const input = el("utterance");
+    if (input) input.value = prefill.dataset.prefill;
     if (!el("btn-submit").disabled) action(onSubmit)();
     return;
   }
