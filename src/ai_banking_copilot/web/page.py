@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=43" />
+<link rel="stylesheet" href="/assets/workspace.css?v=44" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -375,7 +375,7 @@ _PAGE_HTML = """<!DOCTYPE html>
             <p class="panel__title">卡片管理</p>
             <span class="muted" id="cards-status">正在读取卡片…</span>
           </div>
-          <p class="muted scene-hint">四键直接办理：锁卡 / 解锁、挂失、调额、补虚拟卡。红色动作页内只生成计划卡，强验证在对话里完成。</p>
+          <p class="muted scene-hint">四个动作直接办理：常用（锁卡 / 解锁、调整日限额）、风险操作（挂失、申请虚拟卡）。挂失不可逆；页内只生成计划卡，强验证在对话里完成。</p>
           <div id="cards-list"></div>
           <div id="cards-plan" hidden></div>
           <p class="muted" id="cards-plan-status" hidden></p>
@@ -571,7 +571,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </div>
 </dialog>
 
-<script src="/assets/app.js?v=67"></script>
+<script src="/assets/app.js?v=68"></script>
 </body>
 </html>
 """

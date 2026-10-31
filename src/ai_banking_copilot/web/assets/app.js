@@ -1627,20 +1627,23 @@ const CARD_ACTION_UTTERANCE = {
   lost: "挂失卡片",
 };
 
-/* 卡面：类型 / 状态 / 卡号 / 日限额 + 横向对比条 + 四键快捷操作。
-   进度条只表示「相对最高日限额」的横向对比——流水未记录卡号，服务端没有按卡的当日已用，绝不编造。 */
+/* 卡面：类型 / 状态 / 卡号 + 日限额 / 横向对比条 / 常用与风险两组动作。
+   进度条只表示「相对最高日限额」的横向对比——流水未记录卡号，服务端没有按卡的当日已用，绝不编造。
+   动作按风险分两组仅调整呈现与顺序，指令拼装与计划卡流程完全复用 cardPanelTask。 */
 function cardFaceHtml(card, maxLimit) {
   const id = esc(card.card_id);
   const limit = Number(card.daily_limit_cents) || 0;
   const pct = maxLimit > 0 ? Math.round((limit / maxLimit) * 100) : 0;
   const off = card.status !== "active";
-  const keys = [
+  const commonKeys = [
     off
       ? `<button class="btn btn--sm" type="button" data-card-action="unlock" data-card-id="${id}">解锁</button>`
       : `<button class="btn btn--sm" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`,
-    `<button class="btn btn--sm" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`,
-    `<button class="btn btn--sm" type="button" data-card-action="limit" data-card-id="${id}">调额</button>`,
-    `<button class="btn btn--sm" type="button" data-card-action="virtual" data-card-id="${id}">补虚拟卡</button>`,
+    `<button class="btn btn--sm" type="button" data-card-action="limit" data-card-id="${id}">调整日限额</button>`,
+  ].join("");
+  const riskKeys = [
+    `<button class="btn btn--sm btn--danger" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`,
+    `<button class="btn btn--sm btn--ghost" type="button" data-card-action="virtual" data-card-id="${id}">申请虚拟卡</button>`,
   ].join("");
   const limitInput = off
     ? ""
@@ -1652,12 +1655,21 @@ function cardFaceHtml(card, maxLimit) {
       <span class="card-face__type">${esc(card.type_label)}</span>
       <span class="card-state card-state--${esc(card.status)}">${esc(card.status_label)}</span>
     </div>
-    <p class="card-face__no mono">${id}</p>
-    <p class="card-face__limit"><span class="muted">日限额</span> <b>${yuan(limit)}</b></p>
+    <p class="card-face__meta">
+      <span class="card-face__no mono">${id}</span>
+      <span class="card-face__limit"><span class="muted">日限额</span> <b>${yuan(limit)}</b></span>
+    </p>
     <span class="bill__bar-track card-face__bar" role="img"
       aria-label="相对最高日限额 ${pct}%"><i style="width:${pct}%"></i></span>
-    <div class="card-face__keys">${keys}</div>
     ${limitInput}
+    <div class="card-face__keys">
+      <div class="card-face__keys-row">
+        <span class="card-face__keys-k">常用</span>${commonKeys}
+      </div>
+      <div class="card-face__keys-row card-face__keys-row--risk">
+        <span class="card-face__keys-k">风险操作</span>${riskKeys}
+      </div>
+    </div>
   </article>`;
 }
 
@@ -1671,7 +1683,7 @@ function cardsHtml(payload) {
   }
   const maxLimit = Math.max(...cards.map((card) => Number(card.daily_limit_cents) || 0), 1);
   return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`
-    + `<p class="muted cards-hint">红色动作（挂失 / 解锁 / 调额）需强验证：计划卡确认时输入演示验证码。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能补卡。</p>`;
+    + `<p class="muted cards-hint">挂失 / 解锁 / 调整日限额需强验证：计划卡确认时输入演示验证码。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能申请虚拟卡补卡。</p>`;
 }
 
 /* 额度饼图：各卡日限额占全部卡片合计的比例（真实数字，仅用于横向对比） */
@@ -1718,7 +1730,7 @@ async function refreshCards() {
   }
   const payload = result.data;
   state.cards = payload.cards || [];
-  el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 状态与额度来自服务端（${payload.as_of || ""}）`;
+  el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 数据截至 ${payload.as_of || "—"}`;
   el("cards-list").innerHTML = cardsHtml(payload);
   const visual = el("cards-visual");
   if (visual) visual.innerHTML = cardsVisualHtml(state.cards);
@@ -2158,7 +2170,21 @@ if (el("cards-list")) {
   el("cards-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-card-action]");
     if (!button) return;
-    action(() => cardPanelTask(button.dataset.cardAction, button.dataset.cardId))();
+    const kind = button.dataset.cardAction;
+    const cardId = button.dataset.cardId;
+    action(async () => {
+      /* 挂失不可逆：先弹确认，取消则完全不发起计划（计划卡与策略口径不变） */
+      if (kind === "lost") {
+        const proceed = await confirmAppDialog({
+          title: "确认挂失这张卡？",
+          text: "挂失后这张卡不能解锁，只能申请补卡。确定继续？",
+          confirmText: "确认挂失",
+          danger: true,
+        });
+        if (!proceed) return;
+      }
+      await cardPanelTask(kind, cardId);
+    })();
   });
 }
 
@@ -5527,7 +5553,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=61", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=62", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

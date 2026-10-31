@@ -1531,11 +1531,13 @@ body { background: var(--pg-bg); line-height: 1.52; }
 #cards-list > p,
 #bills-findings > p,
 #subscription-list > p { margin: 0; }
-/* 卡面墙：类型 / 卡号 / 日限额 / 横向对比条 / 四键 */
+/* 卡面墙：类型/状态 / 卡号 + 日限额 / 横向对比条 / 常用与风险两组动作 */
 .card-wall { display: grid; gap: var(--s-3); grid-template-columns: minmax(0, 1fr); }
 .card-face {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
+  aspect-ratio: 1.586; /* 真实银行卡比例，收小卡面观感 */
   padding: var(--s-3);
   border: 1px solid var(--pg-line);
   border-radius: var(--r-card);
@@ -1544,16 +1546,29 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .card-face--off { background: var(--pg-panel); border-style: dashed; }
 .card-face__top { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
 .card-face__type { font-weight: 600; }
-.card-face__no { margin: 0; font-size: 12px; color: var(--ink-3); letter-spacing: 0.04em; }
-.card-face__limit { margin: 0; font-size: var(--fs-small); }
-.card-face__limit b { font-size: 18px; font-variant-numeric: tabular-nums; }
-.card-face__bar { margin: 0; }
-.card-face__keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.card-face__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: 0;
+}
+.card-face__no { min-width: 0; font-size: 12px; color: var(--ink-3); letter-spacing: 0.04em; }
+.card-face__limit { margin: 0; font-size: var(--fs-small); white-space: nowrap; }
+.card-face__limit b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.card-face__bar { margin: 0; flex: none; }
 .card-face__limit-in { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.card-face__limit-in .input { flex: 0 0 132px; }
+.card-face__limit-in .input { flex: 0 0 132px; height: 26px; padding: 3px 8px; }
+.card-face__keys { display: flex; flex-direction: column; gap: 4px; margin-top: auto; }
+.card-face__keys-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.card-face__keys-k { font-size: 11px; color: var(--ink-3); }
 
 @media (min-width: 720px) {
   .card-wall { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+/* ≥960px 上三列：minmax(240px) 兜底，左右栏占宽时不会把卡压成窄条 */
+@media (min-width: 960px) {
+  .card-wall { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
 }
 .card-state {
   font-size: 12px;
