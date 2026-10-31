@@ -216,6 +216,13 @@ _WEALTH_SPECS: tuple[ToolSpec, ...] = (
         params=(
             ParamSpec("risk_profile", SlotKind.CONTROL, str, required=False),
             ParamSpec("risk_source", SlotKind.CONTROL, str, required=False),
+            # 咨询类筛选（可选）：期限上限 / 起购上限。缺省 = 不筛，行为与旧版一致。
+            ParamSpec(
+                "max_term_days", SlotKind.CONTROL, int, required=False, slot_name="horizon",
+            ),
+            ParamSpec(
+                "max_amount_cents", SlotKind.CONTROL, int, required=False, slot_name="max_amount",
+            ),
         ),
         is_pure_query=True,
         reversible=True,

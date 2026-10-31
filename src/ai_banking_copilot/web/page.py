@@ -375,6 +375,9 @@ _PAGE_HTML = """<!DOCTYPE html>
               <span class="skeleton"></span><span class="skeleton"></span>
             </div>
           </div>
+          <!-- 页内计划卡：申购 / 赎回都在本页出卡，不把用户甩到对话页去看不见的地方 -->
+          <div id="wealth-plan" hidden></div>
+          <p class="muted" id="wealth-plan-status" hidden></p>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>
           </div>

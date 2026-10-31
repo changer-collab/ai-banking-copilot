@@ -22,6 +22,7 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
+from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway, Record
@@ -514,6 +515,7 @@ def _build_wealth_node(
         list_params: dict[str, object] = {}
         if is_recommendation_request(intent_text(intent)):
             list_params = recommendation_params(_assessment(intent), DEFAULT_BOOKING_DATE)
+        list_params.update(_consultation_filters(intent))
         return PlanNode(
             node_id=node_id,
             action="wealth.list",
@@ -625,29 +627,38 @@ WRITE_HANDLERS: Mapping[str, WriteHandler] = {
 
 
 def _wealth_list(context: QueryContext) -> QueryResult:
-    """只读：无 `risk_profile` ⇒ 全量目录；有 ⇒ 推荐模式（服务端硬筛选后的候选明细）。"""
+    """只读：无 `risk_profile` ⇒ 全量目录；有 ⇒ 推荐模式（服务端硬筛选后的候选明细）。
+
+    可选筛选项（期限 / 起购上限）只**收紧**结果：不传就不筛，行为与旧版逐字一致。
+    """
     products = context.gateway.wealth_products()
+    term, budget = _consultation_bounds(context.params)
     risk_profile = context.params.get("risk_profile")
     if not isinstance(risk_profile, str):
+        scoped = filter_candidates(products, term, budget)
         return QueryResult(
-            record_ids=tuple(item.record_id for item in products),
-            provenance=tuple((item.record_id, item.content_hash) for item in products),
-            detail=f"共 {len(products)} 只理财产品",
+            record_ids=tuple(item.record_id for item in scoped),
+            provenance=tuple((item.record_id, item.content_hash) for item in scoped),
+            detail=f"共 {len(scoped)} 只理财产品{_bounds_note(term, budget)}",
         )
-    candidates = recommend_products(products, risk_profile)
+    candidates = filter_candidates(
+        recommend_products(products, risk_profile), term, budget
+    )
     origin = f"测评等级 {risk_profile}{_describe_source(context.params.get('risk_source'))}"
     if not candidates:
         return QueryResult(
             record_ids=(),
             provenance=(),
             detail=(
-                f"{origin}｜合格候选 0 只（产品目录共 {len(products)} 只）："
-                "当前风险等级下无适配产品，不推荐任何不匹配产品"
+                f"{origin}｜合格候选 0 只（产品目录共 {len(products)} 只）"
+                f"{_bounds_note(term, budget)}："
+                "当前条件下无适配产品，不推荐任何不匹配产品"
             ),
         )
     lines = [
         f"{origin}｜合格候选 {len(candidates)} 只"
-        f"（产品目录共 {len(products)} 只，已按风险等级服务端硬筛选）"
+        f"（产品目录共 {len(products)} 只，已按风险等级服务端硬筛选"
+        f"{_bounds_note(term, budget)}）"
     ]
     lines.extend(describe_candidate(item.payload, risk_profile) for item in candidates)
     return QueryResult(
@@ -655,6 +666,71 @@ def _wealth_list(context: QueryContext) -> QueryResult:
         provenance=tuple((item.record_id, item.content_hash) for item in candidates),
         detail="\n".join(lines),
     )
+
+
+def _consultation_bounds(params: Mapping[str, object]) -> tuple[int | None, int | None]:
+    """从查询参数里取（期限上限, 起购上限）；缺省或非法一律 `None`（不筛）。"""
+    raw_term = params.get("max_term_days")
+    raw_budget = params.get("max_amount_cents")
+    term = raw_term if isinstance(raw_term, int) and not isinstance(raw_term, bool) else None
+    budget = (
+        raw_budget if isinstance(raw_budget, int) and not isinstance(raw_budget, bool) else None
+    )
+    return (term if term and term > 0 else None), (budget if budget and budget > 0 else None)
+
+
+def _bounds_note(max_term_days: int | None, max_amount_cents: int | None) -> str:
+    """已生效的筛选口径（没筛就返回空串，避免出现「已按 筛」这种空话）。"""
+    parts: list[str] = []
+    if max_term_days is not None:
+        parts.append(f"期限 ≤ {max_term_days} 天")
+    if max_amount_cents is not None:
+        parts.append(f"起购 ≤ {Money(max_amount_cents).yuan} 元")
+    return f"；再按 {'、'.join(parts)} 筛" if parts else ""
+
+
+def filter_candidates(
+    records: Sequence[Record[WealthProduct]],
+    max_term_days: int | None,
+    max_amount_cents: int | None,
+) -> tuple[Record[WealthProduct], ...]:
+    """期限 / 起购的**硬筛**：只剔除不符合条件的候选，不改排序口径。
+
+    两个参数都是「上限」，只会让候选集合变小，不可能放宽风险等级闸门。
+    """
+    kept: list[Record[WealthProduct]] = []
+    for record in records:
+        product = record.payload
+        if max_term_days is not None and product.term_days > max_term_days:
+            continue
+        if max_amount_cents is not None and product.min_amount.cents > max_amount_cents:
+            continue
+        kept.append(record)
+    return tuple(kept)
+
+
+def _optional_int_slot(intent: Intent, slot: str) -> int | None:
+    """可选控制槽里的正整数（未给 / 不可信 / 类型不符 ⇒ `None`，不猜）。"""
+    raw = intent.slots.get(slot)
+    if isinstance(raw, Value):
+        if raw.trust is not Trust.TRUSTED:
+            return None
+        raw = raw.raw
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return None
+    return raw
+
+
+def _consultation_filters(intent: Intent) -> dict[str, object]:
+    """规划层已解析的可选槽 → 查询参数；没解析到就不传（不猜期限 / 金额）。"""
+    filters: dict[str, object] = {}
+    horizon = _optional_int_slot(intent, "horizon")
+    if horizon is not None:
+        filters["max_term_days"] = horizon
+    budget = _optional_int_slot(intent, "max_amount")
+    if budget is not None:
+        filters["max_amount_cents"] = budget
+    return filters
 
 
 def _describe_source(source: object) -> str:

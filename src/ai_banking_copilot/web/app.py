@@ -42,6 +42,7 @@ from ai_banking_copilot.gateway.risk_store import (
     SOURCE_QUESTIONNAIRE,
     RiskAssessmentSource,
     RiskAssessmentWriter,
+    retake_payload,
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.gateway.store import Store
@@ -1045,15 +1046,17 @@ def create_app(deps: AppDeps) -> FastAPI:
         """当前已认证用户的测评状态（只读）；未测评 / 过期如实返回，绝不默认等级。"""
         return _risk_payload(deps, user_id)
 
-    @app.post("/api/risk-assessment")
+    @app.post("/api/risk-assessment", response_model=None)
     def save_risk_assessment(
         request: _RiskAssessmentRequest, user_id: str = Depends(current_user)
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | JSONResponse:
         """用户侧测评录入（真实测评入口）。
 
         - **问卷路径**（`answers`）：固定 5 题，等级由 `scenarios.wealth_assessment` 算出，
           请求体不得同时给 `risk_profile`（模型不得自填等级），落库 `source='questionnaire'`；
-        - **直接录入路径**（`risk_profile`）：保留兼容，落库 `source='user_input'`；
+        - **每日次数**：同一用户每个演示业务日最多提交 `RETAKES_PER_DAY` 次问卷，超限 429，
+          额度与次数都随响应下发（口径是**演示产品规则**，不是监管要求）；
+        - **直接录入路径**（`risk_profile`）：保留兼容，落库 `source='user_input'`，不计次；
         - **身份**只取登录用户，请求体不能指定他人；
         - 日期取服务端 `deps.today`，客户端不能把过期测评"刷新"成有效；
         - 只写测评事实，不触碰任何理财交易；录入后推荐仍走同一读路径与服务端硬筛选。
@@ -1067,10 +1070,25 @@ def create_app(deps: AppDeps) -> FastAPI:
                     status_code=400,
                     detail="answers 与 risk_profile 只能二选一：等级由问卷算出，不能自填",
                 )
+            used = writer.attempts_on(user_id, deps.today)
+            quota = retake_payload(used, deps.today)
+            limit_per_day = quota["limit_per_day"]
+            if isinstance(limit_per_day, int) and used >= limit_per_day:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "detail": (
+                            f"今日测评次数已用完（演示口径：每日 {quota['limit_per_day']} 次），"
+                            f"{quota['next_available_on']} 再试"
+                        ),
+                        "retake": quota,
+                    },
+                )
             try:
                 result = evaluate_answers(request.answers)
             except AssessmentError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
+            writer.record_attempt(user_id, deps.today)
             writer.save(
                 user_id, result.risk_profile, deps.today, source=SOURCE_QUESTIONNAIRE,
             )
@@ -2461,6 +2479,14 @@ def _mask_payee_name(name: str) -> str:
     return "收款人已隐藏"
 
 
+def _retake_payload(deps: AppDeps, user_id: str) -> dict[str, object] | None:
+    """当日重测额度；写通道未装配时返回 `None`（前端据此不显示次数，绝不编造）。"""
+    writer = deps.risk_writer
+    if writer is None:
+        return None
+    return retake_payload(writer.attempts_on(user_id, deps.today), deps.today)
+
+
 def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
     """测评状态回显：`state` / 等级 / 日期 / 来源全部如实给出（不做乐观默认）。"""
     source = deps.risk
@@ -2468,6 +2494,7 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="风险测评服务未装配")
     assessment = to_risk_assessment(source.assessment_for(user_id))
     questionnaire = list(questionnaire_payload())
+    retake = _retake_payload(deps, user_id)
     if assessment is None:
         return {
             "state": AssessmentState.UNASSESSED.value,
@@ -2476,6 +2503,7 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
             "expires_on": None,
             "source": None,
             "source_label": None,
+            "retake": retake,
             "questionnaire": questionnaire,
         }
     expires_on = assessment.assessed_on + timedelta(days=assessment.valid_days)
@@ -2486,6 +2514,7 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
         "expires_on": expires_on.isoformat(),
         "source": assessment.source or None,
         "source_label": RISK_SOURCE_LABELS.get(assessment.source),
+        "retake": retake,
         "questionnaire": questionnaire,
     }
 

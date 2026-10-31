@@ -1510,10 +1510,28 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-option input { flex: none; margin-top: 2px; }
 .wealth-error { color: var(--lvl-denied); }
 .wealth-invite { margin: 0 0 var(--s-2); white-space: pre-line; }
+/* 测评二次确认条：点「提交测评」先出这一条，确认后才落库 */
+.wealth-confirm {
+  display: grid;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-left: 3px solid var(--lvl-yellow);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+}
+.wealth-confirm__text { margin: 0; font-size: var(--fs-small); line-height: 1.5; color: var(--ink-2); }
+.wealth-form__limit { margin: var(--s-2) 0 0; font-size: 12px; }
 
 /* 产品 / 持仓行：左信息右动作，宽屏一行读完，窄屏动作换行 */
 #wealth-products,
 #wealth-holdings { display: grid; gap: var(--s-2); }
+/* 页内计划卡容器：申购 / 赎回就地出卡，不再把用户甩到隐藏的对话页 */
+#wealth-plan { margin-top: var(--s-3); }
+#wealth-plan:empty { display: none; }
+#wealth-plan-status { margin: var(--s-2) 0 0; font-size: 12px; }
+#wealth-plan-status:empty { display: none; }
 .wealth-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1581,7 +1599,9 @@ body { background: var(--pg-bg); line-height: 1.52; }
 }
 .wealth-grade__row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-2); }
 .wealth-grade__k { color: var(--ink-2); font-size: var(--fs-small); }
+.wealth-grade__level { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .wealth-grade__note { min-width: 0; color: var(--ink-3); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.wealth-grade__warn { margin: 0; font-size: 12px; line-height: 1.45; color: var(--ink-3); }
 .wealth-grade__btn { flex: none; white-space: nowrap; }
 .wealth-viz__block { display: grid; gap: var(--s-1); min-width: 0; }
 .wealth-viz__k { margin: 0; font-size: var(--fs-small); color: var(--ink-3); }

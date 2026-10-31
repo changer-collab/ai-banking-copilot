@@ -31,6 +31,27 @@ CREATE TABLE IF NOT EXISTS risk_assessments (
 """
 """风险测评表（独立 DDL；不并入 01 的 `SCHEMA_SQL`）。"""
 
+RISK_ATTEMPTS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS risk_assessment_attempts (
+    user_id  TEXT NOT NULL,
+    on_date  TEXT NOT NULL,
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    PRIMARY KEY (user_id, on_date)
+);
+"""
+"""测评**提交次数**表（独立 DDL）。
+
+为什么要它：等级可以被反复重测覆盖，但一个演示日里无限重测既不像真实产品、
+也让「等级是服务端算出来的事实」变得可疑。次数只记「今天提交了几次问卷」，
+不参与任何适当性判定。
+"""
+
+RETAKES_PER_DAY = 3
+"""同一用户每个演示业务日最多提交几次问卷。
+
+**产品口径**，不是监管要求；界面必须标「演示环境」，不能写成「监管规定」。
+"""
+
 _RISK_PROFILES = ("R1", "R2", "R3", "R4", "R5")
 _TABLE = "risk_assessments"
 _DEMO_ASSESSED_ON = (DEFAULT_BOOKING_DATE - timedelta(days=30)).isoformat()
@@ -65,7 +86,11 @@ class RiskAssessmentSource(Protocol):
 
 @runtime_checkable
 class RiskAssessmentWriter(Protocol):
-    """风险测评**写入**协议：只写用户侧来源（自助录入 / 问卷），永不写 `seed`。"""
+    """风险测评**写入**协议：只写用户侧来源（自助录入 / 问卷），永不写 `seed`。
+
+    另带**当日提交次数**读写：次数只用于「每日最多 3 次」这一产品口径，
+    不参与任何适当性判定，也不影响已生效的等级事实。
+    """
 
     def save(
         self,
@@ -76,6 +101,14 @@ class RiskAssessmentWriter(Protocol):
         source: str = SOURCE_USER_INPUT,
     ) -> None:
         """保存/更新一次用户侧测评（覆盖同一用户的旧事实）。"""
+        ...
+
+    def attempts_on(self, user_id: str, on_date: date) -> int:
+        """读某个业务日已提交几次问卷（缺行 = 0）。"""
+        ...
+
+    def record_attempt(self, user_id: str, on_date: date) -> int:
+        """记一次问卷提交并返回当日累计次数。"""
         ...
 
 
@@ -106,16 +139,59 @@ class StoreRiskAssessmentWriter:
     ) -> None:
         save_risk_assessment(self._store, user_id, risk_profile, assessed_on, source=source)
 
+    def attempts_on(self, user_id: str, on_date: date) -> int:
+        return attempts_on(self._store, user_id, on_date)
+
+    def record_attempt(self, user_id: str, on_date: date) -> int:
+        return record_attempt(self._store, user_id, on_date)
+
 
 def init_risk_schema(store: Store) -> None:
     """建风险测评表（幂等；既有库自动补表与补 `source` 列）。"""
     with store.transaction() as conn:
         conn.executescript(RISK_SCHEMA_SQL)
+        conn.executescript(RISK_ATTEMPTS_SCHEMA_SQL)
         columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({_TABLE})")}
         if "source" not in columns:
             conn.execute(
                 f"ALTER TABLE {_TABLE} ADD COLUMN source TEXT NOT NULL DEFAULT '{SOURCE_SEED}'"
             )
+
+
+def attempts_on(store: Store, user_id: str, on_date: date) -> int:
+    """按**业务日**读已提交次数（缺行 = 0，不猜）。"""
+    rows = store.query(
+        "SELECT attempts FROM risk_assessment_attempts WHERE user_id = ? AND on_date = ?",
+        (user_id, on_date.isoformat()),
+    )
+    return int(rows[0]["attempts"]) if rows else 0
+
+
+def record_attempt(store: Store, user_id: str, on_date: date) -> int:
+    """记一次提交并返回当日累计次数（只增不减，跨日各自计数）。"""
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO risk_assessment_attempts(user_id, on_date, attempts) VALUES(?, ?, 1)"
+            " ON CONFLICT(user_id, on_date) DO UPDATE SET attempts = attempts + 1",
+            (user_id, on_date.isoformat()),
+        )
+    return attempts_on(store, user_id, on_date)
+
+
+def retake_state(store: Store, user_id: str, on_date: date) -> dict[str, object]:
+    """当日重测额度（界面据此决定按钮文案与是否可点）。"""
+    return retake_payload(attempts_on(store, user_id, on_date), on_date)
+
+
+def retake_payload(used: int, on_date: date) -> dict[str, object]:
+    """把「今日已用几次」拼成对外口径（`basis` 如实标明这是演示产品口径）。"""
+    return {
+        "limit_per_day": RETAKES_PER_DAY,
+        "used_today": used,
+        "remaining_today": max(RETAKES_PER_DAY - used, 0),
+        "next_available_on": (on_date + timedelta(days=1)).isoformat(),
+        "basis": "demo_policy",
+    }
 
 
 def seed_risk_assessment(store: Store) -> None:

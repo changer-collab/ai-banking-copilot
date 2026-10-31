@@ -39,6 +39,9 @@ _NON_BANK = re.compile(
     r"订(机票|酒店|外卖)|快递|话费|充值|水电|翻译|写代码|写作文|查天气|导航|点外卖|整理房间"
 )
 _LIFE_SIGNAL = re.compile(r"生日|纪念日|结婚|过寿|满月|周岁|房租|学费|保费|送礼")
+_WEALTH_SIGNAL = re.compile(
+    r"理财|申购|赎回|净值|风险等级|R[1-5]|收益|存款|定期|补仓|加仓|闲钱"
+)
 _BUSINESS_VERB = re.compile(r"转|汇|查|看|买|卖|赎回|取消|挂失|锁卡|解锁|额度|账单|余额")
 _SMALLTALK = re.compile(
     r"天气|心情|开心|难过|无聊|你好|您好|在吗|谢谢|谢了|再见|拜拜|早上好|晚上好"
@@ -71,6 +74,18 @@ _NON_BANK_MESSAGE = (
 _AMBIGUOUS_MESSAGE = (
     "没太确定您的意思。如果是想给家人过生日、提前把钱留出来，"
     "我可以用「冻结预算 → 下单 → 释放余额」帮您办；也可以直接告诉我您要办的业务。"
+)
+
+_WEALTH_MESSAGE = (
+    "这类问题我给不了投资建议：不比较收益、不预测涨跌、也不替您决定买哪只。"
+    "我能做的是把产品事实摆出来——风险等级、期限、起购金额——由您自己判断；"
+    "要办申赎请告诉我产品名和金额。"
+)
+
+_WEALTH_SUGGESTIONS: tuple[TriageSuggestion, ...] = (
+    TriageSuggestion(label="我要做风险测评", text="我要做风险测评"),
+    TriageSuggestion(label="看理财持仓", text="看看我的理财持仓"),
+    TriageSuggestion(label="看有哪些产品", text="看看有哪些理财产品"),
 )
 
 _FALLBACK_MESSAGE = (
@@ -110,6 +125,9 @@ def triage(utterance: str, *, low_confidence: bool = False) -> TriageVerdict | N
         )
     if _NON_BANK.search(text):
         return TriageVerdict("out_of_scope", _NON_BANK_MESSAGE, _DEFAULT_SUGGESTIONS)
+    # 理财域：出现理财信号却没装配出意图时给理财澄清，不要套用生日模板
+    if _WEALTH_SIGNAL.search(text):
+        return TriageVerdict("ambiguous", _WEALTH_MESSAGE, _WEALTH_SUGGESTIONS)
     if low_confidence or _LIFE_SIGNAL.search(text) or _BUSINESS_VERB.search(text):
         # 有业务信号却没装配出意图 ⇒ 不猜，给候选句。
         suggestions = _BIRTHDAY_SUGGESTIONS if _LIFE_SIGNAL.search(text) else _DEFAULT_SUGGESTIONS

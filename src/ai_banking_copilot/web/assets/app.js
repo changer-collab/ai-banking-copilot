@@ -458,10 +458,20 @@ function assessmentFormHtml(prefix, questionnaire) {
     ${fields}
     <p class="muted wealth-error" data-form-error hidden></p>
     <div class="btn-row"><button class="btn btn--primary" type="button" data-action="submit-assessment">提交测评</button></div>
+    <div class="wealth-confirm" data-assessment-confirm hidden>
+      <p class="wealth-confirm__text">提交后等级按服务端算分更新，年内有效；每题只有一次选择机会。</p>
+      <div class="btn-row">
+        <button class="btn btn--sm btn--primary" type="button" data-action="assessment-confirm">确认提交</button>
+        <button class="btn btn--sm btn--ghost" type="button" data-assessment-back>返回修改</button>
+      </div>
+    </div>
+    <p class="muted wealth-form__limit">演示环境：每日最多 3 次测评</p>
   </form>`;
 }
 
-/* 等级条：等级由服务端算分定级，前端只展示；「重新测评」只负责展开问卷。 */
+/* 等级条：等级由服务端算分定级，前端只展示；「重新测评」只负责展开问卷。
+   来源必须显示：`seed` 是演示播种，**不是**真实测评，后端已在 `source_label` 写明口径，
+   前端只负责把它放到等级旁边（早前只藏在产品卡的推荐理由折叠区里，实测 WEA-P04）。 */
 function wealthGradeHtml(assessment) {
   const info = assessment || {};
   const valid = info.state === "valid";
@@ -473,16 +483,36 @@ function wealthGradeHtml(assessment) {
     : info.state === "expired"
       ? `有效期至 ${info.expires_on || "—"}；过期后不能申购`
       : "未测评时任何产品都不能申购";
+  const demo = info.source === "seed";
+  const sourceText = info.source_label && !demo ? ` · ${info.source_label}` : "";
+  /* 重测次数：接口没给就不显示剩余次数（不编造数字） */
+  const retake = info.retake || {};
+  const remaining = Number.isFinite(Number(retake.remaining_today))
+    ? Number(retake.remaining_today)
+    : null;
+  const usedUp = remaining !== null && remaining <= 0;
+  const retakeLabel = valid ? "重新测评" : "开始答题";
+  const retakeText = remaining === null ? retakeLabel : `${retakeLabel}（今日还可 ${remaining} 次）`;
+  const demoNote = demo
+    ? `<p class="muted wealth-grade__warn">该等级来自演示种子，不是你的真实测评；点「${retakeLabel}」可换成问卷结果。</p>`
+    : "";
+  const limitNote = usedUp
+    ? '<p class="muted wealth-grade__warn">今日测评次数已用完（演示口径：每日最多 3 次），明天再试。</p>'
+    : "";
   return `<div class="wealth-grade">
     <div class="wealth-grade__row">
       <span class="wealth-grade__k">风险等级</span>
-      <span class="chip ${valid ? "chip--green" : "chip--yellow"}">${esc(level)}</span>
+      <span class="wealth-grade__level">
+        <span class="chip ${valid ? "chip--green" : "chip--yellow"}">${esc(level)}</span>
+        ${demo ? '<span class="chip chip--yellow">演示数据</span>' : ""}
+      </span>
     </div>
     <div class="wealth-grade__row">
-      <span class="wealth-grade__note">${esc(meta)}</span>
-      <button class="btn btn--sm wealth-grade__btn" type="button" data-wealth-retake>${
-        valid ? "重新测评" : "开始答题"}</button>
+      <span class="wealth-grade__note">${esc(meta + sourceText)}</span>
+      <button class="btn btn--sm wealth-grade__btn" type="button" data-wealth-retake${
+        usedUp ? " disabled" : ""}>${esc(retakeText)}</button>
     </div>
+    ${demoNote}${limitNote}
   </div>`;
 }
 
@@ -532,26 +562,28 @@ function wealthProductHtml(item) {
       ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
     </div>
     <div class="wealth-row__act">${action}</div>
-    ${wealthWhyHtml(item)}
     <p class="muted wealth-error" data-wealth-error hidden></p>
+    ${wealthWhyHtml(item)}
   </article>`;
 }
 
-/* 持仓行：名称 + 一行摘要，右侧只放赎回；不画空行（记录号本身在 .tech 里默认隐藏）。 */
+/* 持仓行：名称 + 一行摘要，右侧只放赎回；不画空行（记录号本身在 .tech 里默认隐藏）。
+   「可赎回 ¥X」写在摘要行 —— 上限是这一行自己的事实，不放到卡片底部的报错里。 */
 function wealthHoldingHtml(item) {
   const max = esc(item.amount_yuan);
+  const maxText = yuan(Math.round((Number(item.amount_yuan) || 0) * 100));
   return `<article class="wealth-row">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
         <span class="chip">${esc(item.risk_level)}</span>
         ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
-      <p class="wealth-row__meta">金额 ${esc(item.amount_yuan)} 元 · 起息 ${esc(item.purchased_on)}` +
+      <p class="wealth-row__meta">可赎回 <b>${maxText}</b> · 起息 ${esc(item.purchased_on)}` +
         ` · 收益 ${esc(item.current_income)}</p>
       <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
     </div>
     <div class="wealth-row__act">
       <input class="input input--amount" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01"
-        placeholder="金额" data-amount-for="${esc(item.product_id)}" />
+        placeholder="金额" data-amount-for="${esc(item.product_id)}" aria-label="赎回金额，最多 ${maxText}" />
       <button class="btn btn--sm" type="button" data-action="wealth-redeem"
         data-product="${esc(item.product_id)}" data-max="${max}">赎回</button>
     </div>
@@ -672,21 +704,25 @@ let wealthRendered = false;
 
 function renderWealth(data) {
   const payload = data || {};
-  /* 产品目录同时是「产品」槽的候选来源：先落到 state，再渲染 */
+  const assessment = payload.assessment || {};
+  /* 产品目录同时是「产品」槽的候选来源：先落到 state，再渲染。
+     测评问卷也放进 state：弹窗里留下回执卡后，点「再测一次」要靠它重建问卷。 */
   state.wealth = {
+    assessment,
     products: payload.products || [],
     holdings: payload.holdings || [],
   };
   wealthRendered = true;
-  const assessment = payload.assessment || {};
   const status = el("wealth-status");
   if (status) status.textContent = "测评与持仓已读取";
   const viz = el("wealth-viz");
   if (viz) viz.innerHTML = wealthVizHtml(payload);
   const box = el("wealth-assessment-body");
   /* 问卷只放在弹窗里，页面上只留「重新测评 / 开始答题」一个入口；
-     表单一经渲染就保留用户已选答案：只在没有表单时（首次 / 提交后）重建 */
-  if (box && !box.querySelector("[data-assessment-form]")) {
+     表单一经渲染就保留用户已选答案：只在既没有表单、也没有提交成功卡时重建
+     （早前只看有没有表单，导致提交成功卡被空白问卷当场覆盖 —— 实测 WEA-P08①） */
+  if (box && !box.querySelector("[data-assessment-form]")
+    && !box.querySelector("[data-assessment-result]")) {
     box.innerHTML = assessmentFormHtml("panel", assessment.questionnaire);
   }
   const products = el("wealth-products");
@@ -733,54 +769,98 @@ async function refreshWealth() {
   renderWealth(result.data);
 }
 
-function assessmentResultHtml(outcome) {
+function assessmentResultHtml(outcome, withActions) {
   const result = (outcome && outcome.result) || {};
   const assessment = (outcome && outcome.assessment) || {};
   const level = result.risk_profile || assessment.risk_profile || "—";
   const score = result.score === undefined ? "—" : `${result.score} / ${result.max_score}`;
-  return `<div class="takeover wealth-result">
+  /* 面板弹窗里给「再测一次」；聊天内那份表单没有对应弹窗，不放按钮以免点了没反应 */
+  const actions = withActions
+    ? '<div class="btn-row"><button class="btn btn--sm" type="button" data-wealth-retake>再测一次</button></div>'
+    : "";
+  /* `data-assessment-result` 是「成功卡已渲染」的标记：`renderWealth` 据此不再重建空白问卷 */
+  return `<div class="takeover wealth-result" data-assessment-result>
     <div><b>测评完成：${esc(level)}</b> <span class="chip chip--green">按问卷重新定级</span></div>
     <p>得分 ${esc(score)}（等级由服务端按得分算出，不能自填）。</p>
     <p class="muted">测评日 ${esc(assessment.assessed_on || "—")} · 有效期至 ${esc(assessment.expires_on || "—")}</p>
     <p class="muted">产品目录已按新等级重新判定可申购范围。</p>
+    ${actions}
   </div>`;
 }
 
-async function onAssessmentSubmit(form) {
-  const error = form.querySelector("[data-form-error]");
+/* 收答案：只回传「题号 → 选项号」，分值一律由服务端算。 */
+function assessmentAnswers(form) {
   const answers = {};
   form.querySelectorAll("input[data-question]:checked").forEach((node) => {
     answers[node.dataset.question] = node.value;
   });
   const questions = Array.from(new Set(Array.from(form.querySelectorAll("input[data-question]"))
     .map((node) => node.dataset.question)));
-  const missing = questions.filter((id) => !answers[id]);
+  return { answers, missing: questions.filter((id) => !answers[id]) };
+}
+
+function assessmentFormError(form, text) {
+  const error = form.querySelector("[data-form-error]");
+  if (!error) return;
+  error.hidden = !text;
+  error.textContent = text || "";
+}
+
+/* 「提交测评」不直接落库：先逐题校验，再过一道二次确认（实测 WEA-P08②）。 */
+function openAssessmentConfirm(trigger) {
+  const form = trigger.closest("[data-assessment-form]");
+  if (!form) return;
+  const { missing } = assessmentAnswers(form);
   if (missing.length) {
-    if (error) {
-      error.hidden = false;
-      error.textContent = `还有 ${missing.length} 道题没有选，请逐题完成后提交。`;
-    }
+    assessmentFormError(form, `还有 ${missing.length} 道题没有选，请逐题完成后提交。`);
+    return;
+  }
+  assessmentFormError(form, "");
+  const bar = form.querySelector("[data-assessment-confirm]");
+  if (bar) bar.hidden = false;
+  const confirm = form.querySelector('[data-action="assessment-confirm"]');
+  if (confirm) confirm.focus();
+}
+
+function closeAssessmentConfirm(bar) {
+  if (bar) bar.hidden = true;
+}
+
+async function onAssessmentSubmit(form) {
+  const { answers, missing } = assessmentAnswers(form);
+  if (missing.length) {
+    assessmentFormError(form, `还有 ${missing.length} 道题没有选，请逐题完成后提交。`);
     return;
   }
   const result = await post("/api/risk-assessment", { answers });
   if (result.status !== 200) {
-    if (error) {
-      error.hidden = false;
-      error.textContent = (result.data && result.data.detail) || "提交未被接受，请核对答案后重试。";
-    }
+    assessmentFormError(form, (result.data && result.data.detail) || "提交未被接受，请核对答案后重试。");
     return;
   }
-  const card = assessmentResultHtml(result.data);
-  const box = el("wealth-assessment-body");
-  if (box) box.innerHTML = card;
+  /* 成功卡替换掉表单本身（面板弹窗与聊天内两处表单都适用），
+     并带 `data-assessment-result` 标记，`renderWealth` 不会再用空白问卷覆盖它 */
+  const host = form.parentNode;
+  if (host) {
+    const holder = document.createElement("div");
+    holder.innerHTML = assessmentResultHtml(result.data, form.dataset.assessmentForm === "panel");
+    const card = holder.firstElementChild;
+    if (card) host.replaceChild(card, form);
+  }
   await refreshWealth();
   timelineAdd(`风险测评已提交：服务端算分定级 ${result.data.result.risk_profile}`, "done");
 }
 
-/* 测评问卷是弹窗：入口只有等级条上的「重新测评 / 开始答题」一个按钮 */
+/* 测评问卷是弹窗：入口只有等级条上的「重新测评 / 开始答题」一个按钮。
+   上一次提交成功后弹窗里留下的是回执卡，点「再测一次」要把问卷放回来。 */
 function openWealthAssessment() {
   const dialog = el("wealth-assessment");
   if (!dialog) return;
+  const box = el("wealth-assessment-body");
+  const questionnaire = (state.wealth && state.wealth.assessment
+    && state.wealth.assessment.questionnaire) || [];
+  if (box && !box.querySelector("[data-assessment-form]")) {
+    box.innerHTML = assessmentFormHtml("panel", questionnaire);
+  }
   delete dialog.dataset.dirty;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
@@ -808,16 +888,19 @@ function showWealthFailure(message) {
 function wealthError(trigger, message) {
   const card = trigger.closest(".wealth-row");
   const box = card ? card.querySelector("[data-wealth-error]") : null;
-  if (box) {
-    box.hidden = false;
-    box.textContent = message;
-  } else {
-    timelineAdd(message, "stop");
+  if (!box) {
+    /* 空消息是「清掉上一次的提示」，没有行内位就什么都不用做 */
+    if (message) timelineAdd(message, "stop");
+    return;
   }
+  box.hidden = !message;
+  box.textContent = message || "";
 }
 
 /* 卡片上的「申购 / 赎回」：把产品作为受信任选择随文本一起提交，
-   金额与上限在本地先挡一道（服务端仍会独立复核）。 */
+   金额与上限在本地先挡一道（服务端仍会独立复核）。
+   计划卡出在**本页**（`#wealth-plan`）：早前走 `submitTask` 会把卡塞进隐藏的
+   `#view-chat`，用户在场景页看到的就是「点了没反应」（实测 WEA-P09）。 */
 async function onWealthAction(trigger) {
   const redeem = trigger.dataset.action === "wealth-redeem";
   const productId = trigger.dataset.product || "";
@@ -843,7 +926,7 @@ async function onWealthAction(trigger) {
       return;
     }
     if (redeem && amount > limit) {
-      wealthError(trigger, `赎回金额不能超过持仓 ${limit} 元。`);
+      wealthError(trigger, `最多可赎回 ${limit} 元，请调整金额后重试。`);
       input.focus();
       return;
     }
@@ -851,9 +934,21 @@ async function onWealthAction(trigger) {
   const name = card ? card.querySelector("b")?.textContent || productId : productId;
   const text = `${redeem ? "赎回" : "申购"} ${amount} 元 ${name}`;
   const selected = Object.assign(selectedObjects(), { product: productId });
-  const start = () => submitTask(text, selected);
-  if (!requestStart(start)) return;
-  await start();
+  const planHost = el("wealth-plan");
+  if (planHost) planHost.hidden = false;
+  const planStatus = el("wealth-plan-status");
+  if (planStatus) planStatus.hidden = false;
+  await sceneRunTask({
+    host: "wealth-plan",
+    status: "wealth-plan-status",
+    utterance: text,
+    selected,
+    refresh: refreshWealth,
+    onSuccess: () => {
+      input.value = "";
+      wealthError(trigger, "");
+    },
+  });
 }
 
 function insightRuleLabel(ruleId) {
@@ -5181,23 +5276,34 @@ el("stage").addEventListener("click", (event) => {
   if (event.target && event.target.id === "btn-refresh-session") action(refreshSession)();
 });
 
-/* 问卷表单在「面板」和「聊天内」两处动态渲染，故用文档级事件委托 */
+/* 问卷表单在「面板」和「聊天内」两处动态渲染，故用文档级事件委托。
+   点「提交测评」只展开二次确认条；真正落库要再过一次「确认提交」（实测 WEA-P08②）。 */
 document.addEventListener("click", async (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  const trigger = target ? target.closest('[data-action="submit-assessment"]') : null;
+  if (!target) return;
+  const back = target.closest("[data-assessment-back]");
+  if (back) {
+    closeAssessmentConfirm(back.closest("[data-assessment-confirm]"));
+    return;
+  }
+  const confirm = target.closest('[data-action="assessment-confirm"]');
+  const submit = target.closest('[data-action="submit-assessment"]');
+  const trigger = confirm || submit;
   if (!trigger) return;
   const form = trigger.closest("[data-assessment-form]");
   if (!form || form.dataset.busy === "1") return;
+  if (submit) {
+    /* 先校验再确认：缺题时不该让人先确认一遍才报错 */
+    openAssessmentConfirm(submit);
+    return;
+  }
+  closeAssessmentConfirm(form.querySelector("[data-assessment-confirm]"));
   form.dataset.busy = "1";
   trigger.disabled = true;
   try {
     await onAssessmentSubmit(form);
   } catch (_) {
-    const error = form.querySelector("[data-form-error]");
-    if (error) {
-      error.hidden = false;
-      error.textContent = "提交失败：未收到服务端回执，请稍后重试。";
-    }
+    assessmentFormError(form, "提交失败：未收到服务端回执，请稍后重试。");
   } finally {
     form.dataset.busy = "0";
     trigger.disabled = false;

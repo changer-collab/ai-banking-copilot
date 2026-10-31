@@ -33,34 +33,42 @@ from ai_banking_copilot.tools.registry import ToolSpec
 _SPECS = build_default_registry()
 
 
-def _slots_of(spec: ToolSpec) -> tuple[str, ...]:
+def _slots_of(spec: ToolSpec, *, required: bool) -> tuple[str, ...]:
     """取该动作**由规划层补全**的槽位名（`ParamSpec.slot_name` 非空的那些）。
 
     注意判据是「是否由规划层补全」，**不是**「是否必填」：`bills.monthly` 的 `year` / `month`
     虽为必填参数，却由场景层填充，故 `slot_name` 为空、不计入槽位。
+
+    `required` 用来分开两类槽位：**必填**缺了就追问；**可选**缺了就跳过
+    （例如理财咨询的期限 / 起购上限，用户没说就按「不筛」处理）。
     """
     names: list[str] = []
     for param in spec.params:
-        if param.slot_name is not None:
+        if param.slot_name is not None and param.required is required:
             names.append(param.slot_name)
     return tuple(names)
 
 
 REQUIRED_SLOTS: Mapping[str, tuple[str, ...]] = {
-    action: _slots_of(_SPECS.get(action)) for action in _SPECS.actions()
+    action: _slots_of(_SPECS.get(action), required=True) for action in _SPECS.actions()
 }
-"""动作 → 必填控制槽（**由 02 目录派生**，见 `docs/已修复清单-2026-10-08.md` 步骤 1.3）。
 
-派生而非手写：新增动作只需在场景模块声明 `ToolSpec` 的参数与 `slot_name`，本表自动跟上。
+OPTIONAL_SLOTS: Mapping[str, tuple[str, ...]] = {
+    action: _slots_of(_SPECS.get(action), required=False) for action in _SPECS.actions()
+}
+"""动作 → **可选**控制槽（同由 02 目录派生）：缺了不追问，填了才进参数。"""
 
-**与 02 目录的控制槽一致性**：凡 02 目录声明为**必填 `user_id` 控制槽**的动作，此处必须含
-`user_id`（纯查询动作亦然：`bills.monthly` / `bills.category_trend` / `card.list` /
-`subscription.list`）；写动作（`transfer.create` / `transfer.schedule` / `wealth.subscribe` /
-`wealth.redeem` / `subscription.sign` / `card.apply_virtual`）一并覆盖。`subscription.sign`
-的对象是**商户**（不涉及已有订阅 id），故按 `merchant` / `amount_cents` / `period` /
-`next_charge_on` 声明（README 裁决 #17）；`user_id` 由**受信任调用方**经 `selected` 填入
-（会话层与评测链装配 `DEMO_USER_ID`）。该一致性现由派生**自动成立**——两者同源于 02 目录。
-"""
+# 动作 → 必填控制槽（**由 02 目录派生**，见 `docs/已修复清单-2026-10-08.md` 步骤 1.3）。
+#
+# 派生而非手写：新增动作只需在场景模块声明 `ToolSpec` 的参数与 `slot_name`，本表自动跟上。
+#
+# **与 02 目录的控制槽一致性**：凡 02 目录声明为**必填 `user_id` 控制槽**的动作，此处必须含
+# `user_id`（纯查询动作亦然：`bills.monthly` / `bills.category_trend` / `card.list` /
+# `subscription.list`）；写动作（`transfer.create` / `transfer.schedule` / `wealth.subscribe` /
+# `wealth.redeem` / `subscription.sign` / `card.apply_virtual`）一并覆盖。`subscription.sign`
+# 的对象是**商户**（不涉及已有订阅 id），故按 `merchant` / `amount_cents` / `period` /
+# `next_charge_on` 声明（README 裁决 #17）；`user_id` 由**受信任调用方**经 `selected` 填入
+# （会话层与评测链装配 `DEMO_USER_ID`）。该一致性现由派生**自动成立**——两者同源于 02 目录。
 
 def _slot_params() -> Mapping[str, str]:
     """槽位名 → 参数名（`ParamSpec.slot_name` → `ParamSpec.name`）：**由 02 目录派生**。
@@ -106,6 +114,8 @@ _PROMPTS: Mapping[str, str] = {
     "amount_cents": "请给出代扣金额（数字默认单位为分，也可输入 25 元）。",
     "period": "请给出代扣周期（每月 / 每年，或 monthly / yearly）。",
     "next_charge_on": "请给出下次扣款日（例如 2026-11-01）。",
+    "horizon": "请给出资金闲置的时间（例如 半年 / 6 个月 / 90 天）。",
+    "max_amount": "请给出打算投入的金额（例如 5 万元）。",
 }
 
 _PERIOD_ALIASES = {"monthly": "monthly", "yearly": "yearly", "每月": "monthly", "每年": "yearly"}
@@ -224,6 +234,12 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
             filled[slot] = _accept(slot, chosen)
         elif question is not None:
             questions.append(question)
+    # 可选槽：解析得到就带上，解析不到就静默跳过（绝不因此追问）
+    for slot in OPTIONAL_SLOTS.get(action, ()):
+        chosen, _, notes = _resolve_slot(slot, inputs, bare_amount=bare_amount)
+        trace.extend(notes)
+        if chosen is not None:
+            filled[slot] = _accept(slot, chosen)
     return SlotFill(slots=filled, questions=tuple(questions), trace=tuple(trace))
 
 
@@ -311,6 +327,10 @@ def _resolve_slot(
         return _resolve_card(inputs, notes)
     if slot == "when":
         return _resolve_when(inputs, notes)
+    if slot == "horizon":
+        return _resolve_horizon(inputs, notes)
+    if slot == "max_amount":
+        return _resolve_amount(inputs, notes, slot, bare_amount=False)
     if slot == "period":
         periods = {
             canonical
@@ -425,6 +445,61 @@ def _resolve_card(
             return matches[0].card_id, None, tuple(notes)
         notes.append(f"ambiguous card kind:{kind}")
     return None, SlotQuestion("card", _PROMPTS["card"]), tuple(notes)
+
+
+_CN_DIGITS = {
+    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+"""期限里允许出现的中文数字（够用即可，不做通用中文数字解析）。"""
+
+_HORIZON_DAYS = re.compile(r"(\d+)\s*天")
+_HORIZON_MONTHS = re.compile(r"(半|\d+|[一二两三四五六七八九十])\s*(?:个)?月")
+_HORIZON_YEARS = re.compile(r"(半|\d+|[一二两三四五六七八九十])\s*年")
+
+
+def _cn_number(token: str) -> int | None:
+    if token.isdigit():
+        return int(token)
+    return _CN_DIGITS.get(token)
+
+
+def parse_horizon_days(text: str) -> int | None:
+    """从一句话里读「资金闲置多久」（返回天数）；读不到就 `None`（**不猜**）。
+
+    顺序：天 → 月 → 年。只认用户自己说的时间，不做「大概」推断；
+    「半年」按 180 天算并如实写进回复，避免 182/183 天的假精确。
+    """
+    days = _HORIZON_DAYS.search(text)
+    if days is not None:
+        return int(days.group(1))
+    months = _HORIZON_MONTHS.search(text)
+    if months is not None:
+        token = months.group(1)
+        if token == "半":
+            return 180
+        value = _cn_number(token)
+        return None if value is None else value * 30
+    years = _HORIZON_YEARS.search(text)
+    if years is not None:
+        token = years.group(1)
+        if token == "半":
+            return 180
+        value = _cn_number(token)
+        return None if value is None else value * 365
+    return None
+
+
+def _resolve_horizon(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """期限槽（**可选**）：读不到就返回「无值但不追问」，交给场景层按不筛处理。"""
+    days = parse_horizon_days(inputs.text)
+    if days is None or days <= 0:
+        notes.append("optional horizon: none")
+        return None, None, tuple(notes)
+    notes.append(f"resolved horizon:{days}")
+    return days, None, tuple(notes)
 
 
 def _resolve_amount(

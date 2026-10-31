@@ -41,6 +41,7 @@ from ai_banking_copilot.gateway.preconditions import (
     PreconditionStatus,
     WritePreconditionError,
 )
+from ai_banking_copilot.gateway.resolvers import parse_amount
 from ai_banking_copilot.planning.anaphora import (
     DialogueMemory,
     Reference,
@@ -74,6 +75,7 @@ from ai_banking_copilot.planning.slots import (
     SlotQuestion,
     _payee_label,
     fill_control_slots,
+    parse_horizon_days,
 )
 from ai_banking_copilot.policy.audit import (
     KIND_BREAKER,
@@ -142,8 +144,10 @@ from ai_banking_copilot.scenarios.wealth import (
     WEALTH_ACTIONS,
     RiskAssessment,
     describe_assessment,
+    filter_candidates,
     holdings_payload,
     is_recommendation_request,
+    recommend_products,
     suitability_refusal,
     to_risk_assessment,
 )
@@ -207,6 +211,31 @@ _RETURN_PROMISE_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝
 _FABRICATION_REFUSAL = "不生成事实（H1）：无法提供事实网关之外的数值或预测，安全拒绝"
 _MERCHANT_CANCEL_REFUSAL = "只能报告本地真实订阅状态；商户取消尚未接入，当前没有商户确认回执。"
 _REFUND_GUARANTEE_REFUSAL = "退款与保证商户未来不再扣款均未接入，无法执行或承诺。"
+
+_NOT_GUARANTEED_REFUSAL = (
+    "理财不是保本产品：不保证本金，也可能亏损。我不会承诺保本或收益。"
+    "能做的是先确认你的风险等级与产品风险等级是否匹配，再决定买不买。"
+)
+_NO_SKIP_VERIFY_REFUSAL = (
+    "验证与适当性不能跳过：红色动作必须有服务端一次性验证码，等级不足也不能越级申购。"
+    "本次未执行任何动作。"
+)
+_NO_FAKE_RECEIPT_REFUSAL = (
+    "不会伪造执行结果：只有服务端真正执行后才会产生回执与记录号。"
+    "这笔没有执行，所以我不会念回执。"
+)
+_NO_DOUBLE_REFUSAL = (
+    "不承诺收益、不预测涨跌，也不推荐所谓能翻倍的产品。"
+    "能给的是产品事实：风险等级、期限、起购金额。"
+)
+
+# 「保本吗 / 是不是保本」= 用户在问常识，要正面解释；「保证收益」= 在索取承诺，维持硬拒。
+_GUARANTEE_QUESTION = re.compile(r"保本.{0,6}(吗|么|呢|？|\?)|是不是保本|不是保本")
+# 只认**显式要求跳过验证**的说法。「忽略…规则」不在此列：那句话可能只是取消订阅这类
+# 批量操作的噪音，交给场景层的批量拒绝去回，免得把话术抢错（实测 10-31 订阅回归用例）。
+_SKIP_VERIFY = re.compile(r"不用验证|不需要验证|不验证|跳过验证|别验证|无需验证")
+_FAKE_RECEIPT = re.compile(r"(你就说|就说|假装|当作|硬说).{0,10}(成功|已完成|成交)|把回执念")
+_DOUBLE_MONEY = re.compile(r"翻倍|翻一番")
 
 
 class SessionState(StrEnum):
@@ -509,6 +538,11 @@ class Session:
         self._last_selected: Mapping[str, object] | None = None
         self._memory: DialogueMemory | None = None
         """上一笔**已成功执行**的转账事实（跨 `_reset` 保留）：只服务多轮指代。"""
+        self._last_wealth: str | None = None
+        """上一轮**理财申购**提到的产品 id（不论是否执行成功）。
+
+        只用于「就买刚才那个」这类指代；命中时**只澄清、不执行**——
+        上一轮可能因为起购 / 等级被拒，自动补全等于替用户改金额。"""
         self._review_intents: list[dict[str, object]] = []
         self._clarification_keys: frozenset[str] = frozenset()
         self._review_report: ReviewReport | None = None
@@ -855,7 +889,10 @@ class Session:
                 self._trip_global(BreakerTrigger.INJECTION_DETECTED, "注入检测命中（H3）")
             refusal = _guard_utterance(utterance)
             if refusal is not None:
-                return self._refuse(refusal, utterance)
+                return self._refuse(
+                    refusal.message, utterance,
+                    capability_boundary=refusal.capability_boundary,
+                )
             if (
                 any(word in utterance for word in ("所有", "全部"))
                 and any(word in utterance for word in ("退订", "取消"))
@@ -889,11 +926,18 @@ class Session:
             fact_answer = self._wealth_fact_answer(utterance)
             if fact_answer is not None:
                 return fact_answer
+            recall = self._wealth_recall_answer(utterance)
+            if recall is not None:
+                return recall
+            claimed = self._claimed_level_answer(utterance)
+            if claimed is not None:
+                return claimed
             _notify(on_stage, "understand")
             try:
                 intents, asks, notes = self._assemble_intents(utterance, selected)
             except _WealthRefusal as refusal:
                 return self._refuse(str(refusal), utterance)
+            self._remember_wealth_attempt(intents)
             if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
                 self._message = _with_notes(
@@ -904,6 +948,11 @@ class Session:
                     tuple(ask.prompt for ask in asks), clarifications=asks,
                 )
             if not intents:
+                selection = _wealth_selection_fallback(utterance, self._deps)
+                if selection is not None:
+                    self._state = SessionState.IDLE
+                    self._message = selection
+                    return SubmissionView(self._state, self._message, None, None, None, ())
                 verdict = triage(
                     utterance, low_confidence=any("置信度不足" in note for note in notes)
                 )
@@ -1770,6 +1819,59 @@ class Session:
             questionnaire=questionnaire_payload(),
         )
 
+    def _remember_wealth_attempt(self, intents: tuple[Intent, ...]) -> None:
+        """记住上一轮理财申购提到的产品（**不论是否执行成功**）。
+
+        只记产品 id，不记金额：金额必须由用户自己再给一次（或由起购门槛说清）。
+        """
+        for intent in intents:
+            if intent.action != "wealth.subscribe":
+                continue
+            product_id = _slot_str(intent.slots, "product")
+            if product_id:
+                self._last_wealth = product_id
+
+    def _wealth_recall_answer(self, utterance: str) -> SubmissionView | None:
+        """「就买刚才那个」——上一轮被拒的理财申购，**只澄清、不执行**（实测 WEA-Q05）。
+
+        为什么不自动补全：上一轮多半是起购 / 等级没过，替用户改金额等于替他做决定。
+        这里把上一只的产品与起购门槛摆出来，让他自己确认。
+        """
+        if self._last_wealth is None:
+            return None
+        if _WEALTH_RECALL.search(utterance.strip()) is None:
+            return None
+        try:
+            product = self._deps.gateway.wealth_product(self._last_wealth).payload
+        except GatewayNotFoundError:
+            return None
+        self._state = SessionState.NEEDS_CLARIFICATION
+        self._message = (
+            f"上一轮说的是「{product.name}」（{product.risk_level}，"
+            f"起购 {product.min_amount.yuan} 元），那笔还没有提交成功。"
+            f"要办的话请再说一次金额，例如「买 {product.min_amount.yuan} 元 {product.name}」；"
+            "我不会替你改金额。"
+        )
+        hint = f"买 {product.min_amount.yuan} 元 {product.name}"
+        return SubmissionView(self._state, self._message, None, None, None, (hint,))
+
+    def _claimed_level_answer(self, utterance: str) -> SubmissionView | None:
+        """句子里自述等级 + 选品问法 ⇒ 确定性事实清单（实测 WEA-Q03 的稳定性）。
+
+        走确定性规则而不是等模型，所以同一句话在任何通道下结论一致；
+        等级**只允许更保守**：自述 R2 / 记录 R3 ⇒ 按 R2 筛，自述 R5 / 记录 R3 ⇒ 仍按 R3。
+        """
+        text = utterance.strip()
+        if _CLAIMED_LEVEL.search(text) is None:
+            return None
+        if not is_recommendation_request(text):
+            return None
+        if len(text) > _WEALTH_SELECTION_MAX_LENGTH:
+            return None
+        self._state = SessionState.IDLE
+        self._message = _catalog_answer(self._deps, claimed=text)
+        return SubmissionView(self._state, self._message, None, None, None, ())
+
     def _wealth_fact_answer(self, utterance: str) -> SubmissionView | None:
         """理财**事实**直答（确定性判据，不经模型）：风险等级 / 收益 / 持仓对账。
 
@@ -1785,6 +1887,12 @@ class Session:
             answer = _assessment_answer(self._deps)
         elif _INCOME_QUESTION.search(text) or _HOLDINGS_QUESTION.search(text):
             answer = _holdings_answer(self._deps)
+        elif _HORIZON_QUESTION.search(text):
+            answer = _catalog_answer(
+                self._deps,
+                horizon_days=parse_horizon_days(text),
+                max_amount_cents=_budget_cents(text),
+            )
         else:
             return None
         self._state = SessionState.IDLE
@@ -2779,19 +2887,46 @@ def _notify(on_stage: Callable[[str], None] | None, stage: str) -> None:
         return
 
 
-def _guard_utterance(utterance: str) -> str | None:
+@dataclass(frozen=True)
+class _RefusalCopy:
+    """守卫命中的拒绝文案 + 是否算「能力边界」（不计会话级触发 4）。"""
+
+    message: str
+    capability_boundary: bool = False
+
+
+def _guard_utterance(utterance: str) -> _RefusalCopy | None:
+    """确定性输入守卫：命中即**不进入规划**，直接安全拒绝。
+
+    文案分两种，拒绝结论完全一样（BLOCKED / 不产生计划 / 审计留痕）：
+
+    - `capability_boundary=True`：用户在问常识或索取做不到的东西（保本吗 / 念回执 / 翻倍），
+      正面解释清楚即可，**不计**会话级触发 4；
+    - 策略型（索取收益承诺、伪造结果）：照旧计数。
+
+    「忽略所有规则 / 不用验证」按**加严**处理：仍是策略拒绝，会计数——
+    熔断只加严不降级。真正的注入拦截在此之前由 `detect_injection` 负责。
+    """
+    if _SKIP_VERIFY.search(utterance):
+        return _RefusalCopy(_NO_SKIP_VERIFY_REFUSAL)
+    if _FAKE_RECEIPT.search(utterance):
+        return _RefusalCopy(_NO_FAKE_RECEIPT_REFUSAL, capability_boundary=True)
+    if _DOUBLE_MONEY.search(utterance):
+        return _RefusalCopy(_NO_DOUBLE_REFUSAL, capability_boundary=True)
+    if "保本" in utterance and _GUARANTEE_QUESTION.search(utterance):
+        return _RefusalCopy(_NOT_GUARANTEED_REFUSAL, capability_boundary=True)
     if any(hint in utterance for hint in FORBIDDEN_HINTS):
-        return _RETURN_PROMISE_REFUSAL
+        return _RefusalCopy(_RETURN_PROMISE_REFUSAL)
     if any(marker in utterance for marker in FABRICATION_MARKERS):
-        return _FABRICATION_REFUSAL
+        return _RefusalCopy(_FABRICATION_REFUSAL)
     if "别管商户有没有回复" in utterance or "商户已经取消" in utterance:
-        return _MERCHANT_CANCEL_REFUSAL
+        return _RefusalCopy(_MERCHANT_CANCEL_REFUSAL)
     if (
         "第三方商户" in utterance
         and ("退回" in utterance or "退款" in utterance)
         and "保证" in utterance
     ):
-        return _REFUND_GUARANTEE_REFUSAL
+        return _RefusalCopy(_REFUND_GUARANTEE_REFUSAL)
     return None
 
 
@@ -2865,6 +3000,12 @@ _WEALTH_ACTION_WORDS = re.compile(
 _ASSESSMENT_QUESTION = re.compile(r"风险(?:测评)?(?:等级|级别)|测评等级")
 _INCOME_QUESTION = re.compile(r"(?:收益|赚|盈亏|赔)[^，,。；;]{0,6}(?:多少|几|如何|怎么样)")
 _HOLDINGS_QUESTION = re.compile(r"持仓|持有")
+_HORIZON_QUESTION = re.compile(r"闲钱|多久不用|多久之内|放什么|闲置|半年内|几个月不用")
+_CLAIMED_LEVEL = re.compile(r"R([1-5])", re.IGNORECASE)
+_RISK_KEYS = ("R1", "R2", "R3", "R4", "R5")
+_WEALTH_SELECTION_SIGNAL = re.compile(r"理财|产品|R[1-5]", re.IGNORECASE)
+_WEALTH_SELECTION_MAX_LENGTH = 40
+_WEALTH_RECALL = re.compile(r"(?:就|要)?买(?:刚才|上一)(?:那个|只|款)?|刚才那个|上一只|上一款")
 
 
 def _assessment_answer(deps: AppDeps) -> str:
@@ -2878,7 +3019,11 @@ def _assessment_answer(deps: AppDeps) -> str:
 
 
 def _holdings_answer(deps: AppDeps) -> str:
-    """持仓与收益口径：金额与起息日来自网关；收益为**模拟净值**折算的参考值，缺数据标未知。"""
+    """持仓与收益口径：金额与起息日来自网关；收益为**模拟净值**折算的参考值，缺数据标未知。
+
+    末尾给一句**对账结论**：合计由同一批持仓事实相加得出，所以能明确说「与本人持仓事实一致」；
+    用户觉得对不上时，再按产品名 / 金额逐笔核对（实测 WEA-Q18 只要明细、没结论）。
+    """
     rows = holdings_payload(deps.gateway, deps.user_id)
     if not rows:
         return "你当前没有理财持仓（演示数据）。"
@@ -2888,11 +3033,101 @@ def _holdings_answer(deps: AppDeps) -> str:
         f"，申购日 {row['purchased_on']}，{row['current_income']}"
         for row in rows
     )
+    total_cents = 0
+    for row in rows:
+        total_cents += round(float(str(row["amount_yuan"])) * 100)
+    lines.append(
+        f"对账结论：{len(rows)} 笔合计 {Money(total_cents).yuan} 元，"
+        "与本人持仓事实合计一致；如果你在别处看到不一样，请指出是哪一笔，我按事实逐笔核对。"
+    )
     return "\n".join(lines)
+
+
+def _catalog_answer(
+    deps: AppDeps,
+    *,
+    claimed: str = "",
+    horizon_days: int | None = None,
+    max_amount_cents: int | None = None,
+) -> str:
+    """按本人等级列产品**事实**：等级 / 期限 / 起购。
+
+    不排序收益、不预测涨跌、不替用户选。「多久不用」「手里多少钱」只用来**收紧**候选：
+    期限 / 起购超过用户自述的上限就剔除，期限仍由用户自己对照，不做收益排序。
+
+    `claimed` 是用户原话：句子里自述的等级**只允许更保守**。
+    自述 R2 而服务端记录 R3 ⇒ 按 R2 筛（更严，绝不放宽）；
+    自述 R5 而记录 R3 ⇒ 仍按 R3 筛，并说明不按自述放宽。
+    """
+    if deps.risk is None:
+        return "当前没有可用的风险测评数据源，无法判断哪些产品适合你。"
+    assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
+    if assessment is None:
+        return "你还没有完成风险测评：未测评时任何产品都不能申购，先做一次 5 题测评。"
+    level = assessment.risk_profile
+    note = ""
+    match = _CLAIMED_LEVEL.search(claimed)
+    if match is not None:
+        stated = f"R{match.group(1)}"
+        if stated < level and stated in _RISK_KEYS:
+            note = (
+                f"\n（你说的是 {stated}，比服务端记录的 {level} 更保守，这里按 {stated} 筛。）"
+            )
+            level = stated
+        elif stated != level:
+            note = (
+                f"\n（你说的是 {stated}，但服务端记录是 {level}；"
+                f"等级不能按自述放宽，仍按 {level} 筛。）"
+            )
+    pool = filter_candidates(
+        recommend_products(deps.gateway.wealth_products(), level),
+        horizon_days,
+        max_amount_cents,
+    )
+    bounds: list[str] = []
+    if horizon_days is not None:
+        bounds.append(f"期限 ≤ {horizon_days} 天")
+    if max_amount_cents is not None:
+        bounds.append(f"起购 ≤ {Money(max_amount_cents).yuan} 元")
+    scope = f"，再按 {'、'.join(bounds)} 筛" if bounds else ""
+    if not pool:
+        return f"你的测评等级 {level} 下，当前条件下暂无适配产品（{scope or '无额外筛选'}）。{note}"
+    lines = [f"按你的测评等级 {level}，可申购 {len(pool)} 只（只列事实{scope}）："]
+    lines.extend(
+        f"- {item.payload.name}（{item.payload.risk_level}）期限 {item.payload.term_days} 天"
+        f"，起购 {item.payload.min_amount.yuan} 元"
+        for item in pool
+    )
+    lines.append("期限请你对照这笔钱真正闲置的时间；收益我不预测、不排序，也不替你决定买哪只。")
+    return "\n".join(lines) + note
 
 
 _SUBSCRIBE_VERB = re.compile(r"买|申购|认购")
 _HAS_DIGIT = re.compile(r"\d")
+
+
+def _budget_cents(text: str) -> int | None:
+    """句子里用户自己说的金额（只当**上限**用）：读不到就 `None`，绝不推断。"""
+    parsed = parse_amount(text)
+    if not parsed.matched or parsed.value is None:
+        return None
+    return parsed.value.cents
+
+
+def _wealth_selection_fallback(utterance: str, deps: AppDeps) -> str | None:
+    """选品问法在没有装配出意图时的**确定性**兜底（实测 WEA-Q03：同句 1/3 次失败）。
+
+    判定全在本地规则里，不依赖模型置信度，所以同一句话连跑多次结论一致；
+    产出仍是只读事实清单，不生成任何申购计划。
+    """
+    text = utterance.strip()
+    if not text or len(text) > _WEALTH_SELECTION_MAX_LENGTH:
+        return None
+    if not is_recommendation_request(text):
+        return None
+    if _WEALTH_SELECTION_SIGNAL.search(text) is None:
+        return None
+    return _catalog_answer(deps, claimed=text)
 
 
 def _subscribe_from_page_selection(
