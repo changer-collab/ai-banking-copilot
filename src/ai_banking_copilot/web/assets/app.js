@@ -3061,6 +3061,25 @@ function resultMessage(item) {
   return message;
 }
 
+/* 动作前缀 → 记录页 Tab：回执上的「查看记录」直接落到对应清单 */
+const RECORD_TAB_BY_ACTION = {
+  transfer: "transfers",
+  card: "cards",
+  subscription: "charges",
+  wealth: "holdings",
+  funds: "transfers",
+  merchant: "transfers",
+  account: "transfers",
+};
+
+function recordTabFor(results) {
+  for (const item of results) {
+    const tab = RECORD_TAB_BY_ACTION[String(item.action || "").split(".")[0]];
+    if (tab) return tab;
+  }
+  return "transfers";
+}
+
 function applyExecution(data) {
   showModelMetadata(data.model);
   if (data.card) state.card = data.card;
@@ -3088,10 +3107,16 @@ function applyExecution(data) {
   const receiptLines = results.map((item) =>
     String(resultMessage(item)).replace(/｜审计ID\s*\S+\s*$/, "").trim()
   ).filter(Boolean);
+  const recordIds = results.flatMap((item) => (Array.isArray(item.record_ids) ? item.record_ids : []));
+  const recordTab = recordTabFor(results);
   state.notice = complete
     ? `<div class="takeover takeover--receipt">
         <p class="receipt__title"><span class="receipt__tick" aria-hidden="true">✓</span>${esc(data.message || "计划执行完成")}</p>
         ${receiptLines.length ? `<ul class="receipt__list">${receiptLines.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
+        ${recordIds.length ? `<p class="receipt__record">记录号 <span class="mono">${esc(recordIds[0])}</span></p>` : ""}
+        <div class="btn-row">
+          <button class="btn btn--sm btn--primary" type="button" data-nav="records" data-record-tab="${esc(recordTab)}">查看记录</button>
+        </div>
       </div>` +
       (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);

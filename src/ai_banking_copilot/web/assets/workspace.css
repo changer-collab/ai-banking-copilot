@@ -2273,3 +2273,4 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .triage__head { margin: 0 0 var(--s-2); font-weight: 600; }
 .triage__body { margin: 0 0 var(--s-3); color: var(--ink-2); }
 .triage__note { margin: 0 0 var(--s-3); font-size: var(--fs-small); color: var(--ink-3); }
+.receipt__record { margin: var(--s-2) 0 0; font-size: var(--fs-small); color: var(--ink-2); }
