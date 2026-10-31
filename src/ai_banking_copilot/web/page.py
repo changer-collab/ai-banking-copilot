@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from html import escape
+
 # Inline HTML intentionally keeps a few long semantic lines; layout checks cover structure.
 # ruff: noqa: E501
 _PAGE_HTML = """<!DOCTYPE html>
@@ -23,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=40" />
+<link rel="stylesheet" href="/assets/workspace.css?v=41" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -537,7 +540,26 @@ _PAGE_HTML = """<!DOCTYPE html>
   </nav>
 </div>
 
-<script src="/assets/app.js?v=63"></script>
+<dialog class="app-dialog" id="app-dialog" aria-labelledby="app-dialog-title">
+  <div class="app-dialog__head">
+    <p class="panel__title" id="app-dialog-title">确认操作</p>
+    <button class="btn btn--sm btn--ghost" type="button" data-app-dialog-close>关闭</button>
+  </div>
+  <div class="app-dialog__body">
+    <p class="app-dialog__text" id="app-dialog-text"></p>
+    <label class="field app-dialog__field" id="app-dialog-field" hidden>
+      <span class="field__label">登录口令</span>
+      <input class="input" id="app-dialog-password" type="password" autocomplete="current-password" />
+    </label>
+    <p class="app-dialog__error" id="app-dialog-error" role="alert" hidden></p>
+  </div>
+  <div class="app-dialog__foot">
+    <button class="btn btn--ghost" type="button" data-app-dialog-close>取消</button>
+    <button class="btn btn--danger" id="app-dialog-confirm" type="button">确认</button>
+  </div>
+</dialog>
+
+<script src="/assets/app.js?v=65"></script>
 </body>
 </html>
 """
@@ -594,7 +616,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 <body>
 <form class="login-card" id="login-form" autocomplete="on">
   <p class="brand">AI 银行<em>副驾</em></p>
-  <p class="sub">登录后，您的对话、生活事件与办理记录都会保存在自己的账户下。</p>
+  <p class="sub">一句话，智能办理银行业务</p>
   <label for="username">用户名</label>
   <input id="username" name="username" type="text" autocomplete="username" required />
   <label for="password">密码</label>
@@ -602,8 +624,9 @@ LOGIN_HTML = """<!DOCTYPE html>
   <button id="btn-login" type="submit">登录</button>
   <div class="err" id="login-error" hidden></div>
   <div class="demo">
-    演示账号：<b>chenming</b> / <b>linjing</b><br />
-    演示口令由部署方通过环境变量下发，请向现场负责人获取。
+    __DEMO_CREDENTIALS__<br />
+    模拟银行环境，不连接真实银行账户。对话与办理记录只存在本演示库的本人账户下，
+    演示结束后由部署方整体清除；AI 回复由上游模型服务生成，请勿输入真实敏感信息。
   </div>
   <p class="foot">模拟银行环境 · 不连接真实银行账户</p>
 </form>
@@ -646,7 +669,7 @@ LOGIN_HTML = """<!DOCTYPE html>
       if (result.status === 429) {
         showError(result.body.message || "尝试次数过多，请稍后再试。");
       } else if (result.status === 401) {
-        showError("用户名或密码不正确。");
+        showError("用户名或密码不正确，请使用页面下方的演示账号和口令。");
       } else {
         showError(result.body.message || "登录失败，请稍后再试。");
       }
@@ -663,3 +686,16 @@ LOGIN_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+def render_login_page(accounts: Sequence[str], demo_password: str | None) -> str:
+    """注入演示账号与口令；口令为空时只提示向现场负责人获取。"""
+    if demo_password:
+        names = " / ".join(escape(name) for name in accounts) or "当前演示账号"
+        credentials = (
+            f"<b>演示账号</b>：{names}<br />"
+            f"<b>演示口令</b>：<code>{escape(demo_password)}</code>"
+        )
+    else:
+        credentials = "演示账号与口令由现场负责人提供，不在页面公开。"
+    return LOGIN_HTML.replace("__DEMO_CREDENTIALS__", credentials)

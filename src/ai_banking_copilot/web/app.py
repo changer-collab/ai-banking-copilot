@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -100,6 +101,7 @@ from ai_banking_copilot.scenarios.wealth_assessment import (
 )
 from ai_banking_copilot.tools.registry import ToolRegistry
 from ai_banking_copilot.web.auth import (
+    DEMO_ACCOUNTS,
     SESSION_IDLE_SECONDS,
     TICKET_PURPOSE_DELETE_CONVERSATION,
     TICKET_TTL_SECONDS,
@@ -149,7 +151,7 @@ from ai_banking_copilot.web.life_event_store import (
     STATUS_REJECTED,
     LifeEventStore,
 )
-from ai_banking_copilot.web.page import INDEX_HTML, LOGIN_HTML
+from ai_banking_copilot.web.page import INDEX_HTML, render_login_page
 from ai_banking_copilot.web.plan_card import (
     PlanCard,
     describe_decision,
@@ -220,6 +222,26 @@ _JSON_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 _ERROR_STATES = frozenset({"failed", "blocked", "taken_over"})
 """失败 / 阻断终态：对话历史里记为 `error`，不当成正常助手回答。"""
+
+DOCS_ENV = "AIB_ENABLE_DOCS"
+"""`/docs` 与 `/openapi.json` 的开关：默认关闭，仅本机调试时置 1。"""
+
+COOKIE_SECURE_ENV = "AIB_COOKIE_SECURE"
+"""会话 Cookie 的 `Secure` 开关：经 HTTPS 对外部署时置 1（默认关闭以便本机 http 调试）。"""
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _docs_enabled() -> bool:
+    """接口清单默认不公开：只有显式开关才挂载 `/docs` 与 `/openapi.json`。"""
+    return _env_flag(DOCS_ENV)
+
+
+def _cookie_secure() -> bool:
+    """HTTPS 部署时必须带 `Secure`；本机 http 调试默认不带，否则登录态写不进去。"""
+    return _env_flag(COOKIE_SECURE_ENV)
 
 
 @dataclass(frozen=True)
@@ -297,6 +319,8 @@ class AppDeps:
     """阶段进度表（进程内、按 `(user, session, request)`）：`generate` 前端的轮询数据源。"""
     auth_mode: str = AUTH_MODE_OFF
     """`off`（默认，单用户演示）/ `demo`（登录 + Cookie 会话 + CSRF）。"""
+    demo_password: str | None = None
+    """`demo` 模式下用于登录页提示的演示口令；`None` 时页面只写“由现场负责人提供”。"""
 
 
 DEFAULT_SESSION_ID = "default"
@@ -469,7 +493,16 @@ def create_app(deps: AppDeps) -> FastAPI:
                 except asyncio.CancelledError:
                     pass
 
-    app = FastAPI(title="AI 银行副驾 · Web 渠道", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="AI 银行副驾 · Web 渠道",
+        version="0.1.0",
+        lifespan=lifespan,
+        # 接口清单本身就是攻击面：默认关闭 /docs 与 /openapi.json，只在显式设
+        # `AIB_ENABLE_DOCS=1` 的本机调试环境开启，对外部署保持关闭。
+        docs_url="/docs" if _docs_enabled() else None,
+        openapi_url="/openapi.json" if _docs_enabled() else None,
+        redoc_url=None,
+    )
 
     @app.middleware("http")
     async def service_worker_scope(
@@ -756,7 +789,9 @@ def create_app(deps: AppDeps) -> FastAPI:
         旧的 `workspace.css?v=*`，出现「代码已更新、页面还是旧版」的假象。
         """
         if auth_enabled and _auth().resolve(request.cookies.get(AUTH_COOKIE_NAME, "")) is None:
-            return HTMLResponse(LOGIN_HTML, headers={"Cache-Control": "no-store"})
+            accounts = tuple(row[0] for row in DEMO_ACCOUNTS)
+            login_html = render_login_page(accounts, deps.demo_password)
+            return HTMLResponse(login_html, headers={"Cache-Control": "no-store"})
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     def _session_for(session_id: str, user_id: str) -> Session:
@@ -876,7 +911,12 @@ def create_app(deps: AppDeps) -> FastAPI:
     def session_state(
         session_id: str = DEFAULT_SESSION_ID, user_id: str = Depends(current_user)
     ) -> dict[str, object]:
-        """只恢复与读取状态，不触发计划执行或返回挑战秘密。"""
+        """只恢复与读取状态，不触发计划执行或返回挑战秘密。
+
+        会话按 **(`user_id`, `session_id`) 二元组**隔离：默认 `session_id` 只是「该用户
+        自己的默认槽」，不同用户即便都不传也不会串会话；前端每次新开页面都会生成
+        独立 `session_id`，因此同一账号两个窗口互不干扰。
+        """
         view = _session_for(session_id, user_id).current_view()
         return _response(session_id, user_id, _execution_payload(view))
 
@@ -1417,7 +1457,13 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.post("/api/reverse")
     def reverse(request: _EmptyRequest, user_id: str = Depends(current_user)) -> dict[str, object]:
-        """回退：对本次执行逐条走补偿事务（无 `settled` 参数：模拟核心银行执行即结算）。"""
+        """回退：对本次执行逐条走补偿事务（无 `settled` 参数：模拟核心银行执行即结算）。
+
+        作用域与幂等口径：只补偿**当前用户 + 当前会话**已执行的回执，跨用户 / 跨会话
+        不可达；不存在「未结算 ⇒ 无扣款」档，一律走补偿。已回退过的会话再次调用会
+        因状态不是「已完成 / 部分完成」而返回 409，**不会重复冲正**；补偿失败如实
+        返回 `failed`，不宣称已取消。
+        """
         try:
             outcome = _session_for(request.session_id, user_id).reverse()
         except SessionStateError as error:
@@ -1529,7 +1575,13 @@ def create_app(deps: AppDeps) -> FastAPI:
     def auth_login(
         request: Request, body: _LoginRequest, response: Response
     ) -> dict[str, object]:
-        """登录：校验口令后签发 Cookie 会话；口令不回显、不写日志。"""
+        """登录：校验口令后签发 Cookie 会话；口令不回显、不写日志。
+
+        会话 Cookie 固定 `HttpOnly` + `SameSite=Lax` + `Path=/`；`Secure` 由
+        `AIB_COOKIE_SECURE=1` 打开（对外 HTTPS 部署必开）。同一账号连续输错口令
+        会**临时锁定**（起步 60 秒、逐次翻倍、上限 300 秒，见 `web/auth.py`），
+        锁定期间返回 429；口令失败不会泄露账号是否存在（登录失败统一 401）。
+        """
         if deps.auth is None:
             raise HTTPException(status_code=404, detail="登录未装配")
         _check_csrf(request)
@@ -1545,6 +1597,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             max_age=SESSION_IDLE_SECONDS,
             httponly=True,
             samesite="lax",
+            secure=_cookie_secure(),
             path="/",
         )
         return {
@@ -1754,7 +1807,13 @@ def create_app(deps: AppDeps) -> FastAPI:
     def audit_trail(
         limit: int = 10, user_id: str = Depends(current_user)
     ) -> dict[str, object]:
-        """个人中心「我的操作轨迹」：按审计 payload 里的 `user_id` 反向过滤。"""
+        """个人中心「我的操作轨迹」：按审计 payload 里的 `user_id` 反向过滤。
+
+        审计本身是**哈希链**：每条记录带 `prev_hash` / `entry_hash`，默认 `hmac-sha256`
+        （密钥取 `AIB_AUDIT_KEY`，未配置时落在同目录 `audit.jsonl.key`）；链断裂即
+        `chain_ok=false` 并停止返回轨迹。服务启动时会先校验全链，校验不过直接拒绝启动。
+        响应里的 `chain_head` 是当前链头，可与离线副本比对。
+        """
         bounded = max(1, min(limit, 50))
         chain_ok = deps.audit.verify_chain()
         try:
@@ -1878,6 +1937,9 @@ def create_app(deps: AppDeps) -> FastAPI:
 
         用户把这 6 位发给机器人（飞书侧），服务端在未绑定回调里消费该码并落绑定，
         因此 Web 端不需要知道自己的 `open_id`。
+
+        防枚举口径：码 **5 分钟过期**、**一次性消费**、同一用户重签即覆盖旧码；
+        飞书入站按外部身份限流（每分钟 20 次），且未绑定身份在绑定前一律 401。
         """
         if not feishu.configured:
             raise HTTPException(status_code=409, detail="feishu_not_configured")
@@ -2539,6 +2601,16 @@ def _plan_payload(plan: Plan | None) -> dict[str, object] | None:
     }
 
 
+def _utc_iso(value: datetime) -> str:
+    """服务端时间统一带 UTC 时区输出（会话内部存 naive UTC，naive 一律按 UTC 解释）。
+
+    不带时区的字符串会让浏览器按**本地时区**解析，东八区会把计划卡有效期提前 8 小时，
+    刚生成的卡直接被判「已过期」——所以对外 JSON 必须带时区。
+    """
+    moment = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return moment.astimezone(UTC).isoformat()
+
+
 def _card_payload(
     card: PlanCard | None, plan: Plan | None = None
 ) -> dict[str, object] | None:
@@ -2551,7 +2623,7 @@ def _card_payload(
         "lines": list(card.lines),
         "summary": [line.to_dict() for line in card.summary],
         "requires": list(card.requires),
-        "expires_at": card.expires_at.isoformat() if card.expires_at is not None else None,
+        "expires_at": _utc_iso(card.expires_at) if card.expires_at is not None else None,
         "balance_trace": list(card.balance_trace),
         "impact": list(card.impact),
         "nodes": plan_nodes_payload(plan),

@@ -5,7 +5,7 @@
    ========================================================================== */
 
 const PRESETS = [
-  "转给李娜 500 元",
+  "我的借记卡丢了",
   "转给李娜 1200 元，再查一下上月账单",
   "查一下上月账单",
   "查余额",
@@ -2628,10 +2628,10 @@ function setButtons() {
   const clarifyButton = el("btn-clarify");
   if (clarifyButton) clarifyButton.disabled = offline || busy;
   const redPending = state.card && state.card.level === "RED" && !strongPhase;
-  /* 服务端已校验过期；前端只做「不让人白点」，不改服务端语义 */
-  const expired = Boolean(
-    state.card && state.card.expires_at && Date.now() >= Date.parse(state.card.expires_at),
-  );
+  /* 服务端已校验过期；前端只做「不让人白点」，不改服务端语义。
+     `expires_at` 是不带时区的 UTC 裸串，必须按 UTC 解析，否则东八区会提前 8 小时判过期。 */
+  const cardExpiresAt = state.card ? parseServerTime(state.card.expires_at) : NaN;
+  const expired = !Number.isNaN(cardExpiresAt) && Date.now() >= cardExpiresAt;
   el("btn-confirm").textContent = expired
     ? "计划已过期 · 重新发起"
     : strongPhase
@@ -3216,18 +3216,36 @@ function conversationStateLabel(stateName) {
   return CONVERSATION_STATE_LABELS[stateName] || "";
 }
 
-/* 服务端存 ISO 时间（带 T）；列表里只展示到分钟 */
+/* 服务端时间戳有两种：带时区的（`+00:00`）和不带时区的 UTC 裸串（计划卡 `expires_at`）。
+   裸串若直接交给 `Date.parse`，浏览器会按**本地时区**解释，东八区会比真实时间早 8 小时——
+   计划卡刚生成就被判「已过期」。这里统一按 UTC 解析，再在展示时换成浏览器本地时间。 */
+function parseServerTime(stamp) {
+  const text = String(stamp || "").trim();
+  if (!text) return NaN;
+  /* 纯日期（业务日 / 账期）没有时区概念，按本地自然日处理 */
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return Date.parse(`${text}T00:00:00`);
+  const hasZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text);
+  return Date.parse(hasZone ? text : `${text}Z`);
+}
+
+/* 服务端存 ISO 时间；展示时统一换成浏览器本地时间，列表只到分钟 */
 function momentLabel(stamp) {
   const text = String(stamp || "");
   if (!text) return "—";
-  return text.replace("T", " ").slice(0, 16);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const ms = parseServerTime(text);
+  if (Number.isNaN(ms)) return text.replace("T", " ").slice(0, 16);
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /* 历史分组：今天 / 昨天 / 更早；按本地自然日计算，不按 24 小时滚动 */
 function conversationGroupLabel(stamp) {
-  const text = String(stamp || "");
-  const date = text ? new Date(text) : null;
-  if (!date || Number.isNaN(date.getTime())) return "更早";
+  const ms = parseServerTime(stamp);
+  if (Number.isNaN(ms)) return "更早";
+  const date = new Date(ms);
   const now = new Date();
   const dayStart = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const diffDays = Math.round((dayStart(now) - dayStart(date)) / 86400000);
@@ -3238,11 +3256,10 @@ function conversationGroupLabel(stamp) {
 
 /* 分组内不再重复完整日期：今天/昨天只显示时分，更早显示日期 + 时分 */
 function conversationTimeLabel(stamp, group) {
-  const text = String(stamp || "");
-  if (!text) return "";
-  const time = text.replace("T", " ").slice(11, 16);
-  if (group === "更早") return `${text.slice(0, 10)} ${time}`;
-  return time;
+  const label = momentLabel(stamp);
+  if (!label || label === "—") return "";
+  const time = label.slice(11, 16);
+  return group === "更早" ? `${label.slice(0, 10)} ${time}` : time;
 }
 
 async function refreshConversations() {
@@ -3334,10 +3351,14 @@ async function openConversation(sessionId) {
     return;
   }
   /* 只是翻看历史时不拦截：只有本页真实提交过、且尚未收尾的办理才提醒 */
-  if (!state.historyRestored
-      && hasUnfinishedTask()
-      && !window.confirm("当前办理尚未结束，切换后将保存为只读记录。继续？")) {
-    return;
+  if (!state.historyRestored && hasUnfinishedTask()) {
+    const proceed = await confirmAppDialog({
+      title: "切换历史对话？",
+      text: "当前办理尚未结束，切换后会保存为只读记录。",
+      confirmText: "继续切换",
+      danger: false,
+    });
+    if (!proceed) return;
   }
   let result;
   try {
@@ -3429,54 +3450,54 @@ async function openConversation(sessionId) {
   refreshConversations().catch(() => {});
 }
 
-/* 删除单条历史：`demo` 模式下先试删，403 再补一次性票据重试 */
+/* 删除单条历史：确认文案与二次口令合并到同一个弹窗；`demo` 模式先换一次性票据再删。
+   只删「对话消息 + 会话快照」，交易流水 / 回执 / 审计都不动，所以记录与明细不会少。 */
 async function deleteConversation(sessionId) {
   if (!sessionId) return;
-  if (!window.confirm("删除这条对话？消息记录与办理快照都会删除，且不可恢复。")) return;
-  let result;
-  try {
-    result = await apiFetch("DELETE", `/api/conversations/${encodeURIComponent(sessionId)}`);
-    if (result.status === 403) {
-      const password = window.prompt("删除历史需要再次验证身份，请输入登录口令：");
-      if (!password) return;
-      const ticket = await apiFetch("POST", "/api/auth/reverify", {
-        password,
-        purpose: "delete_conversation",
-      });
-      if (!ticket.ok || !ticket.data || !ticket.data.ticket) {
-        timelineAdd("口令校验未通过，删除已取消。", "warn");
-        return;
+  const needsPassword = (await currentAuthMode()) === "demo";
+  openAppDialog({
+    title: "删除这条对话？",
+    text: "消息记录与办理快照会一起删除，且不可恢复。交易流水、回执与审计记录不受影响，「记录与明细」里的记录不会减少。",
+    password: needsPassword,
+    confirmText: "删除",
+    onConfirm: async (password) => {
+      let ticket = "";
+      if (needsPassword) {
+        const verified = await apiFetch("POST", "/api/auth/reverify", {
+          password,
+          purpose: "delete_conversation",
+        });
+        if (!verified.ok || !verified.data || !verified.data.ticket) {
+          return "登录口令不正确，删除已取消。";
+        }
+        ticket = String(verified.data.ticket);
       }
-      result = await apiFetch(
+      const result = await apiFetch(
         "DELETE",
         `/api/conversations/${encodeURIComponent(sessionId)}`,
         undefined,
-        { "X-Reverify-Ticket": ticket.data.ticket },
+        ticket ? { "X-Reverify-Ticket": ticket } : undefined,
       );
-    }
-  } catch (_) {
-    timelineAdd("删除失败，请稍后重试。", "warn");
-    return;
-  }
-  if (!result.ok) {
-    timelineAdd(
-      result.status === 404 ? "这条对话已不存在。" : "删除失败，请稍后重试。",
-      "warn",
-    );
-    refreshConversations().catch(() => {});
-    return;
-  }
-  if (sessionId === SESSION_ID) {
-    const stale = state.task;
-    archiveTask();
-    if (stale) stale.remove();
-    reset(false);
-    SESSION_ID = newSessionId();
-    const welcome = el("conversation-welcome");
-    if (welcome && !el("stage").querySelector(".chat-task")) welcome.hidden = false;
-  }
-  timelineAdd("已删除一条历史对话。", "live");
-  refreshConversations().catch(() => {});
+      if (result.status === 404) {
+        timelineAdd("这条对话已不存在。", "warn");
+        refreshConversations().catch(() => {});
+        return "";
+      }
+      if (!result.ok) return "删除失败，请稍后重试。";
+      if (sessionId === SESSION_ID) {
+        const stale = state.task;
+        archiveTask();
+        if (stale) stale.remove();
+        reset(false);
+        SESSION_ID = newSessionId();
+        const welcome = el("conversation-welcome");
+        if (welcome && !el("stage").querySelector(".chat-task")) welcome.hidden = false;
+      }
+      timelineAdd("已删除一条历史对话。", "live");
+      refreshConversations().catch(() => {});
+      return "";
+    },
+  });
 }
 
 /* ---------------- 个人中心 ---------------- */
@@ -3684,6 +3705,7 @@ async function refreshProfileEntry() {
       if (avatar) avatar.textContent = "演示";
       return;
     }
+    if (result.data && result.data.auth_mode) authModeCache = result.data.auth_mode;
     const user = (result.data || {}).user || {};
     const name = user.display_name || user.username || "当前用户";
     if (name) {
@@ -4086,6 +4108,136 @@ function bindDialogDismiss(dialog) {
   });
 }
 
+/* ---------------- 通用确认弹窗（替换浏览器原生 confirm / prompt） ----------------
+   一次只做一件事：确认文案 + 可选登录口令都在同一个弹窗里，不再二次弹原生框。
+   `onConfirm` 返回字符串即视为失败，字符串作为行内错误显示、弹窗不关闭；
+   返回空串或 undefined 即视为成功，弹窗关闭。 */
+
+let appDialogState = null;
+let appDialogResolve = null;
+let authModeCache = null;
+
+function settleAppDialog(value) {
+  const resolve = appDialogResolve;
+  appDialogResolve = null;
+  if (resolve) resolve(value);
+}
+
+/* 只有「确认 / 取消」的简单追问：返回 Promise<boolean>，Esc、点遮罩都算取消 */
+function confirmAppDialog(options) {
+  return new Promise((resolve) => {
+    appDialogResolve = resolve;
+    openAppDialog({
+      ...(options || {}),
+      password: false,
+      onConfirm: () => {
+        appDialogResolve = null;
+        resolve(true);
+        return "";
+      },
+    });
+  });
+}
+
+function showAppDialogError(message) {
+  const node = el("app-dialog-error");
+  if (!node) return;
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+function closeAppDialog() {
+  appDialogState = null;
+  closeDialog(el("app-dialog"));
+  settleAppDialog(false);
+}
+
+function openAppDialog(options) {
+  const dialog = el("app-dialog");
+  const opts = options || {};
+  if (!dialog) {
+    /* 壳里没有弹窗户时退回原生确认，宁可丑也不能让动作静默失效 */
+    const accepted = window.confirm(opts.text || "确认继续？");
+    if (appDialogResolve) settleAppDialog(accepted);
+    else if (accepted && opts.onConfirm) Promise.resolve(opts.onConfirm("")).catch(() => {});
+    return;
+  }
+  const needsPassword = Boolean(opts.password);
+  const title = el("app-dialog-title");
+  const text = el("app-dialog-text");
+  const field = el("app-dialog-field");
+  const input = el("app-dialog-password");
+  const confirmButton = el("app-dialog-confirm");
+  if (title) title.textContent = opts.title || "确认操作";
+  if (text) text.textContent = opts.text || "";
+  if (field) field.hidden = !needsPassword;
+  if (input) {
+    input.value = "";
+    input.type = "password";
+    input.autocomplete = "current-password";
+  }
+  if (confirmButton) {
+    confirmButton.textContent = opts.confirmText || "确认";
+    confirmButton.className = opts.danger === false ? "btn btn--primary" : "btn btn--danger";
+    confirmButton.disabled = false;
+  }
+  showAppDialogError("");
+  appDialogState = { onConfirm: opts.onConfirm || null, busy: false };
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  if (needsPassword && input) input.focus();
+  else if (confirmButton) confirmButton.focus();
+}
+
+async function submitAppDialog() {
+  const current = appDialogState;
+  if (!current || current.busy) return;
+  const field = el("app-dialog-field");
+  const input = el("app-dialog-password");
+  const confirmButton = el("app-dialog-confirm");
+  const needsPassword = Boolean(field && !field.hidden);
+  const password = needsPassword && input ? input.value : "";
+  if (needsPassword && !password) {
+    showAppDialogError("请输入登录口令。");
+    if (input) input.focus();
+    return;
+  }
+  current.busy = true;
+  const label = confirmButton ? confirmButton.textContent : "";
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = "处理中…";
+  }
+  try {
+    const failure = current.onConfirm ? await current.onConfirm(password) : "";
+    if (typeof failure === "string" && failure) {
+      showAppDialogError(failure);
+      return;
+    }
+    closeAppDialog();
+  } catch (_) {
+    showAppDialogError("操作失败，请稍后重试。");
+  } finally {
+    current.busy = false;
+    if (confirmButton) {
+      confirmButton.disabled = false;
+      confirmButton.textContent = label;
+    }
+  }
+}
+
+/* 登录模式只读缓存：决定删除历史这类动作是否需要二次口令 */
+async function currentAuthMode() {
+  if (authModeCache) return authModeCache;
+  try {
+    const result = await apiFetch("GET", "/api/me");
+    if (result.ok && result.data && result.data.auth_mode) authModeCache = result.data.auth_mode;
+  } catch (_) {
+    /* 读不到就按演示模式处理：多要一次口令比少要一次安全 */
+  }
+  return authModeCache || "demo";
+}
+
 /* 组合任务台：桌面端弹窗查看，手机端铺满整屏（同一份 DOM，CSS 切形态） */
 function openLifeWorkbench() {
   const dialog = el("life-workbench");
@@ -4163,8 +4315,27 @@ document.addEventListener("click", async (event) => {
 el("btn-life-workbench")?.addEventListener("click", openLifeWorkbench);
 el("btn-wealth-assessment-close")?.addEventListener("click", closeWealthAssessment);
 el("btn-life-workbench-close")?.addEventListener("click", closeLifeWorkbench);
-/* 三个弹窗都支持「点外面关闭」 */
-[el("life-workbench"), el("wealth-assessment"), el("subscription-cancel-dialog")].forEach(bindDialogDismiss);
+/* 四个弹窗都支持「点外面关闭」 */
+[el("life-workbench"), el("wealth-assessment"), el("subscription-cancel-dialog"), el("app-dialog")]
+  .forEach(bindDialogDismiss);
+/* 通用确认弹窗：取消 / Esc / 点遮罩都按「取消」结算，口令框回车等于点确认 */
+el("app-dialog")?.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target && target.closest("[data-app-dialog-close]")) closeAppDialog();
+});
+el("app-dialog")?.addEventListener("close", () => {
+  appDialogState = null;
+  settleAppDialog(false);
+});
+el("app-dialog-confirm")?.addEventListener("click", () => {
+  submitAppDialog().catch(() => {});
+});
+el("app-dialog-password")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    submitAppDialog().catch(() => {});
+  }
+});
 /* 日历翻月：只用已读到的记录重绘，不重新请求 */
 el("life-calendar")?.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target.closest("[data-life-month]") : null;
@@ -5080,7 +5251,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=57", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=59", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
