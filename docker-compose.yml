@@ -21,6 +21,8 @@ services:
       # 登录：不在 compose 里透传的话，服务器 .env 写了也不会进容器（个人中心就没有退出登录）。
       - AIB_AUTH_MODE=${AIB_AUTH_MODE:-off}
       - AIB_DEMO_PASSWORD=${AIB_DEMO_PASSWORD:-}
+      # 对外是 HTTPS（Cloudflare 隧道终止 TLS），会话 Cookie 必须带 Secure。
+      - AIB_COOKIE_SECURE=${AIB_COOKIE_SECURE:-1}
       # 飞书渠道：四项生产凭据只写在仓库根 .env（不提交）。留空即如实显示 replay / 未配置；
       # 不要为了演示设 AIB_FEISHU_REPLAY_MODE=true，判定与验收见 docs/2026-10-27/飞书接入-配置单.md §1。
       - AIB_FEISHU_APP_ID=${AIB_FEISHU_APP_ID:-}

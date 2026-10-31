@@ -3,7 +3,7 @@
 import re
 from contextlib import ExitStack
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -81,6 +81,17 @@ def test_http_end_to_end_keeps_the_audit_chain_intact(deps: AppDeps) -> None:
     assert deps.audit.verify_chain() is True
     kinds = [event.kind for event in deps.audit.events()]
     assert "execution" in kinds
+
+
+def test_card_expiry_is_serialized_with_utc_offset(deps: AppDeps) -> None:
+    """计划卡 `expires_at` 必须带时区：裸 UTC 串会让浏览器按本地时区提前 8 小时判过期。"""
+    client = TestClient(create_app(deps))
+    card = client.post("/api/submit", json={"utterance": "转给李娜 500 元"}).json()["card"]
+    raw = card["expires_at"]
+    assert raw.endswith("+00:00"), raw
+    expiry = datetime.fromisoformat(raw)
+    assert expiry.tzinfo is not None
+    assert expiry > datetime.now(UTC)
 
 
 def test_confirmation_record_ties_plan_to_the_card_hash(deps: AppDeps) -> None:
