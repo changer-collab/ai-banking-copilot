@@ -842,7 +842,12 @@ def create_app(deps: AppDeps) -> FastAPI:
                 user_id, session_id, "assistant", "plan_card", view.message, {"card": card},
             )
         elif view.state.value in _ERROR_STATES:
-            _record_message(user_id, session_id, "assistant", "error", view.message)
+            payload: dict[str, object] | None = (
+                {"triage": {"kind": view.triage.kind}} if view.triage is not None else None
+            )
+            _record_message(
+                user_id, session_id, "assistant", "error", view.message, payload,
+            )
         else:
             _record_message(user_id, session_id, "assistant", "text", view.message)
 

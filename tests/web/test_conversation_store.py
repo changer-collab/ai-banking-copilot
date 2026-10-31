@@ -126,3 +126,28 @@ def test_delete_removes_only_the_target_user_session(store: Store) -> None:
     assert conversations.list_messages("u_demo", "s1") == ()
     assert len(conversations.list_messages("u_lin", "s1")) == 1
     assert conversations.delete("u_demo", "s1") == 0
+
+
+def test_summary_carries_business_and_record_ref(store: Store) -> None:
+    """列表要给业务名与记录号：前端不许靠标题猜业务。"""
+    conv = ConversationStore(store)
+    conv.append(user_id="u_demo", session_id="s1", role="user", kind="text", text="转给李娜 500 元")
+    conv.append(
+        user_id="u_demo", session_id="s1", role="assistant", kind="plan_card", text="计划卡已生成",
+        payload={"card": {"nodes": [{"node_id": "n1", "action": "transfer.create"}]}},
+    )
+    summaries = conv.list_conversations("u_demo")
+    assert summaries[0].business == "转账"
+    assert summaries[0].ref == ""
+
+
+def test_summary_marks_triage_errors_as_explained(store: Store) -> None:
+    conv = ConversationStore(store)
+    conv.append(user_id="u_demo", session_id="s2", role="user", kind="text", text="今天天气不错")
+    conv.append(
+        user_id="u_demo", session_id="s2", role="assistant", kind="error", text="今天天气是挺好的…",
+        payload={"triage": {"kind": "smalltalk"}},
+    )
+    summary = conv.list_conversations("u_demo")[0]
+    assert summary.status_kind == "triage"
+    assert summary.business == ""

@@ -3298,7 +3298,8 @@ const CONVERSATION_STATE_LABELS = {
   reversed: "已回退",
 };
 
-function conversationStateLabel(stateName) {
+function conversationStateLabel(stateName, statusKind) {
+  if (stateName === "blocked") return statusKind === "triage" ? "已说明" : "已拦截";
   return CONVERSATION_STATE_LABELS[stateName] || "";
 }
 
@@ -3386,16 +3387,21 @@ async function refreshConversations() {
       <p class="convs__group-label">${esc(label)}</p>
       ${items.map((item) => {
         const title = item.title || "未命名会话";
+        const biz = item.business ? `<span class="conv-row__biz">${esc(item.business)}</span>` : "";
+        const status = conversationStateLabel(item.state, item.status_kind);
         const meta = [
           conversationTimeLabel(item.last_active_at, label),
-          `${Number(item.message_count) || 0} 条消息`,
-          conversationStateLabel(item.state),
+          item.ref ? `记录 ${item.ref}` : "",
+          `${Number(item.message_count) || 0} 条`,
         ].filter(Boolean).join(" · ");
         const active = item.session_id === SESSION_ID ? " conv-row--active" : "";
         return `<div class="conv-row${active}">
           <button class="conversation-record" type="button" data-open-session="${esc(item.session_id)}">
-            <span class="conv-row__title">${esc(title)}</span>
-            <span class="conv-row__meta">${esc(meta)}</span>
+            <span class="conv-row__top">
+              <span class="conv-row__title">${esc(title)}</span>
+              ${status ? `<span class="conv-row__status">${esc(status)}</span>` : ""}
+            </span>
+            <span class="conv-row__meta">${biz}${biz && meta ? " · " : ""}${esc(meta)}</span>
           </button>
           <button class="conv-delete" type="button" data-delete-session="${esc(item.session_id)}"
                   title="删除对话" aria-label="删除对话：${esc(title)}">
@@ -3424,7 +3430,8 @@ function renderHomeRecent(items) {
   host.hidden = false;
   list.innerHTML = items.map((item) => {
     const title = item.title || "未命名会话";
-    return `<button class="conversation-record" type="button" data-open-session="${esc(item.session_id)}">${esc(title)}</button>`;
+    const head = item.business ? `${item.business} · ${title}` : title;
+    return `<button class="conversation-record" type="button" data-open-session="${esc(item.session_id)}">${esc(head)}</button>`;
   }).join("");
 }
 
@@ -4592,6 +4599,7 @@ function syncColumnButtons() {
     ? app.classList.contains("is-trace-open")
     : !app.classList.contains("is-trace-collapsed");
   el("btn-scenes-mobile")?.setAttribute("aria-expanded", String(navOpen));
+  el("btn-history-mobile")?.setAttribute("aria-expanded", String(navOpen));
   el("btn-trace-mobile")?.setAttribute("aria-expanded", String(traceOpen));
 }
 
@@ -4610,6 +4618,7 @@ function toggleTrace() {
 }
 
 el("btn-scenes-mobile")?.addEventListener("click", toggleNav);
+el("btn-history-mobile")?.addEventListener("click", toggleNav);
 el("btn-trace-mobile")?.addEventListener("click", toggleTrace);
 setMobileDrawer("scenes", false);
 setMobileDrawer("trace", false);

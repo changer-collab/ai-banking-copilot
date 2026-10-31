@@ -82,6 +82,8 @@ _PAGE_HTML = """<!DOCTYPE html>
         <button class="btn btn--ghost" id="btn-install" type="button">安装应用</button>
         <button class="btn btn--ghost" id="btn-scenes-mobile" type="button"
                 aria-controls="conversation-sidebar" aria-expanded="true">导航</button>
+        <button class="btn btn--ghost" id="btn-history-mobile" type="button"
+                aria-controls="conversation-sidebar" aria-expanded="false">历史</button>
         <button class="btn btn--ghost" id="btn-trace-mobile" type="button"
                 aria-controls="trace" aria-expanded="true">处理详情</button>
         <label class="switch">
