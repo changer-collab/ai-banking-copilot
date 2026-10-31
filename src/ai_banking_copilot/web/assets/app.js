@@ -3103,6 +3103,29 @@ function recordTabFor(results) {
   return "transfers";
 }
 
+/* 「查卡片」不该只回一句「共 2 张卡」：用卡片页同一份接口出列表卡，只读、无操作按钮。 */
+async function loadChatCardList(host) {
+  if (!host) return;
+  const result = await apiFetch("GET", "/api/cards");
+  if (!result.ok || !result.data || !Array.isArray(result.data.cards)) {
+    host.innerHTML = '<p class="muted">卡片读取失败，请稍后重试。</p>';
+    return;
+  }
+  const cards = result.data.cards;
+  if (!cards.length) {
+    host.innerHTML = '<p class="muted">名下还没有卡片；可在卡片页申请虚拟卡。</p>';
+    return;
+  }
+  host.innerHTML = `<section class="chat-cards">
+    <div class="chat-cards__head"><h3>我的卡片</h3><span class="chip">共 ${cards.length} 张</span></div>
+    ${cards.map((card) => `<div class="chat-cards__row">
+      <span class="chat-cards__name">${esc(card.type_label)} · 尾号 ${esc(card.last4 || "未知")}</span>
+      <span class="chat-cards__meta">${esc(card.status_label)} · 日限额 ${yuan(Number(card.daily_limit_cents) || 0)}</span>
+    </div>`).join("")}
+    <div class="btn-row"><button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="cards">去卡片页</button></div>
+  </section>`;
+}
+
 function applyExecution(data) {
   showModelMetadata(data.model);
   if (data.card) state.card = data.card;
@@ -3132,6 +3155,8 @@ function applyExecution(data) {
   ).filter(Boolean);
   const recordIds = results.flatMap((item) => (Array.isArray(item.record_ids) ? item.record_ids : []));
   const recordTab = recordTabFor(results);
+  const actions = results.map((item) => String(item.action || ""));
+  const showsCardList = complete && actions.includes("card.list");
   state.notice = complete
     ? `<div class="takeover takeover--receipt">
         <p class="receipt__title"><span class="receipt__tick" aria-hidden="true">✓</span>${esc(data.message || "计划执行完成")}</p>
@@ -3143,7 +3168,9 @@ function applyExecution(data) {
       </div>` +
       (billHtml || adviceFallback) + provenancePanelHtml()
     : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
+  if (showsCardList) state.notice += '<div id="chat-card-list" class="muted">正在读取卡片…</div>';
   renderStage();
+  if (showsCardList) void loadChatCardList(el("chat-card-list"));
   if (complete) void loadProvenance();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
   snapshotTrace();

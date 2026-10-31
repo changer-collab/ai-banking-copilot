@@ -1007,6 +1007,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "status": record.payload.status,
                     "status_label": statuses.get(record.payload.status, record.payload.status),
                     "daily_limit_cents": record.payload.daily_limit.cents,
+                    "last4": record.payload.last4 or "",
                 }
                 for record in deps.gateway.cards_of(user_id)
             ],

@@ -2305,3 +2305,10 @@ body { background: var(--pg-bg); line-height: 1.52; }
     box-shadow: var(--sh-3);
   }
 }
+
+.chat-cards { margin-top: var(--s-4); border: 1px solid var(--pg-line); border-radius: var(--r-card); padding: var(--s-4); }
+.chat-cards__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.chat-cards__row { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) 0; border-bottom: 1px dashed var(--pg-line); }
+.chat-cards__row:last-of-type { border-bottom: 0; }
+.chat-cards__name { font-weight: 600; }
+.chat-cards__meta { font-size: var(--fs-small); color: var(--ink-3); }
