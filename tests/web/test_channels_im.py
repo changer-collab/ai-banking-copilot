@@ -68,7 +68,8 @@ def test_im_channel_handles_trusted_text(deps: AppDeps) -> None:
 def test_im_channel_reports_refusal_truthfully(deps: AppDeps) -> None:
     reply = ImChannel(deps, session_id="im-b").handle("帮我订一张去上海的机票")
     assert reply.state == "blocked"
-    assert "安全拒绝" in reply.text
+    assert reply.text.strip()
+    assert "无法执行" not in reply.text
 
 
 def test_im_channels_with_distinct_ids_do_not_interfere(deps: AppDeps) -> None:

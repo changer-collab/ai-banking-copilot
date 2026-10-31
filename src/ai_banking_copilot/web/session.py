@@ -161,6 +161,7 @@ from ai_banking_copilot.web.plan_card import (
 from ai_banking_copilot.web.session_manager import PROCESS_SESSION_LOCK
 from ai_banking_copilot.web.session_repository import SessionPersistenceError
 from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
+from ai_banking_copilot.web.triage import TriageVerdict, triage
 
 if TYPE_CHECKING:
     from ai_banking_copilot.web.app import AppDeps
@@ -360,6 +361,9 @@ class SubmissionView:
 
     questionnaire: tuple[dict[str, object], ...] = ()
     """风险测评问卷（题号 / 题干 / 选项，不含分值）：仅「我要做风险测评」时下发。"""
+
+    triage: TriageVerdict | None = None
+    """未识别输入的三分类结果（闲聊 / 超范围 / 模糊）；`None` = 策略拒绝或正常产出。"""
 
 
 @dataclass(frozen=True)
@@ -900,6 +904,14 @@ class Session:
                     tuple(ask.prompt for ask in asks), clarifications=asks,
                 )
             if not intents:
+                verdict = triage(
+                    utterance, low_confidence=any("置信度不足" in note for note in notes)
+                )
+                if verdict is not None:
+                    return self._refuse(
+                        verdict.message, utterance,
+                        capability_boundary=True, triage_verdict=verdict,
+                    )
                 return self._refuse(
                     _with_notes("未知意图：无法匹配任何场景", notes),
                     utterance,
@@ -1714,19 +1726,25 @@ class Session:
         card: PlanCard | None = None,
         *,
         capability_boundary: bool = False,
+        triage_verdict: TriageVerdict | None = None,
     ) -> SubmissionView:
         """安全拒绝。
 
         `capability_boundary=True` = 「**未识别 / 无匹配场景**」：它是**能力边界**而非策略拒绝，
         因此**不计入**触发 4（裁决 #27）——否则用户正常的探索输入（演示时随口一句、口音误识别）
         会被当成攻击信号，连着三次就把系统锁死（这正是 `e2e_check.py` 自我污染的根因）。
+
+        `triage_verdict` 非空时**不加**「安全拒绝：」前缀：那三类是「我听不懂 / 办不了」，
+        不是风控拒绝，界面也不该盖「已拦截」印章。审计与状态机语义完全不变。
         """
         self._state = SessionState.BLOCKED
-        self._message = f"安全拒绝：{reason}"
+        self._message = reason if triage_verdict is not None else f"安全拒绝：{reason}"
         self._takeover = self._build_takeover(reason, decision, plan, card, utterance)
         if not capability_boundary:
             self._note_policy_rejection()
-        return SubmissionView(self._state, self._message, card, decision, plan, ())
+        return SubmissionView(
+            self._state, self._message, card, decision, plan, (), triage=triage_verdict
+        )
 
     def _assessment_invitation(self, *, defer: bool = False) -> SubmissionView:
         """「我要做风险测评」⇒ 直接出 5 题问卷（确定性判据，不经模型、不反问等级）。

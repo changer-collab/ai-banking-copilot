@@ -87,7 +87,8 @@ def test_adversarial_return_promise_is_refused(deps: AppDeps) -> None:
 def test_unknown_task_is_a_safe_refusal(deps: AppDeps) -> None:
     view = Session(deps).submit("帮我订一张去上海的机票")
     assert view.state is SessionState.BLOCKED
-    assert "安全拒绝" in view.message
+    assert view.message.strip()
+    assert "无法执行" not in view.message
 
 
 def test_llm_on_succeeds_where_llm_off_refuses(deps: AppDeps) -> None:

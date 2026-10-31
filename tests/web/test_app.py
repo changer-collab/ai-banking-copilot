@@ -123,7 +123,8 @@ def test_unknown_task_returns_a_refusal(deps: AppDeps) -> None:
     client = _client(deps)
     submitted = client.post("/api/submit", json={"utterance": "帮我整理一下房间"}).json()
     assert submitted["state"] == "blocked"
-    assert "安全拒绝" in submitted["message"]
+    assert submitted["message"].strip()
+    assert "无法执行" not in submitted["message"]
 
 
 def test_interrupt_and_resume_over_http(deps: AppDeps) -> None:

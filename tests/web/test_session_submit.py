@@ -28,7 +28,9 @@ def test_unknown_utterance_is_safely_refused_with_reason(deps: AppDeps) -> None:
     view = Session(deps).submit("帮我整理一下房间")
     assert view.state is SessionState.BLOCKED
     assert view.card is None
-    assert "安全拒绝" in view.message
+    assert view.triage is not None
+    assert view.message.strip()
+    assert "无法执行" not in view.message
 
 
 def test_injection_is_detected_and_routed_to_manual_takeover(deps: AppDeps) -> None:
