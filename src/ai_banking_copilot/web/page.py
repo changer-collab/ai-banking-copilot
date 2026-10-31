@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=44" />
+<link rel="stylesheet" href="/assets/workspace.css?v=45" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -571,7 +571,15 @@ _PAGE_HTML = """<!DOCTYPE html>
   </div>
 </dialog>
 
-<script src="/assets/app.js?v=68"></script>
+<dialog class="sub-detail" id="sub-detail" aria-labelledby="sub-detail-title">
+  <div class="sub-detail__head">
+    <p class="panel__title" id="sub-detail-title">订阅详情</p>
+    <button class="btn btn--sm btn--ghost" type="button" data-sub-detail-close>关闭</button>
+  </div>
+  <div class="sub-detail__body" id="sub-detail-body"></div>
+</dialog>
+
+<script src="/assets/app.js?v=69"></script>
 </body>
 </html>
 """

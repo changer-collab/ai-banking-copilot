@@ -690,7 +690,6 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .scene-note,
 .bills-details,
 .wealth-why,
-.sub-card__more,
 .finding {
   padding: var(--s-2) var(--s-3);
   border: 1px solid var(--pg-line);
@@ -701,7 +700,6 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .scene-note > summary,
 .bills-details > summary,
 .wealth-why > summary,
-.sub-card__more > summary,
 .finding > summary {
   cursor: pointer;
   color: var(--blue-700);
@@ -710,7 +708,6 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .scene-note ul,
 .bills-details ul,
 .wealth-why ul,
-.sub-card__more ul,
 .finding ul {
   margin: var(--s-2) 0 0;
   padding-left: 18px;
@@ -720,7 +717,6 @@ body { background: var(--pg-bg); line-height: 1.52; }
 }
 .scene-note p,
 .wealth-why p,
-.sub-card__more p,
 .bills-details p { margin: var(--s-1) 0 0; }
 .scene-note + .scene-note,
 .scene-note + .bills-details,
@@ -1710,7 +1706,8 @@ body { background: var(--pg-bg); line-height: 1.52; }
   font-size: 10px;
 }
 
-/* S2 卡片墙：顶部 4px 色条；列宽随容器自适应，窄屏单列不截断商户名 */
+/* S2 卡片墙：顶部 4px 色条；列宽随容器自适应，窄屏单列不截断商户名。
+   卡片固定三行：商户+状态角标 / 金额·周期·下次扣款 + 取消订阅 / 核对依据入口。 */
 .sub-wall { display: grid; gap: var(--s-2); grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .sub-card {
   display: flex;
@@ -1741,33 +1738,31 @@ body { background: var(--pg-bg); line-height: 1.52; }
   color: var(--lvl-yellow);
   font-size: 11px;
 }
+/* 第二行：金额与周期/下次扣款占左侧、允许换行，取消订阅固定在右端不与之抢行 */
+.sub-card__line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  min-width: 0;
+}
 .sub-card__amount {
+  flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   font-size: 19px;
-  line-height: 1.2;
+  line-height: 1.25;
   font-variant-numeric: tabular-nums;
 }
 .sub-card__meta {
-  margin: 0;
   color: var(--ink-3);
   font-size: 12px;
   line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
 }
-.sub-card__foot {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--s-2);
-  margin-top: 2px;
-}
-.sub-card__more { flex: 1 1 auto; font-size: 12px; padding: 4px 8px; }
-.sub-card__more p { margin: 2px 0; }
-.sub-card__more ul { margin: 2px 0; padding-left: 16px; }
 .sub-card__cancel {
   flex: none;
+  align-self: center;
   padding: 2px 8px;
   border: 1px solid var(--rule);
   border-radius: var(--r-chip);
@@ -1775,9 +1770,31 @@ body { background: var(--pg-bg); line-height: 1.52; }
   color: var(--ink-2);
   font-size: 11px;
   line-height: 1.4;
+  white-space: nowrap;
   cursor: pointer;
 }
 .sub-card__cancel:hover { border-color: var(--blue-300); color: var(--blue-700); }
+/* 第三行：整行可点的依据入口，只开弹层，不承载业务动作 */
+.sub-card__more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  width: 100%;
+  margin-top: 1px;
+  padding: 3px 8px;
+  border: 1px solid var(--pg-line);
+  border-radius: var(--r-chip);
+  background: var(--blue-050);
+  color: var(--blue-700);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.sub-card__more:hover { border-color: var(--blue-300); }
+.sub-card__chev { flex: none; font-size: 14px; line-height: 1; }
 
 /* 取消订阅确认弹窗：居中模态，信息与卡片一致，形态是「标题 + 摘要 + 底部双键」 */
 .sub-cancel-dialog {
@@ -1825,6 +1842,7 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-dialog,
 .life-dialog,
 .sub-cancel-dialog,
+.sub-detail,
 .app-dialog {
   border: 1px solid var(--rule);
   border-radius: var(--r-card);
@@ -1836,6 +1854,7 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .wealth-dialog::backdrop,
 .life-dialog::backdrop,
 .sub-cancel-dialog::backdrop,
+.sub-detail::backdrop,
 .app-dialog::backdrop { background: rgba(16, 24, 40, 0.42); }
 
 /* 通用确认弹窗：一次只承载一件事（确认 + 可选口令），不做二级跳转 */
@@ -1873,6 +1892,52 @@ body { background: var(--pg-bg); line-height: 1.52; }
 @media (max-width: 600px) {
   .app-dialog {
     width: calc(100vw - 24px);
+    max-height: calc(100dvh - 48px);
+    padding: var(--s-3) var(--s-4);
+  }
+}
+
+/* 订阅详情弹层：卡片第三行的「核对依据 · 取消口径」在此展开，
+   正文只有一份来源（subscriptionBasisHtml），卡片不再重复。 */
+.sub-detail {
+  width: min(520px, calc(100% - var(--s-4) * 2));
+  max-height: min(80vh, 560px);
+  padding: var(--s-4) var(--s-5);
+  overflow: hidden;
+}
+.sub-detail[open] { display: flex; flex-direction: column; gap: var(--s-3); }
+.sub-detail__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--rule);
+}
+.sub-detail__head .panel__title { margin: 0; }
+.sub-detail__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+.sub-detail__body p { margin: 0; }
+.sub-detail__body ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.sub-detail__body details {
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+}
+.sub-detail__body summary { cursor: pointer; color: var(--blue-700); font-weight: 600; }
+.sub-detail__lead { font-weight: 600; color: var(--ink); }
+
+@media (max-width: 600px) {
+  .sub-detail {
     max-height: calc(100dvh - 48px);
     padding: var(--s-3) var(--s-4);
   }

@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=44")
-    js = _get(base, "/assets/app.js?v=68")
+    workspace_css = _get(base, "/assets/workspace.css?v=45")
+    js = _get(base, "/assets/app.js?v=69")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=44" in html
-            and "/assets/app.js?v=68" in html
+            and "/assets/workspace.css?v=45" in html
+            and "/assets/app.js?v=69" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html

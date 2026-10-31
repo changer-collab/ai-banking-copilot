@@ -1429,18 +1429,13 @@ async function refreshChannelHealth() {
   renderChannelHealth(result.data);
 }
 
-/* 订阅卡（S2）：顶部色条 + 商户 / 金额 / 周期 + 下次扣款日 + 取消，其余依据收进折叠区。
-   金额与日期全部来自服务端；涨价只做角标，不替代「识别说明」里的口径。 */
+/* 订阅卡（S2）：三行——商户 + 状态角标 / 金额·周期·下次扣款 + 取消订阅 / 核对依据入口。
+   依据不再占卡片版面，点第三行打开详情弹层；金额与日期全部来自服务端。 */
 function subscriptionCardHtml(item, index) {
   const cancelled = item.registered_status === "cancelled";
   const next = item.next_charge_on
     ? `${esc(item.next_charge_on)}${item.next_charge_is_prediction ? "（预测）" : ""}`
     : "未提供";
-  const price = item.price_increased_12m === true
-    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
-    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
-  const external = item.external_cancel_status === "not_integrated"
-    ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
   const suspect = item.status === "confirmed" ? "" : '<span class="chip chip--yellow">疑似</span>';
   const raised = !cancelled && item.price_increased_12m === true
     ? '<span class="sub-card__badge">涨价</span>' : "";
@@ -1449,32 +1444,60 @@ function subscriptionCardHtml(item, index) {
     ? `<button class="sub-card__cancel" type="button" data-sub-cancel="${esc(item.subscription_id)}"
         data-sub-merchant="${esc(item.merchant)}" data-sub-amount="${yuan(item.amount_cents)}"
         data-sub-cycle="${esc(item.cycle_label)}" data-sub-next="${next}"
-        data-sub-last="${esc(item.last_charged_on || "")}">取消</button>`
+        data-sub-last="${esc(item.last_charged_on || "")}">取消订阅</button>`
     : "";
   return `<article class="sub-card${cancelled ? " sub-card--off" : ""}">
     <span class="sub-card__bar" aria-hidden="true"
       style="background:${cancelled ? "var(--rule-strong)" : sceneColor(index)}"></span>
     <div class="sub-card__in">
       <div class="sub-card__top">
-        <span class="sub-card__merchant">${esc(item.merchant)}</span>${state}${suspect}${raised}${cancelBtn}
+        <span class="sub-card__merchant">${esc(item.merchant)}</span>${state}${suspect}${raised}
       </div>
-      <p class="sub-card__amount">${yuan(item.amount_cents)}</p>
-      <p class="sub-card__meta">${esc(item.cycle_label)}扣费 · 下次 ${next}</p>
-      <div class="sub-card__foot">
-        <details class="sub-card__more">
-          <summary>核对依据与取消口径</summary>
-          <p>${price}</p>
-          <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 币种 ${esc(item.currency)} · 置信度 ${esc(confidenceLabel(item.confidence))}</p>
-          <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
-          ${subscriptionNoticesHtml(item)}
-          <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
-          <p><span class="muted">取消路径：</span>${esc(item.cancel_path)}</p>
-          <p class="muted">外部取消接口：${external}</p>
-          ${subscriptionEvidenceHtml(item)}
-        </details>
+      <div class="sub-card__line">
+        <p class="sub-card__amount">${yuan(item.amount_cents)}<span class="sub-card__meta"> / ${esc(item.cycle_label)} · 下次 ${next}</span></p>
+        ${cancelBtn}
       </div>
+      <button class="sub-card__more" type="button" data-sub-detail="${esc(item.insight_id)}"
+        aria-haspopup="dialog">核对依据 · 取消口径<span class="sub-card__chev" aria-hidden="true">›</span></button>
     </div>
   </article>`;
+}
+
+/* 核对依据（原卡片折叠区）：只在详情弹层里渲染这一份，卡片不再重复。
+   金额 / 日期 / 置信度全部来自服务端，不新增结论。 */
+function subscriptionBasisHtml(item) {
+  const price = item.price_increased_12m === true
+    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
+    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
+  const external = item.external_cancel_status === "not_integrated"
+    ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
+  return `<p class="sub-detail__lead">${esc(item.merchant)} · ${yuan(item.amount_cents)} / ${esc(item.cycle_label)}</p>
+    <p>${price}</p>
+    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 币种 ${esc(item.currency)} · 置信度 ${esc(confidenceLabel(item.confidence))}</p>
+    <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
+    ${subscriptionNoticesHtml(item)}
+    <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
+    <p><span class="muted">取消路径：</span>${esc(item.cancel_path)}</p>
+    <p class="muted">外部取消接口：${external}</p>
+    ${subscriptionEvidenceHtml(item)}`;
+}
+
+/* 订阅详情弹层：卡片第三行触发，正文复用 subscriptionBasisHtml（单一来源）。
+   Esc / 点遮罩沿用原生 dialog 行为，与 #app-dialog 一致。 */
+function openSubDetail(insightId) {
+  const details = state.options && state.options.subscription_details;
+  const insights = (details && details.insights) || [];
+  const item = insights.find((row) => row.insight_id === insightId);
+  const dialog = el("sub-detail");
+  if (!item || !dialog) return;
+  const body = el("sub-detail-body");
+  if (body) body.innerHTML = subscriptionBasisHtml(item);
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeSubDetail() {
+  closeDialog(el("sub-detail"));
 }
 
 /* S1 概览行：本月待扣金额 + 在订项数 + 疑似待核对；涨价单独用提示条顶出来。 */
@@ -4595,9 +4618,9 @@ document.addEventListener("click", async (event) => {
 el("btn-life-workbench")?.addEventListener("click", openLifeWorkbench);
 el("btn-wealth-assessment-close")?.addEventListener("click", closeWealthAssessment);
 el("btn-life-workbench-close")?.addEventListener("click", closeLifeWorkbench);
-/* 四个弹窗都支持「点外面关闭」 */
-[el("life-workbench"), el("wealth-assessment"), el("subscription-cancel-dialog"), el("app-dialog")]
-  .forEach(bindDialogDismiss);
+/* 五个弹窗都支持「点外面关闭」 */
+[el("life-workbench"), el("wealth-assessment"), el("subscription-cancel-dialog"),
+  el("sub-detail"), el("app-dialog")].forEach(bindDialogDismiss);
 /* 通用确认弹窗：取消 / Esc / 点遮罩都按「取消」结算，口令框回车等于点确认 */
 el("app-dialog")?.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -5314,6 +5337,15 @@ document.addEventListener("click", (event) => {
     refreshOptions().catch(() => {});
     return;
   }
+  const subDetail = target.closest("[data-sub-detail]");
+  if (subDetail) {
+    openSubDetail(subDetail.dataset.subDetail || "");
+    return;
+  }
+  if (target.closest("[data-sub-detail-close]")) {
+    closeSubDetail();
+    return;
+  }
   const subCancel = target.closest("[data-sub-cancel]");
   if (subCancel) {
     openSubCancelDialog(subCancel);
@@ -5553,7 +5585,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=62", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=63", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
