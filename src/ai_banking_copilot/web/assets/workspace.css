@@ -2274,3 +2274,8 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .triage__body { margin: 0 0 var(--s-3); color: var(--ink-2); }
 .triage__note { margin: 0 0 var(--s-3); font-size: var(--fs-small); color: var(--ink-3); }
 .receipt__record { margin: var(--s-2) 0 0; font-size: var(--fs-small); color: var(--ink-2); }
+
+/* ---------------- ⑦ 每条回复自带处理详情快照（2026-10-31） ---------------- */
+.msg-trace { margin-top: var(--s-3); border-top: 1px dashed var(--pg-line); padding-top: var(--s-2); }
+.msg-trace summary { cursor: pointer; font-size: var(--fs-small); color: var(--ink-2); }
+.msg-trace__list { margin: var(--s-2) 0 0; padding-left: var(--s-4); font-size: var(--fs-small); color: var(--ink-2); }

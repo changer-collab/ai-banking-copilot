@@ -2402,6 +2402,23 @@ function renderStage() {
   showRequestStatus();
 }
 
+/* 每条回复在收尾时把自己那一段时间线快照进消息里：
+   之后新的一次办理会清空右栏，但旧回复仍能展开看当时发生了什么。 */
+function snapshotTrace(response) {
+  const host = response || state.response;
+  const timeline = el("timeline");
+  if (!host || !timeline || host.querySelector(".msg-trace")) return;
+  if (timeline.dataset.empty !== "false") return;
+  const items = Array.from(timeline.querySelectorAll("li"));
+  if (!items.length) return;
+  const details = document.createElement("details");
+  details.className = "msg-trace";
+  details.innerHTML = `<summary>处理详情 · ${state.chain.length} 条审计 · ${items.length} 条时间线</summary>
+    <ul class="msg-trace__list">${items.map((node) => `<li>${node.innerHTML}</li>`).join("")}</ul>
+    <p class="muted">本段快照来自当时的服务端回执；刷新页面后不再保留。</p>`;
+  host.appendChild(details);
+}
+
 function showRequestStatus() {
   let status = el("request-status");
   if (!state.requestLabel || !state.task) {
@@ -2708,6 +2725,7 @@ async function applySubmission(data) {
     renderStage();
     const next = data.card.level === "GREEN" ? "自动执行查询" : "等待确认";
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
+    if (data.card.level !== "GREEN") snapshotTrace();
     if (data.card.level === "GREEN") await onConfirm();
     return;
   }
@@ -2872,6 +2890,7 @@ async function submitTask(text, selected) {
     state.phase = "failed";
     state.notice = interceptHtml("提交未完成", result.data.detail || "请检查输入后重试", false);
     renderStage();
+    snapshotTrace();
     return;
   }
   await applySubmission(result.data);
@@ -3123,6 +3142,7 @@ function applyExecution(data) {
   renderStage();
   if (complete) void loadProvenance();
   timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
+  snapshotTrace();
   setButtons();
 }
 
