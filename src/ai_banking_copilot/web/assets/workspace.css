@@ -2215,13 +2215,78 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .bills-profile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s-2); list-style: none; padding: 0; margin: 0; }
 .bills-profile-grid li { display: grid; gap: 2px; font-size: 12px; }
 .bills-profile-grid strong { font-size: 14px; color: #16233a; }
-.bills-top {
-  padding: var(--s-2) 0;
-  border-bottom: 1px dashed var(--pg-line);
-  font-size: 13px;
+/* 账单账期切换（segmented）+ 结论卡精简（2026-10-31）：
+   首屏只留结论行 / 三指标 / 最多两条重点核对，其余收进「展开完整分析」。 */
+.bills-period {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
 }
-.bills-top span { margin-left: 6px; }
-.bills-top p { margin: 4px 0 0; }
+.bills-period__item {
+  padding: 4px 12px;
+  border: 1px solid var(--pg-line);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.bills-period__item:hover { border-color: var(--rule-strong); color: var(--ink); }
+.bills-period__item.is-active {
+  border-color: var(--blue-600);
+  background: var(--blue-050);
+  color: var(--blue-700);
+  font-weight: 600;
+}
+.bills-period__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+}
+.bills-period__pick .input { padding: 2px 6px; font-size: var(--fs-small); }
+.bills-period__hint { font-size: var(--fs-small); }
+
+.bills-verdict { margin: 0 0 var(--s-2); font-size: 14px; line-height: 1.6; }
+.bills-focus-list { display: grid; gap: 2px; margin: var(--s-1) 0 var(--s-2); padding: 0; list-style: none; }
+.bills-focus {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--pg-line);
+  font-size: var(--fs-small);
+}
+.bills-focus:last-child { border-bottom: 0; }
+.bills-focus__name { color: var(--ink); font-weight: 600; }
+.bills-focus__amt { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.bills-chip {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: var(--r-chip);
+  background: var(--blue-050);
+  color: var(--blue-700);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.bills-chip--confirmed { background: var(--lvl-red-bg); color: var(--lvl-red); }
+.bills-chip--suspected { background: var(--lvl-yellow-bg); color: var(--lvl-yellow); }
+
+.bills-more {
+  margin-top: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--pg-line);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+  font-size: var(--fs-small);
+}
+.bills-more > summary { cursor: pointer; color: var(--blue-700); font-weight: 600; }
+.bills-more > div { margin-top: var(--s-2); }
+.bills-more__note { margin: var(--s-2) 0 0; font-size: 11px; }
 
 /* ---------------- ④ 卡片：状态分布 / 额度条 / 红动作说明（2026-10-28） ---------------- */
 .cards-visual { display: grid; gap: var(--s-2); margin: var(--s-3) 0; }

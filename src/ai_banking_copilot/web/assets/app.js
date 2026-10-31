@@ -92,6 +92,8 @@ const state = {
   cards: [],
   bills: null,
   billsPeriod: null,
+  billsPeriodChoice: "current",
+  billsPeriodCounts: {},
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -1825,7 +1827,7 @@ function findingEvidenceHtml(item) {
   return rows ? `<ul class="evidence">${rows}</ul>` : "";
 }
 
-/* 全部识别线索：默认收起；卡内只留「结论 + 建议」，判断依据与证据再折叠一层 */
+/* 全部识别线索：挂在「展开完整分析」里；每条只留「结论 + 建议」，判断依据与证据再折叠一层 */
 function billsFindingsHtml(payload) {
   const findings = payload.findings || [];
   const source = payload.data_source
@@ -1855,10 +1857,8 @@ function billsFindingsHtml(payload) {
       </details>
     </details>`;
   }).join("");
-  return `<details class="bills-details">
-    <summary>全部识别线索（${findings.length}）</summary>
-    ${rows}${source}
-  </details>`;
+  return `<p class="panel__title panel__title--sub">全部识别线索（${findings.length}）</p>
+    ${rows}${source}`;
 }
 
 function billsTableHtml(payload) {
@@ -1876,7 +1876,7 @@ function billsMetricsHtml(summary) {
   return `<div class="stat-metrics">
     <div class="stat-metric"><span class="stat-metric__k">本期支出</span>
       <b class="stat-metric__v">${yuan(item.expense_total_cents || 0)}</b></div>
-    <div class="stat-metric"><span class="stat-metric__k">交易</span>
+    <div class="stat-metric"><span class="stat-metric__k">支出笔数</span>
       <b class="stat-metric__v">${Number(item.transaction_count || 0)} 笔</b></div>
     <div class="stat-metric${pending ? " stat-metric--warn" : ""}">
       <span class="stat-metric__k">待核对</span>
@@ -1922,26 +1922,53 @@ function billsChartsHtml(payload) {
   </div>`;
 }
 
-function billsTop3Html(payload) {
+/* 结论行：优先服务端叙事摘要；`narrative` 缺失或降级（degraded=true）时回退本地确定性结论 */
+function billsVerdictText(payload) {
+  const narrative = payload.narrative || {};
+  const summary = typeof narrative.summary === "string" ? narrative.summary.trim() : "";
+  if (summary && !narrative.degraded) return summary;
+  return billVerdict(payload.summary || {});
+}
+
+/* 首屏「重点核对」：只留影响金额最大的 2 条，一行一条（名称 + 金额 + 状态 chip）；
+   完整清单在「展开完整分析」里，同一份 findings 不重复展开 */
+function billsTopHtml(payload) {
   const risky = (payload.findings || [])
     .filter((item) => item.status !== "normal")
-    .sort((a, b) => (b.impact_cents || 0) - (a.impact_cents || 0))
-    .slice(0, 3);
+    .sort((a, b) => (Number(b.impact_cents) || 0) - (Number(a.impact_cents) || 0))
+    .slice(0, 2);
   if (!risky.length) {
-    return '<p class="panel__title panel__title--sub">重点核对</p><p class="muted">暂无需要优先核对的可疑项。</p>';
+    return '<p class="muted">暂无需要优先核对的可疑项。</p>';
   }
-  return `<p class="panel__title panel__title--sub">重点核对</p>` +
-    risky.map((item) => `<article class="bills-top">
-      <strong>${esc(FINDING_LABELS[item.kind] || item.kind)}</strong>
-      <span class="muted">${Number(item.impact_cents) > 0 ? yuan(item.impact_cents) : "仅提醒"} · 置信度 ${confidenceLabel(item.confidence)}</span>
-    </article>`).join("");
+  const rows = risky.map((item) => {
+    const amount = Number(item.impact_cents) > 0 ? yuan(item.impact_cents) : "仅提醒";
+    const status = item.status === "confirmed" ? "confirmed" : "suspected";
+    return `<li class="bills-focus">
+      <span class="bills-focus__name">${esc(FINDING_LABELS[item.kind] || item.kind)}</span>
+      <span class="bills-focus__amt">${esc(amount)}</span>
+      <span class="bills-chip bills-chip--${status}">${esc(FINDING_STATUS[item.status] || item.status)}</span>
+    </li>`;
+  }).join("");
+  return `<ul class="bills-focus-list">${rows}</ul>`;
+}
+
+/* 首屏结论卡：结论行 + 3 个指标 + 最多 2 条重点核对（其余都收进折叠区） */
+function billsConclusionHtml(payload) {
+  const degraded = payload.narrative && payload.narrative.degraded
+    ? '<p class="muted scene-hint">文字说明暂不可用，以下为明细数据。</p>'
+    : "";
+  return `<p class="bills-verdict">${esc(billsVerdictText(payload))}</p>
+    ${billsMetricsHtml(payload.summary || {})}
+    <p class="panel__title panel__title--sub">重点核对</p>
+    ${billsTopHtml(payload)}
+    ${degraded}`;
 }
 
 function billsLoading() {
   const status = el("bills-status");
   if (status) status.textContent = "正在读取账单识别结果…";
   const skeleton = '<span class="skeleton"></span><span class="skeleton"></span>';
-  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-findings"].forEach((id) => {
+  ["bills-summary", "bills-profile", "bills-charts", "bills-findings"].forEach((id) => {
     const node = el(id);
     if (node) node.innerHTML = id === "bills-profile" ? "" : skeleton;
   });
@@ -1950,11 +1977,12 @@ function billsLoading() {
 }
 
 function billsFailure(message) {
-  ["bills-summary", "bills-profile", "bills-charts", "bills-top3", "bills-table"].forEach((id) => {
+  /* 失败提示放回首屏（折叠区里的提示默认看不到） */
+  ["bills-profile", "bills-charts", "bills-findings", "bills-table"].forEach((id) => {
     const node = el(id);
     if (node) node.innerHTML = "";
   });
-  panelFailure("bills-findings", message, "bills");
+  panelFailure("bills-summary", message, "bills");
 }
 
 function billsEmpty(payload) {
@@ -1965,32 +1993,105 @@ function billsEmpty(payload) {
   el("bills-summary").innerHTML = card;
   el("bills-profile").innerHTML = "";
   el("bills-charts").innerHTML = "";
-  el("bills-top3").innerHTML = "";
   el("bills-findings").innerHTML = '<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>';
   el("bills-table").innerHTML = billsTableHtml(payload);
 }
 
-/* 记住最近一次账单回答的账期（形如 "2019-01"），供场景页按同一账期取数 */
+/* ---------------- 账期切换：本月（服务端当月）/ 上月 / 指定月份 ----------------
+   「本月」不带参数，走服务端当月默认；「上月」「选月份」带 `?year=&month=`。
+   切换只重拉 /api/bills/analysis 并重渲染结论区，不整页刷新。 */
+
+function billsPreviousPeriod(ref) {
+  return ref.month === 1
+    ? { year: ref.year - 1, month: 12 }
+    : { year: ref.year, month: ref.month - 1 };
+}
+
+/* 服务端「当月」：优先用上次返回的 data_through（当月与今日取小），拿不到才用本地日期 */
+function billsServerMonth() {
+  const payload = state.bills;
+  if (payload && payload.period_basis === "current_month" && typeof payload.data_through === "string") {
+    const matched = /^(\d{4})-(\d{2})/.exec(payload.data_through);
+    if (matched) return { year: Number(matched[1]), month: Number(matched[2]) };
+  }
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+/* 同一账期共用一个计数键，用来算「含今日新增 N 笔」的差值 */
+function billsPeriodKey(period) {
+  const now = billsServerMonth();
+  if (period.year === now.year && period.month === now.month) return "current";
+  return `${period.year}-${period.month}`;
+}
+
+function billsRequestQuery() {
+  if (state.billsPeriodChoice === "previous") {
+    const period = billsPreviousPeriod(billsServerMonth());
+    return { key: billsPeriodKey(period), query: `?year=${period.year}&month=${period.month}` };
+  }
+  if (state.billsPeriodChoice === "explicit" && state.billsPeriod) {
+    const period = state.billsPeriod;
+    return { key: billsPeriodKey(period), query: `?year=${period.year}&month=${period.month}` };
+  }
+  return { key: "current", query: "" };
+}
+
+function syncBillsPeriodControl() {
+  document.querySelectorAll("#bills-period [data-bills-period]").forEach((button) => {
+    const active = button.dataset.billsPeriod === state.billsPeriodChoice;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  const pick = el("bills-period-month");
+  if (!pick) return;
+  pick.value = state.billsPeriodChoice === "explicit" && state.billsPeriod
+    ? `${state.billsPeriod.year}-${String(state.billsPeriod.month).padStart(2, "0")}`
+    : "";
+}
+
+/* 「含今日新增 N 笔」只在 period_basis=current_month 且拿到同账期差值时显示；
+   拿不到差值只写「截至 data_through」，不编造数字。 */
+function renderBillsPeriodHint(payload, count, previousCount) {
+  const hint = el("bills-period-hint");
+  if (!hint) return;
+  const through = typeof payload.data_through === "string" ? payload.data_through : "";
+  const parts = [];
+  if (payload.period_basis === "current_month"
+      && typeof previousCount === "number"
+      && count > previousCount) {
+    parts.push(`含今日新增 ${count - previousCount} 笔`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(through)) {
+    parts.push(`截至 ${through.slice(5)}`);
+  }
+  hint.textContent = parts.join(" · ");
+}
+
+/* 记住最近一次账单回答的账期（形如 "2019-01"），供场景页按同一账期取数；
+   问答落在服务端当月时仍走「本月」缺省，保留「含今日新增」的口径。 */
 function rememberBillsPeriod(findings) {
   const period = findings && typeof findings.period === "string" ? findings.period : "";
   const matched = /^(\d{4})-(\d{2})$/.exec(period);
-  state.billsPeriod = matched
+  const now = billsServerMonth();
+  const isCurrent = matched
+    && Number(matched[1]) === now.year
+    && Number(matched[2]) === now.month;
+  state.billsPeriod = matched && !isCurrent
     ? { year: Number(matched[1]), month: Number(matched[2]) }
     : null;
+  state.billsPeriodChoice = state.billsPeriod ? "explicit" : "current";
+  syncBillsPeriodControl();
 }
 
 async function refreshBills() {
   if (state.offline) return;
   billsLoading();
-  /* 场景页跟随「最近一次账单问答」的账期：问「查 2019 年 1 月账单」就别再画本月的图。
-     没问过时留空，服务端按缺省（上一个月）返回。 */
-  const period = state.billsPeriod;
-  const path = period
-    ? `/api/bills/analysis?year=${period.year}&month=${period.month}`
-    : "/api/bills/analysis";
+  syncBillsPeriodControl();
+  const request = billsRequestQuery();
   let result;
   try {
-    result = await apiFetch("GET", path);
+    result = await apiFetch("GET", `/api/bills/analysis${request.query}`);
   } catch (error) {
     billsFailure("账单识别读取失败，请检查网络后重试。");
     throw error;
@@ -2002,26 +2103,55 @@ async function refreshBills() {
   const payload = result.data;
   state.bills = payload;
   const summary = payload.summary || {};
+  const count = Number(summary.transaction_count) || 0;
   const pending = (Number(summary.confirmed_count) || 0) + (Number(summary.suspected_count) || 0);
-  el("bills-status").textContent = `${payload.period} · ${summary.transaction_count || 0} 笔 · ${pending} 项待核对`;
+  const previousCount = state.billsPeriodCounts[request.key];
+  state.billsPeriodCounts[request.key] = count;
+  el("bills-status").textContent = `${payload.period} · ${count} 笔 · ${pending} 项待核对`
+    + (payload.data_source_is_demo ? " · 演示数据" : "");
+  renderBillsPeriodHint(payload, count, previousCount);
   const disclaimer = el("bills-disclaimer");
   disclaimer.hidden = false;
   disclaimer.textContent = payload.data_source_is_demo
-    ? "演示数据 · 只作核对线索，不当作已确认"
-    : "只作核对线索，不当作已确认";
+    ? "演示数据 · 识别结果只作核对线索，不当作已确认；未发现不等于不存在。"
+    : "识别结果只作核对线索，不当作已确认；未发现不等于不存在。";
   if (!(payload.transactions || []).length) {
     billsEmpty(payload);
     return;
   }
-  const degraded = payload.narrative && payload.narrative.degraded
-    ? '<p class="muted scene-hint">文字说明暂不可用，以下为明细数据。</p>'
-    : "";
-  el("bills-summary").innerHTML = billsMetricsHtml(summary) + degraded;
+  el("bills-summary").innerHTML = billsConclusionHtml(payload);
   el("bills-profile").innerHTML = billsProfileHtml(payload.profile);
   el("bills-charts").innerHTML = billsChartsHtml(payload);
-  el("bills-top3").innerHTML = billsTop3Html(payload);
   el("bills-findings").innerHTML = billsFindingsHtml(payload);
   el("bills-table").innerHTML = billsTableHtml(payload);
+}
+
+if (el("bills-period")) {
+  el("bills-period").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-bills-period]");
+    if (!button) return;
+    const choice = button.dataset.billsPeriod === "previous" ? "previous" : "current";
+    if (choice === state.billsPeriodChoice) return;
+    state.billsPeriodChoice = choice;
+    state.billsPeriod = null;
+    syncBillsPeriodControl();
+    refreshBills().catch(() => {});
+  });
+  const pick = el("bills-period-month");
+  if (pick) {
+    pick.addEventListener("change", () => {
+      const matched = /^(\d{4})-(\d{2})$/.exec(pick.value);
+      if (!matched) {
+        state.billsPeriod = null;
+        state.billsPeriodChoice = "current";
+      } else {
+        state.billsPeriod = { year: Number(matched[1]), month: Number(matched[2]) };
+        state.billsPeriodChoice = "explicit";
+      }
+      syncBillsPeriodControl();
+      refreshBills().catch(() => {});
+    });
+  }
 }
 
 if (el("cards-list")) {
@@ -5332,7 +5462,7 @@ refreshCards().catch(() => {
 });
 refreshBills().catch(() => {
   el("bills-status").textContent = "账单识别读取失败，请稍后重试。";
-  panelFailure("bills-findings", "账单识别读取失败，请稍后重试。", "bills");
+  panelFailure("bills-summary", "账单识别读取失败，请稍后重试。", "bills");
 });
 refreshConversations().catch(() => {});
 refreshLifeEvents().catch(() => {});
@@ -5355,7 +5485,7 @@ window.addEventListener("online", () => {
   });
   refreshBills().catch(() => {
     el("bills-status").textContent = "账单识别读取失败，请稍后重试。";
-    panelFailure("bills-findings", "账单识别读取失败，请稍后重试。", "bills");
+    panelFailure("bills-summary", "账单识别读取失败，请稍后重试。", "bills");
   });
   refreshConversations().catch(() => {});
   refreshLifeEvents().catch(() => {});
@@ -5397,7 +5527,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=60", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=61", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

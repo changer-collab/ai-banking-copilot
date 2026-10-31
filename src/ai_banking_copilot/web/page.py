@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=42" />
+<link rel="stylesheet" href="/assets/workspace.css?v=43" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -295,9 +295,16 @@ _PAGE_HTML = """<!DOCTYPE html>
 
       <div class="scene-block" data-scene-block="bills" hidden>
         <section class="panel" id="bills-panel">
+          <div class="bills-period" id="bills-period" role="group" aria-label="账期">
+            <button class="bills-period__item is-active" type="button" data-bills-period="current" aria-pressed="true">本月</button>
+            <button class="bills-period__item" type="button" data-bills-period="previous" aria-pressed="false">上月</button>
+            <label class="bills-period__pick">选月份
+              <input class="input" id="bills-period-month" type="month" />
+            </label>
+            <span class="bills-period__hint muted" id="bills-period-hint"></span>
+          </div>
           <p class="panel__title">账单分析</p>
           <p class="muted" id="bills-status">正在读取账单识别结果…</p>
-          <p class="muted" id="bills-disclaimer" hidden></p>
           <div id="bills-summary"></div>
           <div class="budget-set">
             <label class="budget-set__label" for="budget-input">本月预算</label>
@@ -306,10 +313,13 @@ _PAGE_HTML = """<!DOCTYPE html>
             <button class="btn btn--sm btn--primary" type="button" data-action="save-budget">保存</button>
             <span class="muted budget-set__status" id="budget-status">只用于「月预算提醒」洞察，不是转账限额；转账的单笔 / 当日累计限额在计划卡里按服务端口径判定。</span>
           </div>
-          <div id="bills-profile"></div>
-          <div id="bills-charts"></div>
-          <div id="bills-top3"></div>
-          <div id="bills-findings"></div>
+          <details class="bills-more" id="bills-more">
+            <summary>展开完整分析</summary>
+            <div id="bills-profile"></div>
+            <div id="bills-charts"></div>
+            <div id="bills-findings"></div>
+            <p class="muted bills-more__note" id="bills-disclaimer" hidden></p>
+          </details>
           <details class="bills-details" id="bills-details">
             <summary>账单明细（本期交易）</summary>
             <div id="bills-table"></div>
@@ -561,7 +571,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </div>
 </dialog>
 
-<script src="/assets/app.js?v=66"></script>
+<script src="/assets/app.js?v=67"></script>
 </body>
 </html>
 """
