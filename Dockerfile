@@ -7,7 +7,7 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --no-cache-dir -e .
+RUN python -m pip install --no-cache-dir -e ".[llm]"
 COPY tests ./tests
 COPY docs ./docs
 COPY deploy ./deploy
