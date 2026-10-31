@@ -54,6 +54,7 @@ def auth_deps(deps: AppDeps, rw_store: Store) -> AppDeps:
         deps,
         auth=auth,
         auth_mode=AUTH_MODE_DEMO,
+        demo_password=PASSWORD,
         conversations=ConversationStore(rw_store),
         life_events=LifeEventStore(rw_store),
         session_repository=SQLiteSessionRepository(rw_store),
@@ -85,6 +86,23 @@ def test_unauthenticated_page_is_login_and_api_is_401(client: TestClient) -> Non
 
     im = client.get("/im")
     assert 'id="login-form"' in im.text
+
+
+def test_login_page_explains_product_and_shows_demo_credentials(client: TestClient) -> None:
+    page = client.get("/")
+    assert "一句话，智能办理银行业务" in page.text
+    assert "演示账号" in page.text
+    assert "chenming" in page.text and "linjing" in page.text
+    assert PASSWORD in page.text
+    assert "由现场负责人提供" not in page.text
+
+
+def test_login_page_hides_password_when_not_configured(auth_deps: AppDeps) -> None:
+    without_password = replace(auth_deps, demo_password=None)
+    with TestClient(create_app(without_password)) as client:
+        page = client.get("/")
+    assert "由现场负责人提供" in page.text
+    assert PASSWORD not in page.text
 
 
 def test_options_and_me_only_contain_the_logged_in_users_facts(
@@ -289,3 +307,39 @@ def test_life_event_panel_lists_seven_prototypes_with_examples(client: TestClien
         assert item["triggers"], f"{item['event_id']} 缺少触发词"
     assert payload["records"] == []
     assert payload["records_available"] is True
+
+
+def test_docs_and_openapi_are_closed_unless_explicitly_enabled(
+    auth_deps: AppDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接口清单默认不公开：/docs 与 /openapi.json 都必须 404。"""
+    monkeypatch.delenv("AIB_ENABLE_DOCS", raising=False)
+    closed = TestClient(create_app(auth_deps))
+    assert closed.get("/docs").status_code == 404
+    assert closed.get("/openapi.json").status_code == 404
+
+    monkeypatch.setenv("AIB_ENABLE_DOCS", "1")
+    opened = TestClient(create_app(auth_deps))
+    assert opened.get("/docs").status_code == 200
+    assert opened.get("/openapi.json").status_code == 200
+
+
+def test_login_cookie_sets_secure_only_when_flagged(
+    auth_deps: AppDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTPS 部署用 AIB_COOKIE_SECURE=1 打开 Secure；本机 http 调试默认不带。"""
+    monkeypatch.delenv("AIB_COOKIE_SECURE", raising=False)
+    plain = TestClient(create_app(auth_deps))
+    plain_cookie = plain.post(
+        "/api/auth/login", json={"username": "chenming", "password": PASSWORD}
+    ).headers["set-cookie"]
+    assert "HttpOnly" in plain_cookie and "SameSite=lax" in plain_cookie
+    assert "Secure" not in plain_cookie
+
+    monkeypatch.setenv("AIB_COOKIE_SECURE", "1")
+    secured = TestClient(create_app(auth_deps))
+    secured_cookie = secured.post(
+        "/api/auth/login", json={"username": "chenming", "password": PASSWORD}
+    ).headers["set-cookie"]
+    assert "Secure" in secured_cookie
+

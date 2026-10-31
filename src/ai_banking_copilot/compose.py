@@ -327,9 +327,10 @@ def build_deps(
         resources.callback(activity_store.close)
     auth_mode = build_auth_mode(env)
     auth_service = AuthService(activity_store)
+    demo_password: str | None = None
     if auth_mode == AUTH_MODE_DEMO:
-        password = source.get(DEMO_PASSWORD_ENV, "").strip() or _DEFAULT_DEMO_PASSWORD
-        auth_service.ensure_demo_accounts(password)
+        demo_password = source.get(DEMO_PASSWORD_ENV, "").strip() or _DEFAULT_DEMO_PASSWORD
+        auth_service.ensure_demo_accounts(demo_password)
         _verify_demo_accounts(auth_service)
     risk_store = Store(db_path, StoreMode.READ_WRITE)
     if resources is not None:
@@ -394,6 +395,7 @@ def build_deps(
         channel_store=session_store,
         auth=auth_service,
         auth_mode=auth_mode,
+        demo_password=demo_password,
         conversations=ConversationStore(activity_store),
         life_events=LifeEventStore(activity_store),
         receipts=StoreReceiptReader(read_store),
