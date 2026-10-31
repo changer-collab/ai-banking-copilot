@@ -1040,6 +1040,7 @@ async function refreshTransfers() {
   const result = await apiFetch("GET", "/api/transfers");
   if (!result.ok) throw new Error("转账记录读取失败");
   renderTransfers(result.data);
+  updatePayeeRecent((result.data && result.data.items) || []);
 }
 
 /* ---------------- 场景页「业务面板」公共件 ----------------
@@ -1227,6 +1228,7 @@ async function confirmSceneCard() {
   }
   scenePending = null;
   setStatus("");
+  if (typeof options.onSuccess === "function") options.onSuccess(data);
   renderSubscriptionCancel(data.subscription_cancel);
   await sceneRefresh(options);
   return data;
@@ -1320,12 +1322,164 @@ function renderQuota(quota) {
     <p class="muted">已用 ${pct}%。${over ? "超出日限额的部分按红色（需强验证）处理；" : ""}这里不在前端计算任何数字。</p>`;
 }
 
+/* ---- 收款人候选（只读）：名册 /api/payees + 最近转账去重合并 ----
+   候选只来自服务端事实；命中不到时给「按此姓名继续」，**不猜收款人**——
+   最终仍由 /api/submit → 服务端澄清与拦截。 */
+let payeeRoster = null;
+let payeeRosterPromise = null;
+let payeeRecentNames = [];
+let payeeMatches = [];
+let payeeActiveIndex = -1;
+
+/* 转账记录里的姓名是脱敏的（`李*` / `王*伟`）：只用来给名册命中排序，绝不当作可选姓名；
+   未脱敏且不在名册里的姓名才作为「最近转账」候选补进来。 */
+function payeeMaskMatches(name, masked) {
+  const text = String(name || "");
+  const mask = String(masked || "");
+  if (!mask || mask === "收款人已隐藏" || mask.length !== text.length) return false;
+  return mask.split("").every((ch, index) => ch === "*" || ch === text[index]);
+}
+
+function payeeOptionList() {
+  const roster = payeeRoster || [];
+  const rosterNames = new Set(roster.map((item) => item.name));
+  const isRecent = (name) => payeeRecentNames.some((masked) => payeeMaskMatches(name, masked));
+  const options = roster.map((item) => Object.assign({ inRoster: true, recent: isRecent(item.name) }, item));
+  payeeRecentNames.forEach((name) => {
+    if (name.includes("*") || rosterNames.has(name)) return;
+    if (roster.some((item) => payeeMaskMatches(item.name, name))) return;
+    options.push({ name, accountTail: "", phoneTail4: "", blocked: false, inRoster: false, recent: true });
+  });
+  /* 最近转过的排前面；其余保持名册顺序（sort 稳定） */
+  return options.sort((a, b) => Number(b.recent) - Number(a.recent));
+}
+
+function filterPayees(query) {
+  const needle = String(query || "").trim().toLowerCase();
+  const all = payeeOptionList();
+  if (!needle) return all;
+  return all.filter((item) =>
+    String(item.name || "").toLowerCase().includes(needle)
+    || String(item.accountTail || "").includes(needle)
+    || String(item.phoneTail4 || "").includes(needle));
+}
+
+function payeeCandidateHtml(item, index) {
+  const meta = [];
+  if (item.accountTail) meta.push(`账号尾号 ${item.accountTail}`);
+  if (item.phoneTail4) meta.push(`手机 ${item.phoneTail4}`);
+  const tag = item.blocked
+    ? '<span class="payee-candidates__tag">已停用</span>'
+    : item.recent ? '<span class="payee-candidates__tag">最近转账</span>' : "";
+  return `<li class="payee-candidates__item${index === payeeActiveIndex ? " is-active" : ""}` +
+    `${item.blocked ? " is-blocked" : ""}" role="option" id="payee-option-${index}"` +
+    ` aria-selected="${index === payeeActiveIndex}" aria-disabled="${item.blocked ? "true" : "false"}"` +
+    ` data-payee-name="${esc(item.name)}" data-payee-blocked="${item.blocked ? "1" : "0"}">` +
+    `<span class="payee-candidates__name">${esc(item.name)}</span>` +
+    (meta.length ? `<span class="payee-candidates__meta">${esc(meta.join(" · "))}</span>` : "") +
+    tag + "</li>";
+}
+
+function closePayeeCandidates() {
+  const input = el("quick-payee");
+  const list = el("payee-candidates");
+  if (list) list.hidden = true;
+  if (input) {
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  }
+  payeeActiveIndex = -1;
+}
+
+function renderPayeeCandidates() {
+  const input = el("quick-payee");
+  const list = el("payee-candidates");
+  if (!input || !list) return;
+  const query = input.value.trim();
+  payeeMatches = filterPayees(query);
+  if (payeeActiveIndex >= payeeMatches.length) payeeActiveIndex = -1;
+  const rows = payeeMatches.map(payeeCandidateHtml);
+  const selectable = payeeMatches.filter((item) => !item.blocked);
+  if (!selectable.length && query) {
+    rows.push('<li class="payee-candidates__item payee-candidates__item--fallback" role="option"' +
+      ' aria-selected="false" data-payee-fallback="1">' +
+      `按「${esc(query)}」继续</li>`);
+  }
+  list.innerHTML = rows.join("");
+  list.hidden = rows.length === 0;
+  input.setAttribute("aria-expanded", String(rows.length > 0));
+}
+
+function choosePayee(name) {
+  const input = el("quick-payee");
+  if (input) input.value = String(name || "");
+  closePayeeCandidates();
+}
+
+function movePayeeActive(step) {
+  if (!payeeMatches.length) return;
+  let index = payeeActiveIndex;
+  for (let i = 0; i < payeeMatches.length; i += 1) {
+    index = (index + step + payeeMatches.length) % payeeMatches.length;
+    if (!payeeMatches[index].blocked) {
+      payeeActiveIndex = index;
+      break;
+    }
+  }
+  renderPayeeCandidates();
+  const input = el("quick-payee");
+  if (input && payeeActiveIndex >= 0) {
+    input.setAttribute("aria-activedescendant", `payee-option-${payeeActiveIndex}`);
+  }
+}
+
+async function loadPayeeRoster() {
+  if (payeeRoster) return payeeRoster;
+  if (!payeeRosterPromise) {
+    payeeRosterPromise = apiFetch("GET", "/api/payees").then((result) => {
+      if (!result.ok) throw new Error("收款人名册读取失败");
+      payeeRoster = ((result.data && result.data.payees) || []).map((item) => ({
+        name: String(item.name || ""),
+        accountTail: String(item.account_tail || ""),
+        phoneTail4: String(item.phone_tail4 || ""),
+        blocked: item.blocked === true,
+      }));
+      /* 名册晚于输入到达时补渲染：正在输入的用户不该只看到「最近转账」那一份 */
+      if (document.activeElement === el("quick-payee")) renderPayeeCandidates();
+      return payeeRoster;
+    }).finally(() => {
+      payeeRosterPromise = null;
+    });
+  }
+  return payeeRosterPromise;
+}
+
+/* 最近转账姓名只更新候选，不覆盖输入框；名册未到时先记下，聚焦时一并渲染 */
+function updatePayeeRecent(items) {
+  payeeRecentNames = Array.from(new Set((items || [])
+    .map((item) => String(item.payee || "").trim())
+    .filter(Boolean)));
+  const list = el("payee-candidates");
+  if (list && !list.hidden) renderPayeeCandidates();
+}
+
+async function openPayeeCandidates() {
+  try {
+    await loadPayeeRoster();
+  } catch (_) {
+    /* 名册读取失败仍保留输入框：不猜收款人，直接按姓名提交由服务端澄清 */
+  }
+  renderPayeeCandidates();
+}
+
 /* 场景①快速转账：把页内表单拼成中文指令，交给与对话相同的 /api/submit */
 async function submitQuickTransfer() {
   const payeeInput = el("quick-payee");
   const amountInput = el("quick-amount");
+  const remarkInput = el("quick-remark");
   const status = el("quick-transfer-status");
   if (!payeeInput || !amountInput) return;
+  closePayeeCandidates();
   const payee = payeeInput.value.trim();
   const amount = amountInput.value.trim();
   if (!payee) {
@@ -1338,12 +1492,23 @@ async function submitQuickTransfer() {
     if (status) status.textContent = "请先填写大于 0 的金额。";
     return;
   }
+  const remark = remarkInput ? remarkInput.value.trim().slice(0, 50) : "";
   await sceneRunTask({
-    utterance: `转给${payee} ${amount} 元`,
+    utterance: remark ? `转给${payee} ${amount} 元，备注：${remark}` : `转给${payee} ${amount} 元`,
     host: "quick-transfer-card",
     status: "quick-transfer-status",
     refresh: refreshAfterExecution,
+    onSuccess: quickTransferSucceeded,
   });
+}
+
+/* 转账成功后清空金额与备注、保留收款人，便于连转 */
+function quickTransferSucceeded() {
+  const amountInput = el("quick-amount");
+  const remarkInput = el("quick-remark");
+  if (amountInput) amountInput.value = "";
+  if (remarkInput) remarkInput.value = "";
+  if (amountInput) amountInput.focus();
 }
 
 function confidenceLabel(value) {
@@ -5486,6 +5651,14 @@ document.addEventListener("click", (event) => {
     return;
   }
   /* 场景页「页内办事」：快速转账 / 计划卡确认 / 撤销 / 去对话强验证 */
+  if (target.closest("[data-quick-amount]")) {
+    const amountInput = el("quick-amount");
+    if (amountInput) {
+      amountInput.value = target.closest("[data-quick-amount]").dataset.quickAmount || "";
+      amountInput.focus();
+    }
+    return;
+  }
   if (target.closest("#quick-transfer-submit")) {
     submitQuickTransfer().catch(() => {});
     return;
@@ -5529,8 +5702,65 @@ el("btn-scene-chat")?.addEventListener("click", () => {
   navigate("chat", {});
 });
 
-/* 快速转账表单：两个输入框里按回车等同点「确认转账」 */
-["quick-payee", "quick-amount"].forEach((id) => {
+/* 快速转账表单：收款人是「输入 + 候选列表」，金额与备注回车等同点「确认转账」 */
+el("quick-payee")?.addEventListener("focus", () => {
+  openPayeeCandidates().catch(() => {});
+});
+
+el("quick-payee")?.addEventListener("input", () => {
+  payeeActiveIndex = -1;
+  renderPayeeCandidates();
+});
+
+el("quick-payee")?.addEventListener("keydown", (event) => {
+  const list = el("payee-candidates");
+  const open = list ? !list.hidden : false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!open) {
+      openPayeeCandidates().catch(() => {});
+      return;
+    }
+    movePayeeActive(event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (event.key === "Escape") {
+    if (open) {
+      event.preventDefault();
+      closePayeeCandidates();
+    }
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    /* 只有用方向键明确选中的候选才填入；否则按输入的姓名继续，交给服务端澄清（不猜） */
+    if (open && payeeActiveIndex >= 0 && payeeMatches[payeeActiveIndex]
+      && !payeeMatches[payeeActiveIndex].blocked) {
+      choosePayee(payeeMatches[payeeActiveIndex].name);
+      return;
+    }
+    closePayeeCandidates();
+    submitQuickTransfer().catch(() => {});
+  }
+});
+
+el("payee-candidates")?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-payee-fallback]")) {
+    closePayeeCandidates();
+    return;
+  }
+  const item = event.target.closest("[data-payee-name]");
+  if (!item) return;
+  if (item.dataset.payeeBlocked === "1") return;
+  choosePayee(item.dataset.payeeName);
+});
+
+document.addEventListener("click", (event) => {
+  const picker = el("payee-picker");
+  if (picker && !picker.contains(event.target)) closePayeeCandidates();
+});
+
+["quick-amount", "quick-remark"].forEach((id) => {
   el(id)?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -5579,6 +5809,8 @@ refreshTransfers().catch(() => {
   el("transfers-status").textContent = "转账记录读取失败，请稍后重试。";
   panelFailure("transfers-list", "转账记录读取失败，请稍后重试。", "transfers");
 });
+/* 收款人候选在页面加载时就取一次（不猜收款人；读不到时输入框仍可直接输入） */
+loadPayeeRoster().catch(() => {});
 refreshWealth().catch(() => {
   showWealthFailure("理财面板读取失败，请稍后重试。");
 });
@@ -5653,7 +5885,7 @@ el("btn-install")?.addEventListener("click", async () => {
 });
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=64", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=65", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

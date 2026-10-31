@@ -1014,6 +1014,31 @@ def create_app(deps: AppDeps) -> FastAPI:
             ],
         }
 
+    @app.get("/api/payees")
+    def payees(user_id: str = Depends(current_user)) -> dict[str, object]:
+        """收款人名册（只读事实）：姓名 + 账号尾号 + 手机尾号后四位。
+
+        **不回传完整手机号**：名册层只存后四位的事实不进接口面；
+        更不允许前端据此拼出完整号码。
+        """
+
+        def tail4(value: str | None) -> str:
+            return (value or "")[-4:]
+
+        return {
+            "payees": [
+                {
+                    "payee_id": record.payload.payee_id,
+                    "name": record.payload.full_name,
+                    "account_tail": record.payload.account_tail,
+                    "phone_tail4": tail4(record.payload.phone_tail)
+                    or tail4(record.payload.phone),
+                    "blocked": record.payload.blocked,
+                }
+                for record in deps.gateway.payees_of(user_id)
+            ]
+        }
+
     @app.get("/api/risk-assessment")
     def risk_assessment_state(user_id: str = Depends(current_user)) -> dict[str, object]:
         """当前已认证用户的测评状态（只读）；未测评 / 过期如实返回，绝不默认等级。"""

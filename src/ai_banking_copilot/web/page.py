@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=46" />
+<link rel="stylesheet" href="/assets/workspace.css?v=47" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -255,15 +255,29 @@ _PAGE_HTML = """<!DOCTYPE html>
           <p class="panel__title">快速转账</p>
           <p class="muted scene-hint">先出计划卡，确认后才会执行；红色动作本页不代做，会引导去对话做强验证。</p>
           <div class="scene-form">
-            <label class="field">
+            <div class="field">
               <span class="field__label">收款人</span>
-              <input class="input" id="quick-payee" type="text" placeholder="例如 李娜" autocomplete="off" />
-            </label>
+              <div class="payee-picker" id="payee-picker">
+                <input class="input" id="quick-payee" type="text" autocomplete="off"
+                       aria-label="收款人" placeholder="输入姓名，或从常用收款人里选" aria-autocomplete="list"
+                       aria-controls="payee-candidates" aria-expanded="false" />
+                <ul class="payee-candidates" id="payee-candidates" role="listbox" hidden></ul>
+              </div>
+            </div>
             <label class="field">
               <span class="field__label">金额（元）</span>
               <input class="input" id="quick-amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如 500" />
             </label>
           </div>
+          <div class="quick-amounts" role="group" aria-label="金额快捷值">
+            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="100">100</button>
+            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="500">500</button>
+            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="1000">1000</button>
+          </div>
+          <label class="field quick-remark">
+            <span class="field__label">备注（选填）</span>
+            <input class="input" id="quick-remark" type="text" maxlength="50" autocomplete="off" placeholder="如 房租，会写进转账备注" />
+          </label>
           <div class="btn-row">
             <button class="btn btn--primary" type="button" id="quick-transfer-submit">确认转账</button>
             <span class="muted" id="quick-transfer-status" role="status" aria-live="polite"></span>
@@ -577,7 +591,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="sub-detail-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=70"></script>
+<script src="/assets/app.js?v=71"></script>
 </body>
 </html>
 """

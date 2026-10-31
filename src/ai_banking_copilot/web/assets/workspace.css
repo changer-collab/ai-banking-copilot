@@ -685,6 +685,45 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .scene-head .panel__title { margin: 0; }
 .scene-hint { margin: 0 0 var(--s-2); font-size: var(--fs-small); line-height: 1.55; }
 .scene-form { display: grid; gap: var(--s-2); grid-template-columns: minmax(0, 1fr); }
+/* 收款人选择器：输入框 + 候选浮层；候选只来自服务端事实（名册 / 最近转账） */
+.payee-picker { position: relative; }
+.payee-candidates {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + var(--s-1));
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--s-1);
+  list-style: none;
+  border: 1px solid var(--pg-line);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+}
+.payee-candidates[hidden] { display: none; }
+.payee-candidates__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-control);
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+.payee-candidates__item.is-active,
+.payee-candidates__item:hover { background: var(--blue-050); color: var(--ink); }
+.payee-candidates__name { color: var(--ink); font-weight: 600; }
+.payee-candidates__meta { color: var(--ink-3); }
+.payee-candidates__item.is-blocked { cursor: not-allowed; background: var(--lvl-yellow-bg); }
+.payee-candidates__item.is-blocked .payee-candidates__name { color: var(--ink-3); }
+.payee-candidates__tag { margin-left: auto; color: var(--lvl-yellow); font-size: 11px; }
+.payee-candidates__item--fallback { color: var(--blue-700); font-weight: 600; }
+.quick-amounts { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: var(--s-2); }
+.quick-remark { margin-top: var(--s-3); }
 /* 场景页统一折叠框：识别说明 / 取消口径 / 账单明细 / 测评问卷 / 产品依据 共用一套
    （浅底 + 细边 + 蓝色摘要，展开后缩进列表） */
 .scene-note,
