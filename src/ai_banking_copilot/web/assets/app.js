@@ -74,6 +74,7 @@ const state = {
   chain: [],
   verification: null,
   clarifications: [],
+  triage: null,
   options: null,
   optionsStatus: "loading",
   busy: false,
@@ -2669,6 +2670,7 @@ function reset(keepUtterance) {
   state.panel = "";
   state.verification = null;
   state.clarifications = [];
+  state.triage = null;
   state.notice = "";
   state.resultCount = 0;
   state.operationUnknown = false;
@@ -2726,17 +2728,43 @@ async function applySubmission(data) {
     timelineAdd(data.message || "当前没有到期待办。", "done");
     return;
   }
+  const triage = data.triage || null;
+  state.triage = triage;
   state.phase = data.state === "blocked" ? "blocked" : "clarifying";
   state.clarifications = data.clarifications || [];
   /* 场景层追问（如「这笔 6800 是不是我刷的」）只有一句话、没有结构化槽位表单：
      此时必须把服务端那句 prompt 原样显示出来，不能退化成「请补充所需信息后重新提交。」——
      那句空话既没告诉用户缺什么，也和 API 返回的 message 不一致。 */
   const clarifyPrompt = data.message || (Array.isArray(data.questions) ? data.questions[0] : "");
-  state.panel = data.state === "blocked"
-    ? interceptHtml("安全拒绝（未产生可执行计划）", data.message || "未知意图不猜测执行；已留痕。", false)
-    : clarifyHtml() || `<div class="takeover"><p>${esc(clarifyPrompt || "请补充所需信息后重新提交。")}</p></div>`;
+  state.panel = triage
+    ? triageHtml(triage, data.message || "")
+    : data.state === "blocked"
+      ? interceptHtml("安全拒绝（未产生可执行计划）", data.message || "未知意图不猜测执行；已留痕。", false)
+      : clarifyHtml() || `<div class="takeover"><p>${esc(clarifyPrompt || "请补充所需信息后重新提交。")}</p></div>`;
   renderStage();
-  timelineAdd(data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别", "stop");
+  timelineAdd(
+    triage ? "已说明能力边界 · 未产生计划" : data.state === "blocked" ? "安全拒绝 · 已留痕" : "转澄清 · 未产出级别",
+    triage ? "live" : "stop",
+  );
+}
+
+const TRIAGE_TITLES = {
+  smalltalk: "先聊两句",
+  out_of_scope: "这个不在银行能办的范围内",
+  ambiguous: "没太理解您的意思",
+};
+
+/* 三分类回应：中性卡 + 可点示例。不用红色封条——那不是风控拒绝。 */
+function triageHtml(triage, message) {
+  const chips = (triage.suggestions || [])
+    .map((item) => `<button class="btn btn--sm" type="button" data-suggestion="${esc(item.text)}">${esc(item.label)}</button>`)
+    .join("");
+  return `<div class="triage">
+    <p class="triage__head">${esc(TRIAGE_TITLES[triage.kind] || TRIAGE_TITLES.ambiguous)}</p>
+    <p class="triage__body">${esc(message)}</p>
+    ${triage.disclaimer ? `<p class="triage__note">${esc(triage.disclaimer)}</p>` : ""}
+    ${chips ? `<div class="btn-row">${chips}</div>` : ""}
+  </div>`;
 }
 
 /* 澄清闭环表单：按结构化提问逐槽位补值，回答后重跑原指令（无需整句重述） */
@@ -5055,6 +5083,15 @@ document.addEventListener("click", (event) => {
   }
   if (target.id === "profile-backdrop") {
     closeProfile();
+    return;
+  }
+  const suggestion = target.closest("[data-suggestion]");
+  if (suggestion) {
+    const text = suggestion.dataset.suggestion || "";
+    document.querySelectorAll("[data-suggestion]").forEach((node) => node.remove());
+    const input = el("utterance");
+    if (input) input.value = text;
+    if (!el("btn-submit").disabled) action(onSubmit)();
     return;
   }
   const nav = target.closest("[data-nav]");

@@ -2260,3 +2260,16 @@ body { background: var(--pg-bg); line-height: 1.52; }
   .dag__row { grid-template-columns: 24px 1fr; }
   .dag__state { grid-column: 2; justify-self: start; }
 }
+
+/* ---------------- ⑥ 三分类中性卡：闲聊 / 超范围 / 模糊（2026-10-31） ---------------- */
+.triage {
+  margin-top: var(--s-4);
+  padding: var(--s-4);
+  border: 1px solid var(--pg-line);
+  border-left: 3px solid var(--blue-600);
+  border-radius: var(--r-card);
+  background: var(--pg-panel);
+}
+.triage__head { margin: 0 0 var(--s-2); font-weight: 600; }
+.triage__body { margin: 0 0 var(--s-3); color: var(--ink-2); }
+.triage__note { margin: 0 0 var(--s-3); font-size: var(--fs-small); color: var(--ink-3); }

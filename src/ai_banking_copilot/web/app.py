@@ -2468,6 +2468,13 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
             for ask in view.clarifications
         ],
         "card": card,
+        "triage": None if view.triage is None else {
+            "kind": view.triage.kind,
+            "suggestions": [
+                {"label": item.label, "text": item.text} for item in view.triage.suggestions
+            ],
+            "disclaimer": view.triage.disclaimer,
+        },
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
         "questionnaire": list(view.questionnaire),

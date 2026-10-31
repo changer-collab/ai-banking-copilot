@@ -263,3 +263,14 @@ def test_subscription_cancel_over_http_reports_local_only_execution(deps: AppDep
     text = confirmed["message"] + result["message"]
     assert "商户已取消" not in text
     assert "取消成功" not in text
+
+
+def test_submit_payload_carries_triage_suggestions(deps: AppDeps) -> None:
+    client = _client(deps)
+    response = client.post("/api/submit", json={"utterance": "帮我炒股"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "blocked"
+    assert payload["triage"]["kind"] == "out_of_scope"
+    assert payload["triage"]["suggestions"], "候选句必须结构化下发"
+    assert "安全拒绝" not in payload["message"]
