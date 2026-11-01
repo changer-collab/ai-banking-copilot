@@ -62,8 +62,11 @@ FLAG_FIRST_LARGE_TO_OBJECT = "first_large_to_object"
 OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
     {
         "wealth.subscribe",
+        "wealth.redeem",
         "card.unlock",
         "card.set_limit",
+        "card.replace",
+        "card.adjust_credit_limit",
         "subscription.sign",
         "transfer.request_collection",
         "password.change",
@@ -72,10 +75,15 @@ OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
 """官方明文点名红色、但按金额档 / 可逆性推不出红色的动作（官方口径不得偏离）。
 
 - `wealth.subscribe`：官方红色示例「理财产品申购」——不因金额小而降为黄；
+- `wealth.redeem`：赎回是持仓扣减与资金回流，演示环境按红色处理（只加严）；
+  赎回确认面与申购共用服务端一次性验证码；
 - `card.unlock`：官方红色「挂失 / 解挂」——解挂是可逆状态变更且无金额，按金额档会落到黄；
   解除保护比施加保护更危险，故强制 ≥ 红（`card.lock` 施加保护仍为黄）；
 - `card.set_limit`：调高卡片限额是**解除既有风控上限**，可把卡片变成无额度约束的敞口，
   且无金额参数（按金额档只会落黄）——与「解挂」同属「解除保护」，强制 ≥ 红；
+- `card.replace`：补卡换新卡号并邮寄到地址，属卡片生命周期变更，按红色要求强验证；
+- `card.adjust_credit_limit`：提高信用额度是解除既有授信上限，固定额度还需审批，
+  与 `card.set_limit` 同属「解除保护」，强制 ≥ 红；
 - `subscription.sign`：代扣签约把**未来无限次扣款**授权给商户（单笔小但敞口长期、易被诈骗利用），
   按金额档次次落黄不足以覆盖风险，强制 ≥ 红；
 - `transfer.request_collection`：发起收款即向他人**索款**，是电信诈骗的典型施压手段，

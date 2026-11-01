@@ -17,8 +17,8 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 7
-"""schema 版本：v7 新增 `wealth_nav`（**模拟净值**序列，演示数据，非真实行情）。"""
+SCHEMA_VERSION = 8
+"""schema 版本：v8 扩展卡片展示 / 分卡限额 / 冻结到期 / 补卡关系列与三张卡片事件表。"""
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
@@ -32,15 +32,42 @@ _TRANSACTIONS_OPTIONAL_COLUMNS = (
 
 _OPTIONAL_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
     "transactions": _TRANSACTIONS_OPTIONAL_COLUMNS,
-    "cards": (("account_id", "TEXT"), ("last4", "TEXT")),
+    "cards": (
+        ("account_id", "TEXT"),
+        ("last4", "TEXT"),
+        ("brand", "TEXT"),
+        ("expiry_month", "INTEGER"),
+        ("expiry_year", "INTEGER"),
+        ("account_class", "TEXT"),
+        ("atm_limit_cents", "INTEGER"),
+        ("transfer_limit_cents", "INTEGER"),
+        ("purchase_limit_cents", "INTEGER"),
+        ("overseas_limit_cents", "INTEGER"),
+        ("credit_limit_cents", "INTEGER"),
+        ("temp_credit_limit_cents", "INTEGER"),
+        ("temp_credit_until", "TEXT"),
+        ("cycle_limit_cents", "INTEGER"),
+        ("temp_lock_until", "TEXT"),
+        ("lock_reason", "TEXT"),
+        ("lost_at", "TEXT"),
+        ("loss_reason", "TEXT"),
+        ("replaced_by_card_id", "TEXT"),
+    ),
     "subscriptions": (("card_id", "TEXT"),),
     "payees": (("phone", "TEXT"),),
+    "wealth_holdings": (
+        ("share_bp", "INTEGER NOT NULL DEFAULT 0"),
+        ("nav_at_purchase_bp", "INTEGER NOT NULL DEFAULT 0"),
+    ),
 }
-"""可空关系列（v4 / v5 / v6）。
+"""可空关系列（v4 / v5 / v6 / v7 / v8）。
 
 - v4：`cards.account_id`（卡绑定账户）与 `subscriptions.card_id`（代扣绑定卡）；
 - v5：`payees.phone`（名册登记的完整 11 位手机号）；
-- v6：`cards.last4`（**演示卡号后四位**，不是真实卡号，仅用于界面显示）。
+- v6：`cards.last4`（**演示卡号后四位**，不是真实卡号，仅用于界面显示）；
+- v7：`wealth_holdings.share_bp` / `nav_at_purchase_bp`（份额 × 10000、买入净值 × 10000）；
+- v8：卡片展示（卡组织 / 有效期 / 账户类别）、分卡限额（借记四通道 / 信用卡三线）、
+  临时冻结到期与原因、正式挂失时间与原因、补卡后的新卡 id。
 
 这些列都**可空**：旧库与旧数据保持 `NULL`，读取层必须把它当作"关系未知"，
 不得据此推断「这张卡没有代扣」「这个收款人没有手机号」——未知不等于零。
@@ -86,6 +113,37 @@ CREATE TABLE IF NOT EXISTS cards (
     daily_limit_cents INTEGER NOT NULL CHECK (daily_limit_cents >= 0),
     account_id        TEXT REFERENCES accounts(account_id),
     last4             TEXT
+);
+
+CREATE TABLE IF NOT EXISTS card_status_events (
+    event_id    TEXT PRIMARY KEY,
+    card_id     TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    reason      TEXT,
+    note        TEXT,
+    occurred_on TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS card_replacement_requests (
+    request_id  TEXT PRIMARY KEY,
+    card_id     TEXT NOT NULL,
+    new_card_id TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    mail_method TEXT NOT NULL CHECK (mail_method IN ('standard', 'express')),
+    fee_cents   INTEGER NOT NULL,
+    eta_on      TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    created_on  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS card_limit_applications (
+    application_id  TEXT PRIMARY KEY,
+    card_id         TEXT NOT NULL,
+    mode            TEXT NOT NULL CHECK (mode IN ('temporary', 'permanent')),
+    requested_cents INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    submitted_on    TEXT NOT NULL,
+    eta_on          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
