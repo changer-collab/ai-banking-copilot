@@ -1,9 +1,8 @@
-"""默认必须先登录：未登录访问页面拿到登录页；只读 GET 仍给演示身份、写接口仍 401。
+"""默认必须先登录：未登录访问页面拿到登录页，只读与写接口一律 401。
 
-按 `AIB_AUTH_MODE=demo` 的真实装配口径起服务，但不登录：页面入口一律先登录
-（不再下发只读页面壳，避免未登录态触发 `/api/options` / `/api/conversations` 等
-需要身份的只读接口）；办理业务的写接口一律仍走 `current_user`，不得被演示身份顶替。
-"""
+按 `AIB_AUTH_MODE=demo` 的真实装配口径起服务，但不登录：页面入口下发登录页
+（不再给只读页面壳，避免未登录态触发 `/api/options` / `/api/conversations` 等
+需要身份的只读接口）；只读接口也不再回落到演示身份，绕过页面直接打 API 同样 401。"""
 
 from __future__ import annotations
 
@@ -44,12 +43,11 @@ def test_anonymous_visitor_gets_login_page(
     assert "/assets/app.js" not in page.text, "登录页不加载应用脚本，未登录态不触发需身份的只读接口"
 
 
-def test_readonly_life_events_fall_back_to_demo_identity(
-    anonymous_client: TestClient,
-) -> None:
+def test_readonly_api_also_requires_login(anonymous_client: TestClient) -> None:
+    """页面要求先登录后，只读接口不再回落到演示身份：直接打 API 也是 401。"""
     response = anonymous_client.get("/api/life-events")
-    assert response.status_code == 200
-    assert response.json()["demo"] is True
+    assert response.status_code == 401
+    assert response.json()["detail"] == "auth_required"
 
 
 def test_write_submit_still_requires_login(anonymous_client: TestClient) -> None:

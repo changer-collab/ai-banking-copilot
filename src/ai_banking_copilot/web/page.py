@@ -24,6 +24,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <meta name="theme-color" content="#0b4fd8" />
 <title>AI 银行副驾 · 对话办理</title>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
+<link rel="icon" href="/assets/icon.svg?v=1" type="image/svg+xml" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
 <link rel="stylesheet" href="/assets/workspace.css?v=53" />
@@ -589,7 +590,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=80"></script>
+<script src="/assets/app.js?v=81"></script>
 </body>
 </html>
 """

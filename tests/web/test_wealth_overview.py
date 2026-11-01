@@ -110,6 +110,7 @@ def test_holdings_expose_real_facts_and_reference_income_from_simulated_nav(
     assert holdings["wp_bond"]["category"] == "债券类"
     assert holdings["wp_bond"]["amount_yuan"] == "3000.00"
     assert holdings["wp_bond"]["purchased_on"] == "2026-03-18"
+    latest_nav_on = holdings["wp_cash"]["nav_series"][-1]["on_date"]
     for row in holdings.values():
         # 有模拟净值：收益是参考值（必须带「模拟净值」标注），不是真实行情
         assert row["simulated"] is True
@@ -119,7 +120,12 @@ def test_holdings_expose_real_facts_and_reference_income_from_simulated_nav(
         assert str(row["nav_start"]).endswith(row["nav_series"][0]["nav"])
         assert row["nav_now"] == row["nav_series"][-1]["nav"]
         assert isinstance(row["income_cents"], int)
-        assert row["income_cents"] > 0
+        if row["purchased_on"] >= latest_nav_on:
+            # 买入日不早于净值最后一天：当日买入无持有期，参考收益必然是 0（不得编出正收益）
+            assert row["income_cents"] == 0
+            assert "参考收益（模拟净值） +0.00 元" == str(row["current_income"])
+        else:
+            assert row["income_cents"] > 0
         assert str(row["record_id"]).startswith("wealth_holdings:")
 
 

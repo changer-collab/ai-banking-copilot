@@ -830,12 +830,17 @@ def create_app(deps: AppDeps) -> FastAPI:
         return _optional_user_id(request) is not None
 
     def _read_user(request: Request) -> str:
-        """只读接口身份：已登录用真实身份，未登录落到演示身份（响应里另标 `demo`）。
+        """只读接口身份：已登录用真实身份；`off` 模式沿用单用户演示。
 
-        写接口一律仍用 `current_user`：演示身份**不能**替代真人办理业务。
+        `demo` 模式未登录一律 401：页面入口已要求先登录，只读接口不再回落到演示身份，
+        否则绕过页面直接打 API 仍能读到别人的数据。
         """
         user_id = _optional_user_id(request)
-        return user_id if user_id is not None else DEMO_USER_ID
+        if user_id is not None:
+            return user_id
+        if auth_enabled:
+            raise AuthRequiredError("登录已失效，请重新登录")
+        return DEMO_USER_ID
 
     def _is_anonymous(request: Request) -> bool:
         """本次请求是否只是访客（响应体据此显式标注演示数据）。"""

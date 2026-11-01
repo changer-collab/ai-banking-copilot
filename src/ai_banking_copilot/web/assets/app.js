@@ -96,6 +96,7 @@ const state = {
   pendingStart: null,
   requestLabel: "",
   historyRestored: false,
+  archiveReadOnly: false,
   operationUnknown: false,
   insights: [],
   wealth: { products: [], holdings: [] },
@@ -3181,8 +3182,17 @@ function setButtons() {
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
   const operationUnknown = state.operationUnknown;
-  el("btn-submit").disabled = offline || busy || !state.options;
-  el("btn-due").disabled = offline || busy || !state.options;
+  /* 只读历史：输入框与发送一律不可用，避免「文案说需新建对话、实际还能直接发」 */
+  const archiveOnly = state.archiveReadOnly === true;
+  const box = el("utterance");
+  if (box) {
+    box.disabled = archiveOnly;
+    box.placeholder = archiveOnly
+      ? "这是历史记录 · 点「新建对话」继续办理"
+      : "说一句话，比如：转给李娜 500 元";
+  }
+  el("btn-submit").disabled = archiveOnly || offline || busy || !state.options;
+  el("btn-due").disabled = archiveOnly || offline || busy || !state.options;
   el("btn-reset").disabled = busy;
   el("task-actions").hidden = !state.task || (!state.card && state.phase !== "blocked");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
@@ -3225,6 +3235,7 @@ function reset(keepUtterance) {
   state.notice = "";
   state.resultCount = 0;
   state.operationUnknown = false;
+  state.archiveReadOnly = false;
   state.model = null;
   if (!keepUtterance) el("utterance").value = "";
   renderStage();
@@ -4158,6 +4169,8 @@ async function openConversation(sessionId) {
     note.className = "archive-note";
     note.textContent = "历史对话 · 只读记录；需要继续办理请新建对话。";
     task.appendChild(note);
+    /* 只读历史里禁用输入框与发送：文案说「需新建对话」，就不能让人在同一页继续发 */
+    state.archiveReadOnly = true;
     const label = conversationStateLabel(data.snapshot_state || data.state);
     timelineAdd(`已打开历史对话${label ? `（${label}）` : ""}。`, "live");
   }
@@ -6294,7 +6307,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=70", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=71", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
