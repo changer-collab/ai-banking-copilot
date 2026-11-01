@@ -5580,7 +5580,7 @@ const RECORD_TAB_LOADERS = {
 };
 
 const RECORD_HEADERS = {
-  transfers: ["记账日", "收款人", "金额", "状态", "记录号", "详情"],
+  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号", "详情"],
   holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益"],
   cards: ["卡号", "类型", "状态", "日限额"],
   suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户"],
@@ -5588,6 +5588,13 @@ const RECORD_HEADERS = {
 };
 
 let recordsRequestToken = 0;
+
+/* 业务流水当前只记 agent / 历史 seed 渠道；web / app / feishu 的逐次区分以审计事件为准。 */
+function recordChannelLabel(value) {
+  const channel = String(value || "").trim();
+  if (!channel) return "—";
+  return ({ web: "网页", app: "手机", feishu: "飞书", agent: "AI 办理" })[channel] || channel;
+}
 
 function recordsRow(cells) {
   return `<tr>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`;
@@ -5629,6 +5636,7 @@ function recordsRowsFor(key, payload) {
       esc(item.payee || "—"),
       `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
       esc(item.status || "—"),
+      esc(recordChannelLabel(item.channel)),
       `<span class="mono">${esc(item.record_id || "—")}</span>`,
       `<details class="records-detail"><summary>详情</summary>
         <p class="muted">${esc(item.kind === "scheduled" ? "定时登记（本次不扣款）" : "即时转账")}` +

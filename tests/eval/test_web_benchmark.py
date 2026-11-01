@@ -446,6 +446,14 @@ def test_unknown_audit_metadata_is_not_copied(tmp_path: Path) -> None:
     assert "PRIVATE_" not in json.dumps(reviews)
 
 
+def _user_utterance(content: str) -> str:
+    """从带会话上下文的 planner user message 里取回【用户原话】。"""
+    marker = "【用户原话】\n"
+    if marker in content:
+        return content.split(marker, 1)[1].split("\n\n", 1)[0]
+    return content
+
+
 def _fake_model_http(monkeypatch: pytest.MonkeyPatch, *, reviewer_failure: str | None = None,
                      clarify: bool = False) -> list[str]:
     """假客户端接替 I/O，保留原 transport、解析器、Web 与审计。"""
@@ -460,7 +468,7 @@ def _fake_model_http(monkeypatch: pytest.MonkeyPatch, *, reviewer_failure: str |
     def response(role: str, payload: Any) -> Any:
         calls.append(role)
         if role == "planner":
-            text = payload["messages"][1]["content"]
+            text = _user_utterance(payload["messages"][1]["content"])
             action = "transfer.create" if "转" in text else "account.balance"
             content = {"intents": [{"action": action, "confidence": 1,
                                    "slots": {"span": text}, "evidence": text}]}

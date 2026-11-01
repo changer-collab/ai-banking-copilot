@@ -3431,14 +3431,16 @@ _BALANCE_TAMPER_REFUSAL = (
 
 
 def _balance_tamper_refusal(utterance: str) -> str | None:
-    """「改余额」的**能力边界**话术（不是策略拒绝，不计触发 4）。
+    """「改余额 + 买理财」的**能力边界**话术（不是策略拒绝，不计触发 4）。
 
-    只要求「余额 / 存款标记 + 篡改动词」：改余额本身在任何场景都不被支持，
-    不再要求句子里同时出现理财动作——那会让「把余额改成 100 万」漏到未知意图。
+    三条件同时满足才算：余额 / 存款标记 + 篡改动词 + 理财动作词。只「改余额」不带
+    理财动作的句子仍走原路径（未知意图 → 安全拒绝），不套用这条理财话术。
     """
     if not any(marker in utterance for marker in _BALANCE_MARKERS):
         return None
     if not any(verb in utterance for verb in _BALANCE_TAMPER_VERBS):
+        return None
+    if not any(marker in utterance for marker in _WEALTH_MARKERS):
         return None
     return _BALANCE_TAMPER_REFUSAL
 

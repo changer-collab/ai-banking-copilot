@@ -205,7 +205,8 @@ def test_request_explains_catalog_actions_and_requires_separate_source_spans() -
     assert "请求词" in prompt and "对应金额或日期" in prompt
     assert "不得共享整句" in prompt and "不得使用重叠片段" in prompt
     assert "只登记预约时不要选择会立即扣款的动作" in prompt
-    assert messages[1] == {"role": "user", "content": utterance}
+    assert messages[1]["role"] == "user"
+    assert f"【用户原话】\n{utterance}\n" in messages[1]["content"]
 
 
 def test_request_only_describes_the_selected_action_subset() -> None:
@@ -259,4 +260,5 @@ def test_query_instructions_accept_questions_without_amount_date_or_request_verb
     assert "查询不要求出现请求词、金额或日期" in prompt
     assert "缺少的控制槽交由服务端补全或澄清" in prompt
     assert "用户明确给出的对应金额或日期必须保留" in prompt
-    assert messages[1] == {"role": "user", "content": utterance}
+    assert messages[1]["role"] == "user"
+    assert f"【用户原话】\n{utterance}\n" in messages[1]["content"]

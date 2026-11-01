@@ -20,7 +20,7 @@ from ai_banking_copilot.compose import (
 from ai_banking_copilot.planning.llm import (
     DEFAULT_LLM_ENDPOINT,
     DEFAULT_LLM_MODEL,
-    FallbackIntentModel,
+    ArbitratedIntentModel,
     TemplateIntentModel,
 )
 from ai_banking_copilot.planning.reviewer import BypassPlanReviewer, Reviewer
@@ -39,7 +39,7 @@ def test_disabled_env_is_template_only() -> None:
 
 def test_missing_key_degrades_to_template_without_network() -> None:
     model = build_intent_model({})
-    assert isinstance(model, FallbackIntentModel)
+    assert isinstance(model, ArbitratedIntentModel)
     proposal = model.propose("转给李娜 500 元", {})
     assert [item.action for item in proposal.intents] == ["transfer.create"]
     assert model.degraded is True
@@ -47,7 +47,7 @@ def test_missing_key_degrades_to_template_without_network() -> None:
 
 def test_key_present_keeps_llm_primary_lazy() -> None:
     model = build_intent_model({"DASHSCOPE_API_KEY": "sk-test"})
-    assert isinstance(model, FallbackIntentModel)
+    assert isinstance(model, ArbitratedIntentModel)
     assert model.degraded is False
 
 
@@ -121,11 +121,11 @@ def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
         "AIB_REVIEW_CHANNEL": "llm-strict", "AI_API_KEY": "test-key",
         "AI_PLANNER_TIMEOUT_S": "12", "AI_REVIEWER_TIMEOUT_S": "90",
     })
-    assert isinstance(deps.intent_model, FallbackIntentModel)
+    assert isinstance(deps.intent_model, ArbitratedIntentModel)
     assert deps.reviewer is not None
     assert deps.intent_model._primary._limiter is deps.reviewer._limiter
     assert deps.intent_model._primary._timeout_s == 12
-    assert deps.intent_model._primary._prompt_version == "planner-v1"
+    assert deps.intent_model._primary._prompt_version == "planner-v2"
     assert deps.reviewer._timeout_s == 90
     assert deps.reviewer_required is True
 
@@ -133,7 +133,7 @@ def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
 def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:
     deps = build_deps(tmp_path / "copilot.db", env={})
     assert isinstance(deps, AppDeps)
-    assert isinstance(deps.intent_model, FallbackIntentModel)
+    assert isinstance(deps.intent_model, ArbitratedIntentModel)
 
 
 def test_build_deps_shares_verification_lockout_across_instances(tmp_path: Path) -> None:

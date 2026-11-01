@@ -219,11 +219,21 @@ _BARE_AMOUNT_ACTIONS = frozenset(
         "funds.freeze",
     }
 )
-"""允许**无歧义裸数字**当金额的动作：转账族（「转给李娜 500」）与理财申购 / 赎回
-（「赎回 500」）。
+"""允许**自由文本里出现无歧义裸数字**当金额的动作：转账族（「转给李娜 500」）与
+理财申购 / 赎回（「赎回 500」），以及口语化的「先冻 3000」。
 
-其余动作（冻结 / 额度 / 代扣签约）保持「必须带单位」：这些金额一旦读错方向更坏。
+其余动作（额度 / 代扣签约）保持「必须带单位」：这些金额一旦读错方向更坏。
 理财侧额外遮蔽 `R1`–`R5` 风险等级词，避免把等级里的数字读成金额。
+"""
+
+_SELECTED_BARE_AMOUNT_ACTIONS = frozenset(
+    {"transfer.create", "transfer.schedule", "transfer.book",
+     "wealth.subscribe", "wealth.redeem"}
+)
+"""`selected` 通道（页面下拉 / 输入框）里允许裸数字按「元」读的动作。
+
+**与 `_BARE_AMOUNT_ACTIONS` 的差别只在冻结**：口语「先冻 3000」要能读懂，但冻结金额
+一旦在表单里只填了「500」，单凭数字无法区分元 / 分，仍按「必须带单位」追问。
 """
 
 _RISK_LEVEL_TOKEN = re.compile(r"(?<![A-Za-z0-9])R\s*([1-5])(?![0-9])", re.IGNORECASE)
@@ -248,8 +258,11 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
     questions: list[SlotQuestion] = []
     trace: list[str] = []
     bare_amount = action in _BARE_AMOUNT_ACTIONS
+    bare_selected = action in _SELECTED_BARE_AMOUNT_ACTIONS
     for slot in REQUIRED_SLOTS.get(action, ()):
-        chosen, question, notes = _resolve_slot(slot, inputs, bare_amount=bare_amount)
+        chosen, question, notes = _resolve_slot(
+            slot, inputs, bare_amount=bare_amount, bare_selected=bare_selected
+        )
         trace.extend(notes)
         if chosen is not None:
             filled[slot] = _accept(slot, chosen)
@@ -257,7 +270,9 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
             questions.append(question)
     # 可选槽：解析得到就带上，解析不到就静默跳过（绝不因此追问）
     for slot in OPTIONAL_SLOTS.get(action, ()):
-        chosen, _, notes = _resolve_slot(slot, inputs, bare_amount=bare_amount)
+        chosen, _, notes = _resolve_slot(
+            slot, inputs, bare_amount=bare_amount, bare_selected=bare_selected
+        )
         trace.extend(notes)
         if chosen is not None:
             filled[slot] = _accept(slot, chosen)
@@ -316,7 +331,8 @@ def _accept(slot: str, value: object) -> object:
 
 
 def _resolve_slot(
-    slot: str, inputs: SlotInputs, *, bare_amount: bool = False
+    slot: str, inputs: SlotInputs, *, bare_amount: bool = False,
+    bare_selected: bool = False,
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     notes: list[str] = []
     # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径，落到解析器 / 追问，
@@ -341,7 +357,7 @@ def _resolve_slot(
                 slot,
                 raw.raw if isinstance(raw, Value) else raw,
                 inputs.today,
-                bare_amount=bare_amount,
+                bare_amount=bare_selected,
             )
             if value is not None:
                 return value, None, tuple(notes)

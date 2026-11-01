@@ -11,9 +11,18 @@ from ai_banking_copilot.web.app import AppDeps
 from ai_banking_copilot.web.session import Session, SessionState
 
 
+def _user_utterance(request: str) -> str:
+    """从带会话上下文的 user message 里取回【用户原话】原文。"""
+    content = str(json.loads(request)["messages"][-1]["content"])
+    marker = "【用户原话】\n"
+    if marker in content:
+        return content.split(marker, 1)[1].split("\n\n", 1)[0]
+    return content
+
+
 def proposed_model(action: str, confidence: float = 1.0) -> LlmIntentModel:
     def transport(request: str) -> str:
-        text = json.loads(request)["messages"][-1]["content"]
+        text = _user_utterance(request)
         return json.dumps({"intents": [{
             "action": action, "confidence": confidence, "evidence": text,
             "slots": {

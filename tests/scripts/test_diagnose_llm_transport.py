@@ -254,7 +254,8 @@ def test_both_channels_use_production_payload_and_binding(monkeypatch: pytest.Mo
         if channel == "planner":
             messages = payload["messages"]
             assert isinstance(messages, list)
-            assert messages[1] == {"role": "user", "content": "查一下上月账单"}
+            assert messages[1]["role"] == "user"
+            assert "【用户原话】\n查一下上月账单\n" in messages[1]["content"]
             return _result(channel, ProbeClass.OK, _planner_text())
         assert _review_payload(payload)["candidate_actions"] == ["bills.monthly"]
         assert payload == build_reviewer_chat_payload(
