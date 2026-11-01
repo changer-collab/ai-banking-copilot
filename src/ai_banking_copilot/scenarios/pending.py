@@ -2,11 +2,12 @@
 
 import hashlib
 import json
-from collections.abc import Sequence
-from dataclasses import replace
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date
 
-from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan
+from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
@@ -21,6 +22,31 @@ from ai_banking_copilot.scenarios.transfer import due_transfer_plan
 
 _BIRTHDAY_ACTIONS = frozenset({"funds.freeze", "merchant.order", "funds.release"})
 """生日预算链的三个动作：冻结 → 下单 → 解冻，共用同一份生日依据。"""
+
+_LIFE_NODE_PATTERN = re.compile(r"^life\d+-")
+"""到期预约节点在计划里的 ID 前缀（`life0-n1`）：**唯一**能识别来源的字段。
+
+预约 ID 不能写进 `PlanNode.params`：`policy.pep` 的节点成员资格比对拿计划节点参数与
+调用参数逐字比较，多一个键就会被判「不属于已确认计划」。故来源只由节点 ID 承载。
+"""
+
+
+@dataclass(frozen=True)
+class LifeDueSchedule:
+    """到期的生活事件预约：确认时冻结的节点快照由会话层读出，本层只重建计划节点。"""
+
+    schedule_id: str
+    event_id: str
+    event_title: str
+    due_on: date
+    nodes: tuple[Mapping[str, object], ...]
+
+
+def _node_evidence_hash(node: PlanNode) -> str:
+    """节点参数摘要：证明该节点来自登记时的快照，而不是本次请求临时拼的。"""
+    return hashlib.sha256(
+        json.dumps(node.params, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"),
+    ).hexdigest()
 
 
 def _birthday_evidence(
@@ -75,16 +101,24 @@ class PendingHandler:
 
     name = "pending"
 
-    def __init__(self, user_id: str, today: date) -> None:
+    def __init__(
+        self, user_id: str, today: date, *, life_schedules: Sequence[LifeDueSchedule] = (),
+    ) -> None:
         self.user_id = user_id
         self.today = today
+        self.life_schedules = life_schedules
 
     def matches(self, intents: Sequence[Intent]) -> bool:
         return False
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
         scheduled = due_transfer_plan(gateway, self.today, user_id=self.user_id)
-        birthday = birthday_plan(gateway, self.today, user_id=self.user_id)
+        # 用户已登记过同一场合的预算链（冻结 / 下单 / 解冻），就不再叠加档案派生的生日链：
+        # 两条链会给同一件事各下一次单，属于重复扣款。
+        birthday = (
+            () if _BIRTHDAY_ACTIONS <= self._scheduled_actions()
+            else birthday_plan(gateway, self.today, user_id=self.user_id)
+        )
         ledger = AnchorLedger()
         nodes = tuple(
             replace(
@@ -96,7 +130,74 @@ class PendingHandler:
             )
             for node in (*scheduled, *birthday)
         )
-        return Plan(plan_id="pending", nodes=nodes)
+        return Plan(plan_id="pending", nodes=(*nodes, *self._life_nodes(ledger)))
+
+    def _life_nodes(self, ledger: AnchorLedger) -> tuple[PlanNode, ...]:
+        """把到期预约的节点快照重建成新计划；节点 ID 加前缀避免与会话内其他节点撞名。"""
+        rebuilt: list[PlanNode] = []
+        for index, schedule in enumerate(self.life_schedules):
+            prefix = f"life{index}-"
+            identifiers = {
+                str(item.get("node_id") or ""): f"{prefix}{item.get('node_id') or ''}"
+                for item in schedule.nodes
+            }
+            for item in schedule.nodes:
+                params = item.get("params")
+                depends = item.get("depends_on")
+                rebuilt.append(
+                    PlanNode(
+                        node_id=identifiers[str(item.get("node_id") or "")],
+                        action=str(item.get("action") or ""),
+                        params=dict(params) if isinstance(params, Mapping) else {},
+                        intent=IntentRef(
+                            source=AnchorSource.EXPLICIT,
+                            anchor_id=ledger.grant_explicit(
+                                f"本人到期预约 {schedule.schedule_id}"
+                                f"（{schedule.due_on.isoformat()}）；执行仍须确认计划卡"
+                            ),
+                        ),
+                        depends_on=tuple(
+                            identifiers.get(str(dep), str(dep))
+                            for dep in depends
+                        ) if isinstance(depends, Sequence) and not isinstance(depends, str) else (),
+                    ),
+                )
+        return tuple(rebuilt)
+
+    def life_node_ids(self, plan: Plan) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """`(预约 ID, 该预约在计划里的节点 ID)`：结算只看这条预约自己的节点成败。"""
+        grouped: list[tuple[str, tuple[str, ...]]] = []
+        for index, schedule in enumerate(self.life_schedules):
+            prefix = f"life{index}-"
+            node_ids = tuple(
+                node.node_id for node in plan.nodes if node.node_id.startswith(prefix)
+            )
+            if node_ids:
+                grouped.append((schedule.schedule_id, node_ids))
+        return tuple(grouped)
+
+    def _scheduled_actions(self) -> frozenset[str]:
+        """到期预约快照里出现过的动作集合。"""
+        return frozenset(
+            str(item.get("action") or "")
+            for schedule in self.life_schedules
+            for item in schedule.nodes
+        )
+
+    def _life_schedule(self, node: PlanNode) -> LifeDueSchedule | None:
+        """按节点 ID 前缀找回登记快照；找不到即视为依据缺失（fail-closed）。"""
+        if _LIFE_NODE_PATTERN.match(node.node_id) is None:
+            return None
+        for index, schedule in enumerate(self.life_schedules):
+            prefix = f"life{index}-"
+            if not node.node_id.startswith(prefix):
+                continue
+            if any(
+                f"{prefix}{item.get('node_id') or ''}" == node.node_id
+                for item in schedule.nodes
+            ):
+                return schedule
+        return None
 
     def review_context(
         self, gateway: FactGateway, plan: Plan,
@@ -116,7 +217,30 @@ class PendingHandler:
             refs: list[str] = []
             missing: list[str] = []
             basis: dict[str, object]
-            if node.action == "transfer.create":
+            life_schedule = self._life_schedule(node)
+            if life_schedule is not None:
+                # 预约节点必须先于生日链判断：两者动作相同，只能靠来源区分。
+                basis = {
+                    "source": "life_event_schedule",
+                    "rule": "本人到期预约仍为 scheduled 且 due_on <= request.today 才可提案",
+                    "event_id": life_schedule.event_id,
+                    "event_title": life_schedule.event_title,
+                    "due_on": life_schedule.due_on.isoformat(),
+                }
+                facts.append({
+                    "source": "life_event_schedule",
+                    "record_id": f"life_event_schedule:{life_schedule.schedule_id}",
+                    "content_hash": _node_evidence_hash(node),
+                    "schedule_id": life_schedule.schedule_id,
+                    "user_id": self.user_id,
+                    "event_id": life_schedule.event_id,
+                    "due_on": life_schedule.due_on.isoformat(),
+                })
+                refs.append(f"life_event_schedule:{life_schedule.schedule_id}")
+            elif _LIFE_NODE_PATTERN.match(node.node_id) is not None:
+                basis = {"source": "life_event_schedule"}
+                missing.append("life_event_schedule")
+            elif node.action == "transfer.create":
                 record = schedules.get(str(node.params.get("schedule_id")))
                 basis = {
                     "source": "scheduled_transfer",

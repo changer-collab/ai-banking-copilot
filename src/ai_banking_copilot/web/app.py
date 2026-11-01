@@ -1475,7 +1475,11 @@ def create_app(deps: AppDeps) -> FastAPI:
             StalePlanError,
         ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        if view.state.value in ("completed", "partial"):
+        if view.scheduled_for is not None:
+            # 未来日期生活事件只登记预约：今天没有冻结、没有下单，记录保持 `planned`，
+            # 到期重新提案并再次确认后才转 `executed`（由预约结算负责）。
+            pass
+        elif view.state.value in ("completed", "partial"):
             _mark_life_event(user_id, request.session_id, STATUS_EXECUTED)
         elif view.state.value in _ERROR_STATES:
             _mark_life_event(user_id, request.session_id, STATUS_FAILED)
@@ -2625,6 +2629,7 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
         "bill_advice_message": view.bill_advice_message,
         "bill_findings": view.bill_findings,
         "hook_status": view.hook_status,
+        "scheduled_for": view.scheduled_for,
         "results": [
             {
                 "action": result.action,

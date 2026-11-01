@@ -3648,6 +3648,7 @@ function applyExecution(data) {
   state.resultCount = results.length;
   state.phase = data.state === "completed" ? "done" : data.state;
   const complete = data.state === "completed";
+  const scheduledFor = data.scheduled_for || "";
   rememberBillsPeriod(data.bill_findings);
   const billHtml = complete
     ? billAnalysisHtml(data.bill_findings, data.bill_advice, data.bill_advice_message)
@@ -3661,7 +3662,15 @@ function applyExecution(data) {
   const recordTab = recordTabFor(results);
   const actions = results.map((item) => String(item.action || ""));
   const showsCardList = complete && actions.includes("card.list");
-  state.notice = complete
+  state.notice = scheduledFor
+    ? `<div class="takeover">
+        <p><b>已登记预约（${esc(scheduledFor)}）</b></p>
+        <p class="muted">今天没有冻结余额、也没有扣款。到期后服务端会重新生成计划卡，需要你再次确认才会执行。</p>
+        <div class="btn-row">
+          <button class="btn btn--sm btn--ghost" type="button" data-nav="records" data-record-tab="${esc(recordTab)}">查看记录</button>
+        </div>
+      </div>`
+    : complete
     ? `<div class="takeover takeover--receipt">
         <p class="receipt__title"><span class="receipt__tick" aria-hidden="true">✓</span>${esc(data.message || "计划执行完成")}</p>
         ${receiptLines.length ? `<ul class="receipt__list">${receiptLines.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
@@ -3675,8 +3684,8 @@ function applyExecution(data) {
   if (showsCardList) state.notice += '<div id="chat-card-list" class="muted">正在读取卡片…</div>';
   renderStage();
   if (showsCardList) void loadChatCardList(el("chat-card-list"));
-  if (complete) void loadProvenance();
-  timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), complete ? "done" : "stop");
+  if (complete && !scheduledFor) void loadProvenance();
+  timelineAdd(data.message || (complete ? "执行完成" : "执行尚未完成"), scheduledFor ? "warn" : complete ? "done" : "stop");
   snapshotTrace();
   setButtons();
 }

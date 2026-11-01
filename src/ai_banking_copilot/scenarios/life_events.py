@@ -314,7 +314,7 @@ _ALIASES: Mapping[str, tuple[str, ...]] = {
     "order_on": ("order_on", "when", "date"),
     "booked_on": ("booked_on", "when"),
     "merchant": ("merchant",),
-    "occasion": ("occasion_id",),
+    "occasion": ("occasion", "occasion_id"),
     "reason": ("reason",),
     "start": ("start",),
     "end": ("end",),
