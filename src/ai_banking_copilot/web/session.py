@@ -135,7 +135,12 @@ from ai_banking_copilot.scenarios.base import (
 )
 from ai_banking_copilot.scenarios.bill_advice import BillAdvice, build_bill_advice
 from ai_banking_copilot.scenarios.bill_findings import analyze_bill, report_payload
-from ai_banking_copilot.scenarios.life_events import detect_life_event, flower_offers
+from ai_banking_copilot.scenarios.life_events import (
+    detect_life_event,
+    detect_maturity_link,
+    flower_offers,
+    holding_maturity,
+)
 from ai_banking_copilot.scenarios.pending import LifeDueSchedule, PendingHandler
 from ai_banking_copilot.scenarios.registry import (
     UnknownScenarioError,
@@ -174,6 +179,7 @@ from ai_banking_copilot.web.session_manager import PROCESS_SESSION_LOCK
 from ai_banking_copilot.web.session_repository import SessionPersistenceError
 from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
 from ai_banking_copilot.web.triage import TriageVerdict, triage
+from ai_banking_copilot.web.wording import polish
 
 if TYPE_CHECKING:
     from ai_banking_copilot.web.app import AppDeps
@@ -426,6 +432,9 @@ class SubmissionView:
     triage: TriageVerdict | None = None
     """未识别输入的三分类结果（闲聊 / 超范围 / 模糊）；`None` = 策略拒绝或正常产出。"""
 
+    visibility: str = "normal"
+    """本次提交的可见性：命中隐私语句为 `private`，记录页折叠、共享推送跳过。"""
+
 
 @dataclass(frozen=True)
 class NodeProgress:
@@ -467,6 +476,10 @@ class ExecutionView:
     """未来日期生活事件**只登记预约**时的到期日（ISO）；`None` = 本次没有登记预约。
 
     登记不冻结、不扣款：到期后由 `/api/due` 重新提案，需要用户再次确认。"""
+    released_holds: tuple[str, ...] = ()
+    """本次终态失败时已退回的冻结记录；空 = 没有需要退回的冻结。"""
+    failed_schedules: tuple[str, ...] = ()
+    """本次结算后落为 `failed` 的到期预约 ID：用户可显式重试（次数受服务端上限约束）。"""
 
 
 @dataclass(frozen=True)
@@ -570,7 +583,7 @@ class Session:
         """**会话级熔断器**（README 裁决 #27）：触发 3 / 4 / 5 的**作用域**——只让本会话转人工接管，
         不波及其他会话。全局熔断器（`deps.breaker`）只由**系统性**信号触发（触发 1 / 2）。"""
         self._reversed_records: list[str] = []
-        self._released_holds: set[str] = set()
+        self._released_holds: tuple[str, ...] = ()
         """已被终态收尾释放的冻结记录（幂等去重，避免重复释放被重复计数）。"""
         # 澄清闭环：保留上一条指令与选中对象，供 `clarify()` 在原指令上续答（不被 `_reset()` 清空）
         self._last_utterance: str | None = None
@@ -587,6 +600,8 @@ class Session:
         self._review_report: ReviewReport | None = None
         self._recent: list[dict[str, object]] = []
         """最近几轮的「用户原话 + 已采纳意图」摘要：只用于理解层上下文，不参与裁决。"""
+        self._visibility = "normal"
+        """本次提交的可见性（不进节点参数 / 意图槽位 / 会话快照）：单次提交内即落库。"""
 
     def snapshot(self) -> SessionSnapshot:
         payload = {name: getattr(self, f"_{name}") for name in self._SNAPSHOT_FIELDS}
@@ -791,17 +806,22 @@ class Session:
             return self._undo_last()
         rewrite = self._reference_rewrite(reference)
         if rewrite is None:
-            return self._submit(
+            view = self._submit(
                 utterance, selected=selected, now=now,
                 execution_id=secrets.token_hex(16), on_stage=on_stage,
             )
+            return replace(view, visibility=self._visibility)
         rewritten, inherited, note = rewrite
         applied = {**inherited, **(selected or {})}
         view = self._submit(
             rewritten, selected=applied, now=now,
             execution_id=secrets.token_hex(16), on_stage=on_stage,
         )
-        return replace(view, message=f"{view.message}；{note}" if view.message else note)
+        return replace(
+            view,
+            message=f"{view.message}；{note}" if view.message else note,
+            visibility=self._visibility,
+        )
 
     def _undo_last(self) -> SubmissionView:
         """「刚才那笔取消」：走会话级冲正，**不产生新的业务动作**。"""
@@ -932,6 +952,9 @@ class Session:
             _notify(on_stage, "guard")
             self._reset()
             self._execution_id = execution_id
+            self._visibility = (
+                "private" if wants_private_visibility(utterance) else "normal"
+            )
             moment = now if now is not None else datetime.now()
             self._last_utterance = utterance
             self._last_selected = dict(selected) if selected is not None else None
@@ -1037,7 +1060,7 @@ class Session:
                     now=moment, risky=not plan_is_pure_query(outcome.plan)
                 )
             _notify(on_stage, "review")
-            return self._after_outcome(
+            view = self._after_outcome(
                 outcome,
                 utterance,
                 asks,
@@ -1047,6 +1070,14 @@ class Session:
                 now=moment,
                 injection_already_tripped=injection_detected,
             )
+            if detect_maturity_link(utterance):
+                note = _expired_maturity_note(self._deps, outcome.plan)
+                if note is not None and view.card is not None and (
+                    view.state is SessionState.AWAITING_CONFIRM
+                ):
+                    # 到期日已过：只补一句推算口径；赎回与下单仍未执行（文案不得写成已到账）。
+                    view = replace(view, message=f"{view.message}\n{note}")
+            return view
         finally:
             _notify(on_stage, "done")
 
@@ -1089,7 +1120,7 @@ class Session:
             labels = {"delivery_address": "配送地址", "delivery_time": "送达时间"}
             note = "；".join(f"{labels[key]}：{value}" for key, value in delivery.items())
             view = replace(view, message=f"{view.message}\n配送信息（演示，不实际配送）——{note}")
-        return view
+        return replace(view, visibility=self._visibility)
 
     @_serialized
     def check_due(self) -> SubmissionView:
@@ -1107,7 +1138,7 @@ class Session:
             self._message = "当前没有到期待办。"
             return SubmissionView(self._state, self._message, None, None, None, ())
         self._note_risky_activity(now=datetime.now(), risky=True)
-        return self._after_outcome(
+        view = self._after_outcome(
             outcome,
             "检查到期待办并生成待确认提案",
             (),
@@ -1116,6 +1147,13 @@ class Session:
             review_kind="due_proposal",
             now=datetime.now(),
         )
+        notice = handler.reminder_notice()
+        if notice is not None and view.card is not None and (
+            view.state is SessionState.AWAITING_CONFIRM
+        ):
+            # 提醒类预约：说清「哪天起可下单 / 哪天送达」，金额仍从冻结节点回读。
+            view = replace(view, message=notice)
+        return view
 
     def _due_life_schedules(self) -> tuple[LifeDueSchedule, ...]:
         """到期且仍为 `scheduled` 的生活事件预约；只提案，不代表已执行。"""
@@ -1129,6 +1167,8 @@ class Session:
                 event_title=item.event_title,
                 due_on=item.due_on,
                 nodes=item.nodes,
+                kind=item.kind,
+                notify_on=item.notify_on,
             )
             for item in store.due_schedules(self._deps.user_id, today=self._deps.today)
         )
@@ -1221,6 +1261,7 @@ class Session:
             "decision_level": decision.level.name,
             "reason_codes": list(hit_rules),
             "actions": [node.action for node in plan.nodes],
+            "visibility": self._visibility,
         })
         quota = (
             DailyQuota(risk.limit_cents, risk.accumulated_cents)
@@ -1545,6 +1586,7 @@ class Session:
         asks: list[ClarificationAsk] = []
         dropped: list[str] = []
         life_event_id = detect_life_event(utterance)
+        maturity_link = detect_maturity_link(utterance)
         candidates = tuple(
             intent for intent in proposal.intents
             if intent.confidence >= CONFIDENCE_THRESHOLD
@@ -1700,7 +1742,10 @@ class Session:
             if fill.negated:
                 continue
             scenario_asks: tuple[ClarificationAsk, ...] = ()
-            if life_event_id == "L1" and intent.action == "merchant.order":
+            if maturity_link and intent.action == "merchant.order":
+                # 到期联动：商户与下单金额由场景层按事实 / 演示档位补，追问只会挡住出卡。
+                fill = _maturity_fill(fill)
+            elif life_event_id == "L1" and intent.action == "merchant.order":
                 fill, scenario_asks = _l1_fill(fill, span, self._deps.today)
             if (
                 intent.action == "funds.release"
@@ -1752,6 +1797,20 @@ class Session:
                 self._review_intents[-1]["data_slots"] = {
                     "remark": {"value": remark, "trust": "unverified", "role": "data_only"}
                 }
+            if intent.action == "merchant.order":
+                # 「前 2 天提醒」只留在本轮已采纳槽位里（`_SNAPSHOT_FIELDS` 已含
+                # `review_intents`）；写进 `PlanNode.params` 会破坏 PEP 节点成员资格。
+                lead = _l1_slot_reminder(span)
+                review_slots = self._review_intents[-1]["slots"]
+                if lead is not None and isinstance(review_slots, dict):
+                    # 只记提前量；下单日可能在澄清后才补齐，届时按**真实下单日**换算提醒日
+                    # （否则按今天算出的提醒日会与下单日脱节）。
+                    review_slots["remind_lead_days"] = lead
+                    known_day = _iso_day(fill.slots.get("order_on"))
+                    if known_day is not None:
+                        review_slots["notify_on"] = (
+                            known_day - timedelta(days=lead)
+                        ).isoformat()
             slots: dict[str, object] = {
                 key: Value(value, Trust.TRUSTED) for key, value in fill.slots.items()
             }
@@ -2342,13 +2401,38 @@ class Session:
         future_order = _future_order_node(pending.plan, self._deps.today)
         if future_order is not None and self._deps.life_events is not None:
             # 未来日期的生活事件只登记预约：今天不冻结、不扣款，到期后重新提案。
-            return self._register_life_schedule(pending, *future_order)
+            node, order_day = future_order
+            notify_on = self._reminder_day(order_day)
+            return self._register_life_schedule(
+                pending, node, notify_on or order_day, notify_on=notify_on,
+            )
         if not self._pending_node_ids:
             self._pending_node_ids = list(pending.node_ids)
         return self._settle_due_schedules(self._execute(steps=steps))
 
+    def _reminder_day(self, order_day: date) -> date | None:
+        """从本轮已采纳的槽位里取提醒日；取不到返回 None（按原下单日登记）。
+
+        优先用「提前 N 天」按**真实下单日**换算（澄清补齐下单日之后仍然成立），
+        其次才用直接解析出的 `notify_on`。
+        """
+        for item in reversed(self._review_intents):
+            slots = item.get("slots")
+            if not isinstance(slots, Mapping):
+                continue
+            lead = slots.get("remind_lead_days")
+            if isinstance(lead, int) and not isinstance(lead, bool) and lead >= 0:
+                candidate = order_day - timedelta(days=lead)
+                return candidate if candidate < order_day else None
+            parsed = _iso_day(slots.get("notify_on"))
+            if parsed is None:
+                continue
+            return parsed if parsed < order_day else None
+        return None
+
     def _register_life_schedule(
-        self, pending: _Pending, node: PlanNode, due_on: date,
+        self, pending: _Pending, node: PlanNode, due_on: date, *,
+        notify_on: date | None = None,
     ) -> ExecutionView:
         """登记到期预约并结束本次确认：不签发写凭据、不调用任何业务写。
 
@@ -2378,6 +2462,8 @@ class Session:
                 for item in pending.plan.nodes
             ),
             record_id=None if record is None else record.record_id,
+            kind="reminder" if notify_on is not None else "order",
+            notify_on=notify_on,
         )
         self._pending_node_ids = list(pending.node_ids)
         self._state = SessionState.COMPLETED
@@ -2419,22 +2505,42 @@ class Session:
             return view
         completed = set(self._completed_node_ids)
         finished = 0
+        failed: list[str] = []
         for schedule_id, node_ids in pending.life_nodes:
             done = sum(1 for node_id in node_ids if node_id in completed)
             if done == 0:
                 continue
             status = SCHEDULE_CONSUMED if done == len(node_ids) else terminal
             try:
-                finished += store.finish_schedule(
+                changed = store.finish_schedule(
                     user_id=self._deps.user_id, schedule_id=schedule_id, status=status,
                 )
             except Exception:
                 LOGGER.warning(
                     "到期预约结算失败：%s / %s", self._deps.user_id, schedule_id, exc_info=True,
                 )
+                continue
+            if not changed:
+                continue
+            finished += changed
+            if status == SCHEDULE_FAILED:
+                failed.append(schedule_id)
+            # 审计带 `schedule_id`：把「这条预约被判成什么」与释放 / 执行回执对上账。
+            self._audit(KIND_DECISION, {
+                "kind": "life_event_settled",
+                "user_id": self._deps.user_id,
+                "session_id": self._session_id,
+                "execution_id": self._execution_id,
+                "schedule_id": schedule_id,
+                "status": status,
+                "node_ids": list(node_ids),
+                "completed_node_ids": [item for item in node_ids if item in completed],
+            })
         if finished:
             self._message = f"{self._message}（到期预约已结算 {finished} 条）"
             view = replace(view, message=self._message)
+        if failed:
+            view = replace(view, failed_schedules=tuple(failed))
         return view
 
     @_serialized
@@ -2746,13 +2852,11 @@ class Session:
                 return self._execution_view()
             except ToolHookBlocked as error:
                 # 统一写操作 Hook 拦截：业务写服务从未被调用，如实回报状态，不得谎报成功。
-                self._in_flight = None
                 self._hook_status = error.status.value
-                self._message = f"写操作被安全策略拦截（{node.action}）：{error.reason}"
-                self._state = (
-                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+                self._fail_node(
+                    message=f"写操作被安全策略拦截（{node.action}）：{error.reason}",
+                    reason="tool_hook_blocked",
                 )
-                self._release_open_holds(reason="tool_hook_blocked")
                 return self._execution_view()
             except CommittedWriteError as error:
                 self._unverified_results[node_id] = ExecResult(
@@ -2764,21 +2868,14 @@ class Session:
                 self._state = SessionState.INTERRUPTED
                 return self._execution_view()
             except (NotAuthorizedError, GatewayError) as error:
-                self._in_flight = None
-                self._message = f"执行受阻（{node.action}）：{error}"
-                self._state = (
-                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+                self._fail_node(
+                    message=f"执行受阻（{node.action}）：{error}",
+                    reason="gateway_or_authorization_failed",
                 )
-                self._release_open_holds(reason="gateway_or_authorization_failed")
                 return self._execution_view()
             except Exception as error:
                 # 未预期异常同样属于「本计划不会再有后续成功」：先把已冻结预算退回，再如实报错，
                 # 绝不把冻结额悬空在核心银行。
-                self._in_flight = None
-                self._message = f"执行失败（{node.action}）：{type(error).__name__}: {error}"
-                self._state = (
-                    SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
-                )
                 self._audit(
                     "execution_error",
                     {
@@ -2790,7 +2887,12 @@ class Session:
                         "execution_id": self._execution_id,
                     },
                 )
-                self._release_open_holds(reason="unexpected_error")
+                self._fail_node(
+                    message=(
+                        f"执行失败（{node.action}）：{type(error).__name__}: {error}"
+                    ),
+                    reason="unexpected_error",
+                )
                 return self._execution_view()
             self._unverified_results.pop(node_id, None)
             self._exec_results.append(result)
@@ -2918,13 +3020,36 @@ class Session:
             raise SessionStateError("当前无人工接管上下文包")
         return self._takeover
 
-    def _release_open_holds(self, *, reason: str) -> tuple[str, ...]:
+    def _fail_node(self, *, message: str, reason: str) -> None:
+        """节点失败收尾（三处 `except` 共用）：先退回本次冻结，再把四要素说清。
+
+        `message` 由调用方给出失败节点与原因；这里统一补「已释放冻结 N 笔」与「后续步骤未执行」，
+        释放失败 / 未装配冲正通道时 `_release_open_holds` 会先追加自己的说明，仍如实计 0 笔。
+        """
+
+        self._in_flight = None
+        self._state = (
+            SessionState.PARTIAL if self._completed_node_ids else SessionState.FAILED
+        )
+        self._message = message
+        released = self._release_open_holds(reason=reason, tail="，后续步骤未执行")
+        if not released:
+            self._message = polish(
+                f"{self._message}；已释放冻结 0 笔，后续步骤未执行",
+                (),
+                getattr(self._deps, "wording_polisher", None),
+            )
+
+    def _release_open_holds(
+        self, *, reason: str, tail: str = "",
+    ) -> tuple[str, ...]:
         """终态失败收尾：把本次执行已冻结的预算退回可用余额（不静默吞钱）。
 
         调用时机：**本计划不会再有后续成功**（安全策略拦截 / 执行受阻 / 未预期异常 /
         用户放弃 / 会话重置）。`WritePreconditionError`（可重新确认后继续）与
         `CommittedWriteError`（可恢复核对后重试）**不**收尾，否则会抽走后续节点依赖的冻结额。
 
+        `tail` 拼在「已释放冻结 N 笔」之后（执行失败时补「后续步骤未执行」）。
         返回实际释放的记录；审计携带用户 / 会话 / 执行身份与原因，便于对账。
         """
         records = tuple(
@@ -2960,8 +3085,9 @@ class Session:
                 {**context, "outcome": "release_failed", "error": str(error)},
             )
             return ()
-        self._released_holds.update(records)
-        self._message = f"{self._message}；已释放冻结预算 {len(released)} 笔"
+        self._released_holds = tuple(released)
+        template = f"{self._message}；已释放冻结 {len(released)} 笔{tail}"
+        self._message = polish(template, (), getattr(self._deps, "wording_polisher", None))
         self._audit(
             KIND_REVERSAL,
             {**context, "outcome": "released_on_failure", "records": list(released)},
@@ -3145,6 +3271,7 @@ class Session:
             bill_findings=bill_findings,
             hook_status=self._hook_status,
             scheduled_for=self._scheduled_due(),
+            released_holds=self._released_holds,
         )
 
     def _scheduled_due(self) -> str | None:
@@ -3158,7 +3285,10 @@ class Session:
         if self._completed_node_ids or self._exec_results:
             return None
         hit = _future_order_node(pending.plan, self._deps.today)
-        return None if hit is None else hit[1].isoformat()
+        if hit is None:
+            return None
+        # 提醒类预约登记在提醒日（与 `_register_life_schedule` 的 due_on 同源）。
+        return (self._reminder_day(hit[1]) or hit[1]).isoformat()
 
     def _node_progress(self) -> tuple[NodeProgress, ...]:
         """逐节点执行状态：由会话的完成记录唯一决定，前端不得自行推导。"""
@@ -3251,7 +3381,8 @@ class Session:
         self._recovery_blocked = False
         self._planner_channel = None
         self._model_calls = []
-        self._released_holds.clear()
+        self._released_holds = ()
+        self._visibility = "normal"
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:
@@ -3268,6 +3399,20 @@ def _review_value(value: object) -> object:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _iso_day(raw: object) -> date | None:
+    """已采纳槽位里的 ISO 文本 / 日期 → `date`；读不出返回 `None`（不猜）。"""
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+    return None
 
 
 def _dropped_notes(dropped: list[str]) -> tuple[str, ...]:
@@ -3291,8 +3436,11 @@ def _plan_has_outflow(plan: Plan) -> bool:
     return any(ACTION_KINDS.get(node.action) is ActionKind.OUTFLOW for node in plan.nodes)
 
 
-_SCHEDULABLE_ACTIONS = frozenset({"funds.freeze", "merchant.order", "funds.release"})
-"""可延后为到期预约的动作集合：生活事件预算链（冻结 → 向商户下单 → 释放）。
+_SCHEDULABLE_ACTIONS = frozenset(
+    {"funds.freeze", "merchant.order", "funds.release", "wealth.redeem"}
+)
+"""可延后为到期预约的动作集合：生活事件预算链（冻结 → 向商户下单 → 释放）
+与理财到期联动（赎回 → 下单）。
 
 出现任何其它动作（转账 / 申购 / 订阅取消费 …）就不延后——那些动作延后等于改掉用户当时确认的语义。
 """
@@ -3938,6 +4086,21 @@ _LIFE_BUDGET_WINDOW = re.compile(
     r"(?:预算|上限|以内|不超过|最多|控制在)[^，,。；;]{0,16}"
 )
 
+_PRIVATE_HINTS = re.compile(
+    r"(?:别|不要|不想).{0,16}(?:暴露|看到|发现|知道)"
+    r"|(?:私密|悄悄|保密|惊喜)"
+)
+
+_PRIVATE_RECEIPT = (
+    "已按私密处理：本应用内的共享账单与推送不会出现这笔。"
+    "管不到的：对方手机银行流水、短信通知、以及共同还款人看到的账单，本应用没有权限处理。"
+)
+
+
+def wants_private_visibility(utterance: str) -> bool:
+    """命中即按私密处理；解析不出来的按正常处理，不倒过来猜。"""
+    return _PRIVATE_HINTS.search(utterance) is not None
+
 
 def _life_budget_cents(text: str) -> int | None:
     """从「预算 1000 以内 / 最多 500」这类片段取预算上限；读不到返回 None。"""
@@ -3946,6 +4109,18 @@ def _life_budget_cents(text: str) -> int | None:
         if parsed.matched and parsed.value is not None:
             return parsed.value.cents
     return None
+
+
+_REMINDER_LEAD = re.compile(r"(?:提前|前)\s*(\d{1,2})\s*天(?:前)?\s*(?:提醒|通知|告诉我)?")
+
+
+def _l1_slot_reminder(text: str) -> int | None:
+    """『生日前 2 天提醒我』→ 2；读不到返回 None（不猜）。"""
+    match = _REMINDER_LEAD.search(text)
+    if match is None:
+        return None
+    lead = int(match.group(1))
+    return lead if 0 < lead <= 30 else None
 
 
 def _l1_fill(
@@ -4011,6 +4186,52 @@ def _l1_fill(
         ClarificationAsk(slot="delivery_time", prompt="希望哪天送达？（演示字段）"),
     )
     return replace(fill, slots=slots, questions=questions), asks
+
+
+def _maturity_fill(fill: SlotFill) -> SlotFill:
+    """到期联动：不再追问商户与下单金额（场景层按演示白名单 / 档位补，到期日由事实推算）。"""
+    keep = tuple(
+        question for question in fill.questions
+        if question.slot not in {"merchant", "amount", "amount_cents"}
+    )
+    return replace(fill, questions=keep)
+
+
+def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
+    """**本次联动所选**的那笔持仓到期日已过时，补一句推算口径。
+
+    只按计划里 `wealth.redeem` 节点的 `product_id` 反查那一笔——不能遍历全部持仓，
+    否则会「选中的是未到期那笔、提示的却是另一笔已到期」。
+    """
+    product_id: str | None = None
+    for node in plan.nodes if plan is not None else ():
+        if node.action != "wealth.redeem":
+            continue
+        raw = node.params.get("product_id")
+        if isinstance(raw, str) and raw:
+            product_id = raw
+            break
+    if product_id is None:
+        return None
+    products = {
+        record.payload.product_id: record.payload for record in deps.gateway.wealth_products()
+    }
+    product = products.get(product_id)
+    if product is None:
+        return None
+    for record in deps.gateway.wealth_holdings_of(deps.user_id):
+        holding = record.payload
+        if holding.product_id != product_id:
+            continue
+        maturity = holding_maturity(holding.purchased_on, product.term_days)
+        if maturity is None or maturity >= deps.today:
+            return None
+        return (
+            f"说明：{product.name}（{holding.amount.yuan} 元）该产品已于 "
+            f"{maturity.isoformat()} 到期——这是按起息日 + 产品期限推算的，不是官方到期公告；"
+            "赎回与下单都还没执行，到账以银行回单为准。"
+        )
+    return None
 
 
 def _booking_semantics_question(index: int, count: int) -> ClarificationAsk:

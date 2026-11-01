@@ -22,6 +22,14 @@
       "audience": "测评等级 ≥ R1 且测评在有效期内的客户"
     },
     {
+      "id": "wp_short",
+      "name": "稳盈短期 A",
+      "risk_level": "R2",
+      "term_days": 30,
+      "min_amount_yuan": "100.00",
+      "audience": "测评等级 ≥ R2 且测评在有效期内的客户"
+    },
+    {
       "id": "wp_bond",
       "name": "稳利债券 A",
       "risk_level": "R2",

@@ -10,7 +10,7 @@
 到期预约（`life_event_schedules`）是另一条独立流水：未来日期的事件在**确认时只登记预约**，
 不冻结也不下单；到期后由 `/api/due` 重新生成待确认提案，再确认一次才真正执行。
 状态机：`scheduled` → `consumed`（已执行） / `cancelled`（已放弃） /
-`failed`（执行失败，不再自动重提）。
+`failed`（执行失败，不再自动重提；用户可手动重试，次数受 `MAX_SCHEDULE_RETRIES` 限制）。
 """
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS life_event_records (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     steps_json   TEXT NOT NULL DEFAULT '[]',
-    due_on       TEXT
+    due_on       TEXT,
+    visibility   TEXT NOT NULL DEFAULT 'normal'
 );
 
 CREATE INDEX IF NOT EXISTS idx_life_event_user
@@ -54,6 +55,9 @@ CREATE TABLE IF NOT EXISTS life_event_schedules (
     plan_id      TEXT NOT NULL DEFAULT '',
     plan_json    TEXT NOT NULL,
     due_on       TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'order',
+    notify_on    TEXT,
+    retry_count  INTEGER NOT NULL DEFAULT 0,
     status       TEXT NOT NULL
                  CHECK (status IN ('scheduled', 'consumed', 'cancelled', 'failed')),
     consumed_at  TEXT,
@@ -81,6 +85,21 @@ SCHEDULE_STATUSES = (
     SCHEDULE_SCHEDULED, SCHEDULE_CONSUMED, SCHEDULE_CANCELLED, SCHEDULE_FAILED,
 )
 
+MAX_SCHEDULE_RETRIES = 3
+"""`failed` 预约可被用户重试的次数上限；达到上限后只能放弃。"""
+
+NORMAL_VISIBILITY = "normal"
+"""默认可见：普通列表与共享推送都能看到这条记录。"""
+PRIVATE_VISIBILITY = "private"
+"""私密：只在用户自己的记录页折叠显示，不进共享推送。"""
+
+_ADDED_COLUMNS = (
+    ("kind", "TEXT NOT NULL DEFAULT 'order'"),
+    ("notify_on", "TEXT"),
+    ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+)
+"""老库缺的预约列：`PRAGMA table_info` 判断后再 `ALTER TABLE`（幂等迁移）。"""
+
 _RECORD_STATUS_BY_SCHEDULE = {
     SCHEDULE_CONSUMED: STATUS_EXECUTED,
     SCHEDULE_CANCELLED: STATUS_REJECTED,
@@ -107,6 +126,8 @@ class LifeEventRecord:
     """计划步骤的只读摘要（动作 / 金额 / 日期）；状态由记录整体状态派生。"""
     due_on: str | None = None
     """计划生效 / 送达日期（ISO）；为空表示未指定。"""
+    visibility: str = NORMAL_VISIBILITY
+    """`normal` / `private`：私密记录不进普通列表与共享推送。"""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -121,6 +142,7 @@ class LifeEventRecord:
             "updated_at": self.updated_at,
             "steps": list(self.steps),
             "due_on": self.due_on,
+            "visibility": self.visibility,
         }
 
 
@@ -142,6 +164,12 @@ class LifeEventSchedule:
     updated_at: str
     record_id: str | None = None
     consumed_at: str | None = None
+    kind: str = "order"
+    """预约类型：`order`（到期下单）等；旧行为 `order`。"""
+    notify_on: date | None = None
+    """提醒日（ISO 存储）；`None` = 不单独提醒，只按 `due_on` 提案。"""
+    retry_count: int = 0
+    """用户重试次数；达到 `MAX_SCHEDULE_RETRIES` 后不可再重试。"""
 
 
 class LifeEventStore:
@@ -162,6 +190,7 @@ class LifeEventStore:
         amount_cents: int | None = None,
         steps: Sequence[Mapping[str, object]] = (),
         due_on: str | None = None,
+        visibility: str = NORMAL_VISIBILITY,
         now: datetime | None = None,
     ) -> LifeEventRecord:
         """登记一次「已提交」；同会话同事件已有 `planned` 行则就地更新。"""
@@ -179,10 +208,11 @@ class LifeEventStore:
             with self._store.transaction() as conn:
                 conn.execute(
                     "UPDATE life_event_records SET event_name = ?, event_title = ?,"
-                    " amount_cents = ?, steps_json = ?, due_on = ?, updated_at = ?"
+                    " amount_cents = ?, steps_json = ?, due_on = ?, visibility = ?,"
+                    " updated_at = ?"
                     " WHERE record_id = ?",
                     (
-                        event_name, event_title, amount_cents, steps_json, due_on,
+                        event_name, event_title, amount_cents, steps_json, due_on, visibility,
                         moment, record_id,
                     ),
                 )
@@ -192,8 +222,9 @@ class LifeEventStore:
                 conn.execute(
                     "INSERT INTO life_event_records"
                     " (record_id, user_id, session_id, event_id, event_name, event_title,"
-                    "  amount_cents, status, created_at, updated_at, steps_json, due_on)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "  amount_cents, status, created_at, updated_at, steps_json, due_on,"
+                    "  visibility)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record_id,
                         user_id,
@@ -207,6 +238,7 @@ class LifeEventStore:
                         moment,
                         steps_json,
                         due_on,
+                        visibility,
                     ),
                 )
         return self._get(user_id, record_id)
@@ -239,20 +271,60 @@ class LifeEventStore:
             )
             return cursor.rowcount
 
-    def list_for_user(self, user_id: str, *, limit: int = 5) -> tuple[LifeEventRecord, ...]:
+    def list_for_user(
+        self, user_id: str, *, limit: int = 5, visibility: str | None = NORMAL_VISIBILITY,
+    ) -> tuple[LifeEventRecord, ...]:
+        """记录页列表：默认**只给普通记录**，私密记录要显式按 `private` 再取一次（前端折叠）。"""
+
+        condition = "" if visibility is None else " AND visibility = ?"
+        params: tuple[object, ...] = (
+            (user_id, limit) if visibility is None else (user_id, visibility, limit)
+        )
         rows = self._store.query(
             "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on"
+            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
             " FROM life_event_records"
-            " WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-            (user_id, limit),
+            f" WHERE user_id = ?{condition} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            params,
         )
         return tuple(_record_from_row(row) for row in rows)
+
+    def record_visibility(self, user_id: str, record_id: str | None) -> str:
+        """来源记录的可见性；没有来源记录按 `normal`（查不到不等于私密）。"""
+
+        if record_id is None:
+            return NORMAL_VISIBILITY
+        rows = self._store.query(
+            "SELECT visibility FROM life_event_records"
+            " WHERE user_id = ? AND record_id = ?",
+            (user_id, record_id),
+        )
+        if not rows or "visibility" not in rows[0].keys():
+            return NORMAL_VISIBILITY
+        return str(rows[0]["visibility"] or NORMAL_VISIBILITY)
+
+    def schedule_kinds(self, user_id: str) -> dict[str, str]:
+        """来源记录 → 关联预约类型（`reminder` / `order`）；同记录多条时以最新一条为准。
+
+        只用于日历上区分「提醒」与「下单」点，不参与任何资金判断；查不到就不出现在表里。
+        """
+
+        rows = self._store.query(
+            "SELECT record_id, kind FROM life_event_schedules"
+            " WHERE user_id = ? AND record_id IS NOT NULL"
+            " ORDER BY created_at ASC",
+            (user_id,),
+        )
+        return {
+            str(row["record_id"]): str(row["kind"] or "order")
+            for row in rows
+            if row["record_id"] is not None
+        }
 
     def _get(self, user_id: str, record_id: str) -> LifeEventRecord:
         rows = self._store.query(
             "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on"
+            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
             " FROM life_event_records"
             " WHERE user_id = ? AND record_id = ?",
             (user_id, record_id),
@@ -263,7 +335,7 @@ class LifeEventStore:
         """该会话最近一条 `planned` 记录；没有则 `None`（用于把预约挂到来源记录）。"""
         rows = self._store.query(
             "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on"
+            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
             " FROM life_event_records"
             " WHERE user_id = ? AND session_id = ? AND status = ?"
             " ORDER BY created_at DESC LIMIT 1",
@@ -282,6 +354,8 @@ class LifeEventStore:
         plan_id: str,
         nodes: Sequence[Mapping[str, object]],
         record_id: str | None = None,
+        kind: str = "order",
+        notify_on: date | None = None,
         now: datetime | None = None,
     ) -> LifeEventSchedule:
         """登记（或就地更新）一条到期预约；同会话同事件同到期日只保留一条 `scheduled`。"""
@@ -292,6 +366,7 @@ class LifeEventStore:
             ensure_ascii=False, sort_keys=True, default=str,
         )
         due_text = due_on.isoformat()
+        notify_text = None if notify_on is None else notify_on.isoformat()
         rows = self._store.query(
             "SELECT schedule_id FROM life_event_schedules"
             " WHERE user_id = ? AND session_id = ? AND event_id = ? AND due_on = ? AND status = ?"
@@ -303,9 +378,12 @@ class LifeEventStore:
             with self._store.transaction() as conn:
                 conn.execute(
                     "UPDATE life_event_schedules SET event_title = ?, record_id = ?,"
-                    " plan_id = ?, plan_json = ?, updated_at = ?"
+                    " plan_id = ?, plan_json = ?, kind = ?, notify_on = ?, updated_at = ?"
                     " WHERE schedule_id = ?",
-                    (event_title, record_id, plan_id, plan_json, moment, schedule_id),
+                    (
+                        event_title, record_id, plan_id, plan_json, kind, notify_text,
+                        moment, schedule_id,
+                    ),
                 )
         else:
             schedule_id = f"ls_{secrets.token_hex(8)}"
@@ -313,11 +391,13 @@ class LifeEventStore:
                 conn.execute(
                     "INSERT INTO life_event_schedules"
                     " (schedule_id, user_id, session_id, record_id, event_id, event_title,"
-                    "  plan_id, plan_json, due_on, status, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "  plan_id, plan_json, due_on, kind, notify_on, status,"
+                    "  created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         schedule_id, user_id, session_id, record_id, event_id, event_title,
-                        plan_id, plan_json, due_text, SCHEDULE_SCHEDULED, moment, moment,
+                        plan_id, plan_json, due_text, kind, notify_text,
+                        SCHEDULE_SCHEDULED, moment, moment,
                     ),
                 )
         return self._get_schedule(user_id, schedule_id)
@@ -368,10 +448,36 @@ class LifeEventStore:
                 )
             return cursor.rowcount
 
+    def retry_schedule(
+        self, *, user_id: str, schedule_id: str, now: datetime | None = None,
+    ) -> int:
+        """把 `failed` 预约放回 `scheduled`；超过上限返回 0（不无限重试）。
+
+        只允许 `failed → scheduled`：成功执行 / 已放弃的预约不会被重试复活；
+        `plan_json` 原样保留，下次 `/api/due` 重新走提案与确认。
+        """
+
+        moment = (now if now is not None else self._clock()).isoformat()
+        rows = self._store.query(
+            "SELECT retry_count FROM life_event_schedules"
+            " WHERE user_id = ? AND schedule_id = ? AND status = ?",
+            (user_id, schedule_id, SCHEDULE_FAILED),
+        )
+        if not rows or int(rows[0]["retry_count"]) >= MAX_SCHEDULE_RETRIES:
+            return 0
+        with self._store.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE life_event_schedules SET status = ?, retry_count = retry_count + 1,"
+                " updated_at = ? WHERE user_id = ? AND schedule_id = ? AND status = ?",
+                (SCHEDULE_SCHEDULED, moment, user_id, schedule_id, SCHEDULE_FAILED),
+            )
+            return cursor.rowcount
+
     def _get_schedule(self, user_id: str, schedule_id: str) -> LifeEventSchedule:
         rows = self._store.query(
             "SELECT schedule_id, user_id, session_id, record_id, event_id, event_title,"
-            "  plan_id, plan_json, due_on, status, consumed_at, created_at, updated_at"
+            "  plan_id, plan_json, due_on, status, consumed_at, created_at, updated_at,"
+            "  kind, notify_on, retry_count"
             " FROM life_event_schedules"
             " WHERE user_id = ? AND schedule_id = ?",
             (user_id, schedule_id),
@@ -398,6 +504,17 @@ def init_life_event_schema(store: Store) -> None:
             )
         if "due_on" not in columns:
             conn.execute("ALTER TABLE life_event_records ADD COLUMN due_on TEXT")
+        if "visibility" not in columns:
+            conn.execute(
+                "ALTER TABLE life_event_records"
+                " ADD COLUMN visibility TEXT NOT NULL DEFAULT 'normal'"
+            )
+        schedule_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(life_event_schedules)")
+        }
+        for name, ddl in _ADDED_COLUMNS:
+            if name not in schedule_columns:
+                conn.execute(f"ALTER TABLE life_event_schedules ADD COLUMN {name} {ddl}")
 
 
 def _record_from_row(row: sqlite3.Row) -> LifeEventRecord:
@@ -411,6 +528,7 @@ def _record_from_row(row: sqlite3.Row) -> LifeEventRecord:
         item for item in parsed if isinstance(item, dict)
     ) if isinstance(parsed, list) else ()
     due_on = row["due_on"] if "due_on" in row.keys() else None
+    visibility = row["visibility"] if "visibility" in row.keys() else None
     return LifeEventRecord(
         record_id=str(row["record_id"]),
         user_id=str(row["user_id"]),
@@ -424,6 +542,7 @@ def _record_from_row(row: sqlite3.Row) -> LifeEventRecord:
         event_title=str(row["event_title"] or ""),
         steps=steps,
         due_on=None if due_on is None else str(due_on),
+        visibility=NORMAL_VISIBILITY if visibility is None else str(visibility),
     )
 
 
@@ -439,6 +558,9 @@ def _schedule_from_row(row: sqlite3.Row) -> LifeEventSchedule:
     plan_id = str(parsed.get("plan_id") or "") if isinstance(parsed, dict) else ""
     record_id = row["record_id"] if "record_id" in row.keys() else None
     consumed_at = row["consumed_at"] if "consumed_at" in row.keys() else None
+    kind = row["kind"] if "kind" in row.keys() else None
+    notify_on = row["notify_on"] if "notify_on" in row.keys() else None
+    retry_count = row["retry_count"] if "retry_count" in row.keys() else 0
     return LifeEventSchedule(
         schedule_id=str(row["schedule_id"]),
         user_id=str(row["user_id"]),
@@ -453,4 +575,7 @@ def _schedule_from_row(row: sqlite3.Row) -> LifeEventSchedule:
         updated_at=str(row["updated_at"]),
         record_id=None if record_id is None else str(record_id),
         consumed_at=None if consumed_at is None else str(consumed_at),
+        kind=str(kind or "order"),
+        notify_on=None if notify_on is None else date.fromisoformat(str(notify_on)),
+        retry_count=int(retry_count or 0),
     )

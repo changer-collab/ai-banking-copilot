@@ -3,7 +3,8 @@
 铁律（PRD §5.4）：
 - 计划卡与执行计划**共用同一份已裁决 DAG**（结构上不可能不一致）；
 - 数值只来自 `PlanNode.params` 与 `FactGateway`（H1 事实零生成），本层**不生成**任何数字；
-- 计划卡只回显**动作 / 对象 / 时间三元组**，**不回显数据槽原文**（备注里的注入文本不进卡片，H3）；
+- 计划卡只回显**动作 / 对象 / 时间三元组**（摘要另加 `web/present.py` 白名单里的事实行），
+  **不回显数据槽原文**（备注里的注入文本不进卡片，H3）；
 - LLM 只允许做**不改变三元组**的润色，由 `polish_plan_card` 的确定性守卫强制
   （丢对象 / 改行数即拒）。
 """
@@ -21,6 +22,7 @@ from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
 from ai_banking_copilot.planning.kernel import resource_key
 from ai_banking_copilot.scenarios import bills, subscriptions, wealth
+from ai_banking_copilot.web.present import fact_lines
 
 PROMPT_USER_CONFIRM = "user_confirm"
 """黄色：用户确认。"""
@@ -257,8 +259,12 @@ def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
     """把三元组拆成结构化键值对（单节点）或逐步摘要（多节点）。
 
     数值一律复用 `_amount_value`（与 `lines` 同源），不新增计算口径。
+    既有摘要在前；其后追加 `web/present.py` 白名单里的事实行（最多 6 条，内部键已被剔除）。
+    追加前做**值去重**：值已出现在既有摘要的 `value` 里（如 `"99.00"` 命中 `"99.00 元"`）
+    就跳过，避免商户 / 金额 / 日期在卡上重复两遍。
     """
     triples = plan_triples(plan, gateway)
+    existing: list[PlanLine]
     if len(plan.nodes) == 1:
         node = plan.nodes[0]
         triple = triples[0]
@@ -269,14 +275,24 @@ def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
         rows.append(PlanLine("对象", triple.object_label))
         if triple.when_label != "—":
             rows.append(PlanLine("时间", triple.when_label))
-        return tuple(rows)
-    return tuple(
-        PlanLine(
-            f"{index}. {_ACTION_LABELS.get(node.action, node.action)}",
-            _step_value(node, triple),
-        )
-        for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
-    )
+        existing = rows
+    else:
+        existing = [
+            PlanLine(
+                f"{index}. {_ACTION_LABELS.get(node.action, node.action)}",
+                _step_value(node, triple),
+            )
+            for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
+        ]
+    seen = [line.value for line in existing]
+    extra: list[PlanLine] = []
+    for node in plan.nodes:
+        for fact in fact_lines(node.action, node.params):
+            if any(fact.value in value for value in seen):
+                continue
+            extra.append(PlanLine(fact.label, fact.value, emphasis=fact.emphasis))
+            seen.append(fact.value)
+    return (*existing, *extra[:6])
 
 
 def _step_value(node: PlanNode, triple: PlanTriple) -> str:

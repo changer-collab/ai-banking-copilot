@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=51" />
+<link rel="stylesheet" href="/assets/workspace.css?v=53" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -219,7 +219,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="row">
           <label class="sr-only" for="utterance">您的办理需求</label>
           <textarea class="textarea" id="utterance" rows="1" placeholder="说一句话，比如：转给李娜 500 元"></textarea>
-          <button class="btn btn--primary" id="btn-submit" type="button">发送</button>
+          <button class="btn btn--primary" id="btn-submit" type="button" data-requires-login>发送</button>
         </div>
         <div class="composer-footer">
           <button class="btn btn--ghost" id="btn-due" type="button">检查到期待办</button>
@@ -569,7 +569,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   </div>
   <div class="app-dialog__foot">
     <button class="btn btn--ghost" type="button" data-app-dialog-close>取消</button>
-    <button class="btn btn--danger" id="app-dialog-confirm" type="button">确认</button>
+    <button class="btn btn--danger" id="app-dialog-confirm" type="button" data-requires-login>确认</button>
   </div>
 </dialog>
 
@@ -589,7 +589,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=77"></script>
+<script src="/assets/app.js?v=79"></script>
 </body>
 </html>
 """
@@ -684,7 +684,7 @@ LOGIN_HTML = """<!DOCTYPE html>
       <li>每一步都有审计 ID，可在「我的 → 审计与溯源」追溯。</li>
       <li>演示环境使用模拟资金，不连接真实银行账户。</li>
     </ul>
-    <p class="muted">登录后可进入对话办理；未登录不展示任何账户数据。</p>
+    <p class="muted">登录后可进入对话办理；未登录仅能浏览演示数据，不能提交业务。</p>
   </details>
   <p class="foot">模拟银行环境 · 不连接真实银行账户</p>
 </form>

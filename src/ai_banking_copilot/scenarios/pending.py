@@ -19,6 +19,7 @@ from ai_banking_copilot.scenarios.cross import (
 )
 from ai_banking_copilot.scenarios.scheduling import due_date
 from ai_banking_copilot.scenarios.transfer import due_transfer_plan
+from ai_banking_copilot.web.present import yuan
 
 _BIRTHDAY_ACTIONS = frozenset({"funds.freeze", "merchant.order", "funds.release"})
 """生日预算链的三个动作：冻结 → 下单 → 解冻，共用同一份生日依据。"""
@@ -40,6 +41,29 @@ class LifeDueSchedule:
     event_title: str
     due_on: date
     nodes: tuple[Mapping[str, object], ...]
+    kind: str = "order"
+    """预约类型：`reminder` = 到提醒日先提案，`order` = 到期直接下单。"""
+    notify_on: date | None = None
+    """提醒日；`None` = 未单独设置提醒。"""
+
+
+def _schedule_param(schedule: LifeDueSchedule, action: str, key: str) -> object | None:
+    """从登记时的节点快照里取某一动作的参数；找不到返回 `None`。"""
+    for item in schedule.nodes:
+        if str(item.get("action") or "") != action:
+            continue
+        params = item.get("params")
+        if not isinstance(params, Mapping):
+            return None
+        return params.get(key)
+    return None
+
+
+def _schedule_text(raw: object) -> str | None:
+    """快照参数 → 展示用文本；读不出返回 `None`（宁可不显示也不猜）。"""
+    if isinstance(raw, date):
+        return raw.isoformat()
+    return raw if isinstance(raw, str) and raw else None
 
 
 def _node_evidence_hash(node: PlanNode) -> str:
@@ -110,6 +134,21 @@ class PendingHandler:
 
     def matches(self, intents: Sequence[Intent]) -> bool:
         return False
+
+    def reminder_notice(self) -> str | None:
+        """提醒类预约的提案文案；取不到下单日 / 预算就返回 `None`（退回模板文案）。"""
+        for schedule in self.life_schedules:
+            if schedule.kind != "reminder":
+                continue
+            order_on = _schedule_text(_schedule_param(schedule, "merchant.order", "order_on"))
+            budget_yuan = yuan(_schedule_param(schedule, "funds.freeze", "amount_cents"))
+            if order_on is None or not budget_yuan:
+                continue
+            return (
+                f"提醒：{(schedule.notify_on or schedule.due_on).isoformat()} 起可下单，"
+                f"{order_on} 送达；预算 {budget_yuan} 元。确认后执行，今天不扣款。"
+            )
+        return None
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
         scheduled = due_transfer_plan(gateway, self.today, user_id=self.user_id)

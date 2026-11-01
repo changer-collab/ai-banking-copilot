@@ -20,7 +20,7 @@ from pathlib import Path
 GRAPH_PATH = Path(__file__).with_name("wealth_graph.json")
 
 FEE_UNKNOWN = "未知（产品数据未提供费率，本图不做费率测算）"
-"""费率口径：4 只演示产品都没有费率数据 ⇒ 一律标未知，不编造、不估算。"""
+"""费率口径：5 只演示产品都没有费率数据 ⇒ 一律标未知，不编造、不估算。"""
 
 _FEE_NODE = "fee:catalog"
 
@@ -209,7 +209,7 @@ def _metric_reasons(item: Mapping[str, object], eligible: bool) -> tuple[str, ..
     if eligible:
         lines.append(
             "本次按 风险等级、期限、起购金额、参考报价 四项指标匹配"
-            "（演示目录共 4 只，非真实海量产品池）。"
+            "（演示目录共 5 只，非真实海量产品池）。"
         )
     return tuple(lines)
 

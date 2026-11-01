@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ai_banking_copilot.web.suggest import select_suggestions
+
 
 @dataclass(frozen=True)
 class TriageSuggestion:
@@ -179,4 +181,9 @@ def triage(utterance: str, *, low_confidence: bool = False) -> TriageVerdict | N
         return TriageVerdict("ambiguous", message, suggestions)
     if len(text) <= _SMALLTALK_MAX_LENGTH and _SMALLTALK.search(text):
         return TriageVerdict("smalltalk", _SMALLTALK_MESSAGE, _DEFAULT_SUGGESTIONS)
-    return TriageVerdict("ambiguous", _FALLBACK_MESSAGE, _DEFAULT_SUGGESTIONS)
+    # 完全没线索时才推荐功能：候选句只来自固定能力清单（`suggest.CAPABILITIES`）。
+    fallback = tuple(
+        TriageSuggestion(label=item["label"], text=item["text"])
+        for item in select_suggestions(text)
+    )
+    return TriageVerdict("ambiguous", _FALLBACK_MESSAGE, fallback)

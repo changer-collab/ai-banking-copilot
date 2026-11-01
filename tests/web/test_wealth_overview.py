@@ -48,7 +48,7 @@ def test_r2_catalog_greys_out_products_with_written_reason(
     payload = _overview(deps)
     products = _by_product(payload, "products")
 
-    for product_id in ("wp_cash", "wp_bond"):
+    for product_id in ("wp_cash", "wp_short", "wp_bond"):
         assert products[product_id]["eligible"] is True
         assert products[product_id]["reason"] == ""
     for product_id in ("wp_mix", "wp_equity"):
@@ -96,12 +96,16 @@ def test_holdings_expose_real_facts_and_reference_income_from_simulated_nav(
 ) -> None:
     payload = _overview(deps)
     holdings = _by_product(payload, "holdings")
-    assert set(holdings) == {"wp_cash", "wp_bond"}
+    assert set(holdings) == {"wp_cash", "wp_short", "wp_bond"}
 
     assert holdings["wp_cash"]["name"] == "活期理财篮子"
     assert holdings["wp_cash"]["category"] == "货币类"
     assert holdings["wp_cash"]["amount_yuan"] == "500.00"
     assert holdings["wp_cash"]["purchased_on"] == "2026-06-10"
+    assert holdings["wp_short"]["name"] == "稳盈短期 A"
+    assert holdings["wp_short"]["category"] == "债券类"
+    assert holdings["wp_short"]["amount_yuan"] == "2000.00"
+    assert holdings["wp_short"]["purchased_on"] == DEFAULT_BOOKING_DATE.isoformat()
     assert holdings["wp_bond"]["name"] == "稳利债券 A"
     assert holdings["wp_bond"]["category"] == "债券类"
     assert holdings["wp_bond"]["amount_yuan"] == "3000.00"

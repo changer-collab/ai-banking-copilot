@@ -100,7 +100,7 @@ def test_r2_recommendation_excludes_higher_risk_products(
     assert "均衡配置 B" not in text
     assert "成长精选 C" not in text
     message = _message(_confirm(client, submitted))
-    assert "合格候选 2 只" in message
+    assert "合格候选 3 只" in message
     assert "wp_mix" not in message
     assert "wp_equity" not in message
     assert "用户自助录入" in message

@@ -217,7 +217,10 @@ async function apiFetch(method, path, body, headers) {
   } catch (_) {
     data = {};
   }
-  if (response.status === 401) window.location.replace("/");
+  /* 未登录只读壳里 401 是预期结果（只读 GET 才放行），保持页面不跳，写操作由点击拦截带走。 */
+  if (response.status === 401 && document.documentElement.dataset.demoReadonly !== "1") {
+    window.location.replace("/login");
+  }
   return { status: response.status, ok: response.ok, data };
 }
 
@@ -458,11 +461,11 @@ function assessmentFormHtml(prefix, questionnaire) {
     <p class="muted">共 ${items.length} 道题。答完由服务端算分定级（R1–R5），等级不能自填。</p>
     ${fields}
     <p class="muted wealth-error" data-form-error hidden></p>
-    <div class="btn-row"><button class="btn btn--primary" type="button" data-action="submit-assessment">提交测评</button></div>
+    <div class="btn-row"><button class="btn btn--primary" type="button" data-action="submit-assessment" data-requires-login>提交测评</button></div>
     <div class="wealth-confirm" data-assessment-confirm hidden>
       <p class="wealth-confirm__text">提交后等级按服务端算分更新，年内有效；每题只有一次选择机会。</p>
       <div class="btn-row">
-        <button class="btn btn--sm btn--primary" type="button" data-action="assessment-confirm">确认提交</button>
+        <button class="btn btn--sm btn--primary" type="button" data-action="assessment-confirm" data-requires-login>确认提交</button>
         <button class="btn btn--sm btn--ghost" type="button" data-assessment-back>返回修改</button>
       </div>
     </div>
@@ -551,7 +554,7 @@ function wealthProductHtml(item) {
     ? '<span class="chip chip--denied">不可买</span>'
     : `<input class="input input--amount" type="number" inputmode="decimal" min="${min}" step="0.01"`
       + ` placeholder="金额" data-amount-for="${esc(item.product_id)}" />`
-      + `<button class="btn btn--sm btn--primary" type="button" data-action="wealth-subscribe"`
+      + `<button class="btn btn--sm btn--primary" type="button" data-action="wealth-subscribe" data-requires-login`
       + ` data-product="${esc(item.product_id)}" data-min="${min}">申购</button>`;
   return `<article class="wealth-row${disabled ? " wealth-row--off" : ""}">
     <div class="wealth-row__main">
@@ -585,7 +588,7 @@ function wealthHoldingHtml(item) {
     <div class="wealth-row__act">
       <input class="input input--amount" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01"
         placeholder="金额" data-amount-for="${esc(item.product_id)}" aria-label="赎回金额，最多 ${maxText}" />
-      <button class="btn btn--sm" type="button" data-action="wealth-redeem"
+      <button class="btn btn--sm" type="button" data-action="wealth-redeem" data-requires-login
         data-product="${esc(item.product_id)}" data-max="${max}">赎回</button>
     </div>
     <p class="muted wealth-error" data-wealth-error hidden></p>
@@ -1331,7 +1334,7 @@ function sceneCardHtml(card) {
   const actions = card.level === "RED"
     ? '<button class="btn btn--sm" type="button" data-scene-chat>去对话做强验证</button>'
     : card.level === "YELLOW"
-      ? '<button class="btn btn--sm btn--primary" type="button" data-scene-confirm>确认执行</button>' +
+      ? '<button class="btn btn--sm btn--primary" type="button" data-scene-confirm data-requires-login>确认执行</button>' +
         '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
       : "";
   return `<article class="scene-plan" data-level="${esc(card.level)}">
@@ -3301,7 +3304,7 @@ function clarifyHtml() {
     <div class="muted">补充后继续 · 在原指令上续答，不必重述</div>
     <div>${fields}</div>
     <div class="btn-row" style="margin-top: var(--s-3)">
-      <button class="btn btn--primary" id="btn-clarify">补充并继续</button>
+      <button class="btn btn--primary" id="btn-clarify" data-requires-login>补充并继续</button>
     </div>
   </div>`;
 }
@@ -3380,6 +3383,11 @@ async function onClarify() {
 }
 
 async function onSubmit() {
+  /* 未登录只读壳：回车发送也走登录，不把 401 当成交互反馈。 */
+  if (document.documentElement.dataset.demoReadonly === "1") {
+    window.location.assign("/login");
+    return;
+  }
   const text = el("utterance").value.trim();
   if (!text) { el("utterance").focus(); return; }
   const selected = selectedObjects();
@@ -3420,6 +3428,21 @@ async function onDue() {
   };
   if (!requestStart(start)) return;
   await start();
+}
+
+/* 失败预约重试：只把状态放回 `scheduled`（次数受服务端上限约束），
+   再走一次「检查到期待办」重新提案，确认仍由用户点。 */
+async function onRetrySchedule(scheduleId) {
+  if (!scheduleId) return;
+  const result = await post("/api/life-schedules/retry", { schedule_id: scheduleId });
+  if (result.status !== 200) {
+    state.notice = interceptHtml("重试未受理", result.data.detail || "请稍后再试", false);
+    renderStage();
+    timelineAdd(`重试未受理：${result.data.detail || "请稍后再试"}`, "stop");
+    return;
+  }
+  timelineAdd("已把该预约放回待办，正在重新生成提案…", "live");
+  await onDue();
 }
 
 /* 申请服务端强验证挑战（红色卡）：验证码一次性 + 有 TTL，与当前冻结计划绑定 */
@@ -3630,6 +3653,22 @@ async function loadChatCardList(host) {
   </section>`;
 }
 
+/* 失败终态：如实说「已释放冻结 N 笔」，并给落为 `failed` 的到期预约一个显式重试入口
+   （服务端不再自动重提，避免同一笔重复扣款）。 */
+function executionFailureHtml(data) {
+  const released = Array.isArray(data.released_holds) ? data.released_holds : [];
+  const failedSchedules = Array.isArray(data.failed_schedules) ? data.failed_schedules : [];
+  let html = interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
+  if (released.length) {
+    html += `<p class="muted">已释放冻结 ${released.length} 笔，未产生扣款。</p>`;
+  }
+  if (failedSchedules.length) {
+    html += `<div class="btn-row">${failedSchedules.map((scheduleId) =>
+      `<button class="btn btn--sm" type="button" data-life-retry="${esc(scheduleId)}">重试该预约</button>`).join("")}</div>`;
+  }
+  return html;
+}
+
 function applyExecution(data) {
   showModelMetadata(data.model);
   if (data.card) state.card = data.card;
@@ -3680,7 +3719,7 @@ function applyExecution(data) {
         </div>
       </div>` +
       (billHtml || adviceFallback) + provenancePanelHtml()
-    : interceptHtml("执行尚未完成", data.message || "请核对已执行步骤。", false);
+    : executionFailureHtml(data);
   if (showsCardList) state.notice += '<div id="chat-card-list" class="muted">正在读取卡片…</div>';
   renderStage();
   if (showsCardList) void loadChatCardList(el("chat-card-list"));
@@ -4568,7 +4607,7 @@ function lifeLoadingHtml() {
 /* ---------------- 生活日历（L4 视图为主） ---------------- */
 /* 只按「本人生成过的记录日期」落点：不排商户日程、不预填未来日期、不补假数据。
    月份可前后翻，翻到空月份就显示空态。 */
-const lifeCal = { month: "", day: "", records: [] };
+const lifeCal = { month: "", day: "", records: [], maturities: [] };
 
 function lifeMonthKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
@@ -4593,6 +4632,31 @@ function lifeShiftMonth(month, delta) {
   return lifeMonthKey(new Date(year, mon - 1 + delta, 1));
 }
 
+/* 三类点各有来源，不在前端猜：
+   - `maturity`：理财到期（服务端按起息日 + 期限推算，`maturity_on` 与当天相同）；
+   - `reminder`：记录关联的预约是提醒类（服务端给的 `schedule_kind`）；
+   - `order`：其余下单记录。 */
+function calendarDotKind(record, maturities) {
+  if (maturities.some((item) => item.maturity_on === record.due_on)) return "maturity";
+  if (record.schedule_kind === "reminder") return "reminder";
+  return "order";
+}
+
+const LIFE_CAL_DOT_TITLE = {
+  order: "下单", reminder: "提醒", maturity: "理财到期（推算）",
+  maturityPast: "理财到期（推算，已到期）",
+};
+
+/* 到期点已过推算到期日时追加灰化类名；状态由服务端按「推算到期日 vs 今天」给出。 */
+function maturityDotClass(item) {
+  const past = item.status === "expired" ? " life-cal__dot--maturity-past" : "";
+  return `life-cal__dot life-cal__dot--maturity${past}`;
+}
+
+function maturityDotTitle(item) {
+  return item.status === "expired" ? LIFE_CAL_DOT_TITLE.maturityPast : LIFE_CAL_DOT_TITLE.maturity;
+}
+
 function lifeCalendarHtml(records) {
   const month = lifeCal.month || lifeMonthKey(new Date());
   lifeCal.month = month;
@@ -4615,15 +4679,23 @@ function lifeCalendarHtml(records) {
   for (let day = 1; day <= days; day += 1) {
     const key = `${month}-${String(day).padStart(2, "0")}`;
     const items = byDay[key] || [];
+    const dayMaturities = lifeCal.maturities.filter((item) => item.maturity_on === key);
     const picked = key === lifeCal.day;
-    const dots = items.slice(0, 3).map((record) =>
-      `<i class="life-cal__dot" title="${esc(record.event_name || record.event_id)}"></i>`).join("");
-    const marks = [items.length ? "is-marked" : "", key === today ? "is-today" : "", picked ? "is-picked" : ""]
+    const dots = items.slice(0, 3).map((record) => {
+      const dotKind = calendarDotKind(record, dayMaturities);
+      return `<i class="life-cal__dot life-cal__dot--${dotKind}" title="${esc(LIFE_CAL_DOT_TITLE[dotKind])}：${esc(record.event_name || record.event_id)}"></i>`;
+    }).join("") + dayMaturities.slice(0, 3).map((item) =>
+      `<i class="${maturityDotClass(item)}" title="${esc(maturityDotTitle(item))}：${esc(item.name || item.product_id)}"></i>`).join("");
+    const maturityLabel = dayMaturities.some((item) => item.status === "expired")
+      ? "理财到期（推算，已到期）" : LIFE_CAL_DOT_TITLE.maturity;
+    const marked = items.length > 0 || dayMaturities.length > 0;
+    const marks = [marked ? "is-marked" : "", key === today ? "is-today" : "", picked ? "is-picked" : ""]
       .filter(Boolean).join(" ");
     cells.push(`<li>
         <button class="life-cal__cell${marks ? ` ${marks}` : ""}" type="button" data-life-day="${key}"
           aria-pressed="${picked ? "true" : "false"}"
-          aria-label="${key}${items.length ? `，${items.length} 条记录` : "，无记录"}">
+          aria-label="${key}${items.length ? `，${items.length} 条记录` : "，无记录"}${
+            dayMaturities.length ? `，${dayMaturities.length} 笔${maturityLabel}` : ""}">
           <span class="life-cal__day">${day}</span><span class="life-cal__dots">${dots}</span>
         </button></li>`);
   }
@@ -4649,6 +4721,12 @@ function lifeCalendarHtml(records) {
       <ol class="life-cal__week" aria-hidden="true">${
         ["一", "二", "三", "四", "五", "六", "日"].map((day) => `<li>${day}</li>`).join("")}</ol>
       <ol class="life-cal__grid">${cells.join("")}</ol>
+      <p class="life-cal__legend">
+        <span><i class="life-cal__dot life-cal__dot--order"></i>下单</span>
+        <span><i class="life-cal__dot life-cal__dot--reminder"></i>提醒</span>
+        <span><i class="life-cal__dot life-cal__dot--maturity"></i>理财到期：到期日为推算值（起息日 + 产品期限），非官方到期公告</span>
+        <span><i class="life-cal__dot life-cal__dot--maturity-past"></i>已到期（推算，未赎回按今日处理）</span>
+      </p>
       ${filter}
       ${rows}
       ${otherNote}
@@ -4817,6 +4895,7 @@ async function refreshLifeEvents() {
   status.textContent = `原型 ${prototypes.length} 个${recordsNote}`;
 
   lifeCal.records = records;
+  lifeCal.maturities = Array.isArray(payload.maturities) ? payload.maturities : [];
   if (calendar) calendar.innerHTML = lifeCalendarHtml(records);
   lifeData.prototypes = prototypes;
   lifeData.records = records;
@@ -5091,6 +5170,16 @@ document.addEventListener("click", async (event) => {
   if (open) {
     closeLifeWorkbench();
     await openConversation(open.dataset.lifeOpen || "");
+    return;
+  }
+  const retry = target.closest("[data-life-retry]");
+  if (retry) {
+    retry.disabled = true;
+    try {
+      await onRetrySchedule(retry.dataset.lifeRetry || "");
+    } finally {
+      retry.disabled = false;
+    }
     return;
   }
   const record = target.closest("[data-life-record]");
@@ -6154,8 +6243,19 @@ el("btn-install")?.addEventListener("click", async () => {
   }
 });
 
+/* 未登录只读壳（`<html data-demo-readonly="1">`）：任何写操作先跳登录，不把 401 当交互反馈。 */
+document.addEventListener("click", (event) => {
+  if (document.documentElement.dataset.demoReadonly !== "1") return;
+  const target = event.target instanceof Element
+    ? event.target.closest("[data-requires-login]") : null;
+  if (!target) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  window.location.assign("/login");
+}, true);
+
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=67", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=69", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

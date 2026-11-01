@@ -28,7 +28,7 @@ from ai_banking_copilot.contracts.plan import (
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import Account, Card
+from ai_banking_copilot.gateway.models import Account, Card, WealthHolding, WealthProduct
 from ai_banking_copilot.gateway.resolvers import resolve_payees
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
@@ -340,6 +340,30 @@ def detect_life_combo(text: str) -> str | None:
     return None
 
 
+_MATURITY_TERM_WORDS = ("到期", "满期")
+"""到期语义的窄词（只负责把口语送进到期联动，不抢域内规则）。"""
+
+_MATURITY_ORDER_WORDS = ("买", "订", "下单", "送", "花", "礼物", "蛋糕")
+"""到期后要办的花钱动作词；只说到期而不提动作时不认定为联动（纯查询不得被拦）。"""
+
+
+def holding_maturity(purchased_on: date, term_days: int) -> date | None:
+    """到期日 = 起息日 + 产品期限；`term_days <= 0`（活期 / 期限不明）返回 `None`。
+
+    这是**推算**，不是官方到期公告；调用方必须一并给出推算口径。
+    """
+    if term_days <= 0:
+        return None
+    return purchased_on + timedelta(days=term_days)
+
+
+def detect_maturity_link(text: str) -> bool:
+    """口语是否在说「理财到期 → 顺手办件事」（同时含到期词与下单 / 送礼词）。"""
+    return any(word in text for word in _MATURITY_TERM_WORDS) and any(
+        word in text for word in _MATURITY_ORDER_WORDS
+    )
+
+
 def build_life_event(
     event_id: str,
     params: Mapping[str, object],
@@ -387,16 +411,22 @@ def build_life_event_combo(
 
 
 class LifeEventsHandler(ScenarioHandler):
-    """生活事件处理器（七条原型 + 三条组合律；排在 `cross` 之后）。"""
+    """生活事件处理器（七条原型 + 三条组合律 + 到期联动；排在 `cross` 之后）。"""
 
     @property
     def name(self) -> str:
         return "life_events"
 
     def matches(self, intents: Sequence[Intent]) -> bool:
-        return any(_life_combo_of(intent) or _life_event_of(intent) for intent in intents)
+        return any(
+            _maturity_of(intent) or _life_combo_of(intent) or _life_event_of(intent)
+            for intent in intents
+        )
 
     def build(self, intents: Sequence[Intent], gateway: FactGateway) -> Plan:
+        for intent in intents:
+            if _maturity_of(intent):
+                return build_maturity_link(intent.slots, gateway)
         for intent in intents:
             combo_id = _life_combo_of(intent)
             if combo_id is not None:
@@ -406,6 +436,10 @@ class LifeEventsHandler(ScenarioHandler):
             if event_id is not None:
                 return build_life_event(event_id, intent.slots, gateway)
         raise ScenarioRefused("未识别到生活事件原型")
+
+
+def _maturity_of(intent: Intent) -> bool:
+    return detect_maturity_link(intent_text(intent))
 
 
 def _life_event_of(intent: Intent) -> str | None:
@@ -601,6 +635,102 @@ def _billing_month(params: Mapping[str, object]) -> tuple[int, int]:
     if not 1 <= month <= 12:
         raise ScenarioRefused(f"记账月份不合法：{year}-{month}")
     return year, month
+
+
+def _maturity_holding(
+    params: Mapping[str, object], gateway: FactGateway
+) -> tuple[WealthHolding, WealthProduct, date]:
+    """从**本人持仓事实**挑一笔可推导到期日的持仓。
+
+    无候选不猜（`ScenarioRefused`）；给了 `product` 就只认那一笔。
+    没给 `product` 时按「最近要到期的那一笔」确定性取值：优先「到期日 >= `REFERENCE_DATE`
+    的最近一笔」，都不在未来时取「到期日最近的一笔已到期持仓」——「到期联动」说的就是
+    最近要到期的那一笔，这是从事实派生的缺省值，不是猜测。
+    """
+    explicit = _opt_text(params, "product")
+    products = {
+        record.payload.product_id: record.payload for record in gateway.wealth_products()
+    }
+    candidates: list[tuple[WealthHolding, WealthProduct, date]] = []
+    for record in gateway.wealth_holdings_of(DEMO_USER_ID):
+        holding = record.payload
+        product = products.get(holding.product_id)
+        if product is None or (explicit is not None and holding.product_id != explicit):
+            continue
+        maturity = holding_maturity(holding.purchased_on, product.term_days)
+        if maturity is None:
+            continue
+        candidates.append((holding, product, maturity))
+    if explicit is not None:
+        if not candidates:
+            raise ScenarioRefused(f"该持仓无法按期限推导到期日：{explicit}")
+        return candidates[0]
+    if not candidates:
+        raise ScenarioRefused("本人没有可推导到期日的理财持仓")
+    upcoming = [item for item in candidates if item[2] >= REFERENCE_DATE]
+    if upcoming:
+        return min(upcoming, key=lambda item: (item[2], item[0].product_id))
+    return min(candidates, key=lambda item: (item[2], item[0].product_id))
+
+
+def build_maturity_link(
+    params: Mapping[str, object],
+    gateway: FactGateway,
+    *,
+    node_prefix: str = "m",
+    ledger: AnchorLedger | None = None,
+) -> Plan:
+    """到期联动：赎回（金额只取持仓事实）→ 向商户下单（下单日 = 到期日）。
+
+    **到期只是一个可以按期处理的时间点，不等于「已到账」**：赎回与下单仍要在计划卡上
+    逐节点确认，到账以银行回单为准；本函数不产事实、不改余额。
+    """
+    holding, product, maturity = _maturity_holding(params, gateway)
+    redeemed = holding.amount.cents
+    if redeemed <= 0:
+        raise ScenarioRefused("该笔持仓已无可用份额，无法赎回")
+    picked = _opt_cents(params, "order_amount")
+    if picked is None:
+        picked = _opt_cents(params, "amount")
+    # 口述没给下单金额时按演示档位；**不得**因为持仓大就把订单做大。
+    order_cents = min(BIRTHDAY_ORDER_CENTS, redeemed) if picked is None else picked
+    if order_cents <= 0 or order_cents > redeemed:
+        raise ScenarioRefused("下单金额必须为正且不得超过赎回金额")
+    account_id = _account_for_budget(params, gateway, 0)
+    merchant = _opt_text(params, "merchant") or BIRTHDAY_MERCHANT
+    occasion_id = _opt_text(params, "occasion") or (
+        f"maturity:{product.product_id}:{maturity.isoformat()}"
+    )
+    shared = ledger if ledger is not None else AnchorLedger()
+    nodes = (
+        _node(
+            shared,
+            f"{node_prefix}1",
+            "wealth.redeem",
+            {
+                "account_id": account_id,
+                "product_id": holding.product_id,
+                "amount_cents": redeemed,
+            },
+            detail="到期赎回（待确认）",
+        ),
+        _node(
+            shared,
+            f"{node_prefix}2",
+            "merchant.order",
+            {
+                "merchant": merchant,
+                "amount_cents": order_cents,
+                "order_on": maturity.isoformat(),
+                "occasion_id": occasion_id,
+            },
+            detail="到期后下单",
+            depends_on=(f"{node_prefix}1",),
+        ),
+    )
+    plan = Plan(plan_id="life_maturity", nodes=nodes)
+    validate_plan(plan)
+    return plan
 
 
 def _build_l1(

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -79,6 +80,8 @@ from ai_banking_copilot.scenarios.life_events import (
     LIFE_EVENT_PROTOTYPES,
     detect_life_combo,
     detect_life_event,
+    detect_maturity_link,
+    holding_maturity,
 )
 from ai_banking_copilot.scenarios.subscriptions import (
     CANCEL_STATE_EXTERNAL_CONFIRMED,
@@ -103,6 +106,7 @@ from ai_banking_copilot.scenarios.wealth_assessment import (
     questionnaire_payload,
 )
 from ai_banking_copilot.tools.registry import ToolRegistry
+from ai_banking_copilot.web import reminders, wording
 from ai_banking_copilot.web.auth import (
     DEMO_ACCOUNTS,
     SESSION_IDLE_SECONDS,
@@ -149,6 +153,8 @@ from ai_banking_copilot.web.channels.render import render_feishu_card, render_te
 from ai_banking_copilot.web.conversation_store import ConversationStore
 from ai_banking_copilot.web.insights import InsightService
 from ai_banking_copilot.web.life_event_store import (
+    PRIVATE_VISIBILITY,
+    SCHEDULE_CANCELLED,
     STATUS_EXECUTED,
     STATUS_FAILED,
     STATUS_REJECTED,
@@ -162,6 +168,7 @@ from ai_banking_copilot.web.plan_card import (
 )
 from ai_banking_copilot.web.progress import ProgressRegistry
 from ai_banking_copilot.web.session import (
+    _PRIVATE_RECEIPT,
     MAX_CONFIRM_STEPS,
     ConfirmationMismatchError,
     ExecutionView,
@@ -185,6 +192,23 @@ AUTH_MODE_DEMO = "demo"
 
 AUTH_COOKIE_NAME = "aib_session"
 """会话 Cookie：`HttpOnly` + `SameSite=Lax`，页面脚本读不到 token。"""
+
+_ANONYMOUS_BANNER = (
+    '<div class="anon-banner" role="status">演示数据 · 未登录只读；'
+    '办理业务请先 <a href="/login">登录</a>。</div>'
+)
+"""未登录页面壳的提示条：显式标注演示数据，避免把演示账户当成本人真实账户。"""
+
+
+def _anonymous_shell(html: str) -> str:
+    """未登录只读壳：`<html>` 打 `data-demo-readonly`，并在 `</body>` 前注入演示提示。"""
+    shell = html
+    if "<html " in shell:
+        shell = shell.replace("<html ", '<html data-demo-readonly="1" ', 1)
+    if "</body>" not in shell:
+        return shell + _ANONYMOUS_BANNER
+    return shell.replace("</body>", f"{_ANONYMOUS_BANNER}\n</body>", 1)
+
 
 LINK_CODE_TTL_SECONDS = 300
 """「连接飞书」绑定码的有效期（秒）：与登录票据同量级，够用户切到飞书发一句。"""
@@ -318,12 +342,23 @@ class AppDeps:
     """对话历史持久化；`None ⇒ 历史接口返回空列表且不写库**（不谎称已保存）。"""
     life_events: LifeEventStore | None = None
     """生活事件记录；`None ⇒ 面板只读原型、不落库。"""
+    feishu: FeishuAdapter | None = None
+    """飞书适配器（组合根注入）；`None ⇒ `create_app` 自行按环境变量装配一份。
+
+    **到期推送只认显式注入的这一份**：`None` 时即便开关打开也不挂调度器，避免单测
+    意外启动后台线程。"""
+    enable_push_scheduler: bool = False
+    """到期推送调度器开关（**默认关闭**）：`True` 才在 lifespan 里每 60s 扫一次到期预约。
+
+    测试与本地调试都走默认值；需要演示推送时由组合根按 `AIB_ENABLE_PUSH` 显式打开。"""
     progress: ProgressRegistry = field(default_factory=ProgressRegistry)
     """阶段进度表（进程内、按 `(user, session, request)`）：`generate` 前端的轮询数据源。"""
     auth_mode: str = AUTH_MODE_OFF
     """`off`（默认，单用户演示）/ `demo`（登录 + Cookie 会话 + CSRF）。"""
     demo_password: str | None = None
     """`demo` 模式下用于登录页提示的演示口令；`None` 时页面只写“由现场负责人提供”。"""
+    wording_polisher: wording.Polisher | None = None
+    """措辞层改写通道；`None` ⇒ 只用确定性模板（措辞异常一律退回模板，不影响业务结果）。"""
 
 
 DEFAULT_SESSION_ID = "default"
@@ -386,6 +421,13 @@ class _EmptyRequest(BaseModel):
     """空请求体（中断 / 恢复 / 回退）。"""
 
     session_id: str = DEFAULT_SESSION_ID
+
+
+class _ScheduleRequest(BaseModel):
+    """到期预约的重试 / 放弃：只认服务端已有且属于本人的 `schedule_id`。"""
+
+    session_id: str = DEFAULT_SESSION_ID
+    schedule_id: str
 
 
 class _UnlockRequest(BaseModel):
@@ -486,6 +528,19 @@ def create_app(deps: AppDeps) -> FastAPI:
                     service.scan(deps.user_id, deps.today)
 
             task = asyncio.create_task(periodic_scan())
+        push_task: asyncio.Task[None] | None = None
+        if (
+            deps.enable_push_scheduler
+            and deps.life_events is not None
+            and deps.feishu is not None
+        ):
+            adapter = deps.feishu
+
+            async def push_tick() -> int:
+                """同步推送在线程里跑：SQLite 读与阻塞 HTTP 都不该占事件循环。"""
+                return await asyncio.to_thread(reminders.push_due_once, deps, adapter=adapter)
+
+            push_task = asyncio.create_task(reminders.run_forever(push_tick))
         try:
             yield
         finally:
@@ -495,6 +550,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                     await task
                 except asyncio.CancelledError:
                     pass
+            if push_task is not None:
+                push_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await push_task
 
     app = FastAPI(
         title="AI 银行副驾 · Web 渠道",
@@ -533,7 +592,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         identities = StoreIdentityDirectory(deps.channel_store)
     else:
         identities = MemoryIdentityDirectory()
-    feishu = FeishuAdapter(FeishuConfig.from_env())
+    feishu = deps.feishu if deps.feishu is not None else FeishuAdapter(FeishuConfig.from_env())
     feishu_audit_channel = "feishu" if feishu.config.mode == "adapter" else "replay"
     LOGGER.info(
         "channel_startup channel=feishu event_id= feishu=%s", feishu.config.mode
@@ -774,27 +833,51 @@ def create_app(deps: AppDeps) -> FastAPI:
         if origin and urlsplit(origin).netloc != request.headers.get("host", ""):
             raise HTTPException(status_code=403, detail="cross_site_rejected")
 
+    def _optional_user_id(request: Request) -> str | None:
+        """解析「这是谁」：`off` 模式沿用单用户；`demo` 模式未登录返回 `None`（不抛错）。"""
+        if not auth_enabled:
+            return deps.user_id
+        session = _auth().resolve(request.cookies.get(AUTH_COOKIE_NAME, ""))
+        if session is None:
+            return None
+        request.state.auth_session = session
+        return session.user_id
+
+    def _authenticated(request: Request) -> bool:
+        """是否已登录；`off` 模式没有访客概念，恒为真。"""
+        return _optional_user_id(request) is not None
+
+    def _read_user(request: Request) -> str:
+        """只读接口身份：已登录用真实身份，未登录落到演示身份（响应里另标 `demo`）。
+
+        写接口一律仍用 `current_user`：演示身份**不能**替代真人办理业务。
+        """
+        user_id = _optional_user_id(request)
+        return user_id if user_id is not None else DEMO_USER_ID
+
+    def _is_anonymous(request: Request) -> bool:
+        """本次请求是否只是访客（响应体据此显式标注演示数据）。"""
+        return _optional_user_id(request) is None
+
     def current_user(request: Request) -> str:
         """当前登录用户；`off` 模式沿用单用户演示（`deps.user_id`），行为与旧版一致。"""
         if not auth_enabled:
             return deps.user_id
         _check_csrf(request)
-        session = _auth().resolve(request.cookies.get(AUTH_COOKIE_NAME, ""))
-        if session is None:
+        user_id = _optional_user_id(request)
+        if user_id is None:
             raise AuthRequiredError("登录已失效，请重新登录")
-        request.state.auth_session = session
-        return session.user_id
+        return user_id
 
     def _page_or_login(request: Request, html: str) -> HTMLResponse:
-        """页面入口：`demo` 模式未登录时先给登录页，不把应用骨架发出去。
+        """页面入口：`demo` 模式未登录时也给**只读页面壳**（ME-02）。
 
         壳 HTML 内嵌资源版本号，**必须 no-store**：否则浏览器缓存旧 HTML 后会一直引用
         旧的 `workspace.css?v=*`，出现「代码已更新、页面还是旧版」的假象。
+        未登录时必须显式标注演示数据并保留登录入口，避免访客把演示账户当成本人账户。
         """
-        if auth_enabled and _auth().resolve(request.cookies.get(AUTH_COOKIE_NAME, "")) is None:
-            accounts = tuple(row[0] for row in DEMO_ACCOUNTS)
-            login_html = render_login_page(accounts, deps.demo_password)
-            return HTMLResponse(login_html, headers={"Cache-Control": "no-store"})
+        if auth_enabled and not _authenticated(request):
+            return HTMLResponse(_anonymous_shell(html), headers={"Cache-Control": "no-store"})
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     def _session_for(session_id: str, user_id: str) -> Session:
@@ -860,18 +943,21 @@ def create_app(deps: AppDeps) -> FastAPI:
         utterance: str,
         selected: dict[str, object] | None,
         view: SubmissionView,
-    ) -> None:
+    ) -> SubmissionView:
         """识别到生活事件且已出计划卡时登记一条 `planned`。
 
         金额优先取表单值，其次取原话里明写的「N 元」，都没有就留空（不估算）；
-        标题记具体事件，金额不重复写进标题。
+        标题记具体事件，金额不重复写进标题。可见性跟随本次提交：私密记录不进
+        普通列表与共享推送，并在回执里说清楚应用内外的边界。
         """
         store = deps.life_events
         if store is None or view.card is None:
-            return
-        event_id = detect_life_combo(utterance) or detect_life_event(utterance)
+            return view
+        event_id = detect_life_combo(utterance) or detect_life_event(utterance) or (
+            _MATURITY_EVENT_ID if detect_maturity_link(utterance) else None
+        )
         if event_id is None:
-            return
+            return view
         event_name = _life_event_name(event_id)
         amount = _selected_amount_cents(selected)
         try:
@@ -885,9 +971,13 @@ def create_app(deps: AppDeps) -> FastAPI:
                 amount_cents=amount if amount is not None else _utterance_amount_cents(utterance),
                 steps=_life_plan_steps(view.plan),
                 due_on=_life_plan_due_on(view.plan),
+                visibility=view.visibility,
             )
         except Exception:
             LOGGER.warning("生活事件写入失败：%s / %s", user_id, session_id, exc_info=True)
+        if view.visibility != PRIVATE_VISIBILITY:
+            return view
+        return replace(view, message=f"{view.message}\n{_PRIVATE_RECEIPT}")
 
     def _mark_life_event(user_id: str, session_id: str, status: str) -> None:
         store = deps.life_events
@@ -1147,9 +1237,10 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.get("/api/bills/analysis")
     def bill_analysis(
+        request: Request,
         year: int | None = None,
         month: int | None = None,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(_read_user),
     ) -> dict[str, object]:
         """只读账单异常识别 + 结论式解释；不写事实、不产生执行授权。
 
@@ -1171,6 +1262,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         narrative = narrate_bill_findings(report, deps.bill_narrator)
         profile = bill_profile(deps.gateway, user_id, report)
         return {
+            "demo": _is_anonymous(request),
             **report_payload(report),
             "period_basis": "explicit" if explicit else "current_month",
             "data_through": data_through.isoformat(),
@@ -1216,20 +1308,22 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.get("/api/insights")
     def insights(
-        include_resolved: bool = False, user_id: str = Depends(current_user)
+        request: Request, include_resolved: bool = False, user_id: str = Depends(_read_user)
     ) -> dict[str, object]:
         """读取当前用户的只读洞察收件箱；不会继承任何执行授权。
 
         启动时只扫默认用户；其他用户首次访问时**懒扫描一次**，否则永远空列表，
         用户会误以为「没有异常」而不是「还没扫过」。
         """
+        demo = _is_anonymous(request)
         service = deps.insights
         if service is None:
-            return {"insights": [], "scanned_at": None, "scan_error": None}
+            return {"demo": demo, "insights": [], "scanned_at": None, "scan_error": None}
         if service.scan_state(user_id) is None:
             service.scan(user_id, deps.today)
         state = service.scan_state(user_id)
         return {
+            "demo": demo,
             "insights": [
                 item.to_dict()
                 for item in service.list_inbox(user_id, include_resolved=include_resolved)
@@ -1331,6 +1425,39 @@ def create_app(deps: AppDeps) -> FastAPI:
         _record_answer(user_id, request.session_id, view)
         return _response(request.session_id, user_id, _submission_payload(view))
 
+    @app.post("/api/life-schedules/retry")
+    def retry_life_schedule(
+        request: _ScheduleRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """`failed` 预约放回 `scheduled`：只认本人预约，次数受服务端上限约束。"""
+        store = deps.life_events
+        if store is None:
+            raise HTTPException(status_code=409, detail="生活事件存储未装配")
+        try:
+            changed = store.retry_schedule(user_id=user_id, schedule_id=request.schedule_id)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not changed:
+            raise HTTPException(status_code=409, detail="该预约不可重试（未失败或已达重试上限）")
+        return {"retried": True, "schedule_id": request.schedule_id}
+
+    @app.post("/api/life-schedules/cancel")
+    def cancel_life_schedule(
+        request: _ScheduleRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """放弃预约：置为 `cancelled`，非 `scheduled` 状态幂等不生效。"""
+        store = deps.life_events
+        if store is None:
+            raise HTTPException(status_code=409, detail="生活事件存储未装配")
+        changed = store.finish_schedule(
+            user_id=user_id,
+            schedule_id=request.schedule_id,
+            status=SCHEDULE_CANCELLED,
+        )
+        if not changed:
+            raise HTTPException(status_code=409, detail="该预约不可取消")
+        return {"cancelled": True, "schedule_id": request.schedule_id}
+
     @app.post("/api/submit")
     def submit(request: _SubmitRequest, user_id: str = Depends(current_user)) -> dict[str, object]:
         session = _session_for(request.session_id, user_id)
@@ -1385,8 +1512,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             if request.request_id:
                 deps.progress.finish(user_id, request.session_id, request.request_id)
         _record_message(user_id, request.session_id, "user", "text", request.utterance)
+        view = _record_life_event(
+            user_id, request.session_id, request.utterance, request.selected, view
+        )
         _record_answer(user_id, request.session_id, view)
-        _record_life_event(user_id, request.session_id, request.utterance, request.selected, view)
         payload = _submission_payload(view)
         card = payload.get("card")
         card_map = card if isinstance(card, dict) else {}
@@ -1430,11 +1559,11 @@ def create_app(deps: AppDeps) -> FastAPI:
             user_id, request.session_id, "user", "clarify",
             "；".join(f"{slot}={value}" for slot, value in request.answers.items()),
         )
-        _record_answer(user_id, request.session_id, view)
         if pending_utterance:
-            _record_life_event(
+            view = _record_life_event(
                 user_id, request.session_id, pending_utterance, request.answers, view,
             )
+        _record_answer(user_id, request.session_id, view)
         return _response(request.session_id, user_id, _submission_payload(view))
 
     @app.post("/api/verify/request")
@@ -1641,6 +1770,17 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     # ---------- 登录 / 账号 ----------
 
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page() -> HTMLResponse:
+        """登录页：未登录只读壳上的「登录」入口；未装配登录时统一 404。"""
+        if deps.auth is None:
+            raise HTTPException(status_code=404, detail="登录未装配")
+        accounts = tuple(row[0] for row in DEMO_ACCOUNTS)
+        return HTMLResponse(
+            render_login_page(accounts, deps.demo_password),
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.post("/api/auth/login")
     def auth_login(
         request: Request, body: _LoginRequest, response: Response
@@ -1823,12 +1963,26 @@ def create_app(deps: AppDeps) -> FastAPI:
     # ---------- 生活事件 / 进度 / 审计 ----------
 
     @app.get("/api/life-events")
-    def life_events(user_id: str = Depends(current_user)) -> dict[str, object]:
-        """生活事件面板：原型清单 + 组合律 + 本用户最近 5 条记录。"""
+    def life_events(
+        request: Request, user_id: str = Depends(_read_user)
+    ) -> dict[str, object]:
+        """生活事件面板：原型清单 + 组合律 + 本用户最近 5 条记录。
+
+        未登录访客看到的是**演示账户**的只读视图，响应里 `demo=true` 显式标注。
+        """
         store = deps.life_events
         records = () if store is None else store.list_for_user(user_id, limit=5)
+        private_records = (
+            ()
+            if store is None
+            else store.list_for_user(user_id, limit=5, visibility=PRIVATE_VISIBILITY)
+        )
         budget = _life_budget_progress(deps.gateway, user_id)
+        # 记录本身不存预约类型：按 `record_id` 反查预约（`reminder` / `order`），
+        # 仅供日历区分「提醒」与「下单」点，前端不得自行猜。
+        schedule_kinds = {} if store is None else store.schedule_kinds(user_id)
         return {
+            "demo": _is_anonymous(request),
             "prototypes": [
                 {
                     "event_id": prototype.event_id,
@@ -1854,12 +2008,20 @@ def create_app(deps: AppDeps) -> FastAPI:
             "records": [
                 {
                     **record.to_dict(),
+                    # `order` / `reminder`：来自该记录的预约类型，查不到按 `order`
+                    "schedule_kind": schedule_kinds.get(record.record_id, "order"),
                     # 只有 L1 有可核的冻结链；其余事件不给预算块（前端不画，不造 0）
                     "budget": budget if record.event_id == "L1" else None,
                 }
                 for record in records
             ],
+            # 私密记录单独返回：普通列表里看不到，前端默认折叠成一行计数。
+            "private_records": [
+                {**record.to_dict(), "budget": None} for record in private_records
+            ],
+            "private_count": len(private_records),
             "records_available": store is not None,
+            "maturities": _life_maturities(deps.gateway, user_id, deps.today),
         }
 
     @app.get("/api/progress")
@@ -2630,6 +2792,9 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
         "bill_findings": view.bill_findings,
         "hook_status": view.hook_status,
         "scheduled_for": view.scheduled_for,
+        # 失败终态时可退回的冻结与可重试的到期预约：前端只渲染，不自行推导。
+        "released_holds": list(view.released_holds),
+        "failed_schedules": list(view.failed_schedules),
         "results": [
             {
                 "action": result.action,
@@ -2811,8 +2976,17 @@ def _life_plan_due_on(plan: object) -> str | None:
     return None
 
 
+_MATURITY_EVENT_ID = "maturity"
+"""理财到期联动的事件 id：**不进** `LIFE_EVENT_PROTOTYPES`（对外口径仍是七条原型 L1–L7）。"""
+
+_MATURITY_EVENT_NAME = "理财到期处理"
+"""理财到期联动在记录页的显示名。"""
+
+
 def _life_event_name(event_id: str) -> str:
     """事件 id → 可读名称；组合事件也查一遍，查不到返回空串（不臆造名字）。"""
+    if event_id == _MATURITY_EVENT_ID:
+        return _MATURITY_EVENT_NAME
     for prototype in LIFE_EVENT_PROTOTYPES:
         if prototype.event_id == event_id:
             return prototype.name
@@ -2892,6 +3066,42 @@ def _life_budget_progress(gateway: FactGateway, user_id: str) -> dict[str, objec
             "release": hold.status == "released",
         },
     }
+
+
+def _life_maturities(
+    gateway: FactGateway, user_id: str, today: date
+) -> list[dict[str, object]]:
+    """本人理财持仓的到期推算（起息日 + 产品期限），按到期日升序。
+
+    无期限产品（`term_days <= 0`，如活期）**不列出**——推不出到期日就不编一个。
+    `basis` 随行返回，页面必须原样展示「推算，非官方到期公告」。
+    `status` / `days_left` 只是把推算值与「今天」作比较，**不代表官方到期公告**。
+    """
+    products = {
+        record.payload.product_id: record.payload for record in gateway.wealth_products()
+    }
+    rows: list[dict[str, object]] = []
+    for record in gateway.wealth_holdings_of(user_id):
+        holding = record.payload
+        product = products.get(holding.product_id)
+        if product is None:
+            continue
+        maturity = holding_maturity(holding.purchased_on, product.term_days)
+        if maturity is None:
+            continue
+        rows.append({
+            "product_id": product.product_id,
+            "name": product.name,
+            "amount_cents": holding.amount.cents,
+            "purchased_on": holding.purchased_on.isoformat(),
+            "term_days": product.term_days,
+            "maturity_on": maturity.isoformat(),
+            "status": "expired" if maturity < today else "upcoming",
+            "days_left": (maturity - today).days,
+            "basis": "按起息日 + 产品期限推算，非官方到期公告",
+        })
+    rows.sort(key=lambda row: (str(row["maturity_on"]), str(row["product_id"])))
+    return rows
 
 
 def _selected_amount_cents(selected: dict[str, object] | None) -> int | None:

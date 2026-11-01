@@ -74,22 +74,31 @@ def _login(client: TestClient, username: str) -> None:
     assert response.status_code == 200, response.text
 
 
-def test_unauthenticated_page_is_login_and_api_is_401(client: TestClient) -> None:
+def test_unauthenticated_page_is_readonly_shell_and_write_api_is_401(
+    client: TestClient,
+) -> None:
+    """ME-02：未登录可浏览只读壳（带演示提示与登录入口），写接口仍一律 401。"""
     page = client.get("/")
     assert page.status_code == 200
-    assert 'id="login-form"' in page.text
-    assert 'id="app"' not in page.text, "未登录不得把应用骨架发出去"
+    assert 'id="app"' in page.text, "未登录也应能看到只读页面壳"
+    assert 'data-demo-readonly="1"' in page.text
+    assert "演示数据" in page.text and 'href="/login"' in page.text
+    assert 'id="login-form"' not in page.text, "壳里不内联登录表单，登录走独立入口"
+
+    login = client.get("/login")
+    assert login.status_code == 200
+    assert 'id="login-form"' in login.text
 
     api = client.get("/api/session")
     assert api.status_code == 401
     assert api.json()["detail"] == "auth_required"
 
     im = client.get("/im")
-    assert 'id="login-form"' in im.text
+    assert 'data-demo-readonly="1"' in im.text and "演示数据" in im.text
 
 
 def test_login_page_explains_product_and_shows_demo_credentials(client: TestClient) -> None:
-    page = client.get("/")
+    page = client.get("/login")
     assert "一句话，智能办理银行业务" in page.text
     assert "演示账号" in page.text
     assert "chenming" in page.text and "linjing" in page.text
@@ -100,7 +109,7 @@ def test_login_page_explains_product_and_shows_demo_credentials(client: TestClie
 def test_login_page_hides_password_when_not_configured(auth_deps: AppDeps) -> None:
     without_password = replace(auth_deps, demo_password=None)
     with TestClient(create_app(without_password)) as client:
-        page = client.get("/")
+        page = client.get("/login")
     assert "由现场负责人提供" in page.text
     assert PASSWORD not in page.text
 
@@ -170,7 +179,7 @@ def test_wealth_holdings_are_scoped_to_the_logged_in_user(
         row["product_id"]: row["amount_yuan"]
         for row in client.get("/api/wealth/overview").json()["holdings"]
     }
-    assert primary == {"wp_cash": "500.00", "wp_bond": "3000.00"}
+    assert primary == {"wp_cash": "500.00", "wp_short": "2000.00", "wp_bond": "3000.00"}
 
     secondary = TestClient(create_app(auth_deps))
     _login(secondary, "linjing")

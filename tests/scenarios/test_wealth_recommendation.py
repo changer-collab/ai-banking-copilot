@@ -62,10 +62,14 @@ def _assessment(risk_profile: str, **overrides: object) -> RiskAssessment:
 # 1. 硬筛选：R2 看不到 R3 / R4 产品
 def test_r2_sees_only_eligible_products(gateway: FactGateway) -> None:
     result = _query(gateway, risk_profile="R2", risk_source="user_input")
-    assert result.record_ids == ("wealth_products:wp_cash", "wealth_products:wp_bond")
+    assert result.record_ids == (
+        "wealth_products:wp_cash",
+        "wealth_products:wp_short",
+        "wealth_products:wp_bond",
+    )
     assert "均衡配置 B" not in result.detail
     assert "成长精选 C" not in result.detail
-    assert "合格候选 2 只" in result.detail
+    assert "合格候选 3 只" in result.detail
     assert "用户自助录入" in result.detail
 
 
@@ -73,9 +77,9 @@ def test_r2_sees_only_eligible_products(gateway: FactGateway) -> None:
     ("profile", "allowed"),
     [
         ("R1", {"wp_cash"}),
-        ("R2", {"wp_cash", "wp_bond"}),
-        ("R3", {"wp_cash", "wp_bond", "wp_mix"}),
-        ("R4", {"wp_cash", "wp_bond", "wp_mix", "wp_equity"}),
+        ("R2", {"wp_cash", "wp_short", "wp_bond"}),
+        ("R3", {"wp_cash", "wp_short", "wp_bond", "wp_mix"}),
+        ("R4", {"wp_cash", "wp_short", "wp_bond", "wp_mix", "wp_equity"}),
     ],
 )
 def test_hard_filter_cannot_be_reintroduced_by_labels(

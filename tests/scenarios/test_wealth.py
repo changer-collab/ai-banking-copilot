@@ -86,7 +86,7 @@ def test_describe_product_has_no_yield_hint(gateway: FactGateway) -> None:
 
 def test_product_comparison_states_facts_only(gateway: FactGateway) -> None:
     items = product_comparison(gateway)
-    assert len(items) == 4
+    assert len(items) == 5
     products = tuple(record.payload for record in gateway.wealth_products())
     assert {product.risk_level for product in products} == {"R1", "R2", "R3", "R4"}
     for product in products:

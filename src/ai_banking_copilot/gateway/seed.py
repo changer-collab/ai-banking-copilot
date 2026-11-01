@@ -47,6 +47,7 @@ _CARDS = (
 
 _WEALTH_PRODUCTS = (
     ("wp_cash", "活期理财篮子", "R1", 0, 180, 100),
+    ("wp_short", "稳盈短期 A", "R2", 30, 260, 10000),
     ("wp_bond", "稳利债券 A", "R2", 90, 320, 100000),
     ("wp_mix", "均衡配置 B", "R3", 180, 480, 500000),
     ("wp_equity", "成长精选 C", "R4", 365, 750, 1000000),
@@ -83,9 +84,16 @@ def _build_nav_rows() -> tuple[tuple[object, ...], ...]:
 _WEALTH_HOLDINGS = (
     # (product_id, user_id, amount_cents, purchased_on)
     ("wp_cash", DEMO_USER_ID, 50000, "2026-06-10"),
+    # 起息日取基准时钟本身（不写字面量日期）：到期日恒为「基准日 + 30 天」，
+    # 演示「未到期 → 预约」链路；零随机、可复现。
+    ("wp_short", DEMO_USER_ID, 200000, DEFAULT_BOOKING_DATE.isoformat()),
     ("wp_bond", DEMO_USER_ID, 300000, "2026-03-18"),
 )
-"""两笔种子持仓：赎回必须校验持仓（H1），因此种子库必须**有持仓可赎**。"""
+"""三笔种子持仓：赎回必须校验持仓（H1），因此种子库必须**有持仓可赎**。
+
+`wp_cash` 无期限（推不出到期日）；`wp_bond` 已过推算到期日，演示「已到期」路径；
+`wp_short` 起息于基准日、30 天期限 ⇒ 到期日在未来，演示「未到期 → 预约」链路。
+"""
 
 _SUBSCRIPTIONS = (
     # (subscription_id, user_id, merchant, amount_cents, period, next_charge_on, status, card_id)

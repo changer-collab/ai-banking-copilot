@@ -71,7 +71,7 @@ def test_holdings_dispute_is_answered_with_gateway_facts(deps: AppDeps) -> None:
     view = Session(deps).submit("持仓对不上")
     assert view.state is SessionState.IDLE
     assert view.message.startswith("你的理财持仓（演示数据）：")
-    assert view.message.count("- ") == 2
+    assert view.message.count("- ") == 3
 
 
 def test_third_party_account_is_a_capability_boundary_not_a_policy_rejection(
@@ -117,11 +117,15 @@ def test_risk_mismatch_is_refused_before_asking_for_the_amount(deps: AppDeps) ->
 
 
 def test_risk_level_in_the_utterance_selects_the_product(deps: AppDeps) -> None:
-    """「买 1000 元 R2」⇒ 选中 R2 的稳利债券 A，金额不再被 R2 污染。"""
-    text, view = _card_text(deps, "买 1000 元 R2", {"account": "acc_savings"})
-    assert "稳利债券 A" in text
+    """「买 5000 元 R3」⇒ 选中 R3 的均衡配置 B，金额不再被 R3 污染。
+
+    种子目录里 R2 有两只（稳盈短期 A / 稳利债券 A），等级词不再唯一，
+    按既有规则应转澄清；本用例改用仍唯一的 R3 验证「等级词选品」这条判据。
+    """
+    text, view = _card_text(deps, "买 5000 元 R3", {"account": "acc_savings"})
+    assert "均衡配置 B" in text
     assert "活期理财篮子" not in text
-    assert "1000" in text
+    assert "5000" in text
     assert view.plan is not None
 
 

@@ -37,8 +37,29 @@ from ai_banking_copilot.web.channels.render import render_feishu_card
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 DEFAULT_REPLAY_ENCRYPT_KEY = "replay-key"
+WEB_BASE_ENV = "AIB_PUBLIC_BASE_URL"
+"""对外站点根地址：卡片里的「打开网站处理」链接用它拼；缺省本机演示地址。"""
+DEFAULT_WEB_BASE = "http://127.0.0.1:8000"
+"""未配置 `AIB_PUBLIC_BASE_URL` 时的站点根：本机演示，不代表生产域名。"""
+LEVEL_YELLOW = "YELLOW"
+"""唯一允许在 IM 侧直接确认的等级：红卡与缺数据只给链接，不走按钮执行。"""
 SIGNATURE_MAX_SKEW_S = 300.0
 """回调时间戳允许的偏移（秒）。超过即拒绝，避免旧报文被无限期重放。"""
+
+
+def _web_base() -> str:
+    """对外站点根：环境变量优先；缺省本机演示地址，去掉尾部斜杠。"""
+    return (os.environ.get(WEB_BASE_ENV, "").strip() or DEFAULT_WEB_BASE).rstrip("/")
+
+
+def _url_button(content: str, url: str) -> dict[str, object]:
+    """纯链接按钮：**不带 `value`**，平台回调不会被解析成确认命令。"""
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": content},
+        "type": "default",
+        "url": url,
+    }
 
 
 class FeishuProtocolError(ValueError):
@@ -565,51 +586,68 @@ class FeishuAdapter:
         )
 
     def render(self, outbound: OutboundMessage) -> Mapping[str, object]:
-        """复用统一计划卡事实；**只有待确认**的卡才附飞书确认按钮。
+        """复用统一计划卡事实；**只有黄卡待确认**才附飞书确认按钮。
 
         绿卡在 IM 侧由调度层自动执行（等价 Web 端浏览器自动点确认），回执不应再带按钮；
-        黄/红卡执行完同样只出回执，避免重复执行入口。
+        红卡 / 缺等级的待确认卡只给「打开网站处理」链接：强验证与人工复核必须在 Web 端
+        完成，IM 按钮不得成为绕过冻结校验的执行入口。缺数据则只给「补齐信息」链接。
+
+        红卡与缺数据按钮**只带 `url`、不带 `value`**，平台回调不会把它们当成确认命令。
         """
         rendered = dict(render_feishu_card(outbound))
+        card = outbound.card if isinstance(outbound.card, Mapping) else None
+        card_id = card.get("card_id") if card is not None else None
+        frozen_hash = card.get("frozen_hash") if card is not None else None
+        if outbound.state == "needs_clarification":
+            return self._append_action(
+                rendered, _url_button("打开网站补齐信息", f"{_web_base()}/?focus=due")
+            )
         if outbound.state != "awaiting_confirm":
             return rendered
-        card = outbound.card
-        if not isinstance(card, Mapping):
-            return rendered
-        card_id = card.get("card_id")
-        frozen_hash = card.get("frozen_hash")
         if not isinstance(card_id, str) or not isinstance(frozen_hash, str):
             return rendered
+        if outbound.level != LEVEL_YELLOW:
+            return self._append_action(
+                rendered,
+                _url_button("打开网站处理", f"{_web_base()}/?focus=due&card={card_id}"),
+            )
+        return self._append_action(
+            rendered,
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "确认办理"},
+                "type": "primary",
+                "value": {
+                    "action": "confirm",
+                    "card_id": card_id,
+                    "frozen_hash": frozen_hash,
+                },
+            },
+        )
+
+    @staticmethod
+    def _append_action(
+        rendered: dict[str, object], button: Mapping[str, object]
+    ) -> dict[str, object]:
         elements = rendered.get("elements")
         if not isinstance(elements, list):
             return rendered
-        elements.append(
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "确认办理"},
-                        "type": "primary",
-                        "value": {
-                            "action": "confirm",
-                            "card_id": card_id,
-                            "frozen_hash": frozen_hash,
-                        },
-                    }
-                ],
-            }
-        )
+        elements.append({"tag": "action", "actions": [button]})
         return rendered
 
     def send(
         self,
         outbound: OutboundMessage,
         *,
+        receive_id_type: str = "chat_id",
         on_attempt: AttemptCallback | None = None,
         on_retry: RetryCallback | None = None,
     ) -> int:
-        """向真实飞书会话发送交互卡片；回调入口可将此方法放入后台任务。"""
+        """向真实飞书会话发送交互卡片；回调入口可将此方法放入后台任务。
+
+        `receive_id_type` 默认 `chat_id`（既有群 / 会话回调路径不变）；按人推送时传
+        `open_id`，`receive_id` 仍复用 `outbound.chat_id` 字段承载该 id。
+        """
         if not self.config.configured or self.replay_mode:
             raise FeishuProtocolError("feishu_send_requires_live_config")
         app_id = self.config.app_id
@@ -617,10 +655,14 @@ class FeishuAdapter:
         if app_id is None or app_secret is None:
             raise FeishuProtocolError("feishu_credentials_missing")
         token = self._tenant_token(app_id, app_secret)
+        url = (
+            "https://open.feishu.cn/open-apis/im/v1/messages"
+            f"?receive_id_type={receive_id_type}"
+        )
 
         def attempt() -> int:
             status, response = _post_json(
-                "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+                url,
                 {
                     "receive_id": outbound.chat_id,
                     "msg_type": "interactive",

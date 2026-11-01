@@ -119,6 +119,6 @@ def test_transaction_facts_only_expose_valid_card_tail(
 
 def test_collection_readers_return_seeded_cards_and_products(gateway: FactGateway) -> None:
     assert len(gateway.cards_of(DEMO_USER_ID)) == 2
-    assert len(gateway.wealth_products()) == 4
+    assert len(gateway.wealth_products()) == 5
     assert len(gateway.subscriptions_of(DEMO_USER_ID)) == 3
     assert len(gateway.payees_of(DEMO_USER_ID)) == 5

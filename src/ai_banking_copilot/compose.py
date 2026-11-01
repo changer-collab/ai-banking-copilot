@@ -72,6 +72,7 @@ from ai_banking_copilot.web.app import (
 )
 from ai_banking_copilot.web.auth import DEMO_ACCOUNTS, AuthService, init_auth_schema
 from ai_banking_copilot.web.bill_narrative import LlmBillNarrator
+from ai_banking_copilot.web.channels.feishu import FeishuAdapter, FeishuConfig
 from ai_banking_copilot.web.channels.identity import init_channel_schema
 from ai_banking_copilot.web.conversation_store import (
     ConversationStore,
@@ -89,6 +90,9 @@ _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 REVIEW_CHANNEL_ENV = "AIB_REVIEW_CHANNEL"
 REVIEW_REQUIRED_ENV = "AIB_REVIEW_REQUIRED"
 INSIGHT_DB_ENV = "AIB_INSIGHT_DB"
+
+PUSH_ENABLED_ENV = "AIB_ENABLE_PUSH"
+"""到期推送调度器开关：**默认关闭**（置真值才在 lifespan 里每 60s 扫一次到期预约）。"""
 
 SESSION_RISK_STRICT_ENV = "AIB_SESSION_RISK_STRICT"
 """会话风控严格模式（G-03）：置为真值时，缺少可信风控结果即升级核验（fail-closed）。"""
@@ -398,6 +402,10 @@ def build_deps(
         demo_password=demo_password,
         conversations=ConversationStore(activity_store),
         life_events=LifeEventStore(activity_store),
+        feishu=FeishuAdapter(FeishuConfig.from_env(source)),
+        enable_push_scheduler=(
+            source.get(PUSH_ENABLED_ENV, "").strip().lower() in _DISABLED_VALUES
+        ),
         receipts=StoreReceiptReader(read_store),
         model_observations=model_observations,
         session_risk_strict=build_session_risk_strict(env),
