@@ -124,6 +124,24 @@ def test_kernel_query_scope_ignores_payee_in_another_clause(gateway: FactGateway
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "列出活期账户本月金额超过两百元的消费",
+        "统计储蓄账户这个月超过 200 元的支出",
+        "列出我名下账户本月金额超过两百元的消费",
+    ],
+)
+def test_amount_and_time_predicate_is_not_treated_as_foreign_object(text: str) -> None:
+    """谓词不是对象：金额 / 时间条件剥离后只剩「活期账户」这类自称词，不得追问账户。"""
+    fill = fill_control_slots(
+        "account.transactions",
+        SlotInputs(text=text, today=TODAY, selected={"account": "acc_current"}),
+    )
+    assert fill.questions == ()
+    assert fill.slots["account"] == "acc_current"
+
+
+@pytest.mark.parametrize(
     ("text", "account_id"),
     [
         ("请查我的储蓄账户余额", "acc_savings"),

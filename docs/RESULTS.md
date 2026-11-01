@@ -358,6 +358,23 @@ python -m pytest -q --junitxml=runtime/junit-2026-10-31.xml
 
 ---
 
+### 17. 生活事件与登录收口后基线（2026-11-01，`38a3a55` 之后工作树）
+
+```
+python -m pytest --junitxml=runtime/pytest-2026-11-01.xml -q
+                    # junit：tests=2144 failures=1 errors=0 skipped=0（610.4s）
+python -m pytest tests/web/test_channels_feishu_route.py::test_live_feishu_preadmission_is_consumed_without_second_charge -q
+                    # 1 passed（单跑）
+```
+
+- 提交：`38a3a55`（`fix(life-events): 生活页可见已登记预约、日历显示到期产品、旧记录回填步骤`）。跑数时工作树另有 11-01 **未提交的源码改动**（`planning/slots.py` / `web/session.py` / `web/assets/*` / 三个测试文件），本轮材料改动只动 `docs/`。
+- 较 §16 的 **2064** 增加 **80** 条：生活事件（流水 / 到期预约 / 失败补偿 / 私密隔离 / 日历回填）、未登录收口、匿名只读接口、飞书分级按钮、呈现层白名单与查询范围等用例。
+- **唯一失败为已知时序敏感用例**：`test_live_feishu_preadmission_is_consumed_without_second_charge` 连续 30 次请求的限流边界在高负载下变成「第 22 次才 429」（期望第 21 次即 429）；**单跑 1 passed**，与 §15 记录的同类抖动一致，非本轮文档改动引入。
+- 因此本节口径为 **2144 例 / 2143 通过 / 1 条时序抖动（单跑通过）**，**不写「全绿」**。
+- 未随本节复跑：`ruff check .`、`mypy`、`scripts/check_served_page.py`、`scripts/e2e_check.py`、`scripts/check_design_sync.py`；提交前需补跑门禁。
+
+---
+
 ## 四个数字的口径（2026-10-27 冻结）
 
 > 本节只冻结「怎么算」，**不填数**。实测值在跑数日由 `runtime/benchmark/results.json` 回填，并注明提交号与数据集哈希。

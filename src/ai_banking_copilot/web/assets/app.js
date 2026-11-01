@@ -221,6 +221,8 @@ async function apiFetch(method, path, body, headers) {
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
+  /* 请求一旦成功就说明链路已恢复：离线标记必须自己解除，否则按钮会一直禁用 */
+  if (state.offline) setOfflineState(false);
   let data = {};
   try {
     data = await response.json();
@@ -2929,8 +2931,13 @@ function renderStage() {
   state.response.innerHTML = state.card
     ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
     : (state.panel || "") + state.notice;
-  if (runChain) state.response.insertBefore(runChain, state.response.firstChild);
-  state.response.innerHTML += roleChainHtml();
+  if (runChain) {
+    /* 三分类 / 澄清回合没有可执行计划：运行链路里的「已拒绝 · 未执行」只会让人误以为被风控拦了 */
+    runChain.hidden = Boolean(state.triage) || (state.phase === "blocked" && !state.decision);
+    state.response.insertBefore(runChain, state.response.firstChild);
+  }
+  /* 没有裁决就没有「AI 链路」可回显；三分类不是裁决，不能挂调试行 */
+  if (state.decision) state.response.innerHTML += roleChainHtml();
   if (el("vcode")) el("vcode").value = code;
   if (state.task) state.task.appendChild(el("task-actions"));
   showRequestStatus();
@@ -3171,9 +3178,33 @@ function verifyHtml() {
 function setOfflineState(offline) {
   state.offline = offline;
   const marker = el("offline-state");
-  if (marker) marker.hidden = !offline;
+  if (marker) {
+    marker.hidden = !offline;
+    if (offline && !el("btn-reconnect")) {
+      /* 只提示不给出路等于把人锁死：给一个自己收回离线态的入口 */
+      marker.innerHTML =
+        '当前离线：提交、确认和挑战已禁用。' +
+        '<button class="btn btn--sm" id="btn-reconnect" type="button">重新连接</button>';
+      el("btn-reconnect").addEventListener("click", reconnect);
+    }
+  }
   if (offline) timelineAdd("当前离线：提交、确认、挑战和其他写操作已禁用。", "warn");
   setButtons();
+}
+
+/* 重新连接：用一次只读请求确认服务端可达；成功就解除离线态并刷新可选对象。 */
+async function reconnect() {
+  const button = el("btn-reconnect");
+  if (button) button.disabled = true;
+  try {
+    await apiFetch("GET", "/api/options");
+    setOfflineState(false);
+    await refreshOptions();
+    timelineAdd("已重新连接服务端。", "done");
+  } catch (_) {
+    timelineAdd("仍连不上服务端，请检查网络后重试。", "stop");
+    if (button) button.disabled = false;
+  }
 }
 
 function setButtons() {
@@ -3194,7 +3225,9 @@ function setButtons() {
   el("btn-submit").disabled = archiveOnly || offline || busy || !state.options;
   el("btn-due").disabled = archiveOnly || offline || busy || !state.options;
   el("btn-reset").disabled = busy;
-  el("task-actions").hidden = !state.task || (!state.card && state.phase !== "blocked");
+  el("task-actions").hidden = !state.task || (!state.card && !state.decision);
+  /* 没有计划卡就没有「确认并执行」：三分类 / 澄清回合不该出现一个永远点不动的按钮 */
+  el("btn-confirm").hidden = !state.card;
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     el(`select-${slot}`).disabled = offline || busy || !state.options;
   });
@@ -3298,6 +3331,8 @@ async function applySubmission(data) {
   }
   const triage = data.triage || null;
   state.triage = triage;
+  /* 只有**真实裁决**（策略拒绝）才保留决策与链路调试行；三分类不是裁决 */
+  state.decision = triage ? null : data.decision || null;
   state.phase = data.state === "blocked" ? "blocked" : "clarifying";
   state.clarifications = data.clarifications || [];
   /* 场景层追问（如「这笔 6800 是不是我刷的」）只有一句话、没有结构化槽位表单：
@@ -6385,7 +6420,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=72", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=73", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

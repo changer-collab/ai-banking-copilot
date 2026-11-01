@@ -125,7 +125,9 @@ _QUERY_NOUN = re.compile(r"余额(?!宝)|(?:异常|可疑|大额)?交易(?:流�
 _QUERY_PREFIX = re.compile(
     r"^(?:(?:请|麻烦|劳驾|帮我|帮忙|给我|我想|我要|想知道|想|把|能否|能不能|可以|先|再|就|有没有)"
     r"|(?:我)?(?:能|可以)|(?:按|照)(?:我)?选(?:择|定)?的"
-    r"|(?:查询|查看|查查|查|看看|看|核对)(?:一下|下)?|\s)+"
+    r"|(?:查询|查看|查查|查|看看|看|核对)(?:一下|下)?"
+    # 「列出 / 统计 / 筛选」同样是查询动词：不剥掉会让后面的对象限定整句失配
+    r"|(?:列出|列举|列|统计|汇总|筛选|找出|盘点|列一下)(?:一下|下)?|\s)+"
 )
 _SELF_QUERY_OBJECT = re.compile(
     r"(?:(?:我|本人|自己|名下|当前|已选|选中|这个|那个|这张|那张|该|本|在|的|银行|账户|帐户|银行卡"
@@ -133,11 +135,27 @@ _SELF_QUERY_OBJECT = re.compile(
     r"|(?:近|过去)?[一二三四五六七八九十\d]+(?:个月|年|月|天|日|周))\s*)*"
 )
 _THIRD_QUERY_OBJECT = re.compile(
-    r"(?:他|她|别人|其他人)(?:们)?(?:的|名下|(?:那张|这张)?(?:账户|帐户|银行卡|储蓄卡|卡))"
+    r"(?:他|她|别人|其他人|老婆|妻子|爱人|老公|丈夫|爸爸|妈妈|父母|儿子|女儿|孩子|家人|同事|朋友)"
+    r"(?:们)?(?:的|名下|(?:那张|这张)?(?:账户|帐户|银行卡|储蓄卡|卡))"
 )
 _QUERY_OBJECT_PART = re.compile(r"[，,。；;、]|" + _QUERY_NOUN.pattern)
 _QUERY_OBJECT_INTRO = re.compile(r"^(?:是|要|用|选)(?:查|看)?")
 _QUERY_OBJECT_SPECIFIED = re.compile(r"^(?:我要|我想用|我想选|要|用|选|是(?!多少|几|什么|否))")
+_QUERY_AMOUNT_FILTER = re.compile(
+    r"(?:金额|数额|总计|合计)?\s*(?:超过|多于|大于|高于|不低于|不足|低于|少于|小于|不高于)\s*"
+    r"[0-9一二三四五六七八九十百千万两.]+\s*(?:元|块)"
+)
+"""金额条件（「超过两百元」）：账户流水查询**不支持**按金额筛选，需如实说明能力边界。"""
+_QUERY_PREDICATE_TAIL = re.compile(
+    r"(?:本月|上月|这个月|上个月|今年|去年|近|过去)?"
+    r"(?:[一二三四五六七八九十\d]+(?:个月|年|月|天|日|周))?"
+    r"(?:的)?"
+    r"(?:金额|数额|总计|合计)?"
+    r"(?:超过|多于|大于|高于|不低于|不足|低于|少于|小于|不高于)"
+    r"\s*[0-9一二三四五六七八九十百千万两.]+\s*(?:元|块)?(?:钱)?"
+    r"的?(?:消费|支出|交易|记录|流水|明细)?"
+)
+"""查询谓词尾巴（「本月金额超过两百元的消费」）：对象限定只取谓词之前的部分。"""
 
 
 @dataclass(frozen=True)
@@ -284,6 +302,8 @@ def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | Non
 
     这里只支持本人或账户泛称，不为命名银行、产品或第三人生成映射。
     查询名词前或明确指定的对象须可解释，不能因省略“的/账户”而套用本人账户。
+    但**谓词不是对象**：「列出活期账户本月金额超过两百元的消费」里，对象只有「活期账户」，
+    时间与金额条件由 `_self_subject` 先剥掉，不能因此判成他人账户。
     """
     if action not in _ACCOUNT_QUERIES:
         return None
@@ -297,8 +317,7 @@ def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | Non
     query_noun = _QUERY_NOUN.search(text)
     if query_noun is not None:
         leading = re.split(r"[，,。；;、]", text[:query_noun.start()])[-1]
-        subject = _QUERY_PREFIX.sub("", leading).strip()
-        subject = _QUERY_OBJECT_INTRO.sub("", subject).strip()
+        subject = _self_subject(leading)
         if subject and not _SELF_QUERY_OBJECT.fullmatch(subject):
             outside = True
     # 对象可能跟在查询词后，也可能没有“余额”等查询名词；完整 scope 均需保留。
@@ -313,15 +332,29 @@ def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | Non
         explicit_subject = any(
             token in subject for token in ("银行", "账户", "帐户", "银行卡", "储蓄卡", "余额宝")
         ) or ((index == 0 or introduced) and "的" in subject) or (specified and bool(subject))
-        if explicit_subject and not _SELF_QUERY_OBJECT.fullmatch(subject):
+        # 判定只保留对象本身：「本月金额超过两百元的消费」这类谓词不是对象的一部分。
+        if explicit_subject and not _SELF_QUERY_OBJECT.fullmatch(_self_subject(subject)):
             outside = True
             break
     if not outside:
         return None
+    return _outside_scope_question()
+
+
+def _outside_scope_question() -> SlotQuestion:
     return SlotQuestion(
         "account",
         "当前仅支持查询所列本人演示账户，原文对象尚未匹配；请明确改查本人账户后重新提交。",
     )
+
+
+def _self_subject(text: str) -> str:
+    """剥掉动词前缀、引语、金额条件与时间谓词，只留对象限定本身。"""
+    subject = _QUERY_PREFIX.sub("", text).strip()
+    subject = _QUERY_OBJECT_INTRO.sub("", subject).strip()
+    subject = _QUERY_PREDICATE_TAIL.sub("", subject).strip()
+    subject = _QUERY_AMOUNT_FILTER.sub("", subject).strip()
+    return re.sub(r"(?:的|里|中)$", "", subject).strip()
 
 
 def _accept(slot: str, value: object) -> object:

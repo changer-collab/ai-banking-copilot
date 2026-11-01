@@ -337,11 +337,13 @@ body { background: var(--pg-bg); line-height: 1.52; }
 .task-more .btn-row { margin-top: var(--s-2); justify-content: flex-end; }
 .request-status { margin: 0; color: var(--blue-600); font-size: var(--fs-small); }
 
-/* 未结束办理的拦截条 */
+/* 未结束办理的拦截条：固定在**顶部**而不是底部——底部会盖住输入框与发送按钮，
+   用户点了发送只看到「没反应」，实际是被提示条挡住了。 */
 .task-guard {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--s-6) + env(safe-area-inset-bottom, 0px));
+  top: calc(var(--s-6) + 48px);
+  bottom: auto;
   transform: translateX(-50%);
   z-index: 40;
   width: min(560px, calc(100% - var(--s-6) * 2));

@@ -178,7 +178,7 @@ from ai_banking_copilot.web.plan_card import (
 from ai_banking_copilot.web.session_manager import PROCESS_SESSION_LOCK
 from ai_banking_copilot.web.session_repository import SessionPersistenceError
 from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
-from ai_banking_copilot.web.triage import TriageVerdict, triage
+from ai_banking_copilot.web.triage import TriageSuggestion, TriageVerdict, triage
 from ai_banking_copilot.web.wording import polish
 
 if TYPE_CHECKING:
@@ -1033,6 +1033,14 @@ class Session:
             except _WealthRefusal as refusal:
                 return self._refuse(str(refusal), utterance)
             self._remember_wealth_attempt(intents)
+            # 账户查询带金额条件：查询动作本身不支持该条件，先如实说明能力边界，
+            # 不能出一张「条件被静默忽略」的查询卡。
+            amount_filter = _amount_filter_verdict(utterance, intents)
+            if amount_filter is not None:
+                return self._refuse(
+                    amount_filter.message, utterance,
+                    capability_boundary=True, triage_verdict=amount_filter,
+                )
             if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
                 self._message = _with_notes(
@@ -1065,6 +1073,16 @@ class Session:
             try:
                 handler = select_handler(intents)
             except UnknownScenarioError:
+                # 模型给的意图没有对应处理器：仍按三分类回答，
+                # 不能退回「未知意图」这种对用户没有信息量的兜底。
+                verdict = triage(
+                    utterance, low_confidence=any("置信度不足" in note for note in notes)
+                )
+                if verdict is not None:
+                    return self._refuse(
+                        verdict.message, utterance,
+                        capability_boundary=True, triage_verdict=verdict,
+                    )
                 return self._refuse(
                     _with_notes("未知意图：无法匹配任何场景", notes),
                     utterance,
@@ -1129,6 +1147,19 @@ class Session:
             on_stage=on_stage,
             allow_freeform_clarification=False,
         )
+        repeated = tuple(
+            ask.slot for ask in view.clarifications
+            # 只拦「账户对象」这一槽位的死循环：已明确选了账户仍被追问同一句，
+            # 说明原文对象无法映射到本人账户；其它槽位（金额 / 动作）重复追问
+            # 可能是另一条意图的同类槽位，不能一律判死。
+            if _base_slot_name(ask.slot) == "account" and "account" in answers
+        )
+        if repeated:
+            # 同一槽位刚回答过又被追问：说明原文对象无法映射到本人账户，再问也是死循环。
+            return self._refuse(
+                _CLARIFY_REPEAT_REFUSAL, self._last_utterance or "",
+                capability_boundary=True, triage_verdict=_CLARIFY_REPEAT_VERDICT,
+            )
         delivery = {
             key: str(value) for key, value in answers.items()
             if key in {"delivery_address", "delivery_time"} and value
@@ -3643,6 +3674,54 @@ _THIRD_PARTY_REFUSAL = (
     "能力边界：仅支持操作你本人名下的账户与银行卡，不支持代他人申购或赎回理财；"
     "如需帮家人办理，请由账户本人登录后操作。"
 )
+
+
+_AMOUNT_FILTER = re.compile(
+    r"(?:超过|多于|大于|高于|不低于|不足|低于|少于|小于|不高于)\s*"
+    r"[0-9一二三四五六七八九十百千万两.]+\s*(?:元|块)"
+)
+_ACCOUNT_QUERY_ACTIONS = frozenset({"account.balance", "account.transactions"})
+_CLARIFY_REPEAT_REFUSAL = (
+    "已收到补充信息，但原文里的对象仍无法对应到本人账户，所以不能按本人账户改查。"
+    "请把指令里的对象改成「本人账户 / 活期账户」后重新提交。"
+)
+_CLARIFY_REPEAT_VERDICT = TriageVerdict(
+    "ambiguous",
+    _CLARIFY_REPEAT_REFUSAL,
+    (
+        TriageSuggestion(label="查活期账户余额", text="查一下活期账户的余额"),
+        TriageSuggestion(label="查上月账单", text="查一下上个月账单"),
+    ),
+)
+_AMOUNT_FILTER_VERDICT_MESSAGE = (
+    "账户流水目前只能按时间区间查，暂不支持「金额超过多少元」这类金额条件——这是当前能力子集。"
+    "可以改看月度账单分析（会把大额项单独列出），或按时间区间查看交易明细。"
+)
+
+
+def _base_slot_name(slot: str) -> str:
+    """澄清槽位去掉 `intent_<n>_` 前缀，与前端 `baseSlot()` 同口径。"""
+    return re.sub(r"^intent_\d+_", "", slot)
+
+
+def _amount_filter_verdict(utterance: str, intents: Sequence[Intent]) -> TriageVerdict | None:
+    """账户查询带金额条件：如实说明能力边界，不把条件静默丢掉。
+
+    命中条件：句子含「超过 / 低于 … 元」且已装配出账户查询意图。此时若照常出卡，
+    查询结果会**忽略**金额条件，等于对用户撒谎；因此按「模糊」中性卡回应并给替代动作。
+    """
+    if _AMOUNT_FILTER.search(utterance) is None:
+        return None
+    if not any(intent.action in _ACCOUNT_QUERY_ACTIONS for intent in intents):
+        return None
+    return TriageVerdict(
+        "ambiguous",
+        _AMOUNT_FILTER_VERDICT_MESSAGE,
+        (
+            TriageSuggestion(label="看月度账单", text="查上个月账单"),
+            TriageSuggestion(label="查余额", text="查一下余额"),
+        ),
+    )
 
 
 def _third_party_account_refusal(utterance: str) -> str | None:
