@@ -193,23 +193,6 @@ AUTH_MODE_DEMO = "demo"
 AUTH_COOKIE_NAME = "aib_session"
 """会话 Cookie：`HttpOnly` + `SameSite=Lax`，页面脚本读不到 token。"""
 
-_ANONYMOUS_BANNER = (
-    '<div class="anon-banner" role="status">演示数据 · 未登录只读；'
-    '办理业务请先 <a href="/login">登录</a>。</div>'
-)
-"""未登录页面壳的提示条：显式标注演示数据，避免把演示账户当成本人真实账户。"""
-
-
-def _anonymous_shell(html: str) -> str:
-    """未登录只读壳：`<html>` 打 `data-demo-readonly`，并在 `</body>` 前注入演示提示。"""
-    shell = html
-    if "<html " in shell:
-        shell = shell.replace("<html ", '<html data-demo-readonly="1" ', 1)
-    if "</body>" not in shell:
-        return shell + _ANONYMOUS_BANNER
-    return shell.replace("</body>", f"{_ANONYMOUS_BANNER}\n</body>", 1)
-
-
 LINK_CODE_TTL_SECONDS = 300
 """「连接飞书」绑定码的有效期（秒）：与登录票据同量级，够用户切到飞书发一句。"""
 
@@ -870,14 +853,20 @@ def create_app(deps: AppDeps) -> FastAPI:
         return user_id
 
     def _page_or_login(request: Request, html: str) -> HTMLResponse:
-        """页面入口：`demo` 模式未登录时也给**只读页面壳**（ME-02）。
+        """页面入口：`demo` 模式未登录时**返回登录页**（默认必须先登录）。
 
-        壳 HTML 内嵌资源版本号，**必须 no-store**：否则浏览器缓存旧 HTML 后会一直引用
+        登录页不引用 `app.js` / `workspace.css`，因此不会在未登录态触发需要身份的
+        只读接口（`/api/options`、`/api/conversations` 均 401），首屏不会刷出
+        「读取失败」类错误文案。
+        已登录页面内嵌资源版本号，**必须 no-store**：否则浏览器缓存旧 HTML 后会一直引用
         旧的 `workspace.css?v=*`，出现「代码已更新、页面还是旧版」的假象。
-        未登录时必须显式标注演示数据并保留登录入口，避免访客把演示账户当成本人账户。
         """
         if auth_enabled and not _authenticated(request):
-            return HTMLResponse(_anonymous_shell(html), headers={"Cache-Control": "no-store"})
+            accounts = tuple(row[0] for row in DEMO_ACCOUNTS)
+            return HTMLResponse(
+                render_login_page(accounts, deps.demo_password),
+                headers={"Cache-Control": "no-store"},
+            )
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     def _session_for(session_id: str, user_id: str) -> Session:

@@ -74,16 +74,15 @@ def _login(client: TestClient, username: str) -> None:
     assert response.status_code == 200, response.text
 
 
-def test_unauthenticated_page_is_readonly_shell_and_write_api_is_401(
+def test_unauthenticated_page_requires_login_and_write_api_is_401(
     client: TestClient,
 ) -> None:
-    """ME-02：未登录可浏览只读壳（带演示提示与登录入口），写接口仍一律 401。"""
+    """默认必须先登录：未登录访问页面拿到登录页，写接口仍一律 401。"""
     page = client.get("/")
     assert page.status_code == 200
-    assert 'id="app"' in page.text, "未登录也应能看到只读页面壳"
-    assert 'data-demo-readonly="1"' in page.text
-    assert "演示数据" in page.text and 'href="/login"' in page.text
-    assert 'id="login-form"' not in page.text, "壳里不内联登录表单，登录走独立入口"
+    assert 'id="login-form"' in page.text, "未登录必须先登录，不再下发只读页面壳"
+    assert 'data-demo-readonly="1"' not in page.text
+    assert "/assets/app.js" not in page.text, "登录页不加载应用脚本，未登录态不触发需身份的只读接口"
 
     login = client.get("/login")
     assert login.status_code == 200
@@ -94,7 +93,7 @@ def test_unauthenticated_page_is_readonly_shell_and_write_api_is_401(
     assert api.json()["detail"] == "auth_required"
 
     im = client.get("/im")
-    assert 'data-demo-readonly="1"' in im.text and "演示数据" in im.text
+    assert 'id="login-form"' in im.text and "/assets/app.js" not in im.text
 
 
 def test_login_page_explains_product_and_shows_demo_credentials(client: TestClient) -> None:

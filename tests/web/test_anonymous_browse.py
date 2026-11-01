@@ -1,7 +1,8 @@
-"""ME-02 未登录只读浏览：页面壳可开、只读 GET 给演示身份、写接口仍 401。
+"""默认必须先登录：未登录访问页面拿到登录页；只读 GET 仍给演示身份、写接口仍 401。
 
-按 `AIB_AUTH_MODE=demo` 的真实装配口径起服务，但不登录：访客只能读，且页面与响应体
-必须显式标注「演示数据」；办理业务的写接口一律仍走 `current_user`，不得被演示身份顶替。
+按 `AIB_AUTH_MODE=demo` 的真实装配口径起服务，但不登录：页面入口一律先登录
+（不再下发只读页面壳，避免未登录态触发 `/api/options` / `/api/conversations` 等
+需要身份的只读接口）；办理业务的写接口一律仍走 `current_user`，不得被演示身份顶替。
 """
 
 from __future__ import annotations
@@ -31,16 +32,16 @@ def anonymous_client(deps: AppDeps, rw_store: Store) -> Iterator[TestClient]:
         yield opened
 
 
-def test_anonymous_visitor_gets_readonly_shell_with_demo_banner(
+def test_anonymous_visitor_gets_login_page(
     anonymous_client: TestClient,
 ) -> None:
     page = anonymous_client.get("/")
     assert page.status_code == 200
     assert page.headers["cache-control"] == "no-store"
-    assert 'id="app"' in page.text, "未登录也应能打开页面壳"
-    assert 'data-demo-readonly="1"' in page.text
-    assert "演示数据" in page.text, "访客不得把演示账户误当成本人真实账户"
-    assert 'href="/login"' in page.text
+    assert 'id="login-form"' in page.text, "未登录必须先登录，不再下发只读页面壳"
+    assert "演示账号" in page.text
+    assert 'data-demo-readonly="1"' not in page.text
+    assert "/assets/app.js" not in page.text, "登录页不加载应用脚本，未登录态不触发需身份的只读接口"
 
 
 def test_readonly_life_events_fall_back_to_demo_identity(
