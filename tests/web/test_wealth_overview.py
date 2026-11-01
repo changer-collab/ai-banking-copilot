@@ -148,6 +148,24 @@ def test_overview_is_read_only(deps: AppDeps, rw_store: Store) -> None:
     assert _business_state(rw_store) == before
 
 
+def test_catalog_carries_disclosure_and_suitability(deps: AppDeps) -> None:
+    """产品目录必须带费率、登记编码、流动性与匹配意见；孰高原则可见。"""
+    products = _by_product(_overview(deps), "products")
+    bond = products["wp_bond"]
+    assert bond["fees"] == {
+        "subscription": "0.00%",
+        "service": "0.30%",
+        "custody": "0.02%",
+    }
+    assert str(bond["registration_code"]).startswith("DEMO-")
+    assert bond["liquidity"]["mode"] == "t_plus_1"
+    assert "封闭期" in str(bond["liquidity"]["label"])
+    assert bond["suitability"]["conclusion"]
+    assert bond["suitability"]["main_risks"]
+    assert bond["suitability"]["unsuitable_for"]
+    assert "孰高" in str(products["wp_mix"]["risk_basis"])
+
+
 def test_catalog_carries_expandable_explanation(deps: AppDeps) -> None:
     """§8.1b：产品卡可展开「推荐理由 / 为什么不能买」，解释随 overview 一起下发。"""
     products = _by_product(_overview(deps), "products")

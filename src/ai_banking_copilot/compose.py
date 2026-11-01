@@ -17,7 +17,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from ai_banking_copilot.gateway.core_bank import CoreBank
+from ai_banking_copilot.gateway.core_bank import CoreBank, init_wealth_holdings_schema
+from ai_banking_copilot.gateway.customer_profile_store import (
+    init_customer_profile_schema,
+    seed_customer_profiles,
+)
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed_user_profiles
 from ai_banking_copilot.gateway.receipt_store import StoreReceiptReader
@@ -30,6 +34,14 @@ from ai_banking_copilot.gateway.risk_store import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database, seed_secondary_user
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
+from ai_banking_copilot.gateway.wealth_disclosure_store import (
+    init_wealth_disclosure_schema,
+    seed_wealth_disclosures,
+)
+from ai_banking_copilot.gateway.wealth_trade_store import (
+    StoreWealthTradeWriter,
+    init_wealth_trade_schema,
+)
 from ai_banking_copilot.planning.analysis_codegen import AnalysisTask, generate_analysis_code
 from ai_banking_copilot.planning.call_observation import CallObserver
 from ai_banking_copilot.planning.llm import (
@@ -298,6 +310,12 @@ def build_deps(
     seed_database(writer)
     init_risk_schema(writer)
     seed_risk_assessment(writer)
+    init_wealth_holdings_schema(writer)
+    init_wealth_disclosure_schema(writer)
+    seed_wealth_disclosures(writer)
+    init_wealth_trade_schema(writer)
+    init_customer_profile_schema(writer)
+    seed_customer_profiles(writer)
     init_merchant_schema(writer)
     seed_user_profiles(writer)
     seed_secondary_user(writer)
@@ -339,6 +357,9 @@ def build_deps(
     risk_store = Store(db_path, StoreMode.READ_WRITE)
     if resources is not None:
         resources.callback(risk_store.close)
+    wealth_trade_store = Store(db_path, StoreMode.READ_WRITE)
+    if resources is not None:
+        resources.callback(wealth_trade_store.close)
     verification_provider, verification_key, verification_strict = build_verification(db_path, env)
     verification_store = Store(db_path, StoreMode.READ_WRITE)
     init_verification_schema(verification_store)
@@ -386,6 +407,7 @@ def build_deps(
         user_id=DEMO_USER_ID,
         risk=StoreRiskAssessmentSource(read_store),
         risk_writer=StoreRiskAssessmentWriter(risk_store),
+        wealth_trades=StoreWealthTradeWriter(wealth_trade_store),
         reversal=ReversalService(core_bank),
         operator_token=build_operator_token(env),
         reviewer=build_reviewer(env, config=model_config, observer=model_observations),

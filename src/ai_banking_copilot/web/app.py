@@ -37,10 +37,13 @@ from pydantic import BaseModel, Field, StrictInt
 from ai_banking_copilot.contracts.authorization import Decision
 from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
+from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Card, Money
 from ai_banking_copilot.gateway.receipt_store import ReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
+    RETAKES_PER_12M,
+    RETAKES_PER_DAY,
     SOURCE_QUESTIONNAIRE,
     RiskAssessmentSource,
     RiskAssessmentWriter,
@@ -48,6 +51,7 @@ from ai_banking_copilot.gateway.risk_store import (
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.gateway.store import Store
+from ai_banking_copilot.gateway.wealth_trade_store import WealthTradeWriter
 from ai_banking_copilot.planning.llm import IntentModel
 from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.planning.task_observations import TaskObservations
@@ -107,7 +111,7 @@ from ai_banking_copilot.scenarios.wealth_assessment import (
     questionnaire_payload,
 )
 from ai_banking_copilot.tools.registry import ToolRegistry
-from ai_banking_copilot.web import reminders, wording
+from ai_banking_copilot.web import reminders, wealth_docs, wording
 from ai_banking_copilot.web.auth import (
     DEMO_ACCOUNTS,
     SESSION_IDLE_SECONDS,
@@ -276,6 +280,8 @@ class AppDeps:
 
     `None ⇒ POST /api/risk-assessment` 一律 404：不得把 seed 演示数据当成真实测评。
     读路径仍走 `risk`，写路径与读路径分离，理财推荐只消费读路径事实。"""
+    wealth_trades: WealthTradeWriter | None = None
+    """理财交易确认留痕通道；`None ⇒ /api/wealth/acknowledgements` 404（fail-closed）。"""
     reversal: ReversalService | None = None
     """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
     operator_token: str | None = None
@@ -438,6 +444,24 @@ class _RiskAssessmentRequest(BaseModel):
 
     risk_profile: str | None = None
     answers: dict[str, str] | None = None
+    confirm_change: bool = False
+    """结果与最近一次不一致时，客户端再次确认后置 `True` 才落库。"""
+
+
+class _WealthAckRequest(BaseModel):
+    """理财交易确认留痕：四件套阅读、声明抄录、分红方式与类型差异确认。"""
+
+    action: str
+    product_id: str
+    account_id: str | None = None
+    doc_versions: dict[str, str]
+    read_seconds: dict[str, int]
+    declaration_text: str | None = None
+    dividend_method: str | None = None
+    auto_redeem_pref: bool | None = None
+    experience_confirmed: bool = False
+    loss_ack: bool = False
+    senior_ack: bool = False
 
 
 class _ImMessageRequest(BaseModel):
@@ -1185,16 +1209,24 @@ def create_app(deps: AppDeps) -> FastAPI:
                     status_code=400,
                     detail="answers 与 risk_profile 只能二选一：等级由问卷算出，不能自填",
                 )
-            used = writer.attempts_on(user_id, deps.today)
-            quota = retake_payload(used, deps.today)
-            limit_per_day = quota["limit_per_day"]
-            if isinstance(limit_per_day, int) and used >= limit_per_day:
+            since = deps.today - timedelta(days=365)
+            used_today = writer.attempts_on(user_id, deps.today)
+            used_12m = writer.events_count_since(user_id, since)
+            quota = retake_payload(
+                used_today,
+                deps.today,
+                used_12m,
+                writer.earliest_event_on(user_id, since),
+            )
+            if used_today >= RETAKES_PER_DAY or used_12m >= RETAKES_PER_12M:
                 return JSONResponse(
                     status_code=429,
                     content={
                         "detail": (
-                            f"今日测评次数已用完（演示口径：每日 {quota['limit_per_day']} 次），"
-                            f"{quota['next_available_on']} 再试"
+                            "测评次数已用完（依据《金融机构产品适当性管理办法》第二十九条："
+                            "单日不超过 2 次、12 个月累计不超过 8 次），"
+                            f"下次可测：{quota['next_available_on']}；"
+                            "演示环境按模拟业务日计数"
                         ),
                         "retake": quota,
                     },
@@ -1203,9 +1235,38 @@ def create_app(deps: AppDeps) -> FastAPI:
                 result = evaluate_answers(request.answers)
             except AssessmentError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
+            latest = (
+                to_risk_assessment(deps.risk.assessment_for(user_id))
+                if deps.risk is not None
+                else None
+            )
+            changed = latest is not None and latest.risk_profile != result.risk_profile
+            if changed and latest is not None and not request.confirm_change:
+                return {
+                    "state": "needs_reconfirmation",
+                    "message": (
+                        f"本次结果 {result.risk_profile}，与最近一次 {latest.risk_profile} "
+                        "不一致；依据第二十九条需要提示并再次确认。"
+                    ),
+                    "previous_profile": latest.risk_profile,
+                    "retake": quota,
+                    "result": {
+                        "risk_profile": result.risk_profile,
+                        "score": result.score,
+                        "max_score": result.max_score,
+                    },
+                }
             writer.record_attempt(user_id, deps.today)
             writer.save(
                 user_id, result.risk_profile, deps.today, source=SOURCE_QUESTIONNAIRE,
+            )
+            writer.record_event(
+                user_id,
+                deps.today,
+                result.risk_profile,
+                result.score,
+                source=SOURCE_QUESTIONNAIRE,
+                previous_profile=latest.risk_profile if latest is not None else None,
             )
             return {
                 "state": "updated",
@@ -1247,15 +1308,266 @@ def create_app(deps: AppDeps) -> FastAPI:
             else None
         )
         products = deps.gateway.wealth_products()
+        disclosures = {
+            record.payload.product_id: record.payload
+            for record in deps.gateway.wealth_disclosures()
+        }
+        profile = deps.gateway.customer_suitability_profile(user_id)
+        birth_year = profile.payload.birth_year if profile is not None else None
+        customer_age = deps.today.year - birth_year if birth_year is not None else None
         return {
             "assessment": assessment,
             "products": list(
                 product_catalog(
-                    products, risk_profile, nav=nav_by_product(deps.gateway, products)
+                    products,
+                    risk_profile,
+                    nav=nav_by_product(deps.gateway, products),
+                    disclosures=disclosures,
                 )
             ),
-            "holdings": list(holdings_payload(deps.gateway, user_id)),
+            "holdings": list(
+                holdings_payload(deps.gateway, user_id, disclosures=disclosures)
+            ),
+            "customer_age": customer_age,
+            "senior_notice": customer_age is not None and customer_age >= 65,
+            "birth_year_known": birth_year is not None,
             "data_source": PRODUCT_DATA_SOURCE,
+        }
+
+    @app.get("/api/wealth/products/{product_id}")
+    def wealth_product_detail(
+        product_id: str, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """产品详情：披露、四份演示文件、是否首次购买、匹配意见。"""
+        try:
+            product = deps.gateway.wealth_product(product_id)
+        except GatewayNotFoundError as error:
+            raise HTTPException(status_code=404, detail="理财产品不存在") from error
+        disclosure = deps.gateway.wealth_disclosure(product_id)
+        disclosures = (
+            {product_id: disclosure.payload} if disclosure is not None else {}
+        )
+        entry = product_catalog(
+            [product], _valid_risk_profile(deps, user_id), disclosures=disclosures
+        )[0]
+        profile = deps.gateway.customer_suitability_profile(user_id)
+        birth_year = profile.payload.birth_year if profile is not None else None
+        customer_age = deps.today.year - birth_year if birth_year is not None else None
+        held = any(
+            record.payload.product_id == product_id
+            for record in deps.gateway.wealth_holdings_of(user_id)
+        )
+        return {
+            **entry,
+            "documents": wealth_docs.documents_payload(),
+            "declaration_text": wealth_docs.DECLARATION_TEXT,
+            "first_purchase": not held,
+            "customer_age": customer_age,
+            "senior_notice": customer_age is not None and customer_age >= 65,
+            "birth_year_known": birth_year is not None,
+        }
+
+    @app.get("/api/wealth/redemption-quote")
+    def wealth_redemption_quote(
+        product_id: str,
+        mode: str = "all",
+        value: str | None = None,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """赎回试算：全部 / 按份额 / 按金额；返回到账、快赎、大额预警。"""
+        if mode not in {"all", "shares", "amount"}:
+            raise HTTPException(status_code=400, detail="mode 只能是 all / shares / amount")
+        disclosures = {
+            record.payload.product_id: record.payload
+            for record in deps.gateway.wealth_disclosures()
+        }
+        rows = holdings_payload(deps.gateway, user_id, disclosures=disclosures)
+        position = next((row for row in rows if row["product_id"] == product_id), None)
+        if position is None:
+            raise HTTPException(status_code=404, detail="没有该产品的持仓")
+        disclosure = disclosures.get(product_id)
+        position_shares = int(str(position["share_bp"]))
+        position_cents = int(
+            (Decimal(str(position["amount_yuan"])) * 100).to_integral_value()
+        )
+        series = deps.gateway.wealth_nav_of(product_id)
+        nav_bp = series[-1].payload.nav_bp if series else 10000
+        if not bool(position["redeemable"]):
+            return {
+                "redeemable": False,
+                "reason": position["redeem_reason"],
+                "position": _position_payload(position),
+                "nav": _nav_text(nav_bp),
+                "nav_note": "模拟净值，实际以 T 日净值为准",
+            }
+        if mode == "all":
+            shares_bp = position_shares
+            amount_cents = position_cents
+        elif mode == "shares":
+            if value is None:
+                raise HTTPException(status_code=400, detail="按份额赎回需要 value")
+            try:
+                shares_bp = int((Decimal(value) * 10000).to_integral_value())
+            except (InvalidOperation, ValueError) as error:
+                raise HTTPException(status_code=400, detail="份额格式不正确") from error
+            amount_cents = shares_bp * nav_bp // 1_000_000
+        else:
+            if value is None:
+                raise HTTPException(status_code=400, detail="按金额赎回需要 value")
+            try:
+                amount_cents = int((Decimal(value) * 100).to_integral_value())
+            except (InvalidOperation, ValueError) as error:
+                raise HTTPException(status_code=400, detail="金额格式不正确") from error
+            shares_bp = amount_cents * 1_000_000 // nav_bp
+        if shares_bp <= 0 or amount_cents <= 0:
+            raise HTTPException(status_code=400, detail="赎回份额或金额必须大于 0")
+        if shares_bp > position_shares:
+            raise HTTPException(status_code=400, detail="赎回份额超过当前持仓")
+        if amount_cents > position_cents:
+            raise HTTPException(status_code=400, detail="赎回金额超过当前持仓")
+        product_type = (
+            disclosure.product_type if disclosure is not None else "unknown"
+        )
+        fast_limit = (
+            disclosure.fast_redeem_limit_cents
+            if disclosure is not None
+            else None
+        )
+        fast_redeem = (
+            product_type == "cash"
+            and fast_limit is not None
+            and amount_cents <= fast_limit
+        )
+        redeem_mode = disclosure.redeem_mode if disclosure is not None else "unknown"
+        if product_type == "cash":
+            arrival_mode = "realtime" if fast_redeem else "t_plus_1"
+            estimated = deps.today if fast_redeem else deps.today + timedelta(days=1)
+        elif redeem_mode == "t_plus_1":
+            arrival_mode = "t_plus_1"
+            estimated = deps.today + timedelta(days=1)
+        elif redeem_mode == "t_plus_3":
+            arrival_mode = "t_plus_3"
+            estimated = deps.today + timedelta(days=3)
+        else:
+            arrival_mode = "unknown"
+            estimated = deps.today
+        large = shares_bp * 2 > position_shares
+        percent = round(shares_bp * 100 / position_shares, 1) if position_shares else 0.0
+        return {
+            "redeemable": True,
+            "mode": mode,
+            "shares": _share_text(shares_bp),
+            "share_bp": shares_bp,
+            "amount_yuan": _yuan_text(amount_cents),
+            "amount_cents": amount_cents,
+            "nav": _nav_text(nav_bp),
+            "nav_note": "按最新模拟净值折算，实际以 T 日净值结算为准",
+            "arrival": {
+                "mode": arrival_mode,
+                "label": _arrival_text(arrival_mode),
+                "estimated_date": estimated.isoformat(),
+            },
+            "fast_redeem": fast_redeem,
+            "fast_redeem_limit_yuan": (
+                _yuan_text(fast_limit) if fast_limit is not None else None
+            ),
+            "large_redemption": large,
+            "percent_of_holding": percent,
+            "warning": (
+                f"该操作将赎回您该产品持仓的 {percent}%，请确认" if large else ""
+            ),
+            "position": _position_payload(position),
+        }
+
+    @app.post("/api/wealth/acknowledgements")
+    def wealth_acknowledgements(
+        request: _WealthAckRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """保存交易确认留痕；四件套、阅读时长、抄录与类型差异确认不通过即拒绝。"""
+        writer = deps.wealth_trades
+        if writer is None:
+            raise HTTPException(status_code=404, detail="交易确认留痕未装配")
+        if request.action not in {"subscribe", "redeem"}:
+            raise HTTPException(status_code=400, detail="action 只能是 subscribe / redeem")
+        try:
+            product = deps.gateway.wealth_product(request.product_id)
+        except GatewayNotFoundError as error:
+            raise HTTPException(status_code=404, detail="理财产品不存在") from error
+        disclosure = deps.gateway.wealth_disclosure(request.product_id)
+        display_risk = (
+            disclosure.payload.display_risk_level
+            if disclosure is not None
+            else product.payload.risk_level
+        )
+        missing = [
+            doc_id
+            for doc_id in wealth_docs.DOCUMENT_IDS
+            if doc_id not in request.doc_versions or doc_id not in request.read_seconds
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=400, detail=f"缺少文件确认：{'、'.join(missing)}"
+            )
+        short = [
+            doc_id
+            for doc_id in wealth_docs.DOCUMENT_IDS
+            if request.read_seconds[doc_id] < 3
+        ]
+        if short:
+            raise HTTPException(
+                status_code=400, detail=f"每份文件至少阅读 3 秒：{'、'.join(short)}"
+            )
+        held = any(
+            record.payload.product_id == request.product_id
+            for record in deps.gateway.wealth_holdings_of(user_id)
+        )
+        first_purchase = not held
+        if first_purchase and request.action == "subscribe" and display_risk in {
+            "R3", "R4", "R5"
+        }:
+            if request.read_seconds.get("risk_disclosure", 0) < 15:
+                raise HTTPException(
+                    status_code=400, detail="首次购买 R3 及以上产品，风险揭示书至少阅读 15 秒"
+                )
+            if (request.declaration_text or "").strip() != wealth_docs.DECLARATION_TEXT:
+                raise HTTPException(
+                    status_code=400, detail="风险揭示声明必须逐字抄录且完全一致"
+                )
+        product_type = disclosure.payload.product_type if disclosure is not None else ""
+        if request.action == "subscribe" and product_type in {"mixed", "equity"}:
+            if not request.experience_confirmed or not request.loss_ack:
+                raise HTTPException(
+                    status_code=400, detail="混合/权益类需确认投资经验与本金损失风险"
+                )
+        profile = deps.gateway.customer_suitability_profile(user_id)
+        birth_year = profile.payload.birth_year if profile is not None else None
+        customer_age = deps.today.year - birth_year if birth_year is not None else None
+        if (
+            request.action == "subscribe"
+            and customer_age is not None
+            and customer_age >= 65
+            and display_risk in {"R3", "R4", "R5"}
+            and not request.senior_ack
+        ):
+            raise HTTPException(status_code=400, detail="65 岁以上客户需确认特别提示")
+        ack_id = writer.save_trade_ack(
+            user_id=user_id,
+            product_id=request.product_id,
+            action=request.action,
+            doc_versions=request.doc_versions,
+            read_seconds=request.read_seconds,
+            declaration_text=request.declaration_text,
+            dividend_method=request.dividend_method,
+            auto_redeem_pref=request.auto_redeem_pref,
+            account_id=request.account_id,
+        )
+        return {
+            "state": "recorded",
+            "ack_id": ack_id,
+            "first_purchase": first_purchase,
+            "declaration_required": first_purchase
+            and request.action == "subscribe"
+            and display_risk in {"R3", "R4", "R5"},
         }
 
     @app.get("/api/bills/analysis")
@@ -2712,11 +3024,17 @@ def _mask_payee_name(name: str) -> str:
 
 
 def _retake_payload(deps: AppDeps, user_id: str) -> dict[str, object] | None:
-    """当日重测额度；写通道未装配时返回 `None`（前端据此不显示次数，绝不编造）。"""
+    """当日与 12 个月重测额度；写通道未装配时返回 `None`（前端据此不显示次数）。"""
     writer = deps.risk_writer
     if writer is None:
         return None
-    return retake_payload(writer.attempts_on(user_id, deps.today), deps.today)
+    since = deps.today - timedelta(days=365)
+    return retake_payload(
+        writer.attempts_on(user_id, deps.today),
+        deps.today,
+        writer.events_count_since(user_id, since),
+        writer.earliest_event_on(user_id, since),
+    )
 
 
 def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
@@ -2739,11 +3057,15 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
             "questionnaire": questionnaire,
         }
     expires_on = assessment.assessed_on + timedelta(days=assessment.valid_days)
+    days_until_expiry = (expires_on - deps.today).days
     return {
         "state": assessment.state_on(deps.today).value,
         "risk_profile": assessment.risk_profile,
         "assessed_on": assessment.assessed_on.isoformat(),
         "expires_on": expires_on.isoformat(),
+        "valid_days": assessment.valid_days,
+        "days_until_expiry": days_until_expiry,
+        "expiring_soon": 0 <= days_until_expiry <= 30,
         "source": assessment.source or None,
         "source_label": RISK_SOURCE_LABELS.get(assessment.source),
         "retake": retake,
@@ -2939,6 +3261,7 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
         "decision": _decision_payload(view.decision),
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
         "questionnaire": list(view.questionnaire),
+        "redemption_prefill": view.redemption_prefill,
     }
 
 

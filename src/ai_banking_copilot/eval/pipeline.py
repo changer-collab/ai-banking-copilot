@@ -28,7 +28,11 @@ from ai_banking_copilot.contracts.plan import Plan, PlanNode, topological_order
 from ai_banking_copilot.contracts.security import INJECTION_MARKERS
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
 from ai_banking_copilot.eval.dataset import EvalCase
-from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
+from ai_banking_copilot.gateway.core_bank import (
+    DEFAULT_BOOKING_DATE,
+    CoreBank,
+    init_wealth_holdings_schema,
+)
 from ai_banking_copilot.gateway.errors import GatewayError, SandboxError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money, Payee
@@ -40,6 +44,10 @@ from ai_banking_copilot.gateway.risk_store import (
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
+from ai_banking_copilot.gateway.wealth_disclosure_store import (
+    init_wealth_disclosure_schema,
+    seed_wealth_disclosures,
+)
 from ai_banking_copilot.planning.kernel import Kernel, PlanningResult
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent, TemplateIntentModel
 from ai_banking_copilot.planning.slots import SlotInputs, fill_control_slots
@@ -181,6 +189,9 @@ class EvalPipeline:
         seed_database(writer)
         init_risk_schema(writer)
         seed_risk_assessment(writer)
+        init_wealth_holdings_schema(writer)
+        init_wealth_disclosure_schema(writer)
+        seed_wealth_disclosures(writer)
         writer.close()
         reader = Store(db_path, StoreMode.READ_ONLY)
         rw_store = Store(db_path, StoreMode.READ_WRITE)

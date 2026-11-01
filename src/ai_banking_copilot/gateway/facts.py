@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Generic, TypeVar
 
+from ai_banking_copilot.gateway.customer_profile_store import (
+    customer_suitability_profile as _customer_suitability_profile,
+)
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError, ReadOnlyViolation
 from ai_banking_copilot.gateway.hashing import canonical_json, sha256_hex
 from ai_banking_copilot.gateway.merchant_store import MerchantOrder, UserProfile
@@ -20,11 +23,13 @@ from ai_banking_copilot.gateway.models import (
     BillSummary,
     Card,
     CategoryTotal,
+    CustomerSuitabilityProfile,
     Hold,
     Money,
     Payee,
     Subscription,
     Transaction,
+    WealthDisclosure,
     WealthHolding,
     WealthNav,
     WealthProduct,
@@ -35,6 +40,12 @@ from ai_banking_copilot.gateway.transfer_store import (
     CollectionRequest,
     ScheduledTransfer,
     due_execution_key,
+)
+from ai_banking_copilot.gateway.wealth_disclosure_store import (
+    wealth_disclosure as _wealth_disclosure,
+)
+from ai_banking_copilot.gateway.wealth_disclosure_store import (
+    wealth_disclosures as _wealth_disclosures,
 )
 
 T = TypeVar("T")
@@ -136,6 +147,40 @@ class FactGateway:
     def wealth_products(self) -> tuple[Record[WealthProduct], ...]:
         rows = self._store.query("SELECT * FROM wealth_products ORDER BY product_id")
         return tuple(self._wealth_product(row) for row in rows)
+
+    def wealth_disclosures(self) -> tuple[Record[WealthDisclosure], ...]:
+        """全部理财销售披露事实（独立表；缺行由调用方按「未披露」处理）。"""
+        return tuple(
+            _record("wealth_disclosures", item.product_id, item)
+            for item in _wealth_disclosures(self._store)
+        )
+
+    def wealth_disclosure(self, product_id: str) -> Record[WealthDisclosure] | None:
+        """单只产品披露事实；缺行 ⇒ `None`。"""
+        item = _wealth_disclosure(self._store, product_id)
+        return None if item is None else _record("wealth_disclosures", item.product_id, item)
+
+    def customer_suitability_profile(
+        self, user_id: str
+    ) -> Record[CustomerSuitabilityProfile] | None:
+        """客户适当性属性（出生年份）；缺行 ⇒ `None`（不猜年龄）。"""
+        item = _customer_suitability_profile(self._store, user_id)
+        return None if item is None else _record("customer_suitability_profiles", user_id, item)
+
+    def wealth_holding_shares(self, user_id: str) -> dict[str, tuple[int, int]]:
+        """本人持仓的 `(份额×10000, 买入净值×10000)`；缺列/旧库按 0 返回，不猜。"""
+        rows = self._store.query(
+            "SELECT product_id, share_bp, nav_at_purchase_bp FROM wealth_holdings"
+            " WHERE user_id = ?",
+            (user_id,),
+        )
+        return {
+            str(row["product_id"]): (
+                int(str(row["share_bp"] or 0)),
+                int(str(row["nav_at_purchase_bp"] or 0)),
+            )
+            for row in rows
+        }
 
     def wealth_holdings_of(self, user_id: str) -> tuple[Record[WealthHolding], ...]:
         """本人理财持仓（只读；金额与申购/赎回同源，供页面「操作可查」对账）。"""

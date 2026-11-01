@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Protocol, runtime_checkable
+from uuid import uuid4
 
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import Record
@@ -46,11 +47,28 @@ CREATE TABLE IF NOT EXISTS risk_assessment_attempts (
 不参与任何适当性判定。
 """
 
-RETAKES_PER_DAY = 3
+RISK_EVENTS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS risk_assessment_events (
+    event_id         TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL,
+    event_on         TEXT NOT NULL,
+    risk_profile     TEXT NOT NULL,
+    score            INTEGER NOT NULL,
+    source           TEXT NOT NULL,
+    previous_profile TEXT
+);
+"""
+"""测评**事件**表：用于 12 个月累计与「结果与最近一次不一致」的再次确认。"""
+
+RETAKES_PER_DAY = 2
 """同一用户每个演示业务日最多提交几次问卷。
 
-**产品口径**，不是监管要求；界面必须标「演示环境」，不能写成「监管规定」。
+依据《金融机构产品适当性管理办法》第二十九条：单日不得超过两次，
+十二个月内累计不得超过八次。演示环境按**模拟业务日**计数，界面必须同时写明。
 """
+
+RETAKES_PER_12M = 8
+"""同一用户十二个月内累计最多提交几次问卷（第二十九条）。"""
 
 _RISK_PROFILES = ("R1", "R2", "R3", "R4", "R5")
 _TABLE = "risk_assessments"
@@ -111,6 +129,27 @@ class RiskAssessmentWriter(Protocol):
         """记一次问卷提交并返回当日累计次数。"""
         ...
 
+    def events_count_since(self, user_id: str, since: date) -> int:
+        """读最近一段时间的**已提交**测评次数（12 个月上限用）。"""
+        ...
+
+    def earliest_event_on(self, user_id: str, since: date) -> date | None:
+        """读最近一段时间最早一次测评日期（算 12 个月下次可测日）。"""
+        ...
+
+    def record_event(
+        self,
+        user_id: str,
+        event_on: date,
+        risk_profile: str,
+        score: int,
+        *,
+        source: str,
+        previous_profile: str | None = None,
+    ) -> None:
+        """记一次**已确认提交**的测评事件。"""
+        ...
+
 
 class StoreRiskAssessmentSource:
     """`RiskAssessmentSource` 的默认实现：只读 store 读取测评事实。"""
@@ -145,12 +184,39 @@ class StoreRiskAssessmentWriter:
     def record_attempt(self, user_id: str, on_date: date) -> int:
         return record_attempt(self._store, user_id, on_date)
 
+    def events_count_since(self, user_id: str, since: date) -> int:
+        return assessment_event_count_since(self._store, user_id, since)
+
+    def earliest_event_on(self, user_id: str, since: date) -> date | None:
+        return earliest_assessment_event_on(self._store, user_id, since)
+
+    def record_event(
+        self,
+        user_id: str,
+        event_on: date,
+        risk_profile: str,
+        score: int,
+        *,
+        source: str,
+        previous_profile: str | None = None,
+    ) -> None:
+        record_assessment_event(
+            self._store,
+            user_id,
+            event_on,
+            risk_profile,
+            score,
+            source=source,
+            previous_profile=previous_profile,
+        )
+
 
 def init_risk_schema(store: Store) -> None:
     """建风险测评表（幂等；既有库自动补表与补 `source` 列）。"""
     with store.transaction() as conn:
         conn.executescript(RISK_SCHEMA_SQL)
         conn.executescript(RISK_ATTEMPTS_SCHEMA_SQL)
+        conn.executescript(RISK_EVENTS_SCHEMA_SQL)
         columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({_TABLE})")}
         if "source" not in columns:
             conn.execute(
@@ -178,19 +244,92 @@ def record_attempt(store: Store, user_id: str, on_date: date) -> int:
     return attempts_on(store, user_id, on_date)
 
 
+def record_assessment_event(
+    store: Store,
+    user_id: str,
+    event_on: date,
+    risk_profile: str,
+    score: int,
+    *,
+    source: str,
+    previous_profile: str | None = None,
+) -> None:
+    """记一次**已确认提交**的测评事件（只增不减）。"""
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO risk_assessment_events("
+            "event_id, user_id, event_on, risk_profile, score, source, previous_profile"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"rae_{uuid4().hex}",
+                user_id,
+                event_on.isoformat(),
+                risk_profile,
+                score,
+                source,
+                previous_profile,
+            ),
+        )
+
+
+def assessment_event_count_since(store: Store, user_id: str, since: date) -> int:
+    """最近一段时间（不含 `since` 当天）已提交测评次数。"""
+    rows = store.query(
+        "SELECT COUNT(*) AS n FROM risk_assessment_events"
+        " WHERE user_id = ? AND event_on > ?",
+        (user_id, since.isoformat()),
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
+def earliest_assessment_event_on(store: Store, user_id: str, since: date) -> date | None:
+    """最近一段时间最早一次测评日期；没有 ⇒ `None`。"""
+    rows = store.query(
+        "SELECT MIN(event_on) AS earliest FROM risk_assessment_events"
+        " WHERE user_id = ? AND event_on > ?",
+        (user_id, since.isoformat()),
+    )
+    if not rows or rows[0]["earliest"] is None:
+        return None
+    return date.fromisoformat(str(rows[0]["earliest"]))
+
+
 def retake_state(store: Store, user_id: str, on_date: date) -> dict[str, object]:
-    """当日重测额度（界面据此决定按钮文案与是否可点）。"""
-    return retake_payload(attempts_on(store, user_id, on_date), on_date)
+    """当日与十二个月的重测额度（界面据此决定按钮文案与是否可点）。"""
+    since = on_date - timedelta(days=365)
+    return retake_payload(
+        attempts_on(store, user_id, on_date),
+        on_date,
+        assessment_event_count_since(store, user_id, since),
+        earliest_assessment_event_on(store, user_id, since),
+    )
 
 
-def retake_payload(used: int, on_date: date) -> dict[str, object]:
-    """把「今日已用几次」拼成对外口径（`basis` 如实标明这是演示产品口径）。"""
+def retake_payload(
+    used_today: int,
+    on_date: date,
+    used_12m: int = 0,
+    earliest_event_on: date | None = None,
+) -> dict[str, object]:
+    """把「今日已用 / 十二个月已用」拼成对外口径。
+
+    `basis` 如实标明这是**监管规则**；`demo_note` 另行说明演示环境按模拟业务日计数。
+    """
+    next_day = on_date + timedelta(days=1)
+    next_available = next_day
+    if used_12m >= RETAKES_PER_12M and earliest_event_on is not None:
+        next_available = max(next_available, earliest_event_on + timedelta(days=365))
     return {
         "limit_per_day": RETAKES_PER_DAY,
-        "used_today": used,
-        "remaining_today": max(RETAKES_PER_DAY - used, 0),
-        "next_available_on": (on_date + timedelta(days=1)).isoformat(),
-        "basis": "demo_policy",
+        "limit_per_12m": RETAKES_PER_12M,
+        "used_today": used_today,
+        "used_12m": used_12m,
+        "remaining_today": max(RETAKES_PER_DAY - used_today, 0),
+        "remaining_12m": max(RETAKES_PER_12M - used_12m, 0),
+        "next_available_on": next_available.isoformat(),
+        "basis": "regulatory",
+        "basis_label": "《金融机构产品适当性管理办法》第二十九条",
+        "demo_note": "演示环境按模拟业务日计数",
     }
 
 

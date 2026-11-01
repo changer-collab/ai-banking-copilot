@@ -36,13 +36,19 @@ from ai_banking_copilot.contracts.security import (
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
 from ai_banking_copilot.gateway.errors import GatewayError, GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import Record
-from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
+from ai_banking_copilot.gateway.models import (
+    Money,
+    Payee,
+    WealthDisclosure,
+    WealthProduct,
+)
 from ai_banking_copilot.gateway.preconditions import (
     PreconditionResult,
     PreconditionStatus,
     WritePreconditionError,
 )
 from ai_banking_copilot.gateway.resolvers import parse_amount, parse_temporal
+from ai_banking_copilot.gateway.risk_store import RETAKES_PER_12M, RETAKES_PER_DAY
 from ai_banking_copilot.planning.anaphora import (
     DialogueMemory,
     Reference,
@@ -434,6 +440,9 @@ class SubmissionView:
 
     visibility: str = "normal"
     """本次提交的可见性：命中隐私语句为 `private`，记录页折叠、共享推送跳过。"""
+
+    redemption_prefill: dict[str, object] | None = None
+    """赎回意图命中的持仓预填（产品 / 份额 / 金额 / 到期日）：只预填弹窗，不执行。"""
 
 
 @dataclass(frozen=True)
@@ -1043,8 +1052,16 @@ class Session:
                 )
             if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
+                scope = ""
+                if len(intents) > 1:
+                    # 「第 2 项」不能凭空出现：先把这句话被拆成的所有事项列出来。
+                    items = "；".join(
+                        f"{index}. {_intent_label(intent.action)}"
+                        for index, intent in enumerate(intents, start=1)
+                    )
+                    scope = f"这件事包含 {len(intents)} 项：{items}。"
                 self._message = _with_notes(
-                    "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
+                    scope + "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
                 )
                 self._pending_slots = frozenset(ask.slot for ask in asks)
                 return self._privacy_note(SubmissionView(
@@ -1106,11 +1123,13 @@ class Session:
                 injection_already_tripped=injection_detected,
             )
             if detect_maturity_link(utterance):
-                note = _expired_maturity_note(self._deps, outcome.plan)
+                note = _expired_maturity_note(self._deps, outcome.plan) or _maturity_note(
+                    self._deps, outcome.plan
+                )
                 if note is not None and view.card is not None and (
                     view.state is SessionState.AWAITING_CONFIRM
                 ):
-                    # 到期日已过：只补一句推算口径；赎回与下单仍未执行（文案不得写成已到账）。
+                    # 到期日已过 / 未到：都只补一句推算口径；赎回与下单仍未执行（不得写成已到账）。
                     view = replace(view, message=f"{view.message}\n{note}")
             return self._privacy_note(view)
         finally:
@@ -1523,11 +1542,31 @@ class Session:
             self._enter_takeover("高风险裁决（≥ L3）：" + "，".join(hit_rules), pending)
             return SubmissionView(self._state, self._message, card, decision, plan, ())
         self._clear_policy_rejections()
+        prefill = _redemption_prefill_payload(plan, self._deps)
         self._state = SessionState.AWAITING_CONFIRM
         self._message = _with_notes(
             f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）", notes
         )
-        return SubmissionView(self._state, self._message, card, decision, plan, (), quota)
+        if prefill is not None:
+            holding_text = (
+                f"{prefill['shares']} 份"
+                if prefill.get("shares")
+                else f"{prefill['amount_yuan']} 元"
+            )
+            self._message = (
+                f"{self._message}；已找到持仓 {prefill['name']}（{holding_text}），"
+                "已预填赎回弹窗，请在弹窗确认份额与到账账户。"
+            )
+        return SubmissionView(
+            self._state,
+            self._message,
+            card,
+            decision,
+            plan,
+            (),
+            quota,
+            redemption_prefill=prefill,
+        )
 
     def _intent_context(self) -> dict[str, object]:
         """给理解层的会话上下文：最近几轮、上一个计划摘要、已选对象。
@@ -1673,10 +1712,16 @@ class Session:
         }
         for key, value in _default_selected(self._deps).items():
             chosen.setdefault(key, value)
-        # `action` / `intent_spans` 是会话澄清用的元数据，不能作为场景槽位透传。
+        # 「每月几号」是会话级澄清答案（不是工具控制槽）：答了就换算成 when（记账日），
+        # 让 `transfer.schedule` 的 booked_on 落在用户指定那一天。
+        monthly_day = str(chosen.get("monthly_day") or "").strip()
+        if monthly_day and chosen.get("when") is None:
+            chosen["when"] = monthly_day
+        # `action` / `intent_spans` / `monthly_day` 是会话澄清用的元数据，不能作为场景槽位透传。
         extras = {
             key: value for key, value in chosen.items()
-            if key not in SLOT_PARAMS and key not in {"action", "intent_spans"}
+            if key not in SLOT_PARAMS
+            and key not in {"action", "intent_spans", "monthly_day"}
             and not key.startswith("intent_")
         }
         remark = extract_remark(utterance)
@@ -1699,6 +1744,11 @@ class Session:
         candidates = tuple(
             intent for intent in candidates if not _is_privacy_constraint(intent, utterance)
         )
+        if maturity_link and any(item.action == "merchant.order" for item in candidates):
+            # 到期联动是**一个**生活事件：赎回（金额取持仓事实）与下单由
+            # `build_maturity_link` 一并装配；再保留一条独立 `wealth.redeem`，
+            # 会被通用多意图当成「merchant 域不支持」而整句拒绝。
+            candidates = tuple(item for item in candidates if item.action != "wealth.redeem")
         if life_event_id == "L1":
             # 「先把预算锁了，别让我乱花」只冻结、不下单：同一句里已有冻结意图，
             # 且没有任何下单 / 订花措辞时，丢掉被「生日」二字带出来的下单意图，
@@ -1737,6 +1787,15 @@ class Session:
             else ()
         )
         products = tuple(record.payload for record in wealth_records)
+        # 赎回对象只能来自本人持仓：这里给的是**持仓事实**，不是在售目录。
+        holdings = (
+            tuple(
+                record.payload
+                for record in self._deps.gateway.wealth_holdings_of(self._deps.user_id)
+            )
+            if any(intent.action == "wealth.redeem" for intent in candidates)
+            else ()
+        )
 
         # 多动作时每个动作必须回指用户原文中的**不同片段**。模型省略 span，或把
         # 两个动作都指向整句，多金额解析会拒绝、无法可靠绑定；此时逐动作澄清，
@@ -1821,6 +1880,10 @@ class Session:
                 if intent.action == "transfer.book" else span
             )
             slot_selected = _per_intent_selected(intent.action, intent_selected, self._deps)
+            if intent.action == "wealth.redeem" and "product" not in slot_selected:
+                prefill = _resolve_redeem_prefill(self._deps, utterance)
+                if prefill is not None:
+                    slot_selected["product"] = prefill["product_id"]
             if intent.action == "subscription.cancel" and "subscription" not in slot_selected:
                 matches = [
                     record.payload.subscription_id
@@ -1844,7 +1907,11 @@ class Session:
                     payees=payees,
                     cards=cards,
                     selected=slot_selected,
+                    # 赎回：换一只产品 / 到期线索常在别的分句里，需看整句才能匹配持仓。
+                    scope_text=utterance if intent.action == "wealth.redeem" else None,
                     products=products,
+                    holdings=holdings,
+                    holdings_known=intent.action == "wealth.redeem",
                     holds=holds,
                     default_product=(
                         _SUBSCRIBE_DEFAULT_PRODUCT
@@ -1856,11 +1923,24 @@ class Session:
             if fill.negated:
                 continue
             scenario_asks: tuple[ClarificationAsk, ...] = ()
+            monthly_ask: ClarificationAsk | None = None
             if maturity_link and intent.action == "merchant.order":
                 # 到期联动：商户与下单金额由场景层按事实 / 演示档位补，追问只会挡住出卡。
                 fill = _maturity_fill(fill)
             elif life_event_id == "L1" and intent.action == "merchant.order":
                 fill, scenario_asks = _l1_fill(fill, span, self._deps.today)
+            elif (
+                life_event_id == "L2"
+                and intent.action in _TRANSFER_ACTIONS
+                and chosen.get("when") is None
+                and "monthly_day" not in chosen
+                and _MONTHLY_DAY_TEXT.search(span) is None
+            ):
+                # 「每月给爸妈 2000 元生活费」没说是每月几号：必须问，不能默认记在今天。
+                monthly_ask = ClarificationAsk(
+                    slot="monthly_day",
+                    prompt="这笔生活费每月几号转？（例如 5 号）",
+                )
             if (
                 intent.action == "funds.release"
                 and "hold" not in fill.slots
@@ -1972,6 +2052,9 @@ class Session:
                 )
                 for question in fill.questions
             )
+            if monthly_ask is not None:
+                # 收款人是转账的前置对象，先问对象再问日期，符合真实办理顺序。
+                asks.append(monthly_ask)
             intents.append(
                 Intent(
                     action=intent.action,
@@ -1994,8 +2077,15 @@ class Session:
         回填值必须是人名册里的 `payee_id`：`_invalid_selection` 只认本人事实列表中的对象 ID，
         自由文本（哪怕是「王伟 8812」）会被当成越权选择拒绝。
         """
-        if not question.candidates:
+        if not question.candidates and not question.choices:
             return ()
+        if question.choices:
+            # 场景层给的可点选项（如「赎回哪笔持仓」）：标签与回填值都由服务端算好，
+            # 前端直接渲染，不再回落到「在售产品目录」。
+            return tuple(
+                ClarificationChoice(label=label, value=value)
+                for label, value in question.choices
+            )
         if question.slot == "hold":
             holds = {
                 f"冻结 {record.payload.amount.yuan} 元 · {record.payload.reason}": record.payload
@@ -2300,9 +2390,28 @@ class Session:
         text = utterance.strip()
         if len(text) > _WEALTH_FACT_MAX_LENGTH:
             return None
-        if _WEALTH_ACTION_WORDS.search(text) is not None:
+        fact_only = (
+            _LIQUIDITY_QUESTION.search(text) is not None
+            or _WHY_NOT_BUY.search(text) is not None
+            or _ARRIVAL_QUESTION.search(text) is not None
+        ) and re.search(r"\d", text) is None
+        if _WEALTH_ACTION_WORDS.search(text) is not None and not fact_only:
             return None
-        if _ASSESSMENT_QUESTION.search(text):
+        if _LIQUIDITY_QUESTION.search(text):
+            answer = _liquidity_answer(self._deps, text)
+        elif _FEE_QUESTION.search(text):
+            answer = _fee_answer(self._deps, text)
+        elif _ARRIVAL_QUESTION.search(text):
+            answer = _arrival_answer(self._deps)
+        elif _WHY_NOT_BUY.search(text):
+            answer = _why_not_buy_answer(self._deps, text)
+        elif _RETAKE_QUESTION.search(text):
+            answer = _retake_answer(self._deps)
+        elif _CODE_QUESTION.search(text):
+            answer = _code_answer(self._deps, text)
+        elif _DIVIDEND_QUESTION.search(text):
+            answer = _dividend_answer()
+        elif _ASSESSMENT_QUESTION.search(text):
             answer = _assessment_answer(self._deps)
         elif _INCOME_QUESTION.search(text) or _HOLDINGS_QUESTION.search(text):
             answer = _holdings_answer(self._deps)
@@ -3805,6 +3914,13 @@ _ASSESSMENT_QUESTION = re.compile(r"风险(?:测评)?(?:等级|级别)|测评等
 _INCOME_QUESTION = re.compile(r"(?:收益|赚|盈亏|赔)[^，,。；;]{0,6}(?:多少|几|如何|怎么样)")
 _HOLDINGS_QUESTION = re.compile(r"持仓|持有")
 _HORIZON_QUESTION = re.compile(r"闲钱|多久不用|多久之内|放什么|闲置|半年内|几个月不用")
+_FEE_QUESTION = re.compile(r"费率|手续费|服务费|托管费|管理费")
+_ARRIVAL_QUESTION = re.compile(r"多久到账|什么时候到账|到账时间|几天到账|T\+\d")
+_WHY_NOT_BUY = re.compile(r"为什么不能买|怎么才能买|买不了|不能申购|为什么不能申购")
+_RETAKE_QUESTION = re.compile(r"还能测几次|测评次数|什么时候过期|有效期|测评过期")
+_CODE_QUESTION = re.compile(r"登记编码|产品编码|怎么验真|理财网")
+_LIQUIDITY_QUESTION = re.compile(r"封闭期|开放日|能赎回吗|流动性")
+_DIVIDEND_QUESTION = re.compile(r"分红方式|现金分红|红利再投资")
 _CLAIMED_LEVEL = re.compile(r"R([1-5])", re.IGNORECASE)
 _RISK_KEYS = ("R1", "R2", "R3", "R4", "R5")
 _WEALTH_SELECTION_SIGNAL = re.compile(r"理财|产品|R[1-5]", re.IGNORECASE)
@@ -3828,13 +3944,16 @@ def _holdings_answer(deps: AppDeps) -> str:
     末尾给一句**对账结论**：合计由同一批持仓事实相加得出，所以能明确说「与本人持仓事实一致」；
     用户觉得对不上时，再按产品名 / 金额逐笔核对（实测 WEA-Q18 只要明细、没结论）。
     """
-    rows = holdings_payload(deps.gateway, deps.user_id)
+    rows = holdings_payload(
+        deps.gateway, deps.user_id, disclosures=_disclosure_map(deps)
+    )
     if not rows:
         return "你当前没有理财持仓（演示数据）。"
     lines = ["你的理财持仓（演示数据）："]
     lines.extend(
         f"- {row['name']}（{row['risk_level']}）{row['amount_yuan']} 元"
-        f"，申购日 {row['purchased_on']}，{row['current_income']}"
+        f"，{row['shares']} 份，申购日 {row['purchased_on']}"
+        f"，到期日 {row['maturity_on'] or '无固定到期日'}，{row['current_income']}"
         for row in rows
     )
     total_cents = 0
@@ -3845,6 +3964,296 @@ def _holdings_answer(deps: AppDeps) -> str:
         "与本人持仓事实合计一致；如果你在别处看到不一样，请指出是哪一笔，我按事实逐笔核对。"
     )
     return "\n".join(lines)
+
+
+_RISK_ORDER = {"R1": 1, "R2": 2, "R3": 3, "R4": 4, "R5": 5}
+
+
+def _fee_text(bp: int | None) -> str:
+    if bp is None:
+        return "未披露"
+    return f"{bp // 100}.{bp % 100:02d}%"
+
+
+def _disclosure_map(deps: AppDeps) -> dict[str, WealthDisclosure]:
+    return {
+        record.payload.product_id: record.payload
+        for record in deps.gateway.wealth_disclosures()
+    }
+
+
+def _named_product(
+    text: str, products: Sequence[Record[WealthProduct]]
+) -> WealthProduct | None:
+    for record in products:
+        if record.payload.name in text:
+            return record.payload
+    return None
+
+
+def _fee_answer(deps: AppDeps, text: str) -> str:
+    disclosures = _disclosure_map(deps)
+    products = deps.gateway.wealth_products()
+    matched = _named_product(text, products)
+    if matched is not None:
+        product = matched
+        disclosure = disclosures.get(product.product_id)
+        if disclosure is None:
+            return f"{product.name} 的费率未披露（演示数据未提供），不能据此判断。"
+        subscription = _fee_text(disclosure.subscription_fee_bp)
+        service = _fee_text(disclosure.service_fee_bp)
+        custody = _fee_text(disclosure.custody_fee_bp)
+        return (
+            f"{product.name} 的费率（演示数据）：申购费 {subscription}、"
+            f"销售服务费 {service}/年、托管费 {custody}/年。"
+            "费率可能从收益中扣除，实际以产品说明书为准。"
+        )
+    lines = ["演示产品的费率（演示数据）："]
+    for record in products:
+        disclosure = disclosures.get(record.payload.product_id)
+        if disclosure is None:
+            lines.append(f"- {record.payload.name}：未披露")
+        else:
+            lines.append(
+                f"- {record.payload.name}：申购 {_fee_text(disclosure.subscription_fee_bp)}、"
+                f"销售服务 {_fee_text(disclosure.service_fee_bp)}/年、"
+                f"托管 {_fee_text(disclosure.custody_fee_bp)}/年"
+            )
+    lines.append("费率可能从收益中扣除，实际以产品说明书为准；本演示不做费率测算。")
+    return "\n".join(lines)
+
+
+def _arrival_answer(deps: AppDeps) -> str:
+    disclosures = _disclosure_map(deps)
+    lines = ["到账时间（演示口径）："]
+    for record in deps.gateway.wealth_products():
+        disclosure = disclosures.get(record.payload.product_id)
+        if disclosure is None:
+            label = "未知（未披露）"
+        elif disclosure.product_type == "cash":
+            label = "实时到账（单笔 ≤1 万元）/ 超过部分 T+1"
+        elif disclosure.redeem_mode == "t_plus_1":
+            label = "T+1 到账"
+        elif disclosure.redeem_mode == "t_plus_3":
+            label = "T+1 ~ T+3 到账"
+        else:
+            label = "未知"
+        lines.append(f"- {record.payload.name}：{label}")
+    lines.append("封闭期产品需到开放日才能赎回；实际到账以产品规则与 T 日净值为准。")
+    return "\n".join(lines)
+
+
+def _why_not_buy_answer(deps: AppDeps, text: str) -> str:
+    if deps.risk is None:
+        return "当前没有可用的风险测评数据源，无法判断是否匹配。"
+    assessment = to_risk_assessment(deps.risk.assessment_for(deps.user_id))
+    level = assessment.risk_profile if assessment is not None else None
+    disclosures = _disclosure_map(deps)
+    matched = _named_product(text, deps.gateway.wealth_products())
+    if matched is not None:
+        product = matched
+        disclosure = disclosures.get(product.product_id)
+        display = (
+            disclosure.display_risk_level
+            if disclosure is not None
+            else product.risk_level
+        )
+        if level is None:
+            return (
+                f"你还没有完成风险测评；未测评时 {product.name} 不能申购。"
+                "可以：① 先做一次 5 题测评；② 查看与测评等级匹配的产品；③ 联系客服。"
+            )
+        if assessment is not None and _RISK_ORDER.get(display, 99) <= _RISK_ORDER.get(level, 0):
+            return (
+                f"{product.name} 风险 {display}，与你的测评等级 {level} 匹配；"
+                "如果页面仍不可买，请检查测评是否已过期或产品是否披露不完整。"
+            )
+        expires = (
+            assessment.assessed_on + timedelta(days=assessment.valid_days)
+            if assessment is not None
+            else "—"
+        )
+        return (
+            f"你当前测评 {level}（有效期至 {expires}），"
+            f"{product.name} 风险 {display}，等级不匹配。可以："
+            f"① 重新测评；② 查看与 {level} 匹配的产品；③ 联系客服。"
+            "未展示申购入口。"
+        )
+    return (
+        "不能买通常有三种原因：测评等级低于产品风险、测评已过期、或产品披露不完整。"
+        "可以：① 重新测评；② 查看与当前等级匹配的产品；③ 联系客服。"
+        "本演示不会为不匹配的产品展示申购入口。"
+    )
+
+
+def _retake_answer(deps: AppDeps) -> str:
+    writer = deps.risk_writer
+    if writer is None:
+        return "当前没有测评次数通道，无法给出剩余次数。"
+    since = deps.today - timedelta(days=365)
+    used_today = writer.attempts_on(deps.user_id, deps.today)
+    used_12m = writer.events_count_since(deps.user_id, since)
+    earliest = writer.earliest_event_on(deps.user_id, since)
+    next_available = deps.today + timedelta(days=1)
+    if used_12m >= RETAKES_PER_12M and earliest is not None:
+        next_available = max(next_available, earliest + timedelta(days=365))
+    return (
+        f"测评次数（依据第二十九条）：今日还可 "
+        f"{max(RETAKES_PER_DAY - used_today, 0)} 次，"
+        f"12 个月还可 {max(RETAKES_PER_12M - used_12m, 0)} 次；"
+        f"下次可测 {next_available.isoformat()}。演示环境按模拟业务日计数。"
+    )
+
+
+def _code_answer(deps: AppDeps, text: str) -> str:
+    disclosures = _disclosure_map(deps)
+    matched = _named_product(text, deps.gateway.wealth_products())
+    if matched is not None:
+        product = matched
+        disclosure = disclosures.get(product.product_id)
+        if disclosure is None:
+            return f"{product.name} 的登记编码未披露。"
+        return (
+            f"{product.name} 的登记编码：{disclosure.registration_code}。"
+            "这是演示编码，未在官方登记；可到中国理财网查询，但本演示编码查不到。"
+        )
+    lines = ["演示产品的登记编码（均为演示编码，未在官方登记）："]
+    for record in deps.gateway.wealth_products():
+        disclosure = disclosures.get(record.payload.product_id)
+        code = disclosure.registration_code if disclosure is not None else "未披露"
+        lines.append(f"- {record.payload.name}：{code}")
+    lines.append("可到中国理财网查询；本演示编码未在官方登记，查不到是正常的。")
+    return "\n".join(lines)
+
+
+def _liquidity_answer(deps: AppDeps, text: str) -> str:
+    disclosures = _disclosure_map(deps)
+    matched = _named_product(text, deps.gateway.wealth_products())
+    records = (
+        [record for record in deps.gateway.wealth_products() if record.payload == matched]
+        if matched is not None
+        else list(deps.gateway.wealth_products())
+    )
+    lines = ["流动性（演示口径）："]
+    for record in records:
+        disclosure = disclosures.get(record.payload.product_id)
+        if disclosure is None:
+            lines.append(f"- {record.payload.name}：未披露")
+        elif disclosure.product_type == "cash":
+            lines.append(f"- {record.payload.name}：实时赎回单日 1 万元以内；超过部分 T+1")
+        elif disclosure.closed_days > 0:
+            open_text = (
+                f"，下一开放日 {disclosure.next_open_date.isoformat()}"
+                if disclosure.next_open_date is not None
+                else ""
+            )
+            lines.append(
+                f"- {record.payload.name}：封闭期 {disclosure.closed_days} 天，"
+                f"期间不可赎回{open_text}"
+            )
+        else:
+            lines.append(f"- {record.payload.name}：可赎回")
+    lines.append("实际以产品说明书与 T 日净值为准。")
+    return "\n".join(lines)
+
+
+def _dividend_answer() -> str:
+    return (
+        "分红方式可选「现金分红」或「红利再投资」，默认红利再投资。"
+        "本演示可在申购弹窗里修改；分红方式不影响风险等级与适当性判定。"
+    )
+
+
+def _resolve_redeem_prefill(deps: AppDeps, utterance: str) -> dict[str, object] | None:
+    """按「到期 / 产品名」从本人持仓里找唯一一笔；只预填，不执行。"""
+    rows = holdings_payload(
+        deps.gateway, deps.user_id, disclosures=_disclosure_map(deps)
+    )
+    if "到期" in utterance:
+        matched = [
+            row
+            for row in rows
+            if isinstance(row.get("maturity_on"), str)
+            and str(row["maturity_on"]) <= deps.today.isoformat()
+        ]
+    else:
+        matched = [row for row in rows if str(row.get("name", "")) in utterance]
+    if len(matched) != 1:
+        return None
+    row = matched[0]
+    return {
+        "product_id": row["product_id"],
+        "name": row["name"],
+        "mode": "all",
+        "shares": row["shares"],
+        "amount_yuan": row["amount_yuan"],
+        "maturity_on": row["maturity_on"],
+        "account_id": "acc_savings",
+    }
+
+
+def _redemption_prefill_payload(plan: object, deps: AppDeps) -> dict[str, object] | None:
+    """从已生成的赎回计划里回填弹窗字段；只读事实，不执行。"""
+    nodes = getattr(plan, "nodes", ())
+    for node in nodes:
+        if getattr(node, "action", "") != "wealth.redeem":
+            continue
+        product_id = node.params.get("product_id")
+        if not isinstance(product_id, str):
+            return None
+        rows = holdings_payload(
+            deps.gateway, deps.user_id, disclosures=_disclosure_map(deps)
+        )
+        row = next((item for item in rows if item["product_id"] == product_id), None)
+        if row is None:
+            return None
+        share_bp = node.params.get("share_bp")
+        node_amount = node.params.get("amount_cents")
+        holding_shares = int(str(row["share_bp"]))
+        holding_cents = int(str(row["amount_yuan"]).replace(".", ""))
+        if isinstance(share_bp, int) and not isinstance(share_bp, bool):
+            mode = "shares" if share_bp < holding_shares else "all"
+        elif (
+            isinstance(node_amount, int)
+            and not isinstance(node_amount, bool)
+            and node_amount < holding_cents
+        ):
+            mode = "amount"
+        else:
+            mode = "all"
+        amount_yuan = (
+            row["amount_yuan"]
+            if mode == "all"
+            else (
+                _cents_text(node_amount)
+                if isinstance(node_amount, int) and not isinstance(node_amount, bool)
+                else row["amount_yuan"]
+            )
+        )
+        if mode == "all":
+            shares_text = row["shares"]
+        elif mode == "shares" and isinstance(share_bp, int) and not isinstance(share_bp, bool):
+            shares_text = _share_text(share_bp)
+        else:
+            shares_text = ""
+        return {
+            "product_id": product_id,
+            "name": row["name"],
+            "mode": mode,
+            "shares": shares_text,
+            "amount_yuan": amount_yuan,
+            "maturity_on": row["maturity_on"],
+            "account_id": node.params.get("account_id"),
+        }
+    return None
+
+
+def _share_text(share_bp: int) -> str:
+    return f"{share_bp // 10000}.{share_bp % 10000:04d}"
+
+
+def _cents_text(cents: int) -> str:
+    return f"{cents // 100}.{cents % 100:02d}"
 
 
 def _catalog_answer(
@@ -4089,6 +4498,8 @@ def _span_text(slots: Mapping[str, object]) -> str:
 _TRANSFER_ACTIONS = frozenset(
     {"transfer.book", "transfer.create", "transfer.schedule"}
 )
+_MONTHLY_DAY_TEXT = re.compile(r"(?:每(?:个)?月)?\s*\d{1,2}\s*[号日]")
+"""口语里已给出「每月几号」；命中就不再追问 L2 的执行日。"""
 _IMMEDIATE_TRANSFER_ACTIONS = frozenset({"transfer.create", "transfer.schedule"})
 _BOOKING_TRANSFER_MARKER = re.compile(r"登记|预约")
 _TRANSFER_TEXT_MARKER = re.compile(r"转账|转给|汇款|打款")
@@ -4506,10 +4917,12 @@ def _maturity_fill(fill: SlotFill) -> SlotFill:
     return replace(fill, questions=keep)
 
 
-def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
-    """**本次联动所选**的那笔持仓到期日已过时，补一句推算口径。
+def _redeem_maturity_fact(
+    deps: AppDeps, plan: Plan | None,
+) -> tuple[str, int, date | None] | None:
+    """计划里 `wealth.redeem` 节点对应的 `(产品名, 持有金额分, 到期日)`；没有则 `None`。
 
-    只按计划里 `wealth.redeem` 节点的 `product_id` 反查那一笔——不能遍历全部持仓，
+    只按计划里选中的 `product_id` 反查那一笔——不能遍历全部持仓，
     否则会「选中的是未到期那笔、提示的却是另一笔已到期」。
     """
     product_id: str | None = None
@@ -4532,15 +4945,43 @@ def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
         holding = record.payload
         if holding.product_id != product_id:
             continue
-        maturity = holding_maturity(holding.purchased_on, product.term_days)
-        if maturity is None or maturity >= deps.today:
-            return None
         return (
-            f"说明：{product.name}（{holding.amount.yuan} 元）该产品已于 "
-            f"{maturity.isoformat()} 到期——这是按起息日 + 产品期限推算的，不是官方到期公告；"
-            "赎回与下单都还没执行，到账以银行回单为准。"
+            product.name,
+            holding.amount.cents,
+            holding_maturity(holding.purchased_on, product.term_days),
         )
     return None
+
+
+def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
+    """**本次联动所选**的那笔持仓到期日已过时，补一句推算口径。"""
+    fact = _redeem_maturity_fact(deps, plan)
+    if fact is None:
+        return None
+    name, amount_cents, maturity = fact
+    if maturity is None or maturity >= deps.today:
+        return None
+    return (
+        f"说明：{name}（{Money(amount_cents).yuan} 元）该产品已于 "
+        f"{maturity.isoformat()} 到期——这是按起息日 + 产品期限推算的，不是官方到期公告；"
+        "赎回与下单都还没执行，到账以银行回单为准。"
+    )
+
+
+def _maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
+    """到期未过时同样给出口径：哪只、哪天到期，以及本演示**没有**建模的部分。"""
+    fact = _redeem_maturity_fact(deps, plan)
+    if fact is None:
+        return None
+    name, amount_cents, maturity = fact
+    if maturity is None:
+        return None
+    return (
+        f"说明：本次赎回的是{name}（持有 {Money(amount_cents).yuan} 元），"
+        f"到期日 {maturity.isoformat()} 按起息日 + 产品期限推算（非官方公告）；"
+        "本演示按持仓金额提交赎回，未模拟份额、开放期与 T+n 到账，到账以银行回单为准。"
+    )
+
 
 
 def _booking_semantics_question(index: int, count: int) -> ClarificationAsk:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 
 from ai_banking_copilot.contracts.plan import (
@@ -26,7 +26,12 @@ from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway, Record
-from ai_banking_copilot.gateway.models import Money, WealthNav, WealthProduct
+from ai_banking_copilot.gateway.models import (
+    Money,
+    WealthDisclosure,
+    WealthNav,
+    WealthProduct,
+)
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.pep import (
@@ -209,6 +214,12 @@ def _nav_text(nav_bp: int) -> str:
     return f"{nav_bp // 10000}.{nav_bp % 10000:04d}"
 
 
+def _latest_nav_bp(gateway: FactGateway, product_id: str) -> int:
+    """最新一日模拟净值；没有序列时按 1.0000 折算（演示兜底）。"""
+    series = gateway.wealth_nav_of(product_id)
+    return series[-1].payload.nav_bp if series else 10000
+
+
 def nav_series_payload(
     gateway: FactGateway, product_id: str, *, days: int = 90
 ) -> tuple[dict[str, object], ...]:
@@ -312,6 +323,166 @@ def candidate_labels(gateway: FactGateway, risk_profile: str) -> tuple[str, ...]
 
 
 PRODUCT_NOT_ASSESSED = "未完成风险测评：完成测评后才能判断你是否可以申购"
+PRODUCT_DISCLOSURE_INCOMPLETE = "信息披露不完整（费率/登记编码/流动性/评级缺失），暂不可售"
+PRODUCT_CLOSED = "当前不在开放期，暂不可申购"
+
+_TYPE_LABELS: Mapping[str, str] = {
+    "cash": "货币类",
+    "bond": "债券类",
+    "mixed": "混合类",
+    "equity": "权益类",
+}
+
+_MAIN_RISKS: Mapping[str, tuple[str, ...]] = {
+    "cash": ("流动性风险（大额赎回转为普通赎回）", "收益波动风险"),
+    "bond": ("利率风险", "信用风险", "封闭期内不可赎回"),
+    "mixed": ("市场风险", "信用风险", "本金损失风险"),
+    "equity": ("市场风险", "本金损失风险", "流动性风险"),
+}
+
+_UNSUITABLE: Mapping[str, tuple[str, ...]] = {
+    "cash": ("希望收益固定且完全不受市场影响",),
+    "bond": ("短期需用资金", "无法接受封闭期"),
+    "mixed": ("无法接受本金损失", "短期需用资金", "缺乏投资经验"),
+    "equity": ("无法接受本金损失", "短期需用资金", "缺乏投资经验"),
+}
+
+
+def _fee_text(bp: int | None) -> str:
+    """基点 → 百分比文本；`None` 一律「未知」，不按 0 处理。"""
+    if bp is None:
+        return "未知"
+    return f"{bp // 100}.{bp % 100:02d}%"
+
+
+def _fee_summary(disclosure: WealthDisclosure | None) -> str:
+    if disclosure is None:
+        return fee_label()
+    return (
+        f"申购 {_fee_text(disclosure.subscription_fee_bp)}"
+        f" · 销售服务 {_fee_text(disclosure.service_fee_bp)}/年"
+        f" · 托管 {_fee_text(disclosure.custody_fee_bp)}/年"
+    )
+
+
+def _liquidity_payload(disclosure: WealthDisclosure | None) -> dict[str, object]:
+    if disclosure is None:
+        return {
+            "mode": "unknown",
+            "label": "流动性未知（产品数据未提供）",
+            "closed_days": 0,
+            "next_open_date": None,
+            "fast_redeem_limit_yuan": None,
+            "purchase_cutoff": None,
+        }
+    if disclosure.product_type == "cash":
+        label = "实时赎回单日 1 万元以内；超过部分普通赎回 T+1"
+    elif disclosure.closed_days > 0:
+        open_text = (
+            f"；下一开放日 {disclosure.next_open_date.isoformat()}"
+            if disclosure.next_open_date is not None
+            else ""
+        )
+        label = f"封闭期 {disclosure.closed_days} 天，期间不可赎回{open_text}"
+    else:
+        label = "可赎回"
+    return {
+        "mode": disclosure.redeem_mode,
+        "label": label,
+        "closed_days": disclosure.closed_days,
+        "next_open_date": (
+            disclosure.next_open_date.isoformat()
+            if disclosure.next_open_date is not None
+            else None
+        ),
+        "fast_redeem_limit_yuan": (
+            str(Money(disclosure.fast_redeem_limit_cents).yuan)
+            if disclosure.fast_redeem_limit_cents is not None
+            else None
+        ),
+        "purchase_cutoff": disclosure.purchase_cutoff,
+    }
+
+
+def disclosure_payload(disclosure: WealthDisclosure | None) -> dict[str, object]:
+    """把披露事实摊成前端字段；缺披露时如实标「未披露」。"""
+    if disclosure is None:
+        return {
+            "product_type": "unknown",
+            "issuer_risk_level": None,
+            "seller_risk_level": None,
+            "risk_basis": "发行方 / 销售方评级未披露",
+            "fees": {"subscription": "未知", "service": "未知", "custody": "未知"},
+            "fee_complete": False,
+            "increment_yuan": "未知",
+            "registration_code": None,
+            "registration_note": "未披露",
+            "liquidity": _liquidity_payload(None),
+            "disclosure_complete": False,
+            "sale_status": "unavailable",
+        }
+    return {
+        "product_type": disclosure.product_type,
+        "issuer_risk_level": disclosure.issuer_risk_level,
+        "seller_risk_level": disclosure.seller_risk_level,
+        "risk_basis": (
+            f"发行方 {disclosure.issuer_risk_level} / 销售方 {disclosure.seller_risk_level}，"
+            f"按孰高展示 {disclosure.display_risk_level}"
+        ),
+        "fees": {
+            "subscription": _fee_text(disclosure.subscription_fee_bp),
+            "service": _fee_text(disclosure.service_fee_bp),
+            "custody": _fee_text(disclosure.custody_fee_bp),
+        },
+        "fee_complete": all(
+            item is not None
+            for item in (
+                disclosure.subscription_fee_bp,
+                disclosure.service_fee_bp,
+                disclosure.custody_fee_bp,
+            )
+        ),
+        "increment_yuan": str(Money(disclosure.increment_cents).yuan),
+        "registration_code": disclosure.registration_code,
+        "registration_note": "演示编码，未在官方登记",
+        "liquidity": _liquidity_payload(disclosure),
+        "disclosure_complete": disclosure.disclosure_complete,
+        "sale_status": disclosure.sale_status if disclosure.disclosure_complete else "unavailable",
+    }
+
+
+def suitability_payload(
+    product: WealthProduct,
+    disclosure: WealthDisclosure | None,
+    risk_profile: str | None,
+    eligible: bool,
+    reason_code: str,
+) -> dict[str, object]:
+    """匹配意见：结论 / 主要风险 / 不适用人群 / 依据 / 免责声明。
+
+    全部由产品事实与测评等级确定性拼装，不经过模型，不含收益承诺。
+    """
+    product_type = disclosure.product_type if disclosure is not None else "unknown"
+    display_risk = (
+        disclosure.display_risk_level if disclosure is not None else product.risk_level
+    )
+    if reason_code == "DISCLOSURE_INCOMPLETE":
+        conclusion = PRODUCT_DISCLOSURE_INCOMPLETE
+    elif risk_profile is None:
+        conclusion = "未完成风险测评，无法判断是否匹配"
+    elif eligible:
+        conclusion = f"该产品风险 {display_risk}，与您的测评等级 {risk_profile} 匹配"
+    else:
+        conclusion = f"该产品风险 {display_risk} 高于您的测评等级 {risk_profile}，不能申购"
+    return {
+        "conclusion": conclusion,
+        "main_risks": list(_MAIN_RISKS.get(product_type, ("市场风险", "流动性风险"))),
+        "unsuitable_for": list(
+            _UNSUITABLE.get(product_type, ("无法接受本金损失", "短期需用资金"))
+        ),
+        "basis": "依据风险等级、产品类型、期限与起购金额（演示数据）",
+        "disclaimer": "不构成投资建议",
+    }
 
 
 def product_catalog(
@@ -319,58 +490,96 @@ def product_catalog(
     risk_profile: str | None,
     *,
     nav: Mapping[str, tuple[dict[str, object], ...]] | None = None,
+    disclosures: Mapping[str, WealthDisclosure] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """页面产品目录：**逐只**给出可申购判定与原因（不可申购的保留并写明原因，不隐藏）。
 
     `risk_profile` 只接受服务端算出的有效等级；`None` ⇒ 全部标"未测评"，
     **不默认任何等级**（与 `recommend_products` 同一口径）。
 
-    `nav` 为可选的**模拟净值**序列（按 `product_id`）；缺失时序列为空数组，
-    前端不画曲线，不进任何真实行情。
+    `disclosures` 为披露事实；生产路由必须传入。未传时按旧口径兼容既有调用，
+    此时不启用「缺披露不可售」判定（仅用于不读披露的旧测试）。
     """
     limit = _RISK_ORDER.get(risk_profile) if risk_profile is not None else None
     catalog: list[dict[str, object]] = []
     for record in sorted(products, key=lambda item: _rank(item.payload)):
         product = record.payload
-        eligible = limit is not None and _RISK_ORDER.get(product.risk_level, 99) <= limit
-        if limit is None:
-            reason = PRODUCT_NOT_ASSESSED
-        elif eligible:
-            reason = ""
+        disclosure = (disclosures or {}).get(product.product_id)
+        display_risk = (
+            disclosure.display_risk_level if disclosure is not None else product.risk_level
+        )
+        if disclosures is None:
+            # 旧调用兼容：没有披露数据时只按风险等级判定。
+            eligible = limit is not None and _RISK_ORDER.get(display_risk, 99) <= limit
+            reason_code = (
+                "NOT_ASSESSED" if limit is None else "" if eligible else "RISK_MISMATCH"
+            )
+        elif disclosure is None or not disclosure.disclosure_complete:
+            eligible = False
+            reason_code = "DISCLOSURE_INCOMPLETE"
+        elif limit is None:
+            eligible = False
+            reason_code = "NOT_ASSESSED"
+        elif _RISK_ORDER.get(display_risk, 99) > limit:
+            eligible = False
+            reason_code = "RISK_MISMATCH"
         else:
-            reason = f"风险等级 {product.risk_level} 高于你的测评等级 {risk_profile}，不能申购"
-        category = PRODUCT_CATEGORY.get(product.product_id, "未分类")
-        fee = fee_label()
-        catalog.append(
+            eligible = True
+            reason_code = ""
+        if reason_code == "DISCLOSURE_INCOMPLETE":
+            reason = PRODUCT_DISCLOSURE_INCOMPLETE
+        elif reason_code == "NOT_ASSESSED":
+            reason = PRODUCT_NOT_ASSESSED
+        elif reason_code == "RISK_MISMATCH":
+            reason = f"风险等级 {display_risk} 高于你的测评等级 {risk_profile}，不能申购"
+        else:
+            reason = ""
+        category = (
+            _TYPE_LABELS.get(disclosure.product_type)
+            if disclosure is not None
+            else PRODUCT_CATEGORY.get(product.product_id, "未分类")
+        ) or PRODUCT_CATEGORY.get(product.product_id, "未分类")
+        fee = _fee_summary(disclosure)
+        entry: dict[str, object] = {
+            "product_id": product.product_id,
+            "name": product.name,
+            "category": category,
+            "risk_level": display_risk,
+            "term_days": product.term_days,
+            "yield_bp": product.yield_bp,
+            "benchmark_label": (
+                f"业绩比较基准（模拟）{_fee_text(product.yield_bp)}"
+            ),
+            "benchmark_note": "业绩比较基准≠实际收益",
+            "min_amount_yuan": str(product.min_amount.yuan),
+            "fee": fee,
+            "fee_detail": fee if disclosure is not None else fee_label(),
+            "eligible": eligible,
+            "reason": reason,
+            "reason_code": reason_code,
+            "nav_series": list((nav or {}).get(product.product_id, ())),
+            "simulated": True,
+            "data_source": PRODUCT_DATA_SOURCE,
+        }
+        entry.update(disclosure_payload(disclosure))
+        entry["suitability"] = suitability_payload(
+            product, disclosure, risk_profile, eligible, reason_code
+        )
+        entry["explanation"] = explain_product(
             {
                 "product_id": product.product_id,
-                "name": product.name,
                 "category": category,
-                "risk_level": product.risk_level,
-                "term_days": product.term_days,
                 "yield_bp": product.yield_bp,
+                "term_days": product.term_days,
                 "min_amount_yuan": str(product.min_amount.yuan),
                 "fee": fee,
+                "fee_detail": entry["fee_detail"],
                 "eligible": eligible,
                 "reason": reason,
-                "nav_series": list((nav or {}).get(product.product_id, ())),
-                "simulated": True,
-                "data_source": PRODUCT_DATA_SOURCE,
-                "explanation": explain_product(
-                    {
-                        "product_id": product.product_id,
-                        "category": category,
-                        "yield_bp": product.yield_bp,
-                        "term_days": product.term_days,
-                        "min_amount_yuan": str(product.min_amount.yuan),
-                        "fee": fee,
-                        "eligible": eligible,
-                        "reason": reason,
-                    },
-                    risk_profile,
-                ),
-            }
+            },
+            risk_profile,
         )
+        catalog.append(entry)
     return tuple(catalog)
 
 
@@ -392,21 +601,46 @@ def _income_text(cents: int) -> str:
     return f"{INCOME_SIMULATED_PREFIX} {sign}{abs(Money(cents).yuan)} 元"
 
 
-def holdings_payload(gateway: FactGateway, user_id: str) -> tuple[dict[str, object], ...]:
-    """本人持仓视图：产品名 / 大类 / 金额 / 起息日 / 模拟净值与参考收益。
+def _shares_text(share_bp: int) -> str:
+    """份额 × 10000 → 四位小数字符串（整数运算，不走浮点）。"""
+    return f"{share_bp // 10000}.{share_bp % 10000:04d}"
+
+
+def _arrival_label(disclosure: WealthDisclosure | None) -> str:
+    if disclosure is None:
+        return "到账时间未知（产品数据未提供）"
+    if disclosure.product_type == "cash":
+        return "实时到账（单笔 ≤1 万元）/ 超过部分 T+1"
+    if disclosure.redeem_mode == "t_plus_1":
+        return "T+1 到账"
+    if disclosure.redeem_mode == "t_plus_3":
+        return "T+1 ~ T+3 到账"
+    return "到账时间未知"
+
+
+def holdings_payload(
+    gateway: FactGateway,
+    user_id: str,
+    *,
+    disclosures: Mapping[str, WealthDisclosure] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """本人持仓视图：产品名 / 大类 / 金额 / 份额 / 起息日 / 到期日 / 模拟净值与参考收益。
 
     - 有净值序列：按「买入日（或序列首日）→ 最新一日」的模拟净值折算**参考收益**，
       并如实标 `simulated=true`；
     - 无净值数据（旧库）：`nav_series` 空数组、`income_cents=null`、`current_income` 标未知，
-      **不填 0**、不推算盈亏。
+      **不填 0**、不推算盈亏；
+    - 份额与金额均来自持仓事实；份额为模拟净值折算值，实际以 T 日净值为准。
     """
     products = {
         record.payload.product_id: record.payload for record in gateway.wealth_products()
     }
+    share_map = gateway.wealth_holding_shares(user_id)
     rows: list[dict[str, object]] = []
     for record in gateway.wealth_holdings_of(user_id):
         holding = record.payload
         product = products.get(holding.product_id)
+        disclosure = (disclosures or {}).get(holding.product_id)
         series = gateway.wealth_nav_of(holding.product_id)
         simulated = tuple(
             {
@@ -428,13 +662,54 @@ def holdings_payload(gateway: FactGateway, user_id: str) -> tuple[dict[str, obje
         else:
             income_cents = None
             current_income = HOLDING_INCOME_UNKNOWN
+        share_bp, nav_at_purchase_bp = share_map.get(holding.product_id, (0, 0))
+        if share_bp <= 0:
+            reference_nav = nav_at_purchase_bp or (
+                series[0].payload.nav_bp if series else 10000
+            )
+            share_bp = holding.amount.cents * 1_000_000 // reference_nav
+        if nav_at_purchase_bp <= 0:
+            nav_at_purchase_bp = series[0].payload.nav_bp if series else 10000
+        closed_days = (
+            disclosure.closed_days
+            if disclosure is not None
+            else (product.term_days if product is not None else 0)
+        )
+        maturity_on = (
+            holding.purchased_on + timedelta(days=closed_days) if closed_days > 0 else None
+        )
+        redeemable = maturity_on is None or maturity_on <= DEFAULT_BOOKING_DATE
+        redeem_reason = ""
+        if not redeemable and maturity_on is not None:
+            open_text = (
+                f"；下一开放日 {disclosure.next_open_date.isoformat()}"
+                if disclosure is not None and disclosure.next_open_date is not None
+                else ""
+            )
+            redeem_reason = f"封闭期至 {maturity_on.isoformat()}，期间不可赎回{open_text}"
         rows.append(
             {
                 "product_id": holding.product_id,
                 "name": product.name if product is not None else "未知（产品目录中已无该产品）",
-                "category": PRODUCT_CATEGORY.get(holding.product_id, "未分类"),
-                "risk_level": product.risk_level if product is not None else "未知",
+                "category": (
+                    _TYPE_LABELS.get(disclosure.product_type)
+                    if disclosure is not None
+                    else PRODUCT_CATEGORY.get(holding.product_id, "未分类")
+                )
+                or PRODUCT_CATEGORY.get(holding.product_id, "未分类"),
+                "risk_level": (
+                    disclosure.display_risk_level
+                    if disclosure is not None
+                    else (product.risk_level if product is not None else "未知")
+                ),
                 "amount_yuan": str(holding.amount.yuan),
+                "share_bp": share_bp,
+                "shares": _shares_text(share_bp),
+                "nav_at_purchase": _nav_text(nav_at_purchase_bp),
+                "maturity_on": maturity_on.isoformat() if maturity_on is not None else None,
+                "redeemable": redeemable,
+                "redeem_reason": redeem_reason,
+                "arrival_label": _arrival_label(disclosure),
                 "purchased_on": holding.purchased_on.isoformat(),
                 "nav_series": list(simulated),
                 "nav_start": _nav_text(series[0].payload.nav_bp) if series else None,
@@ -474,13 +749,17 @@ def blocked_suitability_message(
     if not alternatives:
         return (
             f"{message}；你的测评等级 {assessment.risk_profile} 下暂无适配产品，"
-            "不推荐任何不匹配的产品"
+            "不推荐任何不匹配的产品。可以：① 重新测评；② 查看与当前等级匹配的产品。"
+            "未展示申购入口。"
         )
     names = "、".join(
         f"{item.name}（风险等级 {item.risk_level}，起购 {item.min_amount.yuan} 元）"
         for item in alternatives
     )
-    return f"{message}；你的测评等级 {assessment.risk_profile} 下可申购：{names}"
+    return (
+        f"{message}；你的测评等级 {assessment.risk_profile} 下可申购：{names}。"
+        "可以：① 重新测评；② 查看与当前等级匹配的产品。未展示申购入口。"
+    )
 
 
 class WealthHandler(ScenarioHandler):
@@ -540,11 +819,17 @@ def _build_wealth_node(
             raise
         if amount.cents < product.min_amount.cents:
             raise ScenarioRefused(f"{product.product_id} 起购金额为 {product.min_amount.yuan} 元")
+    shares = _optional_int_slot(intent, "shares")
+    if shares is not None and shares > 0:
+        # 份额赎回：金额按最新模拟净值折算；最终以核心银行按份额复核为准。
+        amount = Money(shares * _latest_nav_bp(gateway, product.product_id) // 1_000_000)
     params: dict[str, object] = {
         "account_id": account_id,
         "product_id": product.product_id,
         "amount_cents": amount.cents,
     }
+    if shares is not None and shares > 0:
+        params["share_bp"] = shares
     return PlanNode(
         node_id=node_id,
         action=intent.action,
@@ -609,13 +894,20 @@ def _subscribe_handler(context: WriteContext) -> WriteReceipt:
 
 
 def _redeem_handler(context: WriteContext) -> WriteReceipt:
-    """把 `wealth.redeem` 映射到 `CoreBank.redeem_product`。"""
+    """把 `wealth.redeem` 映射到 `CoreBank.redeem_product`（可按份额）。"""
+    raw_shares = context.params.get("share_bp")
+    shares = (
+        raw_shares
+        if isinstance(raw_shares, int) and not isinstance(raw_shares, bool) and raw_shares > 0
+        else None
+    )
     return context.core_bank.redeem_product(
         user_id=require_str(context.params, "user_id"),
         account_id=require_str(context.params, "account_id"),
         product_id=require_str(context.params, "product_id"),
         amount=Money(money_cents(context.params, context.spec)),
         idempotency_key=context.idempotency_key,
+        shares=shares,
         before_write=context.before_write,
     )
 

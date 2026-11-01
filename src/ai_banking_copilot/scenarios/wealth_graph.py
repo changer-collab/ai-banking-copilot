@@ -256,7 +256,12 @@ def explain_product(
         "购买前请确认这笔资金在期限内不需要动用。"
     )
     fee_node = graph.nodes.get(_FEE_NODE)
-    fee_text = fee_node.label if fee_node is not None else FEE_UNKNOWN
+    fee_detail = item.get("fee_detail")
+    fee_text = (
+        fee_detail
+        if isinstance(fee_detail, str) and fee_detail
+        else (fee_node.label if fee_node is not None else FEE_UNKNOWN)
+    )
     reasons.append(f"费率：{fee_text}；本页不做测算，也不作业绩承诺。")
     return {
         "title": "推荐理由" if eligible else "为什么不能买",

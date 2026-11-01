@@ -42,12 +42,66 @@ from ai_banking_copilot.gateway.security_store import PASSWORD_CHANGE_EVENTS_SCH
 from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.gateway.transfer_store import (
     COLLECTION_REQUESTS_SCHEMA_SQL,
-    SCHEDULED_TRANSFERS_SCHEMA_SQL,
     due_execution_key,
+    ensure_transfer_schema,
 )
 
 # 演示与评测的基准记账日（固定值，保证评测可复现）
 DEFAULT_BOOKING_DATE = date(2026, 10, 31)
+
+
+def init_wealth_holdings_schema(store: Store) -> None:
+    """给持仓表补份额列，并按买入日模拟净值回填旧库。
+
+    - `share_bp` = 份额 × 10000；`nav_at_purchase_bp` = 买入日净值 × 10000；
+    - 旧库没有份额时按 `amount_cents * 1_000_000 // nav_bp` 折算；
+    - 没有净值数据时按 `nav_bp = 10000` 折算（演示兜底，界面会标注模拟口径）。
+    """
+    with store.transaction() as conn:
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(wealth_holdings)")
+        }
+        if "share_bp" not in columns:
+            conn.execute(
+                "ALTER TABLE wealth_holdings ADD COLUMN share_bp INTEGER NOT NULL DEFAULT 0"
+            )
+        if "nav_at_purchase_bp" not in columns:
+            conn.execute(
+                "ALTER TABLE wealth_holdings ADD COLUMN nav_at_purchase_bp"
+                " INTEGER NOT NULL DEFAULT 0"
+            )
+        rows = conn.execute(
+            "SELECT product_id, user_id, amount_cents, purchased_on"
+            " FROM wealth_holdings WHERE share_bp = 0"
+        ).fetchall()
+        for row in rows:
+            nav_bp = _nav_bp_on(
+                conn, str(row["product_id"]), date.fromisoformat(str(row["purchased_on"]))
+            ) or 10000
+            share_bp = int(row["amount_cents"]) * 1_000_000 // nav_bp
+            conn.execute(
+                "UPDATE wealth_holdings SET share_bp = ?, nav_at_purchase_bp = ?"
+                " WHERE product_id = ? AND user_id = ?",
+                (share_bp, nav_bp, str(row["product_id"]), str(row["user_id"])),
+            )
+
+
+def _nav_bp_on(
+    conn: sqlite3.Connection, product_id: str, on_date: date
+) -> int | None:
+    """取 `on_date` 当天或之前最近一天的模拟净值；早于序列起点则取首日。"""
+    row = conn.execute(
+        "SELECT nav_bp FROM wealth_nav WHERE product_id = ? AND on_date <= ?"
+        " ORDER BY on_date DESC LIMIT 1",
+        (product_id, on_date.isoformat()),
+    ).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT nav_bp FROM wealth_nav WHERE product_id = ? ORDER BY on_date ASC LIMIT 1",
+            (product_id,),
+        ).fetchone()
+    return int(row["nav_bp"]) if row is not None else None
+
 
 EXTERNAL_STATUS_NOT_INTEGRATED = "not_integrated"
 """外部商户系统回执状态：本演示**没有**接入任何商户/支付系统，只做本地库变更。"""
@@ -72,6 +126,8 @@ class WriteReceipt:
     previous_status: str | None = None
     holding_before: int | None = None
     holding_after: int | None = None
+    shares_before: int | None = None
+    shares_after: int | None = None
 
 
 def _effect_id(kind: str, action: str, idempotency_key: str) -> str:
@@ -117,6 +173,10 @@ class CoreBank:
         currency: str | None = None,
         schedule_id: str | None = None,
         executed_on: date | None = None,
+        transfer_method: str | None = None,
+        transfer_purpose: str | None = None,
+        transfer_fee_cents: int = 0,
+        transfer_remark: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         if amount.cents <= 0:
@@ -126,7 +186,7 @@ class CoreBank:
         settlement_on = (executed_on or DEFAULT_BOOKING_DATE) if schedule_id else booked_on
 
         def validate_schedule(conn: sqlite3.Connection) -> None:
-            conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+            ensure_transfer_schema(conn)
             row = conn.execute(
                 "SELECT * FROM scheduled_transfers WHERE schedule_id = ?", (schedule_id,)
             ).fetchone()
@@ -173,7 +233,9 @@ class CoreBank:
             )
             conn.execute(
                 "INSERT INTO transactions(txn_id, user_id, account_id, booked_on, amount_cents,"
-                " merchant, category, channel, direction) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " merchant, category, channel, direction, payee_id, transfer_method,"
+                " transfer_fee_cents, transfer_purpose, transfer_remark, transfer_status)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'settled')",
                 (
                     txn_id,
                     user_id,
@@ -184,6 +246,11 @@ class CoreBank:
                     "转账",
                     "agent",
                     "out",
+                    payee_id,
+                    transfer_method or "realtime",
+                    max(0, int(transfer_fee_cents)),
+                    transfer_purpose or "",
+                    transfer_remark or "",
                 ),
             )
             record_ids: tuple[str, ...] = (f"transactions:{txn_id}",)
@@ -434,6 +501,7 @@ class CoreBank:
             amount=amount,
             idempotency_key=idempotency_key,
             direction="out",
+            shares=None,
             before_write=before_write,
         )
 
@@ -445,8 +513,10 @@ class CoreBank:
         product_id: str,
         amount: Money,
         idempotency_key: str,
+        shares: int | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
+        """赎回；`shares` 为份额 × 10000，缺省时按金额比例扣减。"""
         return self._wealth_flow(
             action="redeem_product",
             user_id=user_id,
@@ -455,6 +525,7 @@ class CoreBank:
             amount=amount,
             idempotency_key=idempotency_key,
             direction="in",
+            shares=shares,
             before_write=before_write,
         )
 
@@ -922,7 +993,7 @@ class CoreBank:
             raise CoreBankError("登记金额必须为正")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
-            conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+            ensure_transfer_schema(conn)
             account = conn.execute(
                 "SELECT account_id, currency FROM accounts WHERE account_id = ? AND user_id = ?",
                 (account_id, user_id),
@@ -1063,9 +1134,12 @@ class CoreBank:
         amount: Money,
         idempotency_key: str,
         direction: str,
+        shares: int | None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
-        if amount.cents <= 0:
+        if shares is not None and shares <= 0:
+            shares = None
+        if amount.cents <= 0 and shares is None:
             raise CoreBankError("金额必须为正")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
@@ -1081,42 +1155,72 @@ class CoreBank:
             if account is None:
                 raise UnknownAccountError(account_id)
             holding = conn.execute(
-                "SELECT amount_cents FROM wealth_holdings WHERE product_id = ? AND user_id = ?",
+                "SELECT amount_cents, share_bp, nav_at_purchase_bp FROM wealth_holdings"
+                " WHERE product_id = ? AND user_id = ?",
                 (product_id, user_id),
             ).fetchone()
             holding_before = int(holding["amount_cents"]) if holding is not None else 0
+            shares_before = int(holding["share_bp"]) if holding is not None else 0
+            nav_bp = _nav_bp_on(conn, product_id, DEFAULT_BOOKING_DATE) or 10000
+            redeem_amount = amount
             if direction == "out":
-                # 申购：起购金额只约束**买入**；同时写持仓（事实零生成：钱与份额同增）。
+                # 申购：起购金额只约束**买入**；钱与份额同增（份额按买入日模拟净值折算）。
                 min_cents = int(product["min_amount_cents"])
                 if amount.cents < min_cents:
                     raise CoreBankError(f"{product_id} 起购金额为 {min_cents} 分")
                 if int(account["balance_cents"]) < amount.cents:
                     raise InsufficientFundsError("可用余额不足")
                 holding_after = holding_before + amount.cents
+                shares_after = shares_before + amount.cents * 1_000_000 // nav_bp
                 conn.execute(
-                    "INSERT INTO wealth_holdings(product_id, user_id, amount_cents, purchased_on)"
-                    " VALUES(?, ?, ?, ?) ON CONFLICT(product_id, user_id)"
-                    " DO UPDATE SET amount_cents = excluded.amount_cents",
+                    "INSERT INTO wealth_holdings("
+                    "product_id, user_id, amount_cents, purchased_on, share_bp, nav_at_purchase_bp"
+                    ") VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(product_id, user_id)"
+                    " DO UPDATE SET amount_cents = excluded.amount_cents,"
+                    " share_bp = excluded.share_bp",
                     (
                         product_id,
                         user_id,
                         holding_after,
                         DEFAULT_BOOKING_DATE.isoformat(),
+                        shares_after,
+                        nav_bp,
                     ),
                 )
             else:
-                # 赎回：不受起购金额约束（H2），但**不得超过持仓**（H1）。
-                if amount.cents > holding_before:
-                    raise InsufficientHoldingError(
-                        f"{product_id} 持仓 {holding_before} 分，不足以赎回 {amount.cents} 分"
+                # 赎回：不受起购金额约束（H2），但**不得超过持仓份额 / 金额**（H1）。
+                redeem_amount = amount
+                if shares is None:
+                    shares_redeemed = (
+                        shares_before * amount.cents // holding_before
+                        if holding_before > 0
+                        else 0
                     )
-                holding_after = holding_before - amount.cents
+                else:
+                    shares_redeemed = shares
+                    if shares_redeemed >= shares_before and shares_before > 0:
+                        redeem_amount = Money(holding_before)
+                    else:
+                        redeem_amount = Money(shares_redeemed * nav_bp // 1_000_000)
+                if redeem_amount.cents <= 0:
+                    raise CoreBankError("按当前模拟净值折算的赎回金额为 0，请增加赎回份额")
+                if shares_redeemed > shares_before:
+                    raise InsufficientHoldingError(
+                        f"{product_id} 持仓 {shares_before} 份，不足以赎回 {shares_redeemed} 份"
+                    )
+                if redeem_amount.cents > holding_before:
+                    raise InsufficientHoldingError(
+                        f"{product_id} 持仓 {holding_before} 分，"
+                        f"不足以赎回 {redeem_amount.cents} 分"
+                    )
+                holding_after = holding_before - redeem_amount.cents
+                shares_after = shares_before - shares_redeemed
                 conn.execute(
-                    "UPDATE wealth_holdings SET amount_cents = ?"
+                    "UPDATE wealth_holdings SET amount_cents = ?, share_bp = ?"
                     " WHERE product_id = ? AND user_id = ?",
-                    (holding_after, product_id, user_id),
+                    (holding_after, shares_after, product_id, user_id),
                 )
-            signed = -amount.cents if direction == "out" else amount.cents
+            signed = -amount.cents if direction == "out" else redeem_amount.cents
             txn_id = _effect_id("txn", action, idempotency_key)
             conn.execute(
                 "UPDATE accounts SET balance_cents = balance_cents + ? WHERE account_id = ?",
@@ -1145,6 +1249,8 @@ class CoreBank:
                 effect_ids=(f"accounts:{account_id}", f"wealth_holdings:{product_id}"),
                 holding_before=holding_before,
                 holding_after=holding_after,
+                shares_before=shares_before,
+                shares_after=shares_after,
             )
 
         return self._run_once(action, idempotency_key, body,

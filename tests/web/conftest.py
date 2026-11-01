@@ -7,7 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, CoreBank
+from ai_banking_copilot.gateway.core_bank import (
+    DEFAULT_BOOKING_DATE,
+    CoreBank,
+    init_wealth_holdings_schema,
+)
+from ai_banking_copilot.gateway.customer_profile_store import (
+    init_customer_profile_schema,
+    seed_customer_profiles,
+)
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
@@ -18,6 +26,14 @@ from ai_banking_copilot.gateway.risk_store import (
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
+from ai_banking_copilot.gateway.wealth_disclosure_store import (
+    init_wealth_disclosure_schema,
+    seed_wealth_disclosures,
+)
+from ai_banking_copilot.gateway.wealth_trade_store import (
+    StoreWealthTradeWriter,
+    init_wealth_trade_schema,
+)
 from ai_banking_copilot.planning.llm import TemplateIntentModel
 from ai_banking_copilot.policy.audit import AuditLog
 from ai_banking_copilot.policy.breaker import CircuitBreaker
@@ -41,6 +57,12 @@ def db_path(tmp_path: Path) -> Path:
     seed_database(store)
     init_risk_schema(store)
     seed_risk_assessment(store)
+    init_wealth_holdings_schema(store)
+    init_wealth_disclosure_schema(store)
+    seed_wealth_disclosures(store)
+    init_wealth_trade_schema(store)
+    init_customer_profile_schema(store)
+    seed_customer_profiles(store)
     init_transfer_schema(store)
     # 与组合根（compose.build_deps）保持一致：定时转账表同样在装配期 bootstrap。
     store.close()
@@ -75,6 +97,12 @@ def risk(db_path: Path) -> Iterator[StoreRiskAssessmentSource]:
 def risk_writer(rw_store: Store) -> StoreRiskAssessmentWriter:
     """风险测评**录入通道**（写连接；`source='user_input'`）。"""
     return StoreRiskAssessmentWriter(rw_store)
+
+
+@pytest.fixture
+def wealth_trades(rw_store: Store) -> StoreWealthTradeWriter:
+    """理财交易确认留痕通道（写连接）。"""
+    return StoreWealthTradeWriter(rw_store)
 
 
 @pytest.fixture
@@ -125,6 +153,7 @@ def deps(
     audit: AuditLog,
     risk: StoreRiskAssessmentSource,
     risk_writer: StoreRiskAssessmentWriter,
+    wealth_trades: StoreWealthTradeWriter,
     core_bank: CoreBank,
 ) -> AppDeps:
     """渠道层依赖装配（默认 LLM-off：模板通道）。"""
@@ -140,6 +169,7 @@ def deps(
         today=DEFAULT_BOOKING_DATE,
         risk=risk,
         risk_writer=risk_writer,
+        wealth_trades=wealth_trades,
         reversal=ReversalService(core_bank),
         session_risk_strict=False,
     )

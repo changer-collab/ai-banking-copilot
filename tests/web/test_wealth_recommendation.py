@@ -221,7 +221,8 @@ def test_risk_assessment_questionnaire_records_computed_profile(
     deps: AppDeps, rw_store: Store
 ) -> None:
     payload = _client(deps).post(
-        "/api/risk-assessment", json={"answers": _answers(3)}
+        "/api/risk-assessment",
+        json={"answers": _answers(3), "confirm_change": True},
     ).json()
     assessment = payload["assessment"]
     assert assessment["risk_profile"] == "R5"
@@ -234,7 +235,10 @@ def test_risk_assessment_questionnaire_records_computed_profile(
 
 def test_risk_assessment_questionnaire_is_stable_across_runs(deps: AppDeps) -> None:
     client = _client(deps)
-    first = client.post("/api/risk-assessment", json={"answers": _answers(1)}).json()
+    first = client.post(
+        "/api/risk-assessment",
+        json={"answers": _answers(1), "confirm_change": True},
+    ).json()
     second = client.post("/api/risk-assessment", json={"answers": _answers(1)}).json()
     assert first["result"] == second["result"]
 

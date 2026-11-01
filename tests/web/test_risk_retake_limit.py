@@ -1,6 +1,7 @@
 """测评每日次数（实测 WEA-P08③）。
 
-口径是**演示产品规则**：同一业务日最多 3 次问卷提交；次数不参与任何适当性判定。
+口径依据《金融机构产品适当性管理办法》第二十九条：同一业务日最多 2 次、
+十二个月累计最多 8 次；演示环境按模拟业务日计数。
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ def test_retake_quota_is_reported_on_overview(deps: AppDeps) -> None:
     assert quota["limit_per_day"] == RETAKES_PER_DAY
     assert quota["used_today"] == 0
     assert quota["remaining_today"] == RETAKES_PER_DAY
-    assert quota["basis"] == "demo_policy"
+    assert quota["basis"] == "regulatory"
+    assert quota["limit_per_12m"] == 8
     assert quota["next_available_on"] == (deps.today + timedelta(days=1)).isoformat()
 
 
@@ -48,7 +50,7 @@ def test_questionnaire_is_capped_per_business_day(deps: AppDeps) -> None:
     assert blocked.status_code == 429
     body = blocked.json()
     assert body["retake"]["remaining_today"] == 0
-    assert "演示口径" in body["detail"]
+    assert "第二十九条" in body["detail"]
     # 超限那次不得把次数继续累加
     assert body["retake"]["used_today"] == RETAKES_PER_DAY
 

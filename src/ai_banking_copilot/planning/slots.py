@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Protocol
 
 from ai_banking_copilot.contracts.taint import Slot, SlotKind, Trust, Value
@@ -126,6 +126,7 @@ _PROMPTS: Mapping[str, str] = {
     "next_charge_on": "请给出下次扣款日（例如 2026-11-01）。",
     "horizon": "请给出资金闲置的时间（例如 半年 / 6 个月 / 90 天）。",
     "max_amount": "请给出打算投入的金额（例如 5 万元）。",
+    "shares": "请给出赎回份额（份）。",
 }
 
 _PERIOD_ALIASES = {"monthly": "monthly", "yearly": "yearly", "每月": "monthly", "每年": "yearly"}
@@ -175,6 +176,8 @@ class SlotQuestion:
     slot: str
     prompt: str
     candidates: tuple[str, ...] = ()
+    choices: tuple[tuple[str, str], ...] = ()
+    """`(标签, 回填值)` 可点选项：赎回只能选**本人持仓**，标签要带持有金额与到期日。"""
 
 
 @dataclass(frozen=True)
@@ -218,6 +221,19 @@ class _HoldView(Protocol):
     def reason(self) -> str: ...
 
 
+class _HoldingView(Protocol):
+    """持仓候选的入参形状：网关 `WealthHolding` 满足（**赎回只能从持仓里选**）。"""
+
+    @property
+    def product_id(self) -> str: ...
+
+    @property
+    def amount(self) -> Money: ...
+
+    @property
+    def purchased_on(self) -> date: ...
+
+
 @dataclass(frozen=True)
 class SlotInputs:
     """补全输入：文本 + 受信任上下文（日期 / 名册 / 已选对象 / 产品目录）。"""
@@ -232,6 +248,10 @@ class SlotInputs:
     """当前意图的完整原文子句；模型截短的 text 不能消除对象限定。"""
     products: Sequence[_ProductView] = ()
     """受信任产品目录（`gateway.wealth_products()`）；只用于**原文匹配**，不新增实体。"""
+    holdings: Sequence[_HoldingView] = ()
+    """本人持仓（只读）：**赎回对象只能从这里选**，在售目录里的产品用户并未持有。"""
+    holdings_known: bool = False
+    """调用方是否已提供完整持仓视图；未提供时保留旧的产品目录匹配口径。"""
     default_product: str | None = None
     """兜底产品（仅申购）：原文没点名 / 没给等级时才用，且必须记 `default product:<id>`。"""
     holds: Sequence[_HoldView] = ()
@@ -289,7 +309,7 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
     bare_selected = action in _SELECTED_BARE_AMOUNT_ACTIONS
     for slot in REQUIRED_SLOTS.get(action, ()):
         chosen, question, notes = _resolve_slot(
-            slot, inputs, bare_amount=bare_amount, bare_selected=bare_selected
+            slot, inputs, action=action, bare_amount=bare_amount, bare_selected=bare_selected
         )
         trace.extend(notes)
         if chosen is not None:
@@ -299,12 +319,48 @@ def fill_control_slots(action: str, inputs: SlotInputs) -> SlotFill:
     # 可选槽：解析得到就带上，解析不到就静默跳过（绝不因此追问）
     for slot in OPTIONAL_SLOTS.get(action, ()):
         chosen, _, notes = _resolve_slot(
-            slot, inputs, bare_amount=bare_amount, bare_selected=bare_selected
+            slot, inputs, action=action, bare_amount=bare_amount, bare_selected=bare_selected
         )
         trace.extend(notes)
         if chosen is not None:
             filled[slot] = _accept(slot, chosen)
+    _default_full_redemption(action, inputs, filled, questions, trace)
     return SlotFill(slots=filled, questions=tuple(questions), trace=tuple(trace))
+
+
+_PARTIAL_REDEEM = re.compile(r"一半|部分|只赎|先赎")
+"""用户明确要**部分赎回**：这时金额必须由用户给，不能默认全部。"""
+
+
+def _default_full_redemption(
+    action: str,
+    inputs: SlotInputs,
+    filled: dict[str, object],
+    questions: list[SlotQuestion],
+    trace: list[str],
+) -> None:
+    """赎回没给金额 ⇒ 默认**全部赎回**，金额取持仓事实（用户不必再算「赎多少」）。
+
+    真实业务按份额赎回、金额由净值事后算出；本仓库持仓只有金额，故默认全额赎回是
+    与事实口径一致的做法，**不替用户编一个部分金额**。
+    """
+    if action != "wealth.redeem" or not inputs.holdings_known:
+        return
+    if "amount" not in filled and not _PARTIAL_REDEEM.search(inputs.text):
+        # 没给金额就是「全部赎回」：不先问金额，等持仓定下来直接取事实金额。
+        questions[:] = [question for question in questions if question.slot != "amount"]
+    product_id = filled.get("product")
+    if not isinstance(product_id, str) or "amount" in filled:
+        return
+    if _PARTIAL_REDEEM.search(inputs.text):
+        return
+    holding = next(
+        (item for item in inputs.holdings if item.product_id == product_id), None,
+    )
+    if holding is None:
+        return
+    filled["amount"] = _accept("amount", holding.amount.cents)
+    trace.append(f"full redeem of holding:{product_id} (amount from holding)")
 
 
 def _query_scope_question(action: str, inputs: SlotInputs) -> SlotQuestion | None:
@@ -374,7 +430,7 @@ def _accept(slot: str, value: object) -> object:
 
 
 def _resolve_slot(
-    slot: str, inputs: SlotInputs, *, bare_amount: bool = False,
+    slot: str, inputs: SlotInputs, *, action: str = "", bare_amount: bool = False,
     bare_selected: bool = False,
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     notes: list[str] = []
@@ -413,8 +469,10 @@ def _resolve_slot(
         return _resolve_hold(inputs, notes)
     if slot in {"amount", "amount_cents"}:
         return _resolve_amount(inputs, notes, slot, bare_amount=bare_amount)
+    if slot == "shares":
+        return _resolve_shares(inputs, notes)
     if slot == "product":
-        return _resolve_product(inputs, notes)
+        return _resolve_product(inputs, notes, action=action)
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
     if slot == "card":
@@ -541,6 +599,12 @@ def _normalize_selected(
         return parsed_amount.value.cents if parsed_amount.value is not None else None
     if slot == "period" and isinstance(raw, str):
         return _PERIOD_ALIASES.get(raw.strip().lower())
+    if slot == "when" and isinstance(raw, str):
+        # 「每月几号」的补充答案（5 / 5 号 / 每月 5 号）：换算成下一次该日期的记账日。
+        match = _MONTHLY_DAY_ANSWER.fullmatch(raw.strip())
+        if match is not None:
+            target = _next_monthly_day(int(match["day"]), today)
+            return None if target is None else target.isoformat()
     if slot == "next_charge_on":
         if isinstance(raw, date):
             return raw.isoformat()
@@ -553,6 +617,28 @@ def _normalize_selected(
                     return parsed_date.when.isoformat()
         return None
     return raw
+
+
+_MONTHLY_DAY_ANSWER = re.compile(r"^(?:每(?:个)?月)?\s*(?P<day>\d{1,2})\s*[号日]?$")
+"""澄清答案里的「每月几号」（`5` / `5 号` / `每月 5 号`）：只在 when 槽被显式回答时生效。"""
+
+
+def _next_monthly_day(day: int, today: date) -> date | None:
+    """下一次「每月第 day 天」；当天命中当天。非法日（0 / 32）返回 `None`，不夹到月末。"""
+    if not 1 <= day <= 31:
+        return None
+    year, month = today.year, today.month
+    for _ in range(13):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate >= today:
+            return candidate
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return None
 
 
 def _is_trusted(value: object) -> bool:
@@ -752,20 +838,43 @@ def _resolve_amount(
     return parsed.value.cents, None, tuple(notes)
 
 
+_SHARES = re.compile(r"(\d+(?:\.\d{1,4})?)\s*份")
+
+
+def _resolve_shares(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """份额槽（可选）：只认「X 份」；读不到就静默跳过，绝不追问、绝不猜。"""
+    match = _SHARES.search(inputs.text)
+    if match is None:
+        return None, None, tuple(notes)
+    whole, _, fraction = match.group(1).partition(".")
+    share_bp = int(whole) * 10000 + int((fraction + "0000")[:4])
+    if share_bp <= 0:
+        return None, None, tuple(notes)
+    notes.append(f"resolved shares:{share_bp}")
+    return share_bp, None, tuple(notes)
+
+
 def _squash(text: str) -> str:
     """去空白后比对：目录里的「稳利债券 A」与口述「稳利债券A」是同一只。"""
     return re.sub(r"\s+", "", text)
 
 
 def _resolve_product(
-    inputs: SlotInputs, notes: list[str]
+    inputs: SlotInputs, notes: list[str], *, action: str = ""
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     """产品槽：只做**原文匹配 + 目录兜底**，绝不凭语义猜产品。
 
     顺序：① 原文出现 `product_id`；② 原文出现产品全名（最长优先）；
     ③ 原文出现唯一的 `R1`–`R5` 等级且目录内该等级只有一只；④ 申购兜底产品；
     ⑤ 否则追问并列出目录（不隐藏被拒产品）。
+
+    **赎回例外**：赎回对象必须来自本人持仓（见 `_resolve_redeem_product`），
+    在售目录里的产品用户并没有持有，不能拿来「选」。
     """
+    if action == "wealth.redeem" and inputs.holdings_known:
+        return _resolve_redeem_product(inputs, notes)
     text = inputs.text
     lowered = text.lower()
     for product in inputs.products:
@@ -812,6 +921,115 @@ def _product_question(
         f"{_PROMPTS['product']}可选：" + "、".join(labels),
         labels,
     )
+
+
+_MATURITY_WORDS = re.compile(r"到期|满期")
+
+
+def _product_by_id(inputs: SlotInputs, product_id: str) -> _ProductView | None:
+    for product in inputs.products:
+        if product.product_id == product_id:
+            return product
+    return None
+
+
+def _holding_maturity(holding: _HoldingView, inputs: SlotInputs) -> date | None:
+    """持仓到期日 = 起息日 + 产品期限；期限不明（如活期）返回 `None`（不猜）。"""
+    product = _product_by_id(inputs, holding.product_id)
+    term = getattr(product, "term_days", 0) if product is not None else 0
+    if not isinstance(term, int) or term <= 0:
+        return None
+    return holding.purchased_on + timedelta(days=term)
+
+
+def _holding_label(holding: _HoldingView, inputs: SlotInputs) -> str:
+    product = _product_by_id(inputs, holding.product_id)
+    name = product.name if product is not None else holding.product_id
+    maturity = _holding_maturity(holding, inputs)
+    when = f"{maturity.isoformat()} 到期" if maturity is not None else "期限不明"
+    return f"{name}（持有 {holding.amount.yuan} 元，{when}）"
+
+
+def _redeem_question(
+    inputs: SlotInputs, holdings: Sequence[_HoldingView], prompt: str | None = None
+) -> SlotQuestion:
+    choices = tuple((_holding_label(item, inputs), item.product_id) for item in holdings)
+    return SlotQuestion(
+        "product",
+        prompt or "请选择要赎回的持仓（只能赎回本人持有的产品）：",
+        tuple(label for label, _ in choices),
+        choices,
+    )
+
+
+def _resolve_redeem_product(
+    inputs: SlotInputs, notes: list[str]
+) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
+    """赎回对象**只从本人持仓里选**：在售目录不是可赎回清单。
+
+    顺序：① 原文点名（产品 id / 名称）且确实持有；② 只有一笔持仓；
+    ③ 原文说「到期」：点名日期能对上就取那一笔，否则取最近要到期的一笔
+    （这是从持仓事实派生的缺省值，不猜产品）；④ 其余情况列**持仓**让用户选。
+    """
+    holdings = tuple(inputs.holdings)
+    if not holdings:
+        notes.append("no holdings to redeem")
+        return None, SlotQuestion("product", "你当前没有可赎回的理财持仓。"), tuple(notes)
+
+    # 「生日那天有笔理财到期，正好赎回」：到期线索在另一分句里，必须看整句；
+    # 金额仍只看本意图的 span（不能把别处的数字读成赎回金额）。
+    hint = inputs.text if not inputs.scope_text else f"{inputs.text} {inputs.scope_text}"
+    lowered = hint.lower()
+    squashed = _squash(hint)
+    named = [
+        holding for holding in holdings
+        if holding.product_id.lower() in lowered
+        or (
+            (product := _product_by_id(inputs, holding.product_id)) is not None
+            and _squash(product.name)
+            and _squash(product.name) in squashed
+        )
+    ]
+    if len(named) == 1:
+        notes.append(f"resolved redeem holding:{named[0].product_id} (named)")
+        return named[0].product_id, None, tuple(notes)
+    if len(holdings) == 1:
+        notes.append(f"resolved redeem holding:{holdings[0].product_id} (only holding)")
+        return holdings[0].product_id, None, tuple(notes)
+    if _MATURITY_WORDS.search(hint):
+        dated = [
+            (holding, maturity)
+            for holding in holdings
+            if (maturity := _holding_maturity(holding, inputs)) is not None
+        ]
+        parsed = parse_temporal(hint, inputs.today)
+        if parsed.matched and parsed.when is not None:
+            same_day = [holding for holding, maturity in dated if maturity == parsed.when]
+            if len(same_day) == 1:
+                notes.append(f"resolved redeem holding:{same_day[0].product_id} (maturity)")
+                return same_day[0].product_id, None, tuple(notes)
+            if not same_day:
+                notes.append("no holding matures on the stated date")
+                return None, _redeem_question(
+                    inputs, holdings,
+                    f"本人持仓里没有在 {parsed.when.isoformat()} 到期的产品；"
+                    "请选择要赎回的持仓：",
+                ), tuple(notes)
+        upcoming = [item for item in dated if item[1] >= inputs.today]
+        if upcoming:
+            holding, maturity = min(upcoming, key=lambda item: (item[1], item[0].product_id))
+            notes.append(
+                f"resolved redeem holding:{holding.product_id} (nearest maturity {maturity})"
+            )
+            return holding.product_id, None, tuple(notes)
+        if dated:
+            holding, maturity = min(dated, key=lambda item: (item[1], item[0].product_id))
+            notes.append(
+                f"resolved redeem holding:{holding.product_id} (latest maturity {maturity})"
+            )
+            return holding.product_id, None, tuple(notes)
+    notes.append("clarify redeem holding")
+    return None, _redeem_question(inputs, holdings), tuple(notes)
 
 
 def _reserved_digits(payees: Sequence[Payee]) -> frozenset[str]:

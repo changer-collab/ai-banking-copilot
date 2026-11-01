@@ -157,6 +157,93 @@ class WealthNav:
 
 
 @dataclass(frozen=True)
+class WealthDisclosure:
+    """理财销售披露事实（与 `WealthProduct` 分离，避免改核心产品哈希）。
+
+    费率单位是基点（1 bp = 0.01%）；`None` = 未披露，**不得**按 0 处理。
+    """
+
+    product_id: str
+    product_type: str
+    registration_code: str
+    issuer: str
+    issuer_risk_level: str
+    seller_risk_level: str
+    subscription_fee_bp: int | None
+    service_fee_bp: int | None
+    custody_fee_bp: int | None
+    increment_cents: int
+    redeem_mode: str
+    fast_redeem_limit_cents: int | None
+    closed_days: int
+    next_open_date: date | None
+    purchase_cutoff: str
+    sale_status: str
+    updated_on: date
+
+    @property
+    def display_risk_level(self) -> str:
+        """发行方与销售方评级取**孰高**（《适当性管理办法》第二十二条）。"""
+        order = {"R1": 1, "R2": 2, "R3": 3, "R4": 4, "R5": 5}
+        return max(
+            (self.issuer_risk_level, self.seller_risk_level),
+            key=lambda item: order.get(item, 0),
+        )
+
+    @property
+    def disclosure_complete(self) -> bool:
+        """任一必填披露缺失 ⇒ 不可售（缺数据不上架）。"""
+        return (
+            self.sale_status == "on_sale"
+            and bool(self.registration_code)
+            and self.subscription_fee_bp is not None
+            and self.service_fee_bp is not None
+            and self.custody_fee_bp is not None
+            and self.increment_cents > 0
+            and self.redeem_mode in {"realtime", "t_plus_1", "t_plus_3", "closed"}
+        )
+
+
+@dataclass(frozen=True)
+class RiskAssessmentEvent:
+    """一次**已提交**的风险测评（用于 12 个月累计与结果变更判断）。"""
+
+    event_id: str
+    user_id: str
+    event_on: date
+    risk_profile: str
+    score: int
+    source: str
+    previous_profile: str | None = None
+
+
+@dataclass(frozen=True)
+class WealthTradeAck:
+    """交易确认留痕：四件套阅读、抄录哈希、分红方式与偏好。"""
+
+    ack_id: str
+    user_id: str
+    product_id: str
+    action: str
+    doc_versions: dict[str, str]
+    read_seconds: dict[str, int]
+    declaration_text: str | None
+    declaration_hash: str | None
+    dividend_method: str | None
+    auto_redeem_pref: bool | None
+    account_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class CustomerSuitabilityProfile:
+    """客户适当性属性：目前只有出生年份（用于 65+ 特别提示）。"""
+
+    user_id: str
+    birth_year: int | None = None
+
+
+@dataclass(frozen=True)
 class Subscription:
     subscription_id: str
     user_id: str

@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import re
-
 from fastapi.testclient import TestClient
 
 from ai_banking_copilot.web.app import AppDeps, create_app
@@ -36,12 +34,21 @@ def test_wealth_scene_block_has_inline_plan_hosts(deps: AppDeps) -> None:
     assert 'id="wealth-plan-status"' in block
 
 
-def test_wealth_actions_render_plan_in_page_not_chat(deps: AppDeps) -> None:
-    """WEA-P09②：`submitTask` 会把卡塞进隐藏的 `#view-chat`，页面看起来毫无反应。"""
+def test_wealth_actions_open_trade_sheet(deps: AppDeps) -> None:
+    """产品卡不再直接提交，统一打开交易确认弹窗；执行仍走 /api/confirm。"""
     body = _function_body(_script(deps), "onWealthAction")
-    assert "sceneRunTask(" in body
+    assert "openWealthTradeSheet(" in body
+    assert "openWealthRedeemSheet(" in body
     assert "submitTask(" not in body
-    assert '"wealth-plan"' in body
+
+
+def test_page_loads_wealth_trade_script(deps: AppDeps) -> None:
+    """四件套 / 份额 / 验证码弹窗由独立脚本承担，页面必须加载它。"""
+    html = _html(deps)
+    assert "/assets/wealth_trade.js" in html
+    script = TestClient(create_app(deps)).get("/assets/wealth_trade.js").text
+    assert "openWealthTradeSheet" in script
+    assert "openWealthProductDetail" in script
 
 
 def test_assessment_success_card_is_not_overwritten_by_rerender(deps: AppDeps) -> None:
@@ -59,12 +66,14 @@ def test_assessment_submit_requires_second_confirmation(deps: AppDeps) -> None:
     assert "data-assessment-back" in script
 
 
-def test_holding_row_shows_redeemable_cap(deps: AppDeps) -> None:
-    """WEA-P09①：上限是这一行自己的事实，要写在行内而不是卡片底部报错里。"""
+def test_holding_row_is_display_only_with_share_and_maturity(deps: AppDeps) -> None:
+    """持仓行只展示份额 / 金额 / 到期日，赎回统一进确认弹窗。"""
     script = _script(deps)
     body = _function_body(script, "wealthHoldingHtml")
-    assert "可赎回" in body
-    assert re.search(r"最多可赎回", script), "超限提示要给出可赎回上限"
+    assert "shares" in body
+    assert "maturity_on" in body
+    assert "data-wealth-redeem" in body
+    assert "data-amount-for" not in body
 
 
 def test_risk_level_shows_demo_source_chip(deps: AppDeps) -> None:

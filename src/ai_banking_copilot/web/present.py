@@ -48,6 +48,11 @@ _FIELD_SPECS: Mapping[str, tuple[tuple[str, str], ...]] = {
     "funds.freeze": (
         ("amount_cents", "冻结金额（元）"), ("reason", "用途"),
     ),
+    "wealth.subscribe": (("amount_cents", "申购金额（元）"),),
+    "wealth.redeem": (
+        ("amount_cents", "预计金额（元）"),
+        ("share_bp", "赎回份额（份）"),
+    ),
 }
 """动作 → 可展示字段白名单。
 
@@ -68,7 +73,9 @@ def fact_lines(action: str, params: Mapping[str, object]) -> tuple[FactLine, ...
         raw = params.get(key)
         if raw is None:
             continue
-        if key.endswith("_cents") or (key.endswith("_id") and key != "occasion_id"):
+        if key == "share_bp" and isinstance(raw, int) and not isinstance(raw, bool):
+            value = f"{raw // 10000}.{raw % 10000:04d}"
+        elif key.endswith("_cents") or (key.endswith("_id") and key != "occasion_id"):
             value = yuan(raw)
         else:
             value = str(raw)
