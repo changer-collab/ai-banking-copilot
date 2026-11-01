@@ -32,8 +32,11 @@ MATRIX: tuple[tuple[str, Level], ...] = (
     ("card.list", Level.GREEN),
     ("card.lock", Level.YELLOW),
     ("card.apply_virtual", Level.YELLOW),
+    ("card.set_cycle_limit", Level.YELLOW),
     ("card.unlock", Level.RED),
     ("card.report_lost", Level.RED),
+    ("card.replace", Level.RED),
+    ("card.adjust_credit_limit", Level.RED),
     ("card.set_limit", Level.RED),
     ("password.change", Level.RED),
 )
@@ -47,7 +50,7 @@ def _intent(action: str, **slots: object) -> Intent:
 
 
 def _plan_nodes(action: str, gateway: FactGateway) -> Sequence[PlanNode]:
-    """卡片 6 动作走场景处理器；`password.change` 没有卡片槽，直接构节点。"""
+    """卡片动作走场景处理器；`password.change` / `card.unlock` 不依赖卡状态，直接构节点。"""
     if action == "password.change":
         return (
             PlanNode(
@@ -57,10 +60,44 @@ def _plan_nodes(action: str, gateway: FactGateway) -> Sequence[PlanNode]:
                 intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="anchor-password"),
             ),
         )
+    if action == "card.unlock":
+        return (
+            PlanNode(
+                node_id="n1",
+                action=action,
+                params={"card_id": CARD_ID},
+                intent=IntentRef(source=AnchorSource.EXPLICIT, anchor_id="anchor-unlock"),
+            ),
+        )
     if action == "card.apply_virtual":
         intent = _intent(action, daily_limit=Value(Money(50000), Trust.TRUSTED))
     elif action == "card.set_limit":
-        intent = _intent(action, daily_limit=Value(Money(80000), Trust.TRUSTED))
+        intent = _intent(
+            action,
+            daily_limit=Value(Money(80000), Trust.TRUSTED),
+            limit_kind=Value("purchase", Trust.TRUSTED),
+        )
+    elif action == "card.replace":
+        intent = _intent(
+            action,
+            card=Value(CARD_ID, Trust.TRUSTED),
+            address=Value("上海市浦东新区演示路 1 号", Trust.TRUSTED),
+            mail_method=Value("standard", Trust.TRUSTED),
+            replace=Value("no", Trust.TRUSTED),
+        )
+    elif action == "card.adjust_credit_limit":
+        intent = _intent(
+            action,
+            card=Value("card_credit", Trust.TRUSTED),
+            credit_mode=Value("temporary", Trust.TRUSTED),
+            amount=Value(Money(100000), Trust.TRUSTED),
+        )
+    elif action == "card.set_cycle_limit":
+        intent = _intent(
+            action,
+            card=Value("card_credit", Trust.TRUSTED),
+            amount=Value(Money(800000), Trust.TRUSTED),
+        )
     elif action == "card.list":
         intent = Intent(action=action, slots={}, confidence=0.9, evidence=action)
     else:
@@ -109,7 +146,9 @@ def test_card_lock_is_yellow_and_unlock_is_red(gateway: FactGateway) -> None:
 def test_set_limit_above_the_single_card_cap_is_refused(gateway: FactGateway) -> None:
     """S6①：调额超单卡上限（5 万元）→ 场景层拒绝并说明。"""
     intent = _intent(
-        "card.set_limit", daily_limit=Value(Money(50_000_000), Trust.TRUSTED)
+        "card.set_limit",
+        daily_limit=Value(Money(50_000_000), Trust.TRUSTED),
+        limit_kind=Value("purchase", Trust.TRUSTED),
     )
     with pytest.raises(ScenarioRefused, match="上限"):
         CardsHandler().build([intent], gateway)
@@ -117,7 +156,9 @@ def test_set_limit_above_the_single_card_cap_is_refused(gateway: FactGateway) ->
 
 def test_set_limit_at_the_cap_is_allowed(gateway: FactGateway) -> None:
     intent = _intent(
-        "card.set_limit", daily_limit=Value(Money(CARD_DAILY_LIMIT_MAX_CENTS), Trust.TRUSTED)
+        "card.set_limit",
+        daily_limit=Value(Money(CARD_DAILY_LIMIT_MAX_CENTS), Trust.TRUSTED),
+        limit_kind=Value("purchase", Trust.TRUSTED),
     )
     plan = CardsHandler().build([intent], gateway)
     assert plan.nodes[0].params["daily_limit_cents"] == CARD_DAILY_LIMIT_MAX_CENTS

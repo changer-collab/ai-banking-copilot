@@ -24,11 +24,11 @@ def test_report_lost_is_irreversible_and_at_least_red(gateway: FactGateway) -> N
     assert evaluate(loss_report_request(DEMO_USER_ID)).level >= Level.RED
 
 
-def test_lock_and_unlock_build_state_nodes(gateway: FactGateway) -> None:
-    plan = CardsHandler().build(
-        [_card_intent("card.lock"), _card_intent("card.unlock")], gateway
-    )
-    assert [node.action for node in plan.nodes] == ["card.lock", "card.unlock"]
+def test_lock_builds_node_and_unlock_requires_locked(gateway: FactGateway) -> None:
+    plan = CardsHandler().build([_card_intent("card.lock")], gateway)
+    assert [node.action for node in plan.nodes] == ["card.lock"]
+    with pytest.raises(ScenarioRefused, match="临时冻结"):
+        CardsHandler().build([_card_intent("card.unlock")], gateway)
 
 
 def test_list_plan_is_pure_query(gateway: FactGateway) -> None:
@@ -38,14 +38,24 @@ def test_list_plan_is_pure_query(gateway: FactGateway) -> None:
 
 
 def test_set_limit_requires_positive_limit(gateway: FactGateway) -> None:
-    intent = _card_intent("card.set_limit", daily_limit=Value(Money(0), Trust.TRUSTED))
+    intent = _card_intent(
+        "card.set_limit",
+        daily_limit=Value(Money(0), Trust.TRUSTED),
+        limit_kind=Value("purchase", Trust.TRUSTED),
+    )
     with pytest.raises(ScenarioRefused):
         CardsHandler().build([intent], gateway)
 
 
 def test_set_limit_builds_node_and_rejects_unknown_card(gateway: FactGateway) -> None:
     plan = CardsHandler().build(
-        [_card_intent("card.set_limit", daily_limit=Value(Money(500000), Trust.TRUSTED))],
+        [
+            _card_intent(
+                "card.set_limit",
+                daily_limit=Value(Money(500000), Trust.TRUSTED),
+                limit_kind=Value("purchase", Trust.TRUSTED),
+            )
+        ],
         gateway,
     )
     assert plan.nodes[0].params["daily_limit_cents"] == 500000

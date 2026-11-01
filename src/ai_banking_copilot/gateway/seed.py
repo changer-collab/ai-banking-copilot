@@ -45,6 +45,18 @@ _CARDS = (
 )
 """`last4` 为**演示卡号后四位**（不是真实卡号），只用于界面显示「尾号 9021」。"""
 
+_CARD_DETAILS = (
+    # (card_id, brand, expiry_month, expiry_year, account_class,
+    #  atm, transfer, purchase, overseas, credit_limit, cycle_limit)
+    ("card_debit", "unionpay", 9, 2029, "Ⅰ", 500_000, 2_000_000, 2_000_000, 500_000, None, None),
+    ("card_credit", "mastercard", 11, 2028, None, None, None, None, None, 5_000_000, 800_000),
+)
+"""卡片展示与分卡限额的**演示事实**：卡组织 / 有效期 / 账户类别 / 四通道 / 信用额度。
+
+全部是演示数据，不是真实卡片信息；旧库由 `init_schema` 补列后为 NULL，
+此处只在列仍为 NULL 时幂等回填，不覆盖演示过程中产生的真实变更。
+"""
+
 _WEALTH_PRODUCTS = (
     ("wp_cash", "活期理财篮子", "R1", 0, 180, 100),
     ("wp_short", "稳盈短期 A", "R2", 30, 260, 10000),
@@ -210,6 +222,21 @@ def seed_database(store: Store) -> None:
         conn.executemany(
             "UPDATE cards SET last4 = ? WHERE card_id = ? AND last4 IS NULL",
             [(last4, card_id) for card_id, _u, _t, _s, _l, _a, last4 in _CARDS],
+        )
+        conn.executemany(
+            "UPDATE cards SET"
+            " brand = COALESCE(brand, ?),"
+            " expiry_month = COALESCE(expiry_month, ?),"
+            " expiry_year = COALESCE(expiry_year, ?),"
+            " account_class = COALESCE(account_class, ?),"
+            " atm_limit_cents = COALESCE(atm_limit_cents, ?),"
+            " transfer_limit_cents = COALESCE(transfer_limit_cents, ?),"
+            " purchase_limit_cents = COALESCE(purchase_limit_cents, ?),"
+            " overseas_limit_cents = COALESCE(overseas_limit_cents, ?),"
+            " credit_limit_cents = COALESCE(credit_limit_cents, ?),"
+            " cycle_limit_cents = COALESCE(cycle_limit_cents, ?)"
+            " WHERE card_id = ? AND brand IS NULL",
+            [(*row[1:], row[0]) for row in _CARD_DETAILS],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO wealth_products(product_id, name, risk_level, term_days,"

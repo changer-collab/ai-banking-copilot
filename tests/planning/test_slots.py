@@ -67,7 +67,7 @@ def test_daily_limit_is_parsed_from_text_with_a_unit() -> None:
     fill = fill_control_slots(
         "card.set_limit",
         SlotInputs(
-            text="把这张卡的额度调到 2 万元",
+            text="把这张卡的消费额度调到 2 万元",
             today=TODAY,
             payees=(),
             selected={"card": "card_debit"},
@@ -81,7 +81,10 @@ def test_daily_limit_without_a_unit_is_not_guessed() -> None:
     fill = fill_control_slots(
         "card.set_limit",
         SlotInputs(
-            text="把这张卡的额度调到 2000", today=TODAY, payees=(), selected={"card": "card_debit"}
+            text="把这张卡的消费额度调到 2000",
+            today=TODAY,
+            payees=(),
+            selected={"card": "card_debit"},
         ),
     )
     assert "daily_limit" not in fill.slots

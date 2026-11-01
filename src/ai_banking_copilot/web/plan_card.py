@@ -53,11 +53,14 @@ _ACTION_LABELS: dict[str, str] = {
     "wealth.redeem": "理财赎回",
     "subscription.cancel": "取消订阅",
     "subscription.sign": "代扣签约",
-    "card.lock": "限制卡片",
-    "card.unlock": "解锁卡片",
-    "card.report_lost": "卡片挂失",
+    "card.lock": "临时冻结（口头挂失）",
+    "card.unlock": "解挂",
+    "card.report_lost": "正式挂失",
+    "card.replace": "补卡（换新卡号）",
     "card.apply_virtual": "申请虚拟卡",
-    "card.set_limit": "调整卡片额度",
+    "card.set_limit": "调整借记卡通道限额",
+    "card.adjust_credit_limit": "调整信用卡额度",
+    "card.set_cycle_limit": "设置账单周期消费限额",
     "password.change": "修改交易密码",
     "funds.freeze": "冻结资金",
     "funds.release": "解冻资金",
@@ -527,6 +530,18 @@ def plan_nodes_payload(plan: Plan | None) -> list[dict[str, object]]:
             "resource": resource_key(node) or "",
             "resource_label": _resource_label(node),
             "index": index,
+            # 理财确认弹窗需要预填：只透出已裁决计划里的产品 / 金额 / 份额事实。
+            "product_id": node.params.get("product_id")
+            if isinstance(node.params.get("product_id"), str)
+            else "",
+            "amount_cents": node.params.get("amount_cents")
+            if isinstance(node.params.get("amount_cents"), int)
+            and not isinstance(node.params.get("amount_cents"), bool)
+            else None,
+            "share_bp": node.params.get("share_bp")
+            if isinstance(node.params.get("share_bp"), int)
+            and not isinstance(node.params.get("share_bp"), bool)
+            else None,
         })
     return rows
 

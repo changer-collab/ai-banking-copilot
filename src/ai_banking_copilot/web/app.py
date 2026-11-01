@@ -38,6 +38,7 @@ from ai_banking_copilot.contracts.authorization import Decision
 from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.facts import FactGateway
+from ai_banking_copilot.gateway.models import Card, Money
 from ai_banking_copilot.gateway.receipt_store import ReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
     SOURCE_QUESTIONNAIRE,
@@ -1079,25 +1080,55 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.get("/api/cards")
     def cards(user_id: str = Depends(current_user)) -> dict[str, object]:
-        """卡片面板只读事实：类型 / 状态 / 日限额。状态与额度一律读服务端，前端不得自行推导。"""
+        """卡片面板只读事实：脱敏卡号 / 卡组织 / 分卡限额 / 状态允许动作。
+
+        状态与额度一律读服务端，前端不得自行推导；`allowed_actions` 是本接口算出的
+        **按钮唯一真源**，前端不得按状态自行扩展。
+        """
         card_types = {"debit": "借记卡", "credit": "信用卡", "virtual": "虚拟卡"}
-        statuses = {"active": "正常", "locked": "已锁定", "lost": "已挂失", "cancelled": "已取消"}
+        statuses = {"active": "正常", "locked": "临时冻结（口头挂失）", "lost": "已正式挂失"}
+
+        def status_label(card: Card, effective: str) -> str:
+            if card.status == "lost" and card.replaced_by_card_id:
+                return "已挂失 · 已补卡" if card.lost_at else "已补卡（旧卡作废）"
+            if card.status == "locked" and effective == "active":
+                return "临时冻结已到期（自动解挂）"
+            return statuses.get(card.status, card.status)
+
+        rows: list[dict[str, object]] = []
+        for record in deps.gateway.cards_of(user_id):
+            card = record.payload
+            effective = _effective_card_status(card.status, card.temp_lock_until, deps.today)
+            replacement = deps.gateway.card_replacement(card.card_id)
+            rows.append(
+                {
+                    "card_id": card.card_id,
+                    "type": card.card_type,
+                    "type_label": card_types.get(card.card_type, card.card_type),
+                    "status": card.status,
+                    "effective_status": effective,
+                    "status_label": status_label(card, effective),
+                    "masked_no": _masked_card_no(card.last4),
+                    "last4": card.last4 or "",
+                    "brand": card.brand or "",
+                    "brand_label": _CARD_BRAND_LABELS.get(card.brand or "", "卡组织未知"),
+                    "expiry": _card_expiry(card.expiry_month, card.expiry_year),
+                    "account_class": card.account_class or "",
+                    "limits": _card_limits_payload(card),
+                    "temp_lock": _temp_lock_payload(card, deps.today),
+                    "lost": _lost_payload(card),
+                    "replacement": replacement,
+                    "allowed_actions": _allowed_card_actions(
+                        card.card_type, card.status, effective, bool(card.replaced_by_card_id)
+                    ),
+                    "daily_limit_cents": card.daily_limit.cents,
+                }
+            )
         return {
             "as_of": deps.today.isoformat(),
-            "cards": [
-                {
-                    "card_id": record.payload.card_id,
-                    "type": record.payload.card_type,
-                    "type_label": card_types.get(
-                        record.payload.card_type, record.payload.card_type
-                    ),
-                    "status": record.payload.status,
-                    "status_label": statuses.get(record.payload.status, record.payload.status),
-                    "daily_limit_cents": record.payload.daily_limit.cents,
-                    "last4": record.payload.last4 or "",
-                }
-                for record in deps.gateway.cards_of(user_id)
-            ],
+            "synced_at": datetime.now(UTC).isoformat(),
+            "default_shipping_address": DEFAULT_SHIPPING_ADDRESS,
+            "cards": rows,
         }
 
     @app.get("/api/payees")
@@ -2718,6 +2749,156 @@ def _risk_payload(deps: AppDeps, user_id: str) -> dict[str, object]:
         "retake": retake,
         "questionnaire": questionnaire,
     }
+
+
+def _valid_risk_profile(deps: AppDeps, user_id: str) -> str | None:
+    """只返回**有效**测评等级；未测评 / 过期 ⇒ `None`（不默认等级）。"""
+    assessment = _risk_payload(deps, user_id)
+    raw = assessment.get("risk_profile")
+    if isinstance(raw, str) and assessment.get("state") == AssessmentState.VALID.value:
+        return raw
+    return None
+
+
+def _yuan_text(cents: int) -> str:
+    return f"{cents // 100}.{cents % 100:02d}"
+
+
+DEFAULT_SHIPPING_ADDRESS = "上海市浦东新区世纪大道 100 号 1 栋 1201 室（演示地址）"
+"""补卡弹窗的默认收货地址：**演示数据**，不是真实用户地址。"""
+
+_CARD_BRAND_LABELS = {"unionpay": "银联", "mastercard": "万事达", "visa": "VISA"}
+_CARD_LOCK_REASON_LABELS = {
+    "cant_find": "找不到卡",
+    "suspected_risk": "疑似风险",
+    "other": "其他",
+}
+_CARD_LOSS_REASON_LABELS = {"lost": "遗失", "stolen": "被盗", "other": "其他"}
+
+
+def _masked_card_no(last4: str | None) -> str:
+    return f"**** **** **** {last4}" if last4 else "卡号未知"
+
+
+def _card_expiry(month: int | None, year: int | None) -> str:
+    if month is None or year is None:
+        return ""
+    return f"{month:02d}/{year % 100:02d}"
+
+
+def _effective_card_status(status: str, temp_lock_until: str | None, today: date) -> str:
+    """临时冻结到期按**读取时业务日**判定自动解挂（演示不跑后台任务）。"""
+    if status != "locked" or not temp_lock_until:
+        return status
+    try:
+        until = date.fromisoformat(temp_lock_until)
+    except ValueError:
+        return status
+    return "active" if until < today else status
+
+
+def _money_cents_or_none(money: Money | None) -> int | None:
+    return None if money is None else money.cents
+
+
+def _card_limits_payload(card: Card) -> dict[str, object]:
+    if card.card_type == "credit":
+        return {
+            "kind": "credit",
+            "credit_limit_cents": _money_cents_or_none(card.credit_limit),
+            "temp_credit_limit_cents": _money_cents_or_none(card.temp_credit_limit),
+            "temp_credit_until": card.temp_credit_until,
+            "cycle_limit_cents": _money_cents_or_none(card.cycle_limit),
+        }
+    return {
+        "kind": "debit",
+        "daily_limit_cents": card.daily_limit.cents,
+        "atm_limit_cents": _money_cents_or_none(card.atm_limit),
+        "transfer_limit_cents": _money_cents_or_none(card.transfer_limit),
+        "purchase_limit_cents": _money_cents_or_none(card.purchase_limit),
+        "overseas_limit_cents": _money_cents_or_none(card.overseas_limit),
+    }
+
+
+def _temp_lock_payload(card: Card, today: date) -> dict[str, object] | None:
+    if card.status != "locked" or not card.temp_lock_until:
+        return None
+    try:
+        until = date.fromisoformat(card.temp_lock_until)
+    except ValueError:
+        return None
+    return {
+        "until": card.temp_lock_until,
+        "days_left": max((until - today).days, 0),
+        "expired": until < today,
+        "reason": card.lock_reason or "",
+        "reason_label": _CARD_LOCK_REASON_LABELS.get(card.lock_reason or "", "未说明"),
+    }
+
+
+def _lost_payload(card: Card) -> dict[str, object] | None:
+    if card.status != "lost":
+        return None
+    return {
+        "at": card.lost_at or "",
+        "reason": card.loss_reason or "",
+        "reason_label": (
+            _CARD_LOSS_REASON_LABELS.get(card.loss_reason or "", "未说明")
+            if card.lost_at else "未挂失（补卡作废）"
+        ),
+        "replaced_by_card_id": card.replaced_by_card_id or "",
+    }
+
+
+def _allowed_card_actions(
+    card_type: str, status: str, effective_status: str, replaced: bool
+) -> list[str]:
+    """服务端计算的状态允许动作：前端按钮的唯一真源。"""
+    if effective_status == "lost" or status == "lost":
+        return ["view_lost_detail"] if replaced else ["replace", "view_lost_detail"]
+    if effective_status == "locked":
+        return ["unlock", "report_lost", "view_lock_detail"]
+    if effective_status == "active":
+        limits = (
+            ["adjust_credit_limit", "set_cycle_limit"]
+            if card_type == "credit"
+            else ["adjust_debit_limit"]
+        )
+        return ["temp_lock", *limits, "report_lost", "replace", "apply_virtual"]
+    return []
+
+
+def _share_text(share_bp: int) -> str:
+    return f"{share_bp // 10000}.{share_bp % 10000:04d}"
+
+
+def _nav_text(nav_bp: int) -> str:
+    return f"{nav_bp // 10000}.{nav_bp % 10000:04d}"
+
+
+def _arrival_text(mode: str) -> str:
+    return {
+        "realtime": "实时到账",
+        "t_plus_1": "T+1 到账",
+        "t_plus_3": "T+1 ~ T+3 到账",
+    }.get(mode, "到账时间未知")
+
+
+def _position_payload(position: Mapping[str, object]) -> dict[str, object]:
+    keys = (
+        "product_id",
+        "name",
+        "category",
+        "risk_level",
+        "amount_yuan",
+        "shares",
+        "maturity_on",
+        "redeemable",
+        "redeem_reason",
+        "arrival_label",
+        "purchased_on",
+    )
+    return {key: position.get(key) for key in keys}
 
 
 def _submission_payload(view: SubmissionView) -> dict[str, object]:

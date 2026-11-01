@@ -253,11 +253,15 @@ _WEALTH_SPECS: tuple[ToolSpec, ...] = (
             ParamSpec("account_id", SlotKind.CONTROL, str, slot_name="account"),
             ParamSpec("product_id", SlotKind.CONTROL, str, slot_name="product"),
             ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            # 份额赎回（份额 × 10000）；可选，缺省时按金额比例扣减。
+            ParamSpec(
+                "share_bp", SlotKind.CONTROL, int, required=False, slot_name="shares",
+            ),
         ),
         is_pure_query=False,
         reversible=True,
         money_param="amount_cents",
-        description="理财赎回（资金回流入账）",
+        description="理财赎回（资金回流入账，可按份额）",
     ),
 )
 
@@ -278,12 +282,15 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
         kind=ActionKind.STATE,
         params=(
             ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
-            ParamSpec("note", SlotKind.DATA, str, required=False),
+            ParamSpec(
+                "duration_days", SlotKind.CONTROL, int, slot_name="lock_days", required=False
+            ),
+            ParamSpec("reason", SlotKind.DATA, str, slot_name="lock_reason", required=False),
         ),
         is_pure_query=False,
         reversible=True,
         money_param=None,
-        description="限制卡片交易（可逆状态变更）",
+        description="临时冻结 / 口头挂失（5–15 天，到期自动解挂；可逆状态变更）",
     ),
     ToolSpec(
         action="card.unlock",
@@ -301,12 +308,62 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
         kind=ActionKind.IRREVERSIBLE,
         params=(
             ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
-            ParamSpec("reason", SlotKind.DATA, str, required=False),
+            ParamSpec(
+                "loss_type", SlotKind.CONTROL, str, slot_name="loss_type", required=False
+            ),
+            ParamSpec("reason", SlotKind.DATA, str, slot_name="loss_reason", required=False),
         ),
         is_pure_query=False,
         reversible=False,
         money_param=None,
-        description="挂失卡片（不可逆：只能加严，无回滚）",
+        description="正式挂失（不可逆：不可线上解挂，只能补卡）",
+    ),
+    ToolSpec(
+        action="card.replace",
+        risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
+            ParamSpec("address", SlotKind.CONTROL, str, slot_name="address"),
+            ParamSpec("mail_method", SlotKind.CONTROL, str, slot_name="mail_method"),
+            ParamSpec("with_report", SlotKind.CONTROL, str, slot_name="replace"),
+            ParamSpec("reason", SlotKind.DATA, str, slot_name="loss_reason", required=False),
+        ),
+        is_pure_query=False,
+        reversible=False,
+        money_param=None,
+        description="补卡（换新卡号；可选同时正式挂失；地址 / 邮寄方式 / 费用 / 预计到卡）",
+    ),
+    ToolSpec(
+        action="card.adjust_credit_limit",
+        risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
+            ParamSpec("mode", SlotKind.CONTROL, str, slot_name="credit_mode"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+            ParamSpec(
+                "duration_months", SlotKind.CONTROL, int, slot_name="duration_months",
+                required=False,
+            ),
+        ),
+        is_pure_query=False,
+        reversible=True,
+        money_param=None,
+        description="信用卡额度：临时额度立即生效；固定额度只登记审批（3–5 个工作日）",
+    ),
+    ToolSpec(
+        action="card.set_cycle_limit",
+        risk=RiskClass.SMALL_CHANGE,
+        kind=ActionKind.STATE,
+        params=(
+            ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
+            ParamSpec("amount_cents", SlotKind.CONTROL, int, slot_name="amount"),
+        ),
+        is_pure_query=False,
+        reversible=True,
+        money_param=None,
+        description="信用卡账单周期消费限额（即时生效；不是信用额度）",
     ),
     ToolSpec(
         action="card.apply_virtual",
@@ -327,12 +384,13 @@ _CARDS_SPECS: tuple[ToolSpec, ...] = (
         kind=ActionKind.STATE,
         params=(
             ParamSpec("card_id", SlotKind.CONTROL, str, slot_name="card"),
+            ParamSpec("limit_kind", SlotKind.CONTROL, str, slot_name="limit_kind"),
             ParamSpec("daily_limit_cents", SlotKind.CONTROL, int, slot_name="daily_limit"),
         ),
         is_pure_query=False,
         reversible=True,
         money_param="daily_limit_cents",
-        description="调整卡片额度（官方黄色；额度进控制槽）",
+        description="调整借记卡通道日限额（ATM / 转账 / 消费 / 境外；信用卡不走此动作）",
     ),
     ToolSpec(
         action="password.change",

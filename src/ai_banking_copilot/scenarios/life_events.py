@@ -851,7 +851,7 @@ def _build_l3(
             ledger,
             f"{prefix}1",
             "card.set_limit",
-            {"card_id": card_id, "daily_limit_cents": travel_limit},
+            {"card_id": card_id, "limit_kind": "purchase", "daily_limit_cents": travel_limit},
             detail="出行收紧额度",
         )
     ]
@@ -877,7 +877,7 @@ def _build_l3(
             ledger,
             f"{prefix}{len(nodes) + 1}",
             "card.set_limit",
-            {"card_id": card_id, "daily_limit_cents": original},
+            {"card_id": card_id, "limit_kind": "purchase", "daily_limit_cents": original},
             detail="恢复原日限额",
             depends_on=tuple(node.node_id for node in nodes),
         )
@@ -971,7 +971,7 @@ def _build_l5(
             ledger,
             f"{prefix}2",
             "card.report_lost",
-            {"card_id": card_id},
+            {"card_id": card_id, "loss_type": "formal"},
             detail="挂失",
             depends_on=(f"{prefix}1",),
         ),

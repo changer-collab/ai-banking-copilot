@@ -108,6 +108,16 @@ _PROMPTS: Mapping[str, str] = {
     "subscription": "请选择要处理的订阅。",
     "card": "请选择要处理的卡片（一次一张）。",
     "daily_limit": "请给出额度（必须带单位，例如 2 万元）。",
+    "lock_days": "临时冻结几天？可选 5 / 7 / 10 / 15 天（默认 7 天，到期自动解挂）。",
+    "loss_type": "是临时冻结（可解、5–15 天、免费），还是正式挂失（不可逆、可能收费）？",
+    "lock_reason": "暂时冻结的原因是什么？（找不到卡 / 疑似风险 / 其他）",
+    "loss_reason": "卡片是遗失、被盗，还是其他情况？",
+    "replace": "是否同时补卡？补卡会换新卡号，旧卡作废。",
+    "mail_method": "新卡怎么寄？普通邮寄（3–5 个工作日）还是加急（1–2 个工作日）。",
+    "address": "新卡寄到哪个地址？（默认地址可以在卡片页弹窗里修改）",
+    "limit_kind": "调整借记卡哪一项限额：ATM 取现 / 转账 / 消费 / 境外？",
+    "credit_mode": "是临时额度（1 个月自动恢复），还是固定额度（需审批 3–5 个工作日）？",
+    "duration_months": "临时额度生效几个月？（默认 1 个月）",
     "hold": "请选择要解冻的冻结记录。",
     "user_id": "请确认要操作的用户身份（由受信任调用方提供）。",
     "merchant": "请给出商户名（例如 鲜花礼品店 / 视频会员）。",
@@ -437,6 +447,43 @@ def _resolve_slot(
         )
         if labelled is not None:
             return labelled["merchant"].strip(" ·・"), None, tuple(notes)
+    if slot == "loss_type":
+        if re.search(r"临时|口头|先冻|暂时", inputs.text):
+            return "temporary", None, tuple(notes)
+        if re.search(r"正式|永久|作废|彻底", inputs.text):
+            return "formal", None, tuple(notes)
+    if slot == "limit_kind":
+        channels = (
+            ("atm", r"atm|取现|现金"),
+            ("transfer", r"转账|转出"),
+            ("purchase", r"消费|刷卡|pos"),
+            ("overseas", r"境外|海外|出国"),
+        )
+        matched = [key for key, pattern in channels if re.search(pattern, inputs.text, re.I)]
+        if len(matched) == 1:
+            return matched[0], None, tuple(notes)
+    if slot == "credit_mode":
+        if re.search(r"临时|短期", inputs.text):
+            return "temporary", None, tuple(notes)
+        if re.search(r"固定|永久|长期|提升|提高", inputs.text):
+            return "permanent", None, tuple(notes)
+    if slot == "mail_method":
+        if re.search(r"加急|快递|顺丰|1.{0,2}2\s*天", inputs.text):
+            return "express", None, tuple(notes)
+        if re.search(r"普通|平邮|挂号|3.{0,2}5\s*天", inputs.text):
+            return "standard", None, tuple(notes)
+    if slot == "replace":
+        if re.search(r"不补|只挂失|无需补|不要补", inputs.text):
+            return "no", None, tuple(notes)
+        if re.search(r"补卡|一起补|同时补|换卡", inputs.text):
+            return "yes", None, tuple(notes)
+    if slot == "address":
+        labelled = re.search(
+            r"(?:地址|寄到|送到)(?:\s*[:：]\s*|\s*)(?P<address>[^，,。；;\n]{5,80})",
+            inputs.text,
+        )
+        if labelled is not None:
+            return labelled["address"].strip(), None, tuple(notes)
     if slot == "next_charge_on":
         match = re.search(r"下个?月\s*(?P<day>\d{1,2})\s*[号日]", inputs.text)
         if match is not None:
@@ -452,10 +499,39 @@ def _resolve_slot(
     return None, SlotQuestion(slot=slot, prompt=_PROMPTS[slot]), tuple(notes)
 
 
+_CHOICE_ALIASES: Mapping[str, Mapping[str, str]] = {
+    "loss_type": {
+        "temporary": "temporary", "临时": "temporary", "临时冻结": "temporary",
+        "口头挂失": "temporary", "formal": "formal", "正式": "formal",
+        "正式挂失": "formal", "永久": "formal",
+    },
+    "limit_kind": {
+        "atm": "atm", "取现": "atm", "cash": "atm",
+        "transfer": "transfer", "转账": "transfer",
+        "purchase": "purchase", "消费": "purchase", "刷卡": "purchase",
+        "overseas": "overseas", "境外": "overseas", "海外": "overseas",
+    },
+    "credit_mode": {
+        "temporary": "temporary", "临时": "temporary",
+        "permanent": "permanent", "固定": "permanent", "永久": "permanent",
+    },
+    "mail_method": {
+        "standard": "standard", "普通": "standard",
+        "express": "express", "加急": "express",
+    },
+    "replace": {"yes": "yes", "是": "yes", "no": "no", "否": "no"},
+}
+
+
 def _normalize_selected(
     slot: str, raw: object, today: date, *, bare_amount: bool = False
 ) -> object | None:
-    """把澄清表单的可信字符串转回工具要求的金额 / 周期 / 日期类型。"""
+    """把澄清表单的可信字符串转回工具要求的金额 / 周期 / 日期 / 枚举类型。"""
+    if isinstance(raw, str) and slot in _CHOICE_ALIASES:
+        return _CHOICE_ALIASES[slot].get(raw.strip())
+    if isinstance(raw, str) and slot in {"lock_days", "duration_months"}:
+        digits = re.search(r"\d+", raw)
+        return int(digits.group()) if digits is not None else None
     if slot in {"amount", "amount_cents", "daily_limit"} and isinstance(raw, str):
         text = raw.strip()
         if slot == "amount_cents" and text.isdigit():

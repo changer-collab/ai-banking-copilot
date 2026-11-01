@@ -91,6 +91,28 @@ class FactGateway:
         )
         return tuple(self._card(row) for row in rows)
 
+    def card_replacement(self, card_id: str) -> dict[str, object] | None:
+        """最近一次补卡请求（只读事实）；没有则返回 `None`，不推断「没有补过卡」。"""
+        rows = self._store.query(
+            "SELECT r.*, c.last4 AS new_last4 FROM card_replacement_requests r"
+            " LEFT JOIN cards c ON c.card_id = r.new_card_id"
+            " WHERE r.card_id = ? ORDER BY r.created_on DESC, r.request_id DESC LIMIT 1",
+            (card_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "request_id": str(row["request_id"]),
+            "new_card_id": str(row["new_card_id"]),
+            "new_card_tail": _optional_text(row["new_last4"]),
+            "address": str(row["address"]),
+            "mail_method": str(row["mail_method"]),
+            "fee_cents": int(row["fee_cents"]),
+            "eta_on": str(row["eta_on"]),
+            "status": str(row["status"]),
+        }
+
     def subscriptions_of(self, user_id: str) -> tuple[Record[Subscription], ...]:
         rows = self._store.query(
             "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY subscription_id", (user_id,)
@@ -355,6 +377,23 @@ class FactGateway:
             daily_limit=Money(int(row["daily_limit_cents"])),  # type: ignore[index]
             account_id=_optional_text(row["account_id"]),  # type: ignore[index]
             last4=_optional_text(row["last4"]),  # type: ignore[index]
+            brand=_optional_text(row["brand"]),  # type: ignore[index]
+            expiry_month=_optional_int(row["expiry_month"]),  # type: ignore[index]
+            expiry_year=_optional_int(row["expiry_year"]),  # type: ignore[index]
+            account_class=_optional_text(row["account_class"]),  # type: ignore[index]
+            atm_limit=_optional_money(row["atm_limit_cents"]),  # type: ignore[index]
+            transfer_limit=_optional_money(row["transfer_limit_cents"]),  # type: ignore[index]
+            purchase_limit=_optional_money(row["purchase_limit_cents"]),  # type: ignore[index]
+            overseas_limit=_optional_money(row["overseas_limit_cents"]),  # type: ignore[index]
+            credit_limit=_optional_money(row["credit_limit_cents"]),  # type: ignore[index]
+            temp_credit_limit=_optional_money(row["temp_credit_limit_cents"]),  # type: ignore[index]
+            temp_credit_until=_optional_text(row["temp_credit_until"]),  # type: ignore[index]
+            cycle_limit=_optional_money(row["cycle_limit_cents"]),  # type: ignore[index]
+            temp_lock_until=_optional_text(row["temp_lock_until"]),  # type: ignore[index]
+            lock_reason=_optional_text(row["lock_reason"]),  # type: ignore[index]
+            lost_at=_optional_text(row["lost_at"]),  # type: ignore[index]
+            loss_reason=_optional_text(row["loss_reason"]),  # type: ignore[index]
+            replaced_by_card_id=_optional_text(row["replaced_by_card_id"]),  # type: ignore[index]
         )
         return _record("cards", payload.card_id, payload)
 
@@ -475,6 +514,26 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_int(value: object) -> int | None:
+    """可空整数列：`NULL` 一律归一为 `None`，不把缺失当成 0。"""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _optional_money(value: object) -> Money | None:
+    """可空金额列：`NULL` 表示未配置 / 不适用，**不等于 0 元**。"""
+    cents = _optional_int(value)
+    return None if cents is None else Money(cents)
 
 
 def _optional_card_tail(value: object) -> str | None:

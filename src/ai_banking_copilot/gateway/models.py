@@ -75,6 +75,31 @@ class Card:
     """绑定的结算账户（可空 = 关系未知；不得据此推断"无账户"）。"""
     last4: str | None = None
     """演示卡号后四位：**不是真实卡号**，仅用于界面显示「尾号 9021」；旧库为 NULL。"""
+    brand: str | None = None
+    """卡组织（unionpay / mastercard / visa）；NULL = 未知，不猜测。"""
+    expiry_month: int | None = None
+    expiry_year: int | None = None
+    """演示有效期；NULL = 未知。"""
+    account_class: str | None = None
+    """借记卡账户类别（Ⅰ / Ⅱ / Ⅲ 类户）；信用卡为 NULL。"""
+    atm_limit: Money | None = None
+    transfer_limit: Money | None = None
+    purchase_limit: Money | None = None
+    overseas_limit: Money | None = None
+    """借记卡四通道日限额；NULL = 该通道未配置，不等于 0。"""
+    credit_limit: Money | None = None
+    temp_credit_limit: Money | None = None
+    temp_credit_until: str | None = None
+    cycle_limit: Money | None = None
+    """信用卡固定额度 / 生效中的临时额度 / 账单周期消费限额；NULL = 不适用或未知。"""
+    temp_lock_until: str | None = None
+    lock_reason: str | None = None
+    """临时冻结（口头挂失）到期日与原因；`status=locked` 时才有意义。"""
+    lost_at: str | None = None
+    loss_reason: str | None = None
+    """正式挂失时间与原因；`status=lost` 时才有意义。"""
+    replaced_by_card_id: str | None = None
+    """补卡后的新卡 id；非空表示旧卡已作废、不可再补。"""
 
 
 @dataclass(frozen=True)

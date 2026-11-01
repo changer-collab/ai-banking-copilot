@@ -195,7 +195,7 @@ def test_offline_query_rules_cover_wealth_and_cards() -> None:
 def test_wealth_and_card_query_rules_keep_frozen_intents() -> None:
     """补查询规则不得抢走：余额查询、失卡止损、理财申购 / 赎回。"""
     assert _actions("查一下我的银行卡余额") == ["account.balance"]
-    assert _actions("我的银行卡丢了") == ["card.lock"]
+    assert _actions("我的银行卡丢了") == ["card.report_lost"]
     assert _actions("买理财") == ["wealth.subscribe"]
     assert _actions("赎回理财") == ["wealth.redeem"]
 

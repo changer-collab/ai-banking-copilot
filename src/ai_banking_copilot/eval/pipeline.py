@@ -84,6 +84,12 @@ _DEFAULT_SELECTED: Mapping[str, object] = {
     "card": "card_debit",
     "user_id": DEMO_USER_ID,
     "daily_limit": 100000,
+    # 卡片域分支槽：只被 card.* 动作使用，不影响其他场景的金额 / 日期解析。
+    "address": "上海市浦东新区演示路 1 号",
+    "mail_method": "standard",
+    "replace": "no",
+    "credit_mode": "temporary",
+    "loss_type": "formal",
 }
 """受信任调用方（交互层）的默认选定对象：确定性、可复现（种子库中均存在）。
 

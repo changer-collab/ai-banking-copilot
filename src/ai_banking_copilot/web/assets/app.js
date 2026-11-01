@@ -526,20 +526,33 @@ function wealthGradeHtml(assessment) {
       : "未测评时任何产品都不能申购";
   const demo = info.source === "seed";
   const sourceText = info.source_label && !demo ? ` · ${info.source_label}` : "";
-  /* 重测次数：接口没给就不显示剩余次数（不编造数字） */
+  /* 测评次数：单日 2 次、12 个月 8 次（《金融机构产品适当性管理办法》第二十九条）。
+     接口没给数字时不编造；演示环境按模拟业务日计数。 */
   const retake = info.retake || {};
-  const remaining = Number.isFinite(Number(retake.remaining_today))
+  const remainingToday = Number.isFinite(Number(retake.remaining_today))
     ? Number(retake.remaining_today)
     : null;
-  const usedUp = remaining !== null && remaining <= 0;
+  const remaining12m = Number.isFinite(Number(retake.remaining_12m))
+    ? Number(retake.remaining_12m)
+    : null;
+  const usedUp = (remainingToday !== null && remainingToday <= 0)
+    || (remaining12m !== null && remaining12m <= 0);
   const retakeLabel = valid ? "重新测评" : "开始答题";
-  const retakeText = remaining === null ? retakeLabel : `${retakeLabel}（今日还可 ${remaining} 次）`;
+  const retakeText = remainingToday === null && remaining12m === null
+    ? retakeLabel
+    : `${retakeLabel}（今日还可 ${remainingToday ?? "—"} 次 / 12 个月还可 ${remaining12m ?? "—"} 次）`;
   const demoNote = demo
     ? `<p class="muted wealth-grade__warn">该等级来自演示种子，不是你的真实测评；点「${retakeLabel}」可换成问卷结果。</p>`
     : "";
+  const nextOn = retake.next_available_on ? `下次可测：${retake.next_available_on}` : "";
   const limitNote = usedUp
-    ? '<p class="muted wealth-grade__warn">今日测评次数已用完（演示口径：每日最多 3 次），明天再试。</p>'
+    ? `<p class="muted wealth-grade__warn">测评次数已用完（依据第二十九条：单日不超过 2 次、12 个月累计不超过 8 次）；${esc(nextOn)}。</p>`
     : "";
+  const expiryNote = info.state === "expired"
+    ? '<p class="muted wealth-grade__warn">测评已过期，所有申购入口已阻断；请先重新测评。</p>'
+    : info.expiring_soon
+      ? `<p class="muted wealth-grade__warn">测评将于 ${esc(String(info.days_until_expiry))} 天后过期（${esc(info.expires_on || "—")}），请提前重新评估。</p>`
+      : "";
   return `<div class="wealth-grade">
     <div class="wealth-grade__row">
       <span class="wealth-grade__k">风险等级</span>
@@ -553,7 +566,8 @@ function wealthGradeHtml(assessment) {
       <button class="btn btn--sm wealth-grade__btn" type="button" data-wealth-retake${
         usedUp ? " disabled" : ""}>${esc(retakeText)}</button>
     </div>
-    ${demoNote}${limitNote}
+    ${demoNote}${limitNote}${expiryNote}
+    <p class="muted wealth-grade__warn">依据《金融机构产品适当性管理办法》第二十九条；演示环境按模拟业务日计数。</p>
   </div>`;
 }
 
@@ -572,61 +586,100 @@ function wealthWhyHtml(item) {
   </details>`;
 }
 
-/* 产品行：名称 + 等级 + 期限/起购/费率，右侧只放金额输入与申购；
-   费率由服务端给（缺数据时是「未知」），前端不估算。不可买的产品灰显并写原因。 */
+/* 产品行：**只做展示**，金额输入与直接申购已移除；交易统一进确认弹窗。
+   披露字段全部来自服务端；缺数据的产品标「暂不可售」，不估算、不隐藏。 */
+function wealthWhyNotBuyHtml(item) {
+  const assessment = (state.wealth && state.wealth.assessment) || {};
+  const level = assessment.risk_profile || "未测评";
+  const expires = assessment.expires_on || "—";
+  if (item.reason_code === "DISCLOSURE_INCOMPLETE") {
+    return `<details class="wealth-why">
+      <summary>为什么不能买</summary>
+      <p>${esc(item.reason || "信息披露不完整")}</p>
+      <p class="muted">当前只做提示：请查看产品详情里的缺失字段，或联系客服。演示环境不提供申购入口。</p>
+      <p class="muted">演示环境：登记编码/费率/流动性/评级均为演示数据。</p>
+    </details>`;
+  }
+  return `<details class="wealth-why">
+    <summary>为什么不能买</summary>
+    <p>当前测评等级：<b>${esc(level)}</b> · 有效期至 ${esc(expires)}</p>
+    <p>${esc(item.reason || "等级或状态不匹配")}</p>
+    <p class="muted">可以：① 重新测评；② 查看与你当前等级匹配的产品；③ 联系客服。</p>
+    <div class="btn-row">
+      <button class="btn btn--sm" type="button" data-wealth-retake>重新测评</button>
+      <button class="btn btn--sm" type="button" data-wealth-matched>查看匹配产品</button>
+      <span class="muted">客服：演示环境未接入在线客服</span>
+    </div>
+  </details>`;
+}
+
 function wealthProductHtml(item) {
-  const disabled = item.eligible === false;
-  const min = esc(item.min_amount_yuan);
-  const fee = esc(item.fee || "未知");
-  const yieldPct = Number.isFinite(Number(item.yield_bp))
-    ? (Number(item.yield_bp) / 100).toFixed(2)
-    : null;
-  /* 指标全部来自接口；年化是种子里的事实，必须紧跟「模拟」标注，不能读成真实行情 */
+  const disabled = item.eligible !== true;
   const minText = yuan(Math.round((Number(item.min_amount_yuan) || 0) * 100));
-  const metaParts = [];
-  if (yieldPct) metaParts.push(`参考年化（模拟）${yieldPct}%`);
-  metaParts.push(`期限 ${esc(item.term_days)} 天`, `起购 ${minText}`, `费率 ${fee}`);
-  const meta = metaParts.join(" · ");
+  const incrementText = item.increment_yuan && item.increment_yuan !== "未知"
+    ? `${item.increment_yuan} 元`
+    : "未知";
+  const fees = item.fees || {};
+  const liquidity = item.liquidity || {};
+  const issuer = item.issuer_risk_level;
+  const seller = item.seller_risk_level;
+  const riskChips = issuer && seller && issuer !== seller
+    ? `<span class="chip">发行 ${esc(issuer)}</span><span class="chip">销售 ${esc(seller)}</span>`
+    : "";
   const action = disabled
     ? '<span class="chip chip--denied">不可买</span>'
-    : `<input class="input input--amount" type="number" inputmode="decimal" min="${min}" step="0.01"`
-      + ` placeholder="金额" data-amount-for="${esc(item.product_id)}" />`
-      + `<button class="btn btn--sm btn--primary" type="button" data-action="wealth-subscribe" data-requires-login`
-      + ` data-product="${esc(item.product_id)}" data-min="${min}">申购</button>`;
+    : `<button class="btn btn--sm" type="button" data-wealth-detail="${esc(item.product_id)}">产品详情</button>`
+      + `<button class="btn btn--sm btn--primary" type="button" data-wealth-subscribe="${esc(item.product_id)}" data-requires-login>立即申购</button>`;
   return `<article class="wealth-row${disabled ? " wealth-row--off" : ""}">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
         <span class="chip">${esc(item.risk_level)}</span>
-        ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
-      <p class="wealth-row__meta">${meta}</p>
+        ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}
+        ${riskChips}
+        ${item.disclosure_complete === false ? '<span class="chip chip--denied">暂不可售</span>' : ""}</div>
+      <p class="wealth-row__meta">${esc(item.benchmark_label || `业绩比较基准（模拟）${item.yield_bp}bp`)}
+        · ${esc(item.benchmark_note || "业绩比较基准≠实际收益")}</p>
+      <p class="wealth-row__meta">期限 ${esc(item.term_days)} 天 · 起购 ${minText} · 递增 ${esc(incrementText)}</p>
+      <p class="wealth-row__meta">费率：申购 ${esc(fees.subscription || "未知")}
+        · 销售服务 ${esc(fees.service || "未知")}/年
+        · 托管 ${esc(fees.custody || "未知")}/年</p>
+      <p class="wealth-row__meta">流动性：${esc(liquidity.label || "未知")}
+        · 申购截止 ${esc(liquidity.purchase_cutoff || "—")}</p>
+      <p class="wealth-row__meta">登记编码：<span class="mono">${esc(item.registration_code || "未披露")}</span>
+        · ${esc(item.registration_note || "")}
+        <a href="https://www.chinawealth.com.cn/" target="_blank" rel="noopener">中国理财网查询</a></p>
       <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
       ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
     </div>
     <div class="wealth-row__act">${action}</div>
     <p class="muted wealth-error" data-wealth-error hidden></p>
     ${wealthWhyHtml(item)}
+    ${disabled ? wealthWhyNotBuyHtml(item) : ""}
   </article>`;
 }
 
-/* 持仓行：名称 + 一行摘要，右侧只放赎回；不画空行（记录号本身在 .tech 里默认隐藏）。
-   「可赎回 ¥X」写在摘要行 —— 上限是这一行自己的事实，不放到卡片底部的报错里。 */
+/* 持仓行：只展示份额 / 金额 / 到期日 / 到账口径，右侧只放赎回入口；
+   金额输入已移除，赎回统一进确认弹窗。封闭期内不可赎回时按钮置灰并写原因。 */
 function wealthHoldingHtml(item) {
-  const max = esc(item.amount_yuan);
   const maxText = yuan(Math.round((Number(item.amount_yuan) || 0) * 100));
+  const redeemable = item.redeemable !== false;
+  const maturity = item.maturity_on || "无固定到期日";
+  const shares = item.shares || "—";
   return `<article class="wealth-row">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
         <span class="chip">${esc(item.risk_level)}</span>
         ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
-      <p class="wealth-row__meta">可赎回 <b>${maxText}</b> · 起息 ${esc(item.purchased_on)}` +
-        ` · 收益 ${esc(item.current_income)}</p>
+      <p class="wealth-row__meta">持有 ${esc(shares)} 份 · 金额 <b>${maxText}</b>
+        · 起息 ${esc(item.purchased_on)} · 到期 ${esc(maturity)}</p>
+      <p class="wealth-row__meta">收益 ${esc(item.current_income)}
+        · 到账 ${esc(item.arrival_label || "未知")}</p>
       <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
+      ${redeemable ? "" : `<p class="muted wealth-reason">${esc(item.redeem_reason || "封闭期内不可赎回")}</p>`}
     </div>
     <div class="wealth-row__act">
-      <input class="input input--amount" type="number" inputmode="decimal" min="0.01" max="${max}" step="0.01"
-        placeholder="金额" data-amount-for="${esc(item.product_id)}" aria-label="赎回金额，最多 ${maxText}" />
-      <button class="btn btn--sm" type="button" data-action="wealth-redeem" data-requires-login
-        data-product="${esc(item.product_id)}" data-max="${max}">赎回</button>
+      <button class="btn btn--sm" type="button" data-wealth-redeem="${esc(item.product_id)}"
+        data-requires-login${redeemable ? "" : " disabled"}>赎回</button>
     </div>
     <p class="muted wealth-error" data-wealth-error hidden></p>
   </article>`;
@@ -867,6 +920,57 @@ function closeAssessmentConfirm(bar) {
   if (bar) bar.hidden = true;
 }
 
+let pendingAssessmentAnswers = null;
+let pendingAssessmentPrefix = "panel";
+
+const RISK_ORDER = { R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
+
+function assessmentReconfirmHtml(data) {
+  const result = data.result || {};
+  const previous = data.previous_profile || "—";
+  const next = result.risk_profile || "—";
+  const diff = Math.abs((RISK_ORDER[next] || 0) - (RISK_ORDER[previous] || 0));
+  const countdown = diff >= 2
+    ? '<p class="muted" data-reconfirm-countdown>冷静期 10 秒…</p>'
+    : "";
+  return `<div class="takeover wealth-result" data-assessment-reconfirm>
+    <div><b>本次结果 ${esc(next)}，与最近一次 ${esc(previous)} 不一致</b>
+      <span class="chip chip--yellow">需再次确认</span></div>
+    <p>依据《金融机构产品适当性管理办法》第二十九条，结果与最近一次不一致时需要提示并请投资者再次确认。</p>
+    <p class="muted">演示环境用冷静期替代人工复核；人工复核未接入。</p>
+    ${countdown}
+    <div class="btn-row">
+      <button class="btn btn--sm btn--primary" type="button" data-action="assessment-reconfirm"
+        data-requires-login>再次确认提交</button>
+    </div>
+  </div>`;
+}
+
+function startReconfirmCountdown(data) {
+  const result = data.result || {};
+  const diff = Math.abs(
+    (RISK_ORDER[result.risk_profile] || 0) - (RISK_ORDER[data.previous_profile] || 0)
+  );
+  if (diff < 2) return;
+  const button = document.querySelector('[data-action="assessment-reconfirm"]');
+  const note = document.querySelector("[data-reconfirm-countdown]");
+  if (!button) return;
+  let left = 10;
+  button.disabled = true;
+  const tick = () => {
+    if (!document.body.contains(button)) return;
+    if (left <= 0) {
+      button.disabled = false;
+      if (note) note.textContent = "冷静期已结束，可以再次确认。";
+      return;
+    }
+    if (note) note.textContent = `冷静期 ${left} 秒…`;
+    left -= 1;
+    window.setTimeout(tick, 1000);
+  };
+  tick();
+}
+
 async function onAssessmentSubmit(form) {
   const { answers, missing } = assessmentAnswers(form);
   if (missing.length) {
@@ -876,6 +980,19 @@ async function onAssessmentSubmit(form) {
   const result = await post("/api/risk-assessment", { answers });
   if (result.status !== 200) {
     assessmentFormError(form, (result.data && result.data.detail) || "提交未被接受，请核对答案后重试。");
+    return;
+  }
+  if (result.data && result.data.state === "needs_reconfirmation") {
+    pendingAssessmentAnswers = answers;
+    pendingAssessmentPrefix = form.dataset.assessmentForm || "panel";
+    const host = form.parentNode;
+    if (host) {
+      const holder = document.createElement("div");
+      holder.innerHTML = assessmentReconfirmHtml(result.data);
+      const card = holder.firstElementChild;
+      if (card) host.replaceChild(card, form);
+    }
+    startReconfirmCountdown(result.data);
     return;
   }
   /* 成功卡替换掉表单本身（面板弹窗与聊天内两处表单都适用），
@@ -889,6 +1006,39 @@ async function onAssessmentSubmit(form) {
   }
   await refreshWealth();
   timelineAdd(`风险测评已提交：服务端算分定级 ${result.data.result.risk_profile}`, "done");
+}
+
+async function submitAssessmentReconfirm(trigger) {
+  if (!pendingAssessmentAnswers) return;
+  trigger.disabled = true;
+  const result = await post("/api/risk-assessment", {
+    answers: pendingAssessmentAnswers,
+    confirm_change: true,
+  });
+  if (result.status !== 200) {
+    trigger.disabled = false;
+    timelineAdd(
+      `再次确认未通过：${(result.data && result.data.detail) || "请稍后重试"}`,
+      "stop"
+    );
+    return;
+  }
+  const host = trigger.closest("[data-assessment-reconfirm]");
+  if (host) {
+    const holder = document.createElement("div");
+    holder.innerHTML = assessmentResultHtml(
+      result.data,
+      pendingAssessmentPrefix === "panel"
+    );
+    const card = holder.firstElementChild;
+    if (card) host.replaceWith(card);
+  }
+  pendingAssessmentAnswers = null;
+  await refreshWealth();
+  timelineAdd(
+    `风险测评已确认：服务端算分定级 ${result.data.result.risk_profile}`,
+    "done"
+  );
 }
 
 /* 测评问卷是弹窗：入口只有等级条上的「重新测评 / 开始答题」一个按钮。
@@ -938,58 +1088,18 @@ function wealthError(trigger, message) {
   box.textContent = message || "";
 }
 
-/* 卡片上的「申购 / 赎回」：把产品作为受信任选择随文本一起提交，
-   金额与上限在本地先挡一道（服务端仍会独立复核）。
-   计划卡出在**本页**（`#wealth-plan`）：早前走 `submitTask` 会把卡塞进隐藏的
-   `#view-chat`，用户在场景页看到的就是「点了没反应」（实测 WEA-P09）。 */
-async function onWealthAction(trigger) {
-  const redeem = trigger.dataset.action === "wealth-redeem";
-  const productId = trigger.dataset.product || "";
-  const card = trigger.closest(".wealth-row");
-  const input = card ? card.querySelector("[data-amount-for]") : null;
-  if (!input) return;
-  const raw = (input.value || "").trim();
-  const amount = Number(raw);
-  if (!raw || !Number.isFinite(amount) || amount <= 0) {
-    wealthError(trigger, "请输入大于 0 的金额（单位：元）。");
-    input.focus();
-    return;
-  }
+/* 卡片上的「立即申购 / 赎回」：不再在本页直接提交，统一打开交易确认弹窗。
+   弹窗负责四件套、份额/金额、验证码与二次确认；执行仍走 /api/confirm → PEP。 */
+function onWealthAction(trigger) {
+  const productId = trigger.dataset.wealthRedeem || trigger.dataset.wealthSubscribe || "";
   if (!productId) {
-    wealthError(trigger, "未取到产品编号，请重新加载理财面板后再试。");
+    timelineAdd("未取到产品编号，请重新加载理财面板后再试。", "stop");
     return;
   }
-  const limit = Number(redeem ? trigger.dataset.max : trigger.dataset.min);
-  if (Number.isFinite(limit) && limit > 0) {
-    if (!redeem && amount < limit) {
-      wealthError(trigger, `低于起购金额 ${limit} 元，请调整金额后重试。`);
-      input.focus();
-      return;
-    }
-    if (redeem && amount > limit) {
-      wealthError(trigger, `最多可赎回 ${limit} 元，请调整金额后重试。`);
-      input.focus();
-      return;
-    }
+  if (trigger.hasAttribute("data-wealth-redeem")) {
+    return openWealthRedeemSheet({ productId });
   }
-  const name = card ? card.querySelector("b")?.textContent || productId : productId;
-  const text = `${redeem ? "赎回" : "申购"} ${amount} 元 ${name}`;
-  const selected = Object.assign(selectedObjects(), { product: productId });
-  const planHost = el("wealth-plan");
-  if (planHost) planHost.hidden = false;
-  const planStatus = el("wealth-plan-status");
-  if (planStatus) planStatus.hidden = false;
-  await sceneRunTask({
-    host: "wealth-plan",
-    status: "wealth-plan-status",
-    utterance: text,
-    selected,
-    refresh: refreshWealth,
-    onSuccess: () => {
-      input.value = "";
-      wealthError(trigger, "");
-    },
-  });
+  return openWealthTradeSheet({ mode: "subscribe", productId });
 }
 
 function insightRuleLabel(ruleId) {
@@ -1357,23 +1467,36 @@ function sceneLevelChip(level) {
 }
 
 /* 页内迷你计划卡：只渲染服务端给的 summary，附冻结哈希；红色不给确认按钮 */
+function isWealthCard(card) {
+  return Boolean(card && (card.nodes || []).some(
+    (node) => String(node.action || "").startsWith("wealth.")
+  ));
+}
+
+
 function sceneCardHtml(card) {
   const rows = (card.summary || []).map((row) =>
     `<div class="scene-plan__row${row.emphasis ? " scene-plan__row--strong" : ""}">` +
     `<dt>${esc(row.label)}</dt><dd>${esc(row.value)}</dd></div>`).join("");
   const lines = (card.lines || []).map((line) =>
     `<li>${esc(stripNo(line))}</li>`).join("");
-  const need = {
-    GREEN: "纯查询，服务端已自动执行。",
-    YELLOW: "确认后由服务端执行；这一步不会替您跳过确认。",
-    RED: "红色动作需服务端一次性验证码，本页不代做，请到对话完成强验证。",
-  }[card.level] || "按服务端裁决处理。";
-  const actions = card.level === "RED"
-    ? '<button class="btn btn--sm" type="button" data-scene-chat>去对话做强验证</button>'
-    : card.level === "YELLOW"
-      ? '<button class="btn btn--sm btn--primary" type="button" data-scene-confirm data-requires-login>确认执行</button>' +
-        '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
-      : "";
+  const wealth = isWealthCard(card);
+  const need = wealth
+    ? "交易确认弹窗会收集四件套、份额/金额与验证码；确认后才由服务端执行。"
+    : ({
+      GREEN: "纯查询，服务端已自动执行。",
+      YELLOW: "确认后由服务端执行；这一步不会替您跳过确认。",
+      RED: "红色动作需服务端一次性验证码，本页不代做，请到对话完成强验证。",
+    }[card.level] || "按服务端裁决处理。");
+  const actions = wealth
+    ? '<button class="btn btn--sm btn--primary" type="button" data-scene-wealth-trade data-requires-login>打开交易确认</button>' +
+      '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
+    : card.level === "RED"
+      ? '<button class="btn btn--sm" type="button" data-scene-chat>去对话做强验证</button>'
+      : card.level === "YELLOW"
+        ? '<button class="btn btn--sm btn--primary" type="button" data-scene-confirm data-requires-login>确认执行</button>' +
+          '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
+        : "";
   return `<article class="scene-plan" data-level="${esc(card.level)}">
     <div class="scene-plan__head">${sceneLevelChip(card.level)}
       <span class="mono tech">cfhash ${esc(String(card.frozen_hash || "").slice(0, 12))}</span></div>
@@ -3240,11 +3363,13 @@ function setButtons() {
   const expired = !Number.isNaN(cardExpiresAt) && Date.now() >= cardExpiresAt;
   el("btn-confirm").textContent = expired
     ? "计划已过期 · 重新发起"
-    : strongPhase
-      ? "提交验证码并执行"
-      : redPending
-        ? "获取验证码"
-        : "确认并执行";
+    : isWealthCard(state.card)
+      ? "打开交易确认"
+        : strongPhase
+        ? "提交验证码并执行"
+        : redPending
+          ? "获取验证码"
+          : "确认并执行";
   el("btn-confirm").disabled = operationUnknown || offline || expired || !(awaiting || strongPhase) || busy;
   el("btn-interrupt").disabled = operationUnknown || offline || state.busy || !(state.phase === "executing" || awaiting);
   el("btn-resume").disabled = operationUnknown || offline || busy || !state.card || state.phase !== "interrupted";
@@ -3309,6 +3434,13 @@ async function applySubmission(data) {
     timelineAdd(`裁决：${(LEVEL[data.card.level] || {}).name || data.card.level} · 计划卡已冻结（${next}）`, data.card.level === "RED" ? "warn" : "done");
     if (data.card.level !== "GREEN") snapshotTrace();
     if (data.card.level === "GREEN") await onConfirm();
+    if (data.redemption_prefill) {
+      openWealthRedeemSheet({
+        productId: data.redemption_prefill.product_id,
+        prefill: data.redemption_prefill,
+        card: data.card,
+      }).catch(() => {});
+    }
     return;
   }
   if (data.state === "idle" && Array.isArray(data.questionnaire) && data.questionnaire.length) {
@@ -3549,6 +3681,16 @@ async function requestVerification() {
 async function onConfirm() {
   if (!state.card) return;
   state.historyRestored = false;
+  if (isWealthCard(state.card)
+    && (state.phase === "awaiting_confirm" || state.phase === "strong-verify")) {
+    /* 理财交易统一进确认弹窗：弹窗负责四件套、份额/金额、验证码与二次确认。 */
+    const redeem = (state.card.nodes || []).some((node) => node.action === "wealth.redeem");
+    openWealthTradeSheet({
+      mode: redeem ? "redeem" : "subscribe",
+      card: state.card,
+    }).catch(() => {});
+    return;
+  }
   if (state.card.level === "RED" && state.phase !== "strong-verify") {
     await requestVerification();
     return;
@@ -5632,6 +5774,11 @@ document.addEventListener("click", async (event) => {
     closeAssessmentConfirm(back.closest("[data-assessment-confirm]"));
     return;
   }
+  const reconfirm = target.closest('[data-action="assessment-reconfirm"]');
+  if (reconfirm) {
+    submitAssessmentReconfirm(reconfirm).catch(() => {});
+    return;
+  }
   const confirm = target.closest('[data-action="assessment-confirm"]');
   const submit = target.closest('[data-action="submit-assessment"]');
   const trigger = confirm || submit;
@@ -5681,20 +5828,42 @@ document.addEventListener("click", async (event) => {
     renderInsightCards();
     return;
   }
-  const trigger = target.closest('[data-action="wealth-subscribe"], [data-action="wealth-redeem"]');
+  if (target.closest("[data-wealth-detail]")) {
+    const node = target.closest("[data-wealth-detail]");
+    openWealthProductDetail(node.dataset.wealthDetail).catch(() => {});
+    return;
+  }
+  if (target.closest("[data-wealth-matched]")) {
+    focusMatchedWealthProducts();
+    return;
+  }
+  const trigger = target.closest("[data-wealth-subscribe], [data-wealth-redeem]");
   if (!trigger || trigger.disabled) return;
-  trigger.disabled = true;
   try {
     await onWealthAction(trigger);
   } catch (_) {
     wealthError(trigger, "提交失败：未收到服务端回执，请稍后重试。");
   } finally {
-    trigger.disabled = false;
     /* 卡片按钮直接起办理时不经过 `action()` 包装，需在此补一次按钮态：
        否则 `beginTask` 期间被隐藏的 #task-actions 不会恢复，确认按钮点不到。 */
     setButtons();
   }
 });
+
+function focusMatchedWealthProducts() {
+  const rows = Array.from(
+    document.querySelectorAll("#wealth-products .wealth-row:not(.wealth-row--off)")
+  );
+  if (!rows.length) {
+    timelineAdd("当前等级下没有匹配产品，请先重新测评或联系客服。", "warn");
+    return;
+  }
+  rows.forEach((row) => row.classList.add("wealth-row--focus"));
+  rows[0].scrollIntoView({ behavior: "smooth", block: "center" });
+  window.setTimeout(() => {
+    rows.forEach((row) => row.classList.remove("wealth-row--focus"));
+  }, 3200);
+}
 
 function readTheme() {
   try {
@@ -6198,6 +6367,13 @@ document.addEventListener("click", (event) => {
   }
   if (target.closest("#quick-transfer-submit")) {
     submitQuickTransfer().catch(() => {});
+    return;
+  }
+  if (target.closest("[data-scene-wealth-trade]")) {
+    const card = scenePending && scenePending.card;
+    if (!card) return;
+    const redeem = (card.nodes || []).some((node) => node.action === "wealth.redeem");
+    openWealthTradeSheet({ mode: redeem ? "redeem" : "subscribe", card }).catch(() => {});
     return;
   }
   if (target.closest("[data-scene-confirm]")) {

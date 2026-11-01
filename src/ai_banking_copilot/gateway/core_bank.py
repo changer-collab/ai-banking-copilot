@@ -13,7 +13,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from threading import RLock
 
 from ai_banking_copilot.gateway.errors import (
@@ -460,25 +460,228 @@ class CoreBank:
 
     def set_card_status(
         self, *, card_id: str, status: str, idempotency_key: str,
+        temp_lock_until: str | None = None, reason: str | None = None,
+        occurred_on: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
+        """卡片状态变更（解挂 / 临时冻结 / 正式挂失共用一个写原语）。
+
+        - `locked` 必须带 `temp_lock_until`（临时冻结到期日），否则拒绝；
+        - `lost` 为**正式挂失**：不可逆，写入 `lost_at` / `loss_reason`；
+        - 每次状态变更同时登记 `card_status_events`，供「查看冻结/挂失详情」。
+        """
         if status not in ("active", "lost", "locked"):
             raise CoreBankError(f"非法卡片状态：{status}")
+        if status == "locked" and not temp_lock_until:
+            raise CoreBankError("临时冻结必须指定到期日")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
-            row = conn.execute("SELECT card_id FROM cards WHERE card_id = ?", (card_id,)).fetchone()
+            row = conn.execute(
+                "SELECT card_id, status FROM cards WHERE card_id = ?", (card_id,)
+            ).fetchone()
             if row is None:
                 raise UnknownCardError(card_id)
-            conn.execute("UPDATE cards SET status = ? WHERE card_id = ?", (status, card_id))
+            previous = str(row["status"])
+            conn.execute(
+                "UPDATE cards SET status = ?, temp_lock_until = ?, lock_reason = ?,"
+                " lost_at = ?, loss_reason = ? WHERE card_id = ?",
+                (
+                    status,
+                    temp_lock_until if status == "locked" else None,
+                    reason if status == "locked" else None,
+                    occurred_on if status == "lost" else None,
+                    reason if status == "lost" else None,
+                    card_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO card_status_events(event_id, card_id, action, reason, note,"
+                " occurred_on) VALUES(?, ?, ?, ?, ?, ?)",
+                (
+                    _effect_id("card_event", status, idempotency_key),
+                    card_id,
+                    status,
+                    reason,
+                    None,
+                    occurred_on or "",
+                ),
+            )
             return WriteReceipt(
                 idempotency_key=idempotency_key,
                 action="set_card_status",
                 status=status,
                 record_ids=(f"cards:{card_id}",),
                 effect_ids=(f"cards:{card_id}",),
+                previous_status=previous,
             )
 
         return self._run_once("set_card_status", idempotency_key, body,
+                              before_write=before_write)
+
+    def replace_card(
+        self, *, card_id: str, address: str, mail_method: str, with_report: bool,
+        idempotency_key: str, occurred_on: str, reason: str | None = None,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
+        """补卡：发新卡号、旧卡作废（可选同时正式挂失）。
+
+        **演示口径**：不真实制卡 / 邮寄；`status` 直接落 `issued`，费用只登记不扣款，
+        预计到卡日按「普通 +5 天 / 加急 +2 天」推算。旧卡保留 `lost`（或原状态）并写
+        `replaced_by_card_id`，再次补卡一律拒绝。
+        """
+        if mail_method not in ("standard", "express"):
+            raise CoreBankError(f"非法邮寄方式：{mail_method}")
+        if not address.strip():
+            raise CoreBankError("补卡地址不得为空")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            row = conn.execute(
+                "SELECT card_id, card_type, status, last4, brand, expiry_month, expiry_year,"
+                " account_class, daily_limit_cents, account_id, replaced_by_card_id"
+                " FROM cards WHERE card_id = ?",
+                (card_id,),
+            ).fetchone()
+            if row is None:
+                raise UnknownCardError(card_id)
+            if row["replaced_by_card_id"]:
+                raise CoreBankError("该卡已补卡，不能重复申请")
+            new_card_id = _effect_id("card", "replace", idempotency_key)
+            new_last4 = str(int(sha256_hex(f"last4:{idempotency_key}")[:8], 16) % 9000 + 1000)
+            fee_cents = 2_000 if mail_method == "express" else 1_000
+            eta_days = 2 if mail_method == "express" else 5
+            eta_on = (date.fromisoformat(occurred_on) + timedelta(days=eta_days)).isoformat()
+            conn.execute(
+                "INSERT INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
+                " account_id, last4, brand, expiry_month, expiry_year, account_class)"
+                " SELECT ?, user_id, card_type, 'active', daily_limit_cents, account_id, ?,"
+                " brand, expiry_month, expiry_year, account_class FROM cards WHERE card_id = ?",
+                (new_card_id, new_last4, card_id),
+            )
+            conn.execute(
+                "INSERT INTO card_replacement_requests(request_id, card_id, new_card_id, address,"
+                " mail_method, fee_cents, eta_on, status, created_on)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, 'issued', ?)",
+                (
+                    _effect_id("replace", card_id, idempotency_key),
+                    card_id,
+                    new_card_id,
+                    address.strip(),
+                    mail_method,
+                    fee_cents,
+                    eta_on,
+                    occurred_on,
+                ),
+            )
+            if with_report:
+                conn.execute(
+                    "UPDATE cards SET status = 'lost', lost_at = ?, loss_reason = ?"
+                    " WHERE card_id = ?",
+                    (occurred_on, reason or "other", card_id),
+                )
+            elif str(row["status"]) != "lost":
+                # 仅补卡（卡损坏）：旧卡停用但不记为「正式挂失」，不写 lost_at。
+                conn.execute("UPDATE cards SET status = 'lost' WHERE card_id = ?", (card_id,))
+            conn.execute(
+                "UPDATE cards SET replaced_by_card_id = ? WHERE card_id = ?",
+                (new_card_id, card_id),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="replace_card",
+                status="issued",
+                record_ids=(f"cards:{card_id}", f"cards:{new_card_id}"),
+                effect_ids=(f"cards:{new_card_id}",),
+                previous_status=str(row["status"]),
+            )
+
+        return self._run_once("replace_card", idempotency_key, body,
+                              before_write=before_write)
+
+    def set_credit_limit(
+        self, *, card_id: str, mode: str, amount: Money, idempotency_key: str,
+        occurred_on: str, duration_months: int = 1,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
+        """信用卡额度：临时额度立即生效（默认 1 个月）；固定额度只登记审批，不改额度。"""
+        if mode not in ("temporary", "permanent"):
+            raise CoreBankError(f"非法额度模式：{mode}")
+        if amount.cents <= 0:
+            raise CoreBankError("额度必须为正")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            row = conn.execute(
+                "SELECT card_id, card_type FROM cards WHERE card_id = ?", (card_id,)
+            ).fetchone()
+            if row is None:
+                raise UnknownCardError(card_id)
+            if str(row["card_type"]) != "credit":
+                raise CoreBankError("只有信用卡支持信用额度调整")
+            if mode == "temporary":
+                until = (
+                    date.fromisoformat(occurred_on)
+                    + timedelta(days=30 * max(duration_months, 1))
+                ).isoformat()
+                conn.execute(
+                    "UPDATE cards SET temp_credit_limit_cents = ?, temp_credit_until = ?"
+                    " WHERE card_id = ?",
+                    (amount.cents, until, card_id),
+                )
+                status = "effective"
+            else:
+                eta = (date.fromisoformat(occurred_on) + timedelta(days=4)).isoformat()
+                conn.execute(
+                    "INSERT INTO card_limit_applications(application_id, card_id, mode,"
+                    " requested_cents, status, submitted_on, eta_on)"
+                    " VALUES(?, ?, 'permanent', ?, 'pending', ?, ?)",
+                    (
+                        _effect_id("limit_application", card_id, idempotency_key),
+                        card_id,
+                        amount.cents,
+                        occurred_on,
+                        eta,
+                    ),
+                )
+                status = "pending"
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="set_credit_limit",
+                status=status,
+                record_ids=(f"cards:{card_id}",),
+                effect_ids=(f"cards:{card_id}",),
+            )
+
+        return self._run_once("set_credit_limit", idempotency_key, body,
+                              before_write=before_write)
+
+    def set_cycle_limit(
+        self, *, card_id: str, amount: Money, idempotency_key: str,
+        before_write: BeforeWrite | None = None,
+    ) -> WriteReceipt:
+        """信用卡账单周期消费限额（即时生效，不是信用额度）。"""
+        if amount.cents <= 0:
+            raise CoreBankError("账单周期消费限额必须为正")
+
+        def body(conn: sqlite3.Connection) -> WriteReceipt:
+            row = conn.execute(
+                "SELECT card_id, card_type FROM cards WHERE card_id = ?", (card_id,)
+            ).fetchone()
+            if row is None:
+                raise UnknownCardError(card_id)
+            if str(row["card_type"]) != "credit":
+                raise CoreBankError("只有信用卡支持账单周期消费限额")
+            conn.execute(
+                "UPDATE cards SET cycle_limit_cents = ? WHERE card_id = ?",
+                (amount.cents, card_id),
+            )
+            return WriteReceipt(
+                idempotency_key=idempotency_key,
+                action="set_cycle_limit",
+                status="updated",
+                record_ids=(f"cards:{card_id}",),
+                effect_ids=(f"cards:{card_id}",),
+            )
+
+        return self._run_once("set_cycle_limit", idempotency_key, body,
                               before_write=before_write)
 
     def apply_virtual_card(
@@ -517,18 +720,38 @@ class CoreBank:
 
     def set_card_limit(
         self, *, card_id: str, daily_limit: Money, idempotency_key: str,
+        limit_kind: str | None = None,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
+        """借记卡通道限额：`limit_kind` 为 atm / transfer / purchase / overseas。
+
+        未传 `limit_kind` 时沿用旧的 `daily_limit_cents` 字段（兼容既有调用），
+        但页面与场景层一律要求显式通道，避免再把四类限额混成一个「日限额」。
+        """
         if daily_limit.cents < 0:
             raise CoreBankError("卡片额度不得为负")
+        columns = {
+            "atm": "atm_limit_cents",
+            "transfer": "transfer_limit_cents",
+            "purchase": "purchase_limit_cents",
+            "overseas": "overseas_limit_cents",
+        }
+        if limit_kind is not None and limit_kind not in columns:
+            raise CoreBankError(f"非法额度通道：{limit_kind}")
 
         def body(conn: sqlite3.Connection) -> WriteReceipt:
-            row = conn.execute("SELECT card_id FROM cards WHERE card_id = ?", (card_id,)).fetchone()
+            row = conn.execute(
+                "SELECT card_id, card_type FROM cards WHERE card_id = ?", (card_id,)
+            ).fetchone()
             if row is None:
                 raise UnknownCardError(card_id)
+            if limit_kind is not None and str(row["card_type"]) != "debit":
+                raise CoreBankError("通道日限额只适用于借记卡")
+            target = "daily_limit_cents" if limit_kind is None else columns[limit_kind]
             conn.execute(
-                "UPDATE cards SET daily_limit_cents = ? WHERE card_id = ?",
-                (daily_limit.cents, card_id),
+                f"UPDATE cards SET {target} = ?, daily_limit_cents = CASE"
+                f" WHEN ? = 'purchase' THEN ? ELSE daily_limit_cents END WHERE card_id = ?",
+                (daily_limit.cents, limit_kind, daily_limit.cents, card_id),
             )
             return WriteReceipt(
                 idempotency_key=idempotency_key,

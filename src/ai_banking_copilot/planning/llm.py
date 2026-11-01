@@ -177,10 +177,20 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "wealth.list",
         "命中『我的理财 / 持仓』模板（只读：产品目录）",
     ),
-    (re.compile(r"挂失"), "card.report_lost", "命中『挂失』模板"),
+    # 卡片域：先接窄词（临时/正式/补卡/额度类型），再接泛词，避免「额度」吞掉「账单周期额度」。
+    (re.compile(r"临时冻结|口头挂失|先冻|暂时冻结"), "card.lock", "命中『临时冻结』模板"),
+    (re.compile(r"正式挂失|永久挂失|挂失"), "card.report_lost", "命中『正式挂失』模板"),
+    (re.compile(r"补卡|换卡|补办卡|卡损坏"), "card.replace", "命中『补卡』模板"),
+    (re.compile(r"临时额度|临时提额"), "card.adjust_credit_limit", "命中『临时额度』模板"),
+    (
+        re.compile(r"固定额度|永久额度|提高额度|提升额度|提额"),
+        "card.adjust_credit_limit",
+        "命中『固定额度』模板",
+    ),
+    (re.compile(r"账单周期|周期消费限额"), "card.set_cycle_limit", "命中『账单周期限额』模板"),
     (re.compile(r"虚拟卡"), "card.apply_virtual", "命中『虚拟卡申请』模板"),
     (re.compile(r"额度|限额"), "card.set_limit", "命中『额度调整』模板"),
-    (re.compile(r"解锁|解除.{0,4}?卡"), "card.unlock", "命中『解锁卡片』模板"),
+    (re.compile(r"解挂|解锁|解除.{0,4}?卡"), "card.unlock", "命中『解挂 / 解锁卡片』模板"),
     (re.compile(r"锁.{0,3}卡"), "card.lock", "命中『锁卡』模板（含修饰语）"),
     (re.compile(r"锁卡|限制.*卡|卡.*限制"), "card.lock", "命中『锁卡』模板"),
     (
@@ -297,8 +307,8 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"凑钱|首付|学费|装修款"), "wealth.redeem", "命中『L4 大额凑集』生活事件"),
     (
         re.compile(r"卡丢了|银行卡丢|卡片丢失|手机丢了|钱包被偷|钱包丢了|疑似盗刷"),
-        "card.lock",
-        "命中『L5 失卡止损』生活事件",
+        "card.report_lost",
+        "命中『L5 失卡止损』生活事件（先问临时冻结还是正式挂失）",
     ),
     (
         re.compile(r"阶段盘点|年度盘点|年终总结|全年盘点"),

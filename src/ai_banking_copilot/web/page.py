@@ -391,7 +391,7 @@ _PAGE_HTML = """<!DOCTYPE html>
             <p class="panel__title">卡片管理</p>
             <span class="muted" id="cards-status">正在读取卡片…</span>
           </div>
-          <p class="muted scene-hint">四个动作直接办理：常用（锁卡 / 解锁、调整日限额）、风险操作（挂失、申请虚拟卡）。挂失不可逆；页内只生成计划卡，强验证在对话里完成。</p>
+          <p class="muted scene-hint">临时冻结（口头挂失）可解、免费、到期自动解挂；正式挂失不可逆，需补卡换新卡号。所有操作在弹窗内完成一次性验证码与二次确认（演示验证码，非真实人脸 / 短信 / U 盾）。</p>
           <div id="cards-list"></div>
           <div id="cards-plan" hidden></div>
           <p class="muted" id="cards-plan-status" hidden></p>
@@ -574,6 +574,23 @@ _PAGE_HTML = """<!DOCTYPE html>
   </div>
 </dialog>
 
+<dialog class="card-flow" id="card-flow-dialog" aria-labelledby="card-flow-title">
+  <div class="card-flow__head">
+    <div>
+      <p class="panel__title" id="card-flow-title">卡片操作</p>
+      <p class="muted card-flow__sub" id="card-flow-sub"></p>
+    </div>
+    <button class="btn btn--sm btn--ghost" type="button" data-card-flow-close>关闭</button>
+  </div>
+  <ol class="card-flow__steps" id="card-flow-steps"></ol>
+  <div class="card-flow__body" id="card-flow-body"></div>
+  <p class="card-flow__error" id="card-flow-error" role="alert" hidden></p>
+  <div class="card-flow__foot">
+    <button class="btn btn--ghost" type="button" data-card-flow-back id="card-flow-back">上一步</button>
+    <button class="btn btn--primary" type="button" id="card-flow-next" data-requires-login>下一步</button>
+  </div>
+</dialog>
+
 <dialog class="sub-detail" id="sub-detail" aria-labelledby="sub-detail-title">
   <div class="sub-detail__head">
     <p class="panel__title" id="sub-detail-title">订阅详情</p>
@@ -590,7 +607,8 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=83"></script>
+<script src="/assets/app.js?v=84"></script>
+<script src="/assets/wealth_trade.js?v=1"></script>
 </body>
 </html>
 """
