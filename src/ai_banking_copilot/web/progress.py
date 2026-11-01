@@ -26,7 +26,8 @@ STAGE_LABELS = {
     "understand": "理解意图",
     "plan": "生成计划",
     "review": "风险审阅",
-    "done": "完成",
+    # 「收尾」而不是「完成」：链路跑完不等于事情办完（还要澄清 / 确认 / 强验证）。
+    "done": "收尾",
 }
 
 PROGRESS_TTL_SECONDS = 120

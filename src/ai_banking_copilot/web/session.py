@@ -597,6 +597,10 @@ class Session:
         上一轮可能因为起购 / 等级被拒，自动补全等于替用户改金额。"""
         self._review_intents: list[dict[str, object]] = []
         self._clarification_keys: frozenset[str] = frozenset()
+        self._pending_slots: frozenset[str] = frozenset()
+        """当前离线澄清**待补槽位**：自由文本只按这些槽位取答案，不把新指令当答案。"""
+        self._privacy_ack: bool = False
+        """私密要求是否已回执（整段对话只说一次，避免每轮重复声明）。"""
         self._review_report: ReviewReport | None = None
         self._recent: list[dict[str, object]] = []
         """最近几轮的「用户原话 + 已采纳意图」摘要：只用于理解层上下文，不参与裁决。"""
@@ -982,9 +986,21 @@ class Session:
                     f"不支持批量取消，也不能跳过确认。请选择一项订阅后确认：{merchants}。",
                     utterance,
                 )
-            invalid = self._invalid_selection(selected or {})
+            # 「答错 / 选错」不是策略拒绝：能落到具体槽位的自由文本，丢掉该键让补齐流程
+            # 重新问一次；只有**指向他人对象的内部 ID**（越权尝试）才计入策略拒绝与熔断。
+            invalid = self._invalid_selection_key(selected or {})
             if invalid is not None:
-                return self._refuse(invalid, utterance)
+                key, value, message = invalid
+                if _looks_like_object_id(value):
+                    return self._refuse(message, utterance)
+                selected = {
+                    name: item for name, item in (selected or {}).items() if name != key
+                }
+                self._last_selected = dict(selected)
+            # 周期 / 条件触发的自动转账没有实现：先把边界说清楚，不追问收款人。
+            recurring = _recurring_transfer_refusal(utterance)
+            if recurring is not None:
+                return self._refuse(recurring, utterance, capability_boundary=True)
             # 第三人账户属于**能力边界**（不支持代他人操作），不是策略拒绝。
             third_party = _third_party_account_refusal(utterance)
             if third_party is not None:
@@ -1022,10 +1038,11 @@ class Session:
                 self._message = _with_notes(
                     "信息不足，请补充：" + "；".join(ask.prompt for ask in asks), notes
                 )
-                return SubmissionView(
+                self._pending_slots = frozenset(ask.slot for ask in asks)
+                return self._privacy_note(SubmissionView(
                     self._state, self._message, None, None, None,
                     tuple(ask.prompt for ask in asks), clarifications=asks,
-                )
+                ))
             if not intents:
                 selection = _wealth_selection_fallback(utterance, self._deps)
                 if selection is not None:
@@ -1077,7 +1094,7 @@ class Session:
                 ):
                     # 到期日已过：只补一句推算口径；赎回与下单仍未执行（文案不得写成已到账）。
                     view = replace(view, message=f"{view.message}\n{note}")
-            return view
+            return self._privacy_note(view)
         finally:
             _notify(on_stage, "done")
 
@@ -1173,8 +1190,24 @@ class Session:
             for item in store.due_schedules(self._deps.user_id, today=self._deps.today)
         )
 
-    def _invalid_selection(self, selected: Mapping[str, object]) -> str | None:
-        """对象由本人事实列表选取；客户端不能靠填写内部 ID 操作其他人的对象。"""
+    def _privacy_note(self, view: SubmissionView) -> SubmissionView:
+        """私密要求必须**当场回执**：澄清轮也要答应一句，不能等到出卡才说。
+
+        整段对话只说一次（`_privacy_ack`），避免每轮把同一句免责声明再念一遍。
+        """
+        if self._visibility != "private" or self._privacy_ack:
+            return view
+        self._privacy_ack = True
+        return replace(view, message=f"{view.message}\n{_PRIVATE_RECEIPT}")
+
+    def _invalid_selection_key(
+        self, selected: Mapping[str, object]
+    ) -> tuple[str, str, str] | None:
+        """对象由本人事实列表选取；客户端不能靠填写内部 ID 操作其他人的对象。
+
+        返回 `(键, 值, 文案)`：调用方据此区分「越权填了别人的 ID」（策略拒绝）与
+        「用户答错 / 选错」（定向重问），后者不该把会话推进熔断。
+        """
         gateway, user_id = self._deps.gateway, self._deps.user_id
         owned = {
             "account": {r.payload.account_id for r in gateway.accounts_of(user_id)},
@@ -1202,7 +1235,7 @@ class Session:
                     # 不能在这里先按「内部 ID」拒掉「李娜」这种正常输入。
                     continue
                 if value not in identifiers:
-                    return "所选对象不存在、已失效或不属于当前用户，请重新选择。"
+                    return key, value, "所选对象不存在、已失效或不属于当前用户，请重新选择。"
         return None
 
     def _after_outcome(
@@ -1223,7 +1256,9 @@ class Session:
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
             self._state = SessionState.NEEDS_CLARIFICATION
             self._message = _with_notes(outcome.message, notes)
-            return SubmissionView(
+            if asks:
+                self._pending_slots = frozenset(ask.slot for ask in asks)
+            return self._privacy_note(SubmissionView(
                 self._state,
                 self._message,
                 None,
@@ -1231,7 +1266,7 @@ class Session:
                 None,
                 questions or (outcome.message,),
                 clarifications=asks,
-            )
+            ))
         if outcome.status is not ScenarioStatus.PLANNED or outcome.plan is None:
             return self._refuse(outcome.message or "场景安全拒绝", utterance)
         plan = outcome.plan
@@ -1495,37 +1530,69 @@ class Session:
         }
 
     def _freeform_answers(self, utterance: str) -> dict[str, object]:
-        """把聊天框里的短补充解析成待澄清槽位；解析不到任何槽位就返回空。
+        """把聊天框里的补充解析成**待补槽位**的答案；解析不到任何槽位就返回空。
 
-        只认金额 / 日期 / 收款人 / 简短商户名，不把完整新指令（含动作词）当答案。
+        支持两类写法，都会一次吃完全部字段（表单回填与用户手打同一口径）：
+
+        1. 带标签的多字段：「商户名称：X；金额：Y 元；配送地址：Z；送达时间：D」；
+        2. 单个短答：「李娜」「3000」「299 元」——沿用旧口径，只认金额 / 日期 /
+           名册人名 / 简短商户名，含动作词的整句不当作答案。
+
+        只回填**当前仍在待补**的槽位：已答过的槽位重复出现不覆盖，未问过的槽位不新增，
+        避免一段文本把别的意图的槽位顺手写掉。
         """
         text = utterance.strip()
-        if not text or len(text) > 30:
-            return {}
-        candidate = text
-        for prefix in ("收款人", "付款人", "金额", "商户名", "商户", "日期", "时间", "预算"):
-            if candidate.startswith(prefix):
-                candidate = candidate[len(prefix):].lstrip("：: ")
-        if not candidate:
+        if not text:
             return {}
         answers: dict[str, object] = {}
+        for segment in (part.strip() for part in re.split(r"[；;\n]", text) if part.strip()):
+            slot, value = _split_answer_segment(segment)
+            if slot is None or not value:
+                continue
+            key = self._pending_slot_key(slot)
+            if key is None or key in answers:
+                continue
+            accepted = _accepted_answer(slot, value)
+            if accepted is not None:
+                answers[key] = accepted
+        if answers:
+            return answers
+        if len(text) > 40:
+            return {}
+        slot, candidate = _split_answer_segment(text)
+        if not candidate:
+            return {}
+        if slot is not None:
+            key = self._pending_slot_key(slot)
+            accepted = _accepted_answer(slot, candidate)
+            return {key: accepted} if key is not None and accepted is not None else {}
+        if re.search(r"取消|查|转|买|卖|冻结|解冻|订阅|账单|余额|理财", candidate):
+            return {}
         amount = parse_amount(candidate, bare_amounts=True)
         if amount.matched and amount.value is not None:
-            answers["amount"] = f"{amount.value.yuan} 元"
+            return {"amount": f"{amount.value.cents / 100:g} 元"}
         parsed_date = parse_temporal(candidate, self._deps.today)
         if parsed_date.matched and parsed_date.when is not None:
-            answers["when"] = parsed_date.when.isoformat()
+            return {"when": parsed_date.when.isoformat()}
         payees = tuple(
             record.payload for record in self._deps.gateway.payees_of(self._deps.user_id)
         )
         if any(payee.full_name and payee.full_name in candidate for payee in payees):
-            answers["payee"] = candidate
-        elif candidate in {"妈妈", "妈", "爸爸", "爸", "爱人", "老婆", "老公"}:
-            answers["payee"] = candidate
-        if not answers and re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9（）()·\s]{1,12}", candidate):
-            if not re.search(r"取消|查|转|买|卖|冻结|解冻|订阅|账单|余额", candidate):
-                answers["merchant"] = candidate
-        return answers
+            return {"payee": candidate}
+        if candidate in {"妈妈", "妈", "爸爸", "爸", "爱人", "老婆", "老公"}:
+            return {"payee": candidate}
+        if re.fullmatch(r"[\u4e00-\u9fa5A-Za-z0-9（）()·\s]{1,12}", candidate):
+            return {"merchant": candidate}
+        return {}
+
+    def _pending_slot_key(self, slot: str) -> str | None:
+        """把「基础槽位名」映射回待补键（多意图时是 `intent_N_<slot>`）。"""
+        if slot in self._pending_slots:
+            return slot
+        for key in self._pending_slots:
+            if re.sub(r"^intent_\d+_", "", key) == slot:
+                return key
+        return None
 
     def _remember_turn(self, utterance: str, intents: Sequence[Intent]) -> None:
         slots = {"merchant", "amount_cents", "budget", "order_on", "payee", "payee_id", "hold"}
@@ -1595,6 +1662,12 @@ class Session:
             intent.action for intent in proposal.intents
             if intent.confidence < CONFIDENCE_THRESHOLD
         )
+        # 保密 / 可见性要求是**约束**，不是新动作：模型把「别在她常看的账单推送里暴露这笔支出」
+        # 读成账单查询时必须剔掉，否则它会以否定句的形式被丢弃，约束既没落地也没回执。
+        # 只有模型**单独切出来**的从句才丢——若 span 就是整句，那是主意图，不能误杀。
+        candidates = tuple(
+            intent for intent in candidates if not _is_privacy_constraint(intent, utterance)
+        )
         if life_event_id == "L1":
             # 「先把预算锁了，别让我乱花」只冻结、不下单：同一句里已有冻结意图，
             # 且没有任何下单 / 订花措辞时，丢掉被「生日」二字带出来的下单意图，
@@ -1633,7 +1706,6 @@ class Session:
             else ()
         )
         products = tuple(record.payload for record in wealth_records)
-        local_slots = _local_intent_slots(candidates)
 
         # 多动作时每个动作必须回指用户原文中的**不同片段**。模型省略 span，或把
         # 两个动作都指向整句，多金额解析会拒绝、无法可靠绑定；此时逐动作澄清，
@@ -1666,15 +1738,26 @@ class Session:
         )
         if contexts is None:
             return (), _multi_intent_span_questions(candidates), _dropped_notes(dropped)
+        # 否定子句（「别…」）在补槽阶段会被丢掉，如果先按它算「每意图独立槽位」，
+        # 金额这类槽位会被 pop 掉却没人回填（回填键是 `intent_0_amount`），
+        # 于是同一个问题反复出现、永远答不完。故先剔除否定意图，再算作用域。
+        accepted = [
+            (index, intent, context)
+            for index, (intent, context) in enumerate(
+                zip(candidates, contexts, strict=True)
+            )
+            if not _context_is_negated(context, self._deps.today)
+        ]
+        if not accepted:
+            return (), (), _dropped_notes(dropped)
+        local_slots = _local_intent_slots(tuple(intent for _, intent, _ in accepted))
         prefix_targets = _unassigned_booking_prefix_targets(utterance, spans, candidates)
 
         # “登记/预约转账”表达的是登记未来动作；`transfer.create` 与
         # `transfer.schedule` 当前都可能直接扣款。明确的登记语义确定性落到
         # `transfer.book`，只有同句又出现“立即/马上/现在”等冲突语义时才澄清，
         # 避免把登记请求送进立即扣款 handler。
-        for index, (intent, span, context) in enumerate(
-            zip(candidates, spans, contexts, strict=True)
-        ):
+        for index, intent, context in accepted:
             # 完整原文范围同时用于控制槽解析，模型不能裁掉否定词或另一金额。
             span = context
             if index in prefix_targets:
@@ -3376,6 +3459,7 @@ class Session:
         self._review_report = None
         self._review_intents = []
         self._clarification_keys = frozenset()
+        self._pending_slots = frozenset()
         self._confirmation_history = []
         self._in_flight = None
         self._recovery_blocked = False
@@ -3383,6 +3467,17 @@ class Session:
         self._model_calls = []
         self._released_holds = ()
         self._visibility = "normal"
+
+
+_OBJECT_ID_SHAPE = re.compile(r"[a-z]{1,10}_[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def _looks_like_object_id(value: str) -> bool:
+    """像内部 ID（`p_lina` / `acc_savings` / `card_debit`）而不是人写的对象名。
+
+    只用来区分「越权填了别人 ID」与「答错 / 选错」：前者要被拒，后者只该重问。
+    """
+    return _OBJECT_ID_SHAPE.fullmatch(value.strip()) is not None
 
 
 def _with_notes(message: str, notes: tuple[str, ...]) -> str:
@@ -3591,6 +3686,34 @@ def _balance_tamper_refusal(utterance: str) -> str | None:
     if not any(marker in utterance for marker in _WEALTH_MARKERS):
         return None
     return _BALANCE_TAMPER_REFUSAL
+
+
+_RECURRING_TRIGGER = re.compile(
+    r"(?:每(?:个)?月|每周|每天)[^，,。；;]{0,8}?(?:自动|定时)"
+    r"|(?:自动|定时)[^，,。；;]{0,8}?(?:每(?:个)?月|每周|每天)"
+)
+_PAYROLL_TRIGGER = re.compile(r"发(?:了)?工资(?:第[一二三四五]天|当天|以后|后)")
+_TRANSFER_VERB = re.compile(r"转账|转给|打款|汇款|转")
+_RECURRING_TRANSFER_REFUSAL = (
+    "能力边界：不支持「按周期 / 按条件自动」的转账（比如每月自动转、发工资后自动转）。"
+    "现在能办的是两种：① 登记一笔到指定日期执行的定时转账；"
+    "② 到那天由「待办」提醒你回来确认。要哪种，把具体日期、收款人和金额告诉我。"
+)
+
+
+def _recurring_transfer_refusal(utterance: str) -> str | None:
+    """周期 / 条件触发的自动转账属于**能力边界**（不是策略拒绝，不计触发 4）。
+
+    只能命中「周期词 + 自动/定时」或「发工资 + 时点」并且确实带转账动词的句子；
+    `每月给李娜 500 元生活费`（L2 定期出资，登记的是**一笔**）不受影响。
+    """
+    if _RECURRING_TRIGGER.search(utterance) is None and (
+        _PAYROLL_TRIGGER.search(utterance) is None
+    ):
+        return None
+    if _TRANSFER_VERB.search(utterance) is None:
+        return None
+    return _RECURRING_TRANSFER_REFUSAL
 
 
 _WEALTH_FACT_MAX_LENGTH = 24
@@ -3896,6 +4019,55 @@ _IMMEDIATE_TRANSFER_MARKER = re.compile(
 _BOOKING_NO_DEBIT_MARKER = re.compile(r"(?:不要|不用)\s*(?:立即|马上|现在|立刻)?\s*扣款")
 
 
+_PRIVACY_CLAUSE_SPLIT = re.compile(r"([，,。；;])")
+
+
+def _strip_privacy_clauses(text: str) -> str:
+    """去掉「别 … 暴露 / 看到」这类可见性从句，只留业务语义。
+
+    只按标点切分整句，不做模糊删除：把「别让她看到」删掉之后剩下的分句仍原样保留，
+    后续动作 / 金额 / 日期解析不受影响。
+    """
+    if _PRIVACY_CONSTRAINT_CLAUSE.search(text) is None:
+        return text
+    pieces = _PRIVACY_CLAUSE_SPLIT.split(text)
+    kept: list[str] = []
+    for index in range(0, len(pieces), 2):
+        clause = pieces[index]
+        if _PRIVACY_CONSTRAINT_CLAUSE.search(clause):
+            continue
+        kept.append(clause)
+        if index + 1 < len(pieces):
+            kept.append(pieces[index + 1])
+    return "".join(kept).strip("，,。；; ")
+
+
+def _context_is_negated(context: str, today: date) -> bool:
+    """与补槽阶段同一判据地看「这一句是不是拒绝」。
+
+    「不要立即扣款」是**登记语义修饰**而不是否定：补槽前会先替换成「不扣款」，
+    这里必须同样处理，否则会在补槽之前就把合法的登记意图误杀。
+    """
+    return parse_temporal(_BOOKING_NO_DEBIT_MARKER.sub("不扣款", context), today).negation
+
+
+def _is_privacy_constraint(intent: Intent, utterance: str) -> bool:
+    """该意图是否只是模型从原话里**切出来的保密从句**（如「别在账单推送里出现」）。
+
+    只认「模型单独给了片段、且该片段是『别 … 暴露 / 看到』这类可见性约束」这一种：
+    整句 span 属于主意图，哪怕句子里带「别…」也不能整条丢掉；而「想给她惊喜」这种
+    带**惊喜**的主意图更不能被杀。隐私本身由 `wants_private_visibility` 另行判定并回执。
+    """
+    span = intent.slots.get("span")
+    if not isinstance(span, str) or not span.strip():
+        return False
+    if span.strip() == utterance.strip():
+        return False
+    if span not in utterance:
+        return False
+    return _PRIVACY_CONSTRAINT_CLAUSE.search(span) is not None
+
+
 def _intent_span(
     intent: Intent,
     utterance: str,
@@ -3974,8 +4146,9 @@ def _intent_semantic_contexts(
 ) -> tuple[str, ...] | None:
     """从原文恢复完整语义，防止模型裁掉“登记预约”等决定动作性质的前缀。"""
     if len(spans) <= 1:
-        # 备注是数据，不参与动作类型选择。
-        return (utterance.partition("备注")[0],) if spans else ()
+        # 备注是数据，不参与动作类型选择；保密从句同理，只剩约束语义、没有业务动作。
+        cleaned = _strip_privacy_clauses(utterance)
+        return (cleaned.partition("备注")[0],) if spans else ()
     clauses: list[tuple[int, int]] = []
     start = 0
     for boundary in _INTENT_CLAUSE_BOUNDARY.finditer(utterance):
@@ -4091,8 +4264,18 @@ _PRIVATE_HINTS = re.compile(
     r"|(?:私密|悄悄|保密|惊喜)"
 )
 
+_PRIVACY_CONSTRAINT_CLAUSE = re.compile(
+    r"(?:别|不要|不想).{0,16}(?:暴露|看到|发现|知道)"
+)
+"""只取「别 … 暴露 / 看到」这一支：用来剔除模型切出来的约束从句。
+
+「惊喜 / 私密 / 保密」是**可见性信号**（交给 `wants_private_visibility`），不能单独
+用来丢掉意图——「想给她惊喜」本身就是用户要办的事。
+"""
+
 _PRIVATE_RECEIPT = (
-    "已按私密处理：本应用内的共享账单与推送不会出现这笔。"
+    "已记下「不要暴露这笔」这条要求：这一笔按私密处理——"
+    "本应用内的共享账单与推送不会出现这一笔。"
     "管不到的：对方手机银行流水、短信通知、以及共同还款人看到的账单，本应用没有权限处理。"
 )
 
@@ -4100,6 +4283,47 @@ _PRIVATE_RECEIPT = (
 def wants_private_visibility(utterance: str) -> bool:
     """命中即按私密处理；解析不出来的按正常处理，不倒过来猜。"""
     return _PRIVATE_HINTS.search(utterance) is not None
+
+
+_ANSWER_LABELS: tuple[tuple[str, str], ...] = (
+    ("商户名称", "merchant"), ("商户名", "merchant"), ("商户", "merchant"),
+    ("花束档位", "amount"), ("金额", "amount"), ("档位", "amount"), ("花束", "amount"),
+    ("配送地址", "delivery_address"), ("送达地址", "delivery_address"),
+    ("送达时间", "delivery_time"), ("送达日期", "delivery_time"),
+    ("送到", "delivery_address"), ("地址", "delivery_address"),
+    ("日期", "delivery_time"), ("时间", "delivery_time"),
+    ("收款人", "payee"), ("付款人", "payer"),
+)
+"""澄清答案的中文标签 → 槽位名（长标签在前，避免「商户」先吃掉「商户名称」）。"""
+
+_DISTANCE_TAIL = re.compile(r"\s*[·・]\s*距离.*$")
+"""下拉选项的展示后缀（`· 距离 0.8 km`）：回填只保留业务名，不把展示串写进计划。"""
+
+_UNIT_HINT = re.compile(r"[元块万]")
+
+
+def _split_answer_segment(segment: str) -> tuple[str | None, str]:
+    """把「标签：值」拆成（槽位, 值）；没有标签时返回 (None, 原串)。"""
+    for label, slot in _ANSWER_LABELS:
+        if segment.startswith(label):
+            return slot, segment[len(label):].lstrip("：: 　").strip()
+    return None, segment.strip()
+
+
+def _accepted_answer(slot: str, value: str) -> str | None:
+    """校验单个答案；读不懂就返回 None（交给补槽流程再问一次，不猜）。"""
+    text = value.strip()
+    if not text:
+        return None
+    if slot == "amount":
+        parsed = parse_amount(text, bare_amounts=True)
+        if parsed.value is None:
+            return None
+        # 下游 `_normalize_selected` 要求金额带单位；用户只写数字时在这里补一次。
+        return text if _UNIT_HINT.search(text) else f"{text} 元"
+    if slot == "merchant":
+        return _DISTANCE_TAIL.sub("", text).strip() or None
+    return text
 
 
 def _life_budget_cents(text: str) -> int | None:
@@ -4136,6 +4360,8 @@ def _l1_fill(
     nearest = offers[0]
     bundle_label, bundle_price = nearest.bundles[0] if nearest.bundles else ("花束", 29900)
     slots = dict(fill.slots)
+    # 用户自己在原话里点过名的商户 / 档位不再重复问；系统推荐值仍要请用户确认一次。
+    known = {slot for slot in ("merchant", "amount") if slot in slots}
     slots.setdefault("budget_cents", budget)
     slots.setdefault("merchant", nearest.merchant)
     # 用户选过花束档位（`amount`）时以它为准；`amount_cents` 是 L1 场景读取的别名，
@@ -4143,8 +4369,7 @@ def _l1_fill(
     chosen_amount = slots.get("amount")
     if isinstance(chosen_amount, int) and chosen_amount > 0:
         slots["amount_cents"] = chosen_amount
-    else:
-        slots.setdefault("amount_cents", bundle_price)
+    # 没选档位就**不写**金额：金额是必填控制槽，替用户挑一个默认档位等于替用户下单。
     parsed_day = parse_temporal(text, today)
     if parsed_day.matched and parsed_day.when is not None:
         slots.setdefault("order_on", parsed_day.when.isoformat())
@@ -4171,19 +4396,24 @@ def _l1_fill(
         for label, price in nearest.bundles
     ) or (ClarificationChoice(label=f"{bundle_label} · {bundle_price // 100} 元",
                               value=f"{bundle_price // 100} 元"),)
-    asks = (
-        ClarificationAsk(
-            slot="merchant",
-            prompt="选一家花店（演示推荐，按距离排序；不会真实配送）。",
-            options=merchant_options,
-        ),
-        ClarificationAsk(
-            slot="amount",
-            prompt="选一个花束档位（都不超过你的预算）。",
-            options=amount_options,
-        ),
-        ClarificationAsk(slot="delivery_address", prompt="送到哪里？（演示字段，不会真实配送）"),
-        ClarificationAsk(slot="delivery_time", prompt="希望哪天送达？（演示字段）"),
+    asks = tuple(
+        ask for ask in (
+            ClarificationAsk(
+                slot="merchant",
+                prompt="选一家花店（演示推荐，按距离排序；不会真实配送）。",
+                options=merchant_options,
+            ),
+            ClarificationAsk(
+                slot="amount",
+                prompt="选一个花束档位（都不超过你的预算）。",
+                options=amount_options,
+            ),
+            ClarificationAsk(
+                slot="delivery_address", prompt="送到哪里？（演示字段，不会真实配送）",
+            ),
+            ClarificationAsk(slot="delivery_time", prompt="希望哪天送达？（演示字段）"),
+        )
+        if ask.slot not in known
     )
     return replace(fill, slots=slots, questions=questions), asks
 

@@ -589,7 +589,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=79"></script>
+<script src="/assets/app.js?v=80"></script>
 </body>
 </html>
 """

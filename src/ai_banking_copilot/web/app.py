@@ -168,7 +168,6 @@ from ai_banking_copilot.web.plan_card import (
 )
 from ai_banking_copilot.web.progress import ProgressRegistry
 from ai_banking_copilot.web.session import (
-    _PRIVATE_RECEIPT,
     MAX_CONFIRM_STEPS,
     ConfirmationMismatchError,
     ExecutionView,
@@ -964,9 +963,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         except Exception:
             LOGGER.warning("生活事件写入失败：%s / %s", user_id, session_id, exc_info=True)
-        if view.visibility != PRIVATE_VISIBILITY:
-            return view
-        return replace(view, message=f"{view.message}\n{_PRIVATE_RECEIPT}")
+        return view
 
     def _mark_life_event(user_id: str, session_id: str, status: str) -> None:
         store = deps.life_events

@@ -38,6 +38,15 @@ const SLOT_LABELS = {
   delivery_address: "配送地址", delivery_time: "送达时间",
 };
 const MONEY_SLOTS = new Set(["amount", "amount_cents", "daily_limit"]);
+const MONEY_UNIT = /[元块万亿]/;
+
+/* 金额槽只在**缺单位**时补「元」：下拉选项的文案和值本身已带「元」，
+   再拼一次就是实测里那条「经典玫瑰 · 299 元 元」 */
+function withMoneyUnit(slot, value) {
+  const text = String(value || "").trim();
+  if (!MONEY_SLOTS.has(slot) || !text) return text;
+  return MONEY_UNIT.test(text) ? text : `${text} 元`;
+}
 
 const LEVEL = {
   GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
@@ -332,6 +341,31 @@ function settleRunChain() {
   root.classList.add("is-done");
   root.open = false;
   if (hint && /进行中|准备中/.test(hint.textContent || "")) hint.textContent = "已结束";
+}
+
+/* 链路跑完 ≠ 事情办完：按服务端真实状态收口，别让「已完成 5/5」盖住「还在等用户补参数」 */
+const RUN_OUTCOME_HINTS = {
+  needs_clarification: "待补充 · 未执行",
+  awaiting_confirm: "待确认 · 未执行",
+  blocked: "已拒绝 · 未执行",
+  completed: "已执行 · 见回执",
+  idle: "已结束",
+};
+
+function markRunOutcome(stateName) {
+  if (!state.response) return;
+  const root = state.response.querySelector(".run-chain");
+  if (!root) return;
+  const hint = root.querySelector("[data-run-hint]");
+  const label = RUN_OUTCOME_HINTS[stateName];
+  if (!hint || !label) return;
+  hint.textContent = label;
+  root.classList.remove("is-running");
+  root.classList.add("is-done");
+  /* 收口之后再让轮询把「已完成 N/N」写回去就是状态误报：直接停掉本次请求的进度渲染 */
+  if (progress.timer) window.clearInterval(progress.timer);
+  progress.timer = null;
+  progress.requestId = "";
 }
 
 async function pollProgress(requestId) {
@@ -3212,6 +3246,7 @@ function renderPresets() {
 /* 把一次提交（/api/submit 或 /api/clarify）的结果落到界面：两条路径共用同一处理 */
 async function applySubmission(data) {
   showModelMetadata(data.model);
+  markRunOutcome(data.state);
   if (data.state === "awaiting_confirm" && data.card) {
     state.card = data.card;
     state.decision = data.decision || null;
@@ -3334,7 +3369,7 @@ function clarifyControl(ask) {
       .join("");
     const note = ask.candidates && ask.candidates.length
       ? "候选来自名册与已记账流水，只列事实，不做猜测。"
-      : "选项来自演示白名单，只作推荐，不会自动执行。";
+      : "选项来自演示白名单，仅用于补全参数；确认后才会执行。";
     return (
       `<select ${attrs}><option value="">请选择${esc(SLOT_LABELS[slot] || "其一")}</option>` +
       `${options}</select><span class="muted">${esc(note)}</span>`
@@ -3362,12 +3397,15 @@ async function onClarify() {
   if (!inputs.every((node) => node.reportValidity())) return;
   inputs.forEach((node) => {
     const value = (node.value || "").trim();
-    if (value) answers[node.dataset.slot] = MONEY_SLOTS.has(baseSlot(node.dataset.slot)) ? `${value}元` : value;
+    const slot = baseSlot(node.dataset.slot);
+    if (value) answers[node.dataset.slot] = withMoneyUnit(slot, value);
   });
   const answerText = inputs.map((node) => {
-    const value = node.tagName === "SELECT" && node.selectedOptions[0] ? node.selectedOptions[0].textContent : node.value;
     const slot = baseSlot(node.dataset.slot);
-    return `${SLOT_LABELS[slot] || "补充信息"}：${value}${MONEY_SLOTS.has(slot) ? " 元" : ""}`;
+    const shown = node.tagName === "SELECT" && node.selectedOptions[0]
+      ? node.selectedOptions[0].textContent
+      : node.value;
+    return `${SLOT_LABELS[slot] || "补充信息"}：${withMoneyUnit(slot, String(shown || "").trim())}`;
   }).join("；");
   const result = await post("/api/clarify", { answers });
   if (result.status !== 200) {
@@ -3686,6 +3724,7 @@ function applyExecution(data) {
   });
   state.resultCount = results.length;
   state.phase = data.state === "completed" ? "done" : data.state;
+  markRunOutcome(data.state);
   const complete = data.state === "completed";
   const scheduledFor = data.scheduled_for || "";
   rememberBillsPeriod(data.bill_findings);
@@ -6255,7 +6294,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=69", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=70", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

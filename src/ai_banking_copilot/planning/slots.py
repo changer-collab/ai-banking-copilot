@@ -395,6 +395,15 @@ def _resolve_slot(
         match = re.search(r"给(?P<merchant>[^，,。；;]{1,30}?)开通", inputs.text)
         if match is not None:
             return match["merchant"].strip(), None, tuple(notes)
+        # 显式标签（「商户 鲜花礼品店」/「商户名称：X」）：用户在补参时最常这么写。
+        # 只认带分隔符的写法，避免把「商户名称是什么」这类问句读成商户。
+        labelled = re.search(
+            r"(?:商户名称|商户名|商户|商家)(?:\s*[:：]\s*|\s+)"
+            r"(?P<merchant>[^，,。；;\s]{2,20})",
+            inputs.text,
+        )
+        if labelled is not None:
+            return labelled["merchant"].strip(" ·・"), None, tuple(notes)
     if slot == "next_charge_on":
         match = re.search(r"下个?月\s*(?P<day>\d{1,2})\s*[号日]", inputs.text)
         if match is not None:
