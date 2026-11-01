@@ -413,6 +413,48 @@ class LifeEventStore:
         )
         return tuple(self._get_schedule(user_id, str(row["schedule_id"])) for row in rows)
 
+    def active_schedules(
+        self, user_id: str, *, limit: int = 20,
+    ) -> tuple[LifeEventSchedule, ...]:
+        """仍为 `scheduled` 的预约（按到期日升序）：生活页「已登记预约」的只读列表。
+
+        只列**未到期 / 未执行**的；已消耗 / 已放弃 / 失败的预约属于历史，不进这里。
+        """
+
+        rows = self._store.query(
+            "SELECT schedule_id FROM life_event_schedules"
+            " WHERE user_id = ? AND status = ?"
+            " ORDER BY due_on ASC, created_at ASC LIMIT ?",
+            (user_id, SCHEDULE_SCHEDULED, limit),
+        )
+        return tuple(self._get_schedule(user_id, str(row["schedule_id"])) for row in rows)
+
+    def nodes_by_record(self, user_id: str) -> dict[str, tuple[dict[str, object], ...]]:
+        """记录 → 预约里冻结的节点快照（同记录多条取最新一条）。
+
+        旧版本记录没有写 `steps_json`：只读回填用它还原步骤摘要，不据此执行任何动作。
+        """
+
+        rows = self._store.query(
+            "SELECT record_id, plan_json FROM life_event_schedules"
+            " WHERE user_id = ? AND record_id IS NOT NULL"
+            " ORDER BY created_at ASC",
+            (user_id,),
+        )
+        result: dict[str, tuple[dict[str, object], ...]] = {}
+        for row in rows:
+            try:
+                parsed = json.loads(str(row["plan_json"] or "{}"))
+            except ValueError:
+                continue
+            nodes = parsed.get("nodes") if isinstance(parsed, dict) else None
+            if not isinstance(nodes, list):
+                continue
+            result[str(row["record_id"])] = tuple(
+                dict(node) for node in nodes if isinstance(node, dict)
+            )
+        return result
+
     def finish_schedule(
         self,
         *,

@@ -773,31 +773,43 @@ def test_reviewer_total_deadline_closes_a_real_dripping_connection() -> None:
             posts += 1
             self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(200)
+            # 声明一个大 body 但一字节不写：客户端会一直等 body，直到总截止把它断开。
             self.send_header("Content-Length", "10000")
             self.end_headers()
+            self.wfile.flush()
             received.set()
+            self.close_connection = True
+            # 断开的判定**不能靠写失败**：写 1 字节要等内核发送缓冲填满才会报 BrokenPipe，
+            # 满不满取决于机器负载与对端关闭方式（FIN/RST），全量跑时会抖。直接读对端：
+            # EOF / RST 都说明「总截止已取消 I/O 并关闭连接」，判定与负载无关。
+            self.connection.settimeout(0.05)
             while not stop.is_set():
                 try:
-                    self.wfile.write(b" ")
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    chunk = self.connection.recv(1)
+                except TimeoutError:
+                    continue
+                except OSError:
                     disconnected.set()
                     return
-                stop.wait(0.02)
+                if not chunk:
+                    disconnected.set()
+                    return
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
+        # 总截止必须**明显大于**建连 + 发请求的耗时：0.5s 时全量跑偶尔会在请求到达前
+        # 就超时（服务端连 `posts` 都是 0），这是用例自身的时序竞态，不是 Reviewer 行为。
         report = StrictPlanReviewer(
-            api_key="local-test-key", timeout_s=0.5,
+            api_key="local-test-key", timeout_s=2.0,
             endpoint=f"http://127.0.0.1:{server.server_port}/",
         ).review(_request())
         assert received.is_set() and posts == 1
         assert report.status is ReviewStatus.MANUAL
         assert report.failure_code is ReviewerFailure.TIMEOUT
         assert report.error_type == "TimeoutError"
-        assert disconnected.wait(2), "总截止应取消 I/O 并断开本地连接"
+        assert disconnected.wait(5), "总截止应取消 I/O 并断开本地连接"
     finally:
         stop.set()
         server.shutdown()

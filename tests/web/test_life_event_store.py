@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -212,3 +212,75 @@ def test_life_events_api_returns_event_title_and_cases(
     cases = {item["event_id"]: item["cases"] for item in payload["prototypes"]}
     assert {"label": "合租分摊", "utterance": "合租分摊，李娜应付 100 元"} in cases["L7"]
     assert all(item["cases"] for item in payload["prototypes"])
+
+
+def test_life_events_api_lists_registered_schedules(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """已登记预约必须能在生活页看到（此前只在确认回执里出现一次就消失）。"""
+
+    init_life_event_schema(rw_store)
+    events = LifeEventStore(rw_store)
+    record = events.create(
+        user_id="u_demo", session_id="s-schedule", event_id="L2",
+        event_name="定期出资型", event_title="生活费", amount_cents=50000,
+        steps=(), due_on="2026-11-04", now=_T0,
+    )
+    events.schedule(
+        user_id="u_demo", session_id="s-schedule", event_id="L2", event_title="生活费",
+        due_on=date(2026, 11, 4), plan_id="plan-1", record_id=record.record_id,
+        nodes=(
+            {
+                "node_id": "n1", "action": "transfer.schedule",
+                "params": {"amount_cents": 50000, "booked_on": "2026-11-04"},
+                "depends_on": [],
+            },
+            {"node_id": "n2", "action": "subscription.list",
+             "params": {"user_id": "u_demo"}, "depends_on": ["n1"]},
+        ),
+        now=_T0,
+    )
+    client = TestClient(create_app(replace(deps, life_events=events)))
+
+    payload = client.get("/api/life-events").json()
+    schedules = payload["schedules"]
+    assert len(schedules) == 1
+    assert schedules[0]["event_title"] == "生活费"
+    assert schedules[0]["due_on"] == "2026-11-04"
+    assert schedules[0]["kind"] == "order"
+    assert schedules[0]["record_id"] == record.record_id
+    assert [step["label"] for step in schedules[0]["steps"]] == ["定期转出", "订阅查询"]
+    assert schedules[0]["steps"][0]["amount_cents"] == 50000
+    # 记录本身仍是 `planned`，但要带出到期日：前端据此显示「已登记预约」而不是「待确认」
+    assert payload["records"][0]["schedule_due_on"] == "2026-11-04"
+
+
+def test_life_events_api_backfills_legacy_steps_from_schedule(
+    deps: AppDeps, rw_store: Store
+) -> None:
+    """旧版本记录 `steps_json` 为空：用关联预约冻结的节点快照做只读回填。"""
+
+    init_life_event_schema(rw_store)
+    events = LifeEventStore(rw_store)
+    legacy = events.create(
+        user_id="u_demo", session_id="s-legacy", event_id="L1",
+        event_name="预算锁定型", event_title="生日礼物", amount_cents=29900,
+        steps=(), due_on="2026-11-04", now=_T0,
+    )
+    events.schedule(
+        user_id="u_demo", session_id="s-legacy", event_id="L1", event_title="生日礼物",
+        due_on=date(2026, 11, 4), plan_id="plan-legacy", record_id=legacy.record_id,
+        nodes=(
+            {"node_id": "n1", "action": "funds.freeze",
+             "params": {"amount_cents": 100000}, "depends_on": []},
+            {"node_id": "n2", "action": "merchant.order",
+             "params": {"amount_cents": 29900, "order_on": "2026-11-04"},
+             "depends_on": ["n1"]},
+        ),
+        now=_T0,
+    )
+    client = TestClient(create_app(replace(deps, life_events=events)))
+
+    record = client.get("/api/life-events").json()["records"][0]
+    assert [step["label"] for step in record["steps"]] == ["冻结预算", "商户下单"]
+    assert record["steps"][1]["date"] == "2026-11-04"

@@ -21,7 +21,7 @@ import re
 import secrets
 import time
 from calendar import monthrange
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -158,6 +158,7 @@ from ai_banking_copilot.web.life_event_store import (
     STATUS_EXECUTED,
     STATUS_FAILED,
     STATUS_REJECTED,
+    LifeEventRecord,
     LifeEventStore,
 )
 from ai_banking_copilot.web.page import INDEX_HTML, render_login_page
@@ -1972,6 +1973,25 @@ def create_app(deps: AppDeps) -> FastAPI:
         # 记录本身不存预约类型：按 `record_id` 反查预约（`reminder` / `order`），
         # 仅供日历区分「提醒」与「下单」点，前端不得自行猜。
         schedule_kinds = {} if store is None else store.schedule_kinds(user_id)
+        # 已登记但未到期的预约：生活页需要一处能看见它们，此前只在确认回执里一闪而过。
+        schedules = () if store is None else store.active_schedules(user_id)
+        # 来源记录 → 预约到期日：记录仍是 `planned`，但对用户来说已经「登记完了」。
+        schedule_due = {
+            schedule.record_id: schedule.due_on.isoformat()
+            for schedule in schedules
+            if schedule.record_id is not None
+        }
+        # 旧版本记录没有 `steps_json`，用它关联的预约节点快照做**只读**回填。
+        schedule_nodes = {} if store is None else store.nodes_by_record(user_id)
+
+        def _record_payload(record: LifeEventRecord) -> dict[str, object]:
+            payload = record.to_dict()
+            if not payload.get("steps"):
+                payload["steps"] = list(
+                    _steps_from_nodes(schedule_nodes.get(record.record_id, ()))
+                )
+            return payload
+
         return {
             "demo": _is_anonymous(request),
             "prototypes": [
@@ -1998,17 +2018,37 @@ def create_app(deps: AppDeps) -> FastAPI:
             ],
             "records": [
                 {
-                    **record.to_dict(),
+                    **_record_payload(record),
                     # `order` / `reminder`：来自该记录的预约类型，查不到按 `order`
                     "schedule_kind": schedule_kinds.get(record.record_id, "order"),
+                    # 已登记未到期时带到期日：前端据此把「待确认」显示成「已登记预约」
+                    "schedule_due_on": schedule_due.get(record.record_id),
                     # 只有 L1 有可核的冻结链；其余事件不给预算块（前端不画，不造 0）
                     "budget": budget if record.event_id == "L1" else None,
                 }
                 for record in records
             ],
+            # 已登记预约：只读列出到期日 / 类型 / 冻结的步骤；到期后由 /api/due 重新提案。
+            "schedules": [
+                {
+                    "schedule_id": schedule.schedule_id,
+                    "session_id": schedule.session_id,
+                    "record_id": schedule.record_id,
+                    "event_id": schedule.event_id,
+                    "event_title": schedule.event_title or schedule.event_id,
+                    "due_on": schedule.due_on.isoformat(),
+                    "kind": schedule.kind,
+                    "notify_on": (
+                        None if schedule.notify_on is None else schedule.notify_on.isoformat()
+                    ),
+                    "status": schedule.status,
+                    "steps": list(_steps_from_nodes(schedule.nodes)),
+                }
+                for schedule in schedules
+            ],
             # 私密记录单独返回：普通列表里看不到，前端默认折叠成一行计数。
             "private_records": [
-                {**record.to_dict(), "budget": None} for record in private_records
+                {**_record_payload(record), "budget": None} for record in private_records
             ],
             "private_count": len(private_records),
             "records_available": store is not None,
@@ -2925,35 +2965,72 @@ def _empty_progress() -> dict[str, object]:
     return {"stage": "", "stages": [], "finished": True, "updated_at": ""}
 
 
+_LIFE_STEP_LABELS = {
+    "funds.freeze": "冻结预算",
+    "funds.release": "解冻剩余",
+    "merchant.order": "商户下单",
+    "transfer.create": "转账",
+    "transfer.book": "登记转账",
+    "transfer.schedule": "定期转出",
+    "wealth.redeem": "赎回",
+    "wealth.list": "理财查询",
+    "card.set_limit": "调整限额",
+    "card.lock": "锁卡",
+    "card.unlock": "解锁卡片",
+    "bills.monthly": "月度账单",
+    "bills.yearly": "年度账单",
+    "subscription.list": "订阅查询",
+    "subscription.cancel": "取消订阅",
+    "account.balance": "余额查询",
+    "account.transactions": "交易查询",
+    "card.list": "卡片查询",
+    "transfer.request_collection": "发起分摊",
+}
+"""步骤摘要里的动作短名（比 `plan_card` 的对外全名短，适合列表一行）。"""
+
+
+def _step_payload(
+    index: int, action: str, params: Mapping[str, object],
+) -> dict[str, object]:
+    """单个步骤的只读摘要：动作中文名 + 金额 + 日期。"""
+    date_value = params.get("order_on") or params.get("booked_on") or params.get("executed_on")
+    return {
+        "index": index,
+        "action": action,
+        "label": _LIFE_STEP_LABELS.get(action, action),
+        "amount_cents": params.get("amount_cents"),
+        "date": str(date_value) if date_value is not None else None,
+    }
+
+
 def _life_plan_steps(plan: object) -> tuple[dict[str, object], ...]:
     """计划步骤的只读摘要：动作中文名 + 金额 + 日期，供生活页记录抽屉回放。"""
+
     nodes = getattr(plan, "nodes", ())
-    labels = {
-        "funds.freeze": "冻结预算",
-        "funds.release": "解冻剩余",
-        "merchant.order": "商户下单",
-        "transfer.create": "转账",
-        "transfer.schedule": "定期转出",
-        "wealth.redeem": "赎回",
-        "card.set_limit": "调整限额",
-        "card.lock": "锁卡",
-        "bills.yearly": "年度账单",
-        "transfer.request_collection": "发起分摊",
-    }
     steps: list[dict[str, object]] = []
     for index, node in enumerate(nodes, start=1):
         params = node.params if isinstance(node.params, dict) else {}
-        date_value = (
-            params.get("order_on") or params.get("booked_on") or params.get("executed_on")
-        )
+        steps.append(_step_payload(index, str(node.action), params))
+    return tuple(steps)
+
+
+def _steps_from_nodes(nodes: Sequence[Mapping[str, object]]) -> tuple[dict[str, object], ...]:
+    """从预约里冻结的节点快照还原步骤摘要（与 `_life_plan_steps` 同一口径）。
+
+    旧版本记录没有写 `steps_json`，但它关联的预约仍保存着确认时的节点快照：
+    只做只读回填，不据此重新执行任何动作。
+    """
+
+    steps: list[dict[str, object]] = []
+    for index, node in enumerate(nodes, start=1):
+        action = node.get("action")
+        params = node.get("params")
         steps.append(
-            {
-                "index": index,
-                "action": node.action,
-                "label": labels.get(node.action, node.action),
-                "amount_cents": params.get("amount_cents"),
-                "date": str(date_value) if date_value is not None else None,
-            }
+            _step_payload(
+                index,
+                action if isinstance(action, str) else "",
+                params if isinstance(params, Mapping) else {},
+            )
         )
     return tuple(steps)
 

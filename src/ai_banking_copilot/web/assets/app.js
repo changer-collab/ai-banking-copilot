@@ -4709,6 +4709,22 @@ function maturityDotTitle(item) {
   return item.status === "expired" ? LIFE_CAL_DOT_TITLE.maturityPast : LIFE_CAL_DOT_TITLE.maturity;
 }
 
+/* 日历点开某天时必须能看清「哪只产品到期」：只画点不写名字，等于没告诉用户。 */
+function maturityRowHtml(item) {
+  const expired = item.status === "expired";
+  const amount = typeof item.amount_cents === "number" ? `${yuan(item.amount_cents)} 元` : "金额未知";
+  const term = typeof item.term_days === "number" ? `期限 ${item.term_days} 天` : "期限未知";
+  return `<li class="life-record-step">
+      <span class="life-record-step__no"><i class="${maturityDotClass(item)}"
+        title="${esc(maturityDotTitle(item))}"></i></span>
+      <span class="life-record-step__body">
+        <b>理财到期（推算）：${esc(item.name || item.product_id || "理财产品")}</b>
+        <span class="muted">${esc(amount)} · ${esc(item.purchased_on || "起息日未知")} 起息
+          · ${esc(term)} · 推算到期 ${esc(item.maturity_on || "—")}${expired ? " · 已到期（推算）" : ""}</span>
+        <span class="muted">${esc(item.basis || "按起息日 + 产品期限推算，非官方到期公告")}</span>
+      </span></li>`;
+}
+
 function lifeCalendarHtml(records) {
   const month = lifeCal.month || lifeMonthKey(new Date());
   lifeCal.month = month;
@@ -4754,13 +4770,29 @@ function lifeCalendarHtml(records) {
   const monthRecords = Object.keys(byDay).sort().reverse().flatMap((key) => byDay[key]);
   const other = records.length - monthRecords.length;
   const dayRecords = lifeCal.day ? (byDay[lifeCal.day] || []) : monthRecords;
+  /* 到期日不是「生活事件记录」：单列一块，把产品名 / 金额 / 起息 / 期限写清楚。
+     选某天时只看当天；没选时看本月全部。 */
+  const scopeMaturities = lifeCal.maturities.filter((item) => (
+    lifeCal.day
+      ? item.maturity_on === lifeCal.day
+      : String(item.maturity_on || "").slice(0, 7) === month
+  ));
+  const maturityBlock = scopeMaturities.length
+    ? `<section class="life-cal__maturity">
+        <p class="life-cal__filter"><b>理财到期（推算）</b> · ${scopeMaturities.length} 笔
+          <span class="muted">起息日 + 产品期限推算，非官方到期公告</span></p>
+        <ul class="life-cal__list">${scopeMaturities.map(maturityRowHtml).join("")}</ul>
+      </section>`
+    : "";
   const filter = lifeCal.day
     ? `<p class="life-cal__filter">已选 <b>${esc(lifeCal.day)}</b> · ${dayRecords.length} 条
         <button class="life-cal__clear" type="button" data-life-day="">显示整月</button></p>`
     : "";
   const rows = dayRecords.length
     ? `<ul class="life-cal__list">${dayRecords.map(lifeRecordRowHtml).join("")}</ul>`
-    : `<p class="muted">${lifeCal.day ? `${esc(lifeCal.day)} 没有生活事件记录。` : "本月没有生活事件记录。"}</p>`;
+    : `<p class="muted">${lifeCal.day
+      ? `${esc(lifeCal.day)} 没有生活事件记录。`
+      : "本月没有生活事件记录。"}${scopeMaturities.length ? "（上方为当天 / 本月到期的理财，推算值）" : ""}</p>`;
   const otherNote = other > 0
     ? `<p class="muted scene-hint">另有 ${other} 条记录不在本月，见下方最近记录。</p>` : "";
   return `<div class="life-cal">
@@ -4780,6 +4812,7 @@ function lifeCalendarHtml(records) {
         <span><i class="life-cal__dot life-cal__dot--maturity-past"></i>已到期（推算，未赎回按今日处理）</span>
       </p>
       ${filter}
+      ${maturityBlock}
       ${rows}
       ${otherNote}
     </div>`;
@@ -4791,7 +4824,10 @@ function lifeRecordKind(record) {
 }
 
 function lifeRecordRowHtml(record) {
-  const label = LIFE_EVENT_STATUS[record.status] || record.status;
+  /* 已登记未到期的记录仍是 `planned`，但对用户来说已经办完「登记」这一步了 */
+  const label = record.schedule_due_on
+    ? "已登记预约"
+    : (LIFE_EVENT_STATUS[record.status] || record.status);
   const kind = lifeRecordKind(record);
   const title = record.event_title || record.event_name || record.event_id;
   const amount = typeof record.amount_cents === "number" ? ` ${yuan(record.amount_cents)}` : "";
@@ -4808,10 +4844,13 @@ function openLifeRecord(recordId) {
   const dialog = el("life-record-dialog");
   const body = el("life-record-body");
   if (!record || !dialog || !body) return;
-  const statusLabel = LIFE_EVENT_STATUS[record.status] || record.status;
-  const stepState = record.status === "executed" ? "已执行"
-    : record.status === "planned" ? "待确认"
-      : record.status === "rejected" ? "已拒绝" : "失败";
+  const statusLabel = record.schedule_due_on
+    ? `已登记预约（${record.schedule_due_on} 到期）`
+    : (LIFE_EVENT_STATUS[record.status] || record.status);
+  const stepState = record.schedule_due_on ? "已登记"
+    : record.status === "executed" ? "已执行"
+      : record.status === "planned" ? "待确认"
+        : record.status === "rejected" ? "已拒绝" : "失败";
   const title = record.event_title || record.event_name || record.event_id;
   const steps = Array.isArray(record.steps) ? record.steps : [];
   const stepRows = steps.length
@@ -4825,13 +4864,15 @@ function openLifeRecord(recordId) {
           <span class="muted">${amount}${when} · ${stepState}</span>
         </span></li>`;
     }).join("")
-    : '<li class="muted">这条记录没有步骤摘要（旧版本记录）。</li>';
+    : '<li class="muted">这一版没有保存步骤快照（旧版本记录）；已知信息见上方金额与计划日期。</li>';
+  const amountNote = typeof record.amount_cents === "number"
+    ? ` · 金额 ${yuan(record.amount_cents)} 元` : "";
   body.innerHTML = `<p class="life-record-detail__name">${esc(title)}</p>
     <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))} · ${esc(statusLabel)}${
-      record.due_on ? ` · 计划日期 ${esc(record.due_on)}` : ""
-    }</p>
+      amountNote
+    }${record.due_on ? ` · 计划日期 ${esc(record.due_on)}` : ""}</p>
     <ul class="life-record-steps">${stepRows}</ul>
-    <p class="muted">只读回放：展示历史计划的步骤与金额，不会重新执行。</p>`;
+    ${steps.length ? '<p class="muted">只读回放：展示历史计划的步骤与金额，不会重新执行。</p>' : ""}`;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
 }
@@ -4840,7 +4881,29 @@ function openLifeRecord(recordId) {
 /* 原型全部来自服务端；L1 先选一个事件，选中后展开该事件的步骤与参数，
    参数折叠展开后才出现「开始组合」，避免还没填就误触。 */
 const lifePick = { event: "" };
-const lifeData = { prototypes: [], records: [] };
+const lifeData = { prototypes: [], records: [], schedules: [] };
+
+/* 已登记预约行：到期日 / 类型 / 冻结的步骤都在服务端算好，前端只渲染。
+   到期后会由 `/api/due` 重新生成待确认提案，所以这里明确写「不会自动扣款」。 */
+function lifeScheduleRowHtml(item) {
+  const title = item.event_title || item.event_id;
+  const kind = item.kind === "reminder" ? "提醒" : "到期下单";
+  const steps = Array.isArray(item.steps) ? item.steps : [];
+  const due = item.due_on ? `到期 ${esc(item.due_on)}` : "到期日未定";
+  const notify = item.notify_on ? ` · ${esc(item.notify_on)} 提前提醒` : "";
+  return `<article class="takeover insight-item life-record">
+      <div class="life-record__head">
+        <span class="life-record__kind">已登记预约</span>
+        <b>${esc(title)}</b>
+        <span class="chip">${esc(kind)}</span>
+      </div>
+      <div class="life-record__meta">
+        <p class="muted">${due}${notify} · ${steps.length} 步 · 到期后需再次确认，不会自动扣款</p>
+        <button class="life-send" type="button" data-life-open="${esc(item.session_id || "")}"
+                aria-label="打开会话：${esc(title)}">打开会话</button>
+      </div>
+    </article>`;
+}
 
 function lifeWorkbenchHtml(prototypes) {
   const list = Array.isArray(prototypes) ? prototypes : [];
@@ -4941,16 +5004,19 @@ async function refreshLifeEvents() {
   const payload = result.data || {};
   const prototypes = Array.isArray(payload.prototypes) ? payload.prototypes : [];
   const records = Array.isArray(payload.records) ? payload.records : [];
+  const schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
   const recordsNote = payload.records_available === false
     ? " · 本部署未开启记录"
     : ` · 我的记录 ${records.length} 条`;
-  status.textContent = `原型 ${prototypes.length} 个${recordsNote}`;
+  const scheduleNote = schedules.length ? ` · 已登记预约 ${schedules.length} 条` : "";
+  status.textContent = `原型 ${prototypes.length} 个${recordsNote}${scheduleNote}`;
 
   lifeCal.records = records;
   lifeCal.maturities = Array.isArray(payload.maturities) ? payload.maturities : [];
   if (calendar) calendar.innerHTML = lifeCalendarHtml(records);
   lifeData.prototypes = prototypes;
   lifeData.records = records;
+  lifeData.schedules = schedules;
   if (!lifePick.event && prototypes.length) {
     lifePick.event = typeof prototypes[0].event_id === "string" ? prototypes[0].event_id : "";
   }
@@ -4958,11 +5024,14 @@ async function refreshLifeEvents() {
 
   const recordRows = records.length
     ? records.map((record) => {
-      const label = LIFE_EVENT_STATUS[record.status] || record.status;
+      const label = record.schedule_due_on
+        ? "已登记预约"
+        : (LIFE_EVENT_STATUS[record.status] || record.status);
       const typeName = record.event_name || record.event_id;
       const title = record.event_title || typeName;
       const kind = lifeRecordKind(record);
       const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
+      const dueNote = record.schedule_due_on ? ` · 到期 ${record.schedule_due_on}` : "";
       const metaType = title === typeName ? "" : `${typeName} · `;
       return `<article class="takeover insight-item life-record" data-life-record="${esc(record.record_id || "")}">
       <div class="life-record__head">
@@ -4971,7 +5040,7 @@ async function refreshLifeEvents() {
         <span class="chip">${esc(label)}</span>
       </div>
       <div class="life-record__meta">
-        <p class="muted">${esc(metaType)}${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}</p>
+        <p class="muted">${esc(metaType)}${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}${esc(dueNote)}</p>
         <button class="life-send" type="button" data-life-open="${esc(record.session_id)}"
                 aria-label="打开会话：${esc(title)}">打开会话</button>
       </div>
@@ -4979,7 +5048,16 @@ async function refreshLifeEvents() {
     </article>`;
     }).join("")
     : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
-  list.innerHTML = `<div class="life-records">${recordRows}</div>`;
+  /* 已登记预约单独一块：它不在「最近记录」里（记录是已提交的事件），
+     以前只有确认回执里提一句，之后在页面上就找不到了。 */
+  const scheduleBlock = schedules.length
+    ? `<section class="life-block">
+        <div class="life-block__head"><b>已登记预约</b>
+          <span class="muted">到期后重新生成待确认提案，不会自动扣款</span></div>
+        <div class="life-records">${schedules.map(lifeScheduleRowHtml).join("")}</div>
+      </section>`
+    : "";
+  list.innerHTML = `${scheduleBlock}<div class="life-records">${recordRows}</div>`;
 }
 
 /* 统一关弹窗：showModal 打开的必须 close()，否则保留 open 属性会留下遮罩 */
@@ -6307,7 +6385,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=71", { scope: "/" }).catch(() => {
+navigator.serviceWorker.register("/assets/sw.js?v=72", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }
