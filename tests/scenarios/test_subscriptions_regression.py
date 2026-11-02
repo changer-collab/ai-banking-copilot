@@ -153,7 +153,7 @@ def test_s6_cancel_is_red_before_local_execution(
     http = subscription_http
     before = http.snapshot()
     view = http.submit(utterance)
-    _assert_card(view, "subscription.cancel", "RED")
+    _assert_card(view, "subscription.cancel", "YELLOW")
     assert http.snapshot() == before
     done = http.confirm(view, strong=True)
     assert done.status_code == 200, done.text
@@ -257,7 +257,7 @@ def test_s2_cancel_does_not_guarantee_merchant_stops_charging(
 ) -> None:
     http = subscription_http
     view = http.submit(CANCEL)
-    _assert_card(view, "subscription.cancel", "RED")
+    _assert_card(view, "subscription.cancel", "YELLOW")
     assert http.confirm(view, strong=True).status_code == 200
     assert all(
         item.subscription_id != "sub_video"

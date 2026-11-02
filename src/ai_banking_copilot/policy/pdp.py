@@ -68,7 +68,6 @@ OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
         "card.replace",
         "card.adjust_credit_limit",
         "subscription.sign",
-        "subscription.cancel",
         "transfer.request_collection",
         "password.change",
     }
@@ -87,8 +86,8 @@ OFFICIAL_RED_ACTIONS: frozenset[str] = frozenset(
   与 `card.set_limit` 同属「解除保护」，强制 ≥ 红；
 - `subscription.sign`：代扣签约把**未来无限次扣款**授权给商户（单笔小但敞口长期、易被诈骗利用），
   按金额档次次落黄不足以覆盖风险，强制 ≥ 红；
-- `subscription.cancel`：关闭的是银行卡侧扣款授权（解除既有支付授权），
-  与「解挂 / 调高限额」同属解除保护；单笔金额小不代表敞口小，强制 ≥ 红；
+- `subscription.cancel`：**按用户 2026-11-02 实测口径改为黄卡**——关闭扣款授权不再强制升红，
+  由用户确认即执行；本行只关闭银行卡侧授权，商户侧服务由商户决定；
 - `transfer.request_collection`：发起收款即向他人**索款**，是电信诈骗的典型施压手段，
   金额小也不降级，强制 ≥ 红；
 - `password.change`：官方红色示例「密码修改」——改密是账户被接管的最后一步，无金额参数，

@@ -1797,6 +1797,27 @@ class Session:
                         freeze_seen = True
                     kept.append(intent)
                 candidates = tuple(kept)
+            elif order_words is not None:
+                # 同一场生日被逗号切成多个「向商户下单」：合并成一条，span 用整句，
+                # 让 `_l1_fill` 能读到预算与日期；冻结节点由 `_build_l1` 自己生成，
+                # 去掉分句带出来的独立冻结意图，避免重复追问金额。
+                merged: list[Intent] = []
+                order_seen = False
+                for intent in candidates:
+                    if intent.action == "merchant.order":
+                        if not order_seen:
+                            merged.append(
+                                replace(
+                                    intent,
+                                    slots={**intent.slots, "span": utterance},
+                                )
+                            )
+                            order_seen = True
+                        continue
+                    if intent.action == "funds.freeze":
+                        continue
+                    merged.append(intent)
+                candidates = tuple(merged)
         if not candidates:
             # 页面已受信任选中产品、用户只说「买 1000 元」：模型不给意图时，
             # 由**受信任选中值 + 明确动词**确定性合成申购意图（不猜产品、不猜金额）。
@@ -4808,6 +4829,9 @@ def _multi_intent_span_questions(intents: tuple[Intent, ...]) -> tuple[Clarifica
 _LIFE_BUDGET_WINDOW = re.compile(
     r"(?:预算|上限|以内|不超过|最多|控制在)[^，,。；;]{0,16}"
 )
+_LIFE_BUDGET_BEFORE = re.compile(
+    r"(?:拿|用|准备|从[^，,。；;]{0,10}?拿)\s*\d+(?:\.\d+)?\s*(?:元|块)?\s*(?:做|作为|当)?\s*预算"
+)
 
 _PRIVATE_HINTS = re.compile(
     r"(?:别|不要|不想).{0,16}(?:暴露|看到|发现|知道)"
@@ -4877,11 +4901,12 @@ def _accepted_answer(slot: str, value: str) -> str | None:
 
 
 def _life_budget_cents(text: str) -> int | None:
-    """从「预算 1000 以内 / 最多 500」这类片段取预算上限；读不到返回 None。"""
-    for match in _LIFE_BUDGET_WINDOW.finditer(text):
-        parsed = parse_amount(match.group(0), bare_amounts=True)
-        if parsed.matched and parsed.value is not None:
-            return parsed.value.cents
+    """从「预算 1000 以内 / 拿 1000 做预算」这类片段取预算上限；读不到返回 None。"""
+    for pattern in (_LIFE_BUDGET_BEFORE, _LIFE_BUDGET_WINDOW):
+        for match in pattern.finditer(text):
+            parsed = parse_amount(match.group(0), bare_amounts=True)
+            if parsed.matched and parsed.value is not None:
+                return parsed.value.cents
     return None
 
 
@@ -4900,10 +4925,10 @@ def _l1_slot_reminder(text: str) -> int | None:
 def _l1_fill(
     fill: SlotFill, text: str, today: date,
 ) -> tuple[SlotFill, tuple[ClarificationAsk, ...]]:
-    """L1 预算锁定：把通用「商户 + 金额」追问换成场景问题（花店 / 花束 / 配送）。
+    """L1 预算锁定：把通用「商户 + 金额」追问换成**一个**花束档位问题。
 
     商户由系统按距离推荐（演示白名单），不再让用户填「视频会员」；预算只作上限，
-    花束档位只列预算内的选项。地址与时间仅作演示字段，不写入执行计划。
+    花束档位只列预算内的选项。地址与时间不参与执行计划，故不再追问。
     """
     budget = _life_budget_cents(text) or 100000
     offers = flower_offers(budget) or flower_offers()
@@ -4935,36 +4960,20 @@ def _l1_fill(
         question for question in fill.questions
         if question.slot not in {"merchant", "amount", "amount_cents"}
     )
-    merchant_options = tuple(
-        ClarificationChoice(
-            label=f"{offer.merchant} · 距离 {offer.distance_km} km", value=offer.merchant,
-        )
-        for offer in offers
-    )
     amount_options = tuple(
         ClarificationChoice(label=f"{label} · {price // 100} 元", value=f"{price // 100} 元")
         for label, price in nearest.bundles
     ) or (ClarificationChoice(label=f"{bundle_label} · {bundle_price // 100} 元",
                               value=f"{bundle_price // 100} 元"),)
-    asks = tuple(
-        ask for ask in (
-            ClarificationAsk(
-                slot="merchant",
-                prompt="选一家花店（演示推荐，按距离排序；不会真实配送）。",
-                options=merchant_options,
-            ),
+    asks: tuple[ClarificationAsk, ...] = ()
+    if "amount" not in known:
+        asks = (
             ClarificationAsk(
                 slot="amount",
-                prompt="选一个花束档位（都不超过你的预算）。",
+                prompt="选一个花束档位（都不超过你的预算；蛋糕需另行下单）。",
                 options=amount_options,
             ),
-            ClarificationAsk(
-                slot="delivery_address", prompt="送到哪里？（演示字段，不会真实配送）",
-            ),
-            ClarificationAsk(slot="delivery_time", prompt="希望哪天送达？（演示字段）"),
         )
-        if ask.slot not in known
-    )
     return replace(fill, slots=slots, questions=questions), asks
 
 
