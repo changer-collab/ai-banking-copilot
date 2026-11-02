@@ -17,6 +17,7 @@ from ai_banking_copilot.compose import (
     build_reviewer,
     reviewer_required,
 )
+from ai_banking_copilot.gateway.store import Store, StoreMode
 from ai_banking_copilot.planning.llm import (
     DEFAULT_LLM_ENDPOINT,
     DEFAULT_LLM_MODEL,
@@ -171,3 +172,42 @@ def test_build_audit_log_prefers_the_env_key(tmp_path: Path) -> None:
     audit = build_audit_log(tmp_path / "copilot.db", env={AUDIT_KEY_ENV: "k-from-env"})
     assert audit.keyed is True
     assert not (tmp_path / "audit.jsonl.key").exists()
+
+
+def test_build_deps_seeds_demo_extras(tmp_path: Path) -> None:
+    """组合根额外播种：第二用户卡片详情 / 适当性、定时转账、已完成生活事件。"""
+
+    db_path = tmp_path / "demo-extras.db"
+    with ExitStack() as resources:
+        build_deps(db_path, env={DISABLE_LLM_ENV: "1"}, resources=resources)
+        store = Store(db_path, StoreMode.READ_ONLY)
+        try:
+            scheduled = store.query(
+                "SELECT COUNT(*) AS n FROM scheduled_transfers WHERE status = 'scheduled'"
+            )[0]["n"]
+            assert scheduled == 1
+            events = store.query(
+                "SELECT COUNT(*) AS n FROM life_event_records WHERE status = 'executed'"
+            )[0]["n"]
+            assert events == 2
+            cards = {
+                row["card_id"]: row
+                for row in store.query(
+                    "SELECT card_id, brand FROM cards WHERE user_id = 'u_lin'"
+                )
+            }
+            assert cards["card_b_debit"]["brand"] == "unionpay"
+            assert cards["card_b_credit"]["brand"] == "visa"
+            profiles = {
+                row["user_id"]: row["birth_year"]
+                for row in store.query(
+                    "SELECT user_id, birth_year FROM customer_suitability_profiles"
+                )
+            }
+            assert profiles == {"u_demo": 1990, "u_lin": 1996}
+            holdings = store.query(
+                "SELECT share_bp FROM wealth_holdings WHERE user_id = 'u_lin'"
+            )
+            assert all(int(row["share_bp"]) > 0 for row in holdings)
+        finally:
+            store.close()

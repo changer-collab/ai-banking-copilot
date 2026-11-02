@@ -70,8 +70,8 @@ def test_card_lock_lists_bound_subscriptions_as_impact(gateway: FactGateway) -> 
     )
 
     text = "；".join(card.impact)
-    assert "2 个在扣订阅" in text
-    assert "视频会员" in text and "音乐会员" in text
+    assert "3 个在扣订阅" in text
+    assert "云盘会员" in text and "音乐会员" in text
     assert "不会自动取消商户侧代扣" in text
 
 

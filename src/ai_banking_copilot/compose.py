@@ -32,7 +32,12 @@ from ai_banking_copilot.gateway.risk_store import (
     init_risk_schema,
     seed_risk_assessment,
 )
-from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database, seed_secondary_user
+from ai_banking_copilot.gateway.seed import (
+    DEMO_USER_ID,
+    seed_database,
+    seed_demo_extras,
+    seed_secondary_user,
+)
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
 from ai_banking_copilot.gateway.transfer_store import (
     ScheduledTransferWriter,
@@ -315,7 +320,6 @@ def build_deps(
     seed_database(writer)
     init_risk_schema(writer)
     seed_risk_assessment(writer)
-    init_wealth_holdings_schema(writer)
     init_wealth_disclosure_schema(writer)
     seed_wealth_disclosures(writer)
     init_wealth_trade_schema(writer)
@@ -324,6 +328,8 @@ def build_deps(
     init_merchant_schema(writer)
     seed_user_profiles(writer)
     seed_secondary_user(writer)
+    # 持仓份额回填必须晚于两个用户的持仓播种，否则第二用户会留下 share_bp=0。
+    init_wealth_holdings_schema(writer)
     init_transfer_schema(writer)
     init_breaker_schema(writer)
     init_session_schema(writer)
@@ -331,6 +337,7 @@ def build_deps(
     init_auth_schema(writer)
     init_conversation_schema(writer)
     init_life_event_schema(writer)
+    seed_demo_extras(writer)
     writer.close()
 
     read_store = Store(db_path, StoreMode.READ_ONLY)

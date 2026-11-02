@@ -7,11 +7,12 @@ python scripts/reset_demo.py                # 重置 runtime/copilot.db
 python scripts/reset_demo.py --db runtime/copilot.db
 ```
 
-删除范围只包含本脚本认识的四个文件（含 SQLite 旁路文件）：
+删除范围只包含本脚本认识的这些文件（含 SQLite 旁路文件）：
 
 - `<db>`、`<db>-wal`、`<db>-shm`：业务库；
 - `audit.jsonl`：审计链日志（重置后从空链重新开始）；
-- `<stem>-insights.db`（含旁路）：洞察元数据。
+- `<stem>-insights.db`（含旁路）：洞察元数据；
+- `<stem>-bill-analysis.db`（含旁路）：账单分析结果与线索处理记录。
 
 **保留** `audit.jsonl.key` 与 `<stem>.verification.key`：密钥不属于业务状态，
 保留后重置前后的审计链密钥与强验证密钥保持一致。
@@ -51,6 +52,9 @@ def _artifact_paths(db_path: Path) -> tuple[Path, ...]:
         f"{db_path.stem}-insights.db",
         f"{db_path.stem}-insights.db-wal",
         f"{db_path.stem}-insights.db-shm",
+        f"{db_path.stem}-bill-analysis.db",
+        f"{db_path.stem}-bill-analysis.db-wal",
+        f"{db_path.stem}-bill-analysis.db-shm",
     )
     return tuple(parent / name for name in names)
 

@@ -149,3 +149,20 @@ def test_cards_carry_demo_last_four(seeded_db: Path) -> None:
     assert tails["card_debit"] == "4471"
     assert all(value and len(value) == 4 and value.isdigit() for value in tails.values())
     store.close()
+
+
+def test_seed_transfer_rows_carry_v9_metadata(seeded_db: Path) -> None:
+    """种子转账流水补齐 v9 元数据后，记录页不再一律显示「历史转账」。"""
+
+    store = Store(seeded_db, StoreMode.READ_ONLY)
+    rows = store.query(
+        "SELECT payee_id, transfer_method, transfer_fee_cents, transfer_remark,"
+        " transfer_status FROM transactions WHERE merchant = '转给李娜'"
+    )
+    assert rows
+    assert {row["payee_id"] for row in rows} == {"p_lina"}
+    assert {row["transfer_method"] for row in rows} == {"realtime"}
+    assert {row["transfer_fee_cents"] for row in rows} == {0}
+    assert {row["transfer_remark"] for row in rows} == {"生活费"}
+    assert {row["transfer_status"] for row in rows} == {"completed"}
+    store.close()

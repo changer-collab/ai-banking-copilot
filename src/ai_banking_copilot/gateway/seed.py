@@ -21,6 +21,8 @@ from ai_banking_copilot.gateway.store import Store
 
 DEMO_USER_ID = "u_demo"
 SEEDED_KEY = "seeded"
+DEMO_EXTRAS_KEY = "demo_extras_seeded"
+"""演示增强数据只播种一次的标记：避免用户取消定时转账后，重启服务又把它复活。"""
 
 _USERS = ((DEMO_USER_ID, "陈明", "R3"),)
 
@@ -274,6 +276,7 @@ def seed_database(store: Store) -> None:
         _upgrade_seeded_amounts(conn)
         _upgrade_fixed_price_amounts(conn)
         _upgrade_payment_identity(conn)
+        _upgrade_transfer_metadata(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,)
         )
@@ -447,6 +450,20 @@ def _upgrade_payment_identity(conn: sqlite3.Connection) -> None:
     )
 
 
+def _upgrade_transfer_metadata(conn: sqlite3.Connection) -> None:
+    """给仍缺 v9 元数据的种子转账流水补齐收款人 / 到账方式 / 手续费 / 备注 / 状态。
+
+    只命中 `merchant='转给李娜'` 且 `payee_id IS NULL` 的行：用户真实发起的转账
+    已带元数据，不会被覆盖；重复调用等价 no-op（回填后 `payee_id` 不再为 NULL）。
+    """
+
+    conn.execute(
+        "UPDATE transactions SET payee_id = 'p_lina', transfer_method = 'realtime',"
+        " transfer_fee_cents = 0, transfer_remark = '生活费', transfer_status = 'completed'"
+        " WHERE merchant = '转给李娜' AND payee_id IS NULL"
+    )
+
+
 def _upgrade_fixed_price_amounts(conn: sqlite3.Connection) -> None:
     """把旧库中订阅商户被年度缩放的 2025 年种子行回填为固定价。
 
@@ -491,6 +508,14 @@ _SECONDARY_CARDS = (
     ("card_b_debit", SECONDARY_USER_ID, "debit", "active", 1500000, "acc_b_savings", "3120"),
     ("card_b_credit", SECONDARY_USER_ID, "credit", "active", 3000000, "acc_b_savings", "7745"),
 )
+
+_SECONDARY_CARD_DETAILS = (
+    # (card_id, brand, expiry_month, expiry_year, account_class,
+    #  atm, transfer, purchase, overseas, credit_limit, cycle_limit)
+    ("card_b_debit", "unionpay", 6, 2029, "Ⅰ", 500_000, 1_500_000, 1_500_000, 500_000, None, None),
+    ("card_b_credit", "visa", 3, 2028, None, None, None, None, None, 3_000_000, 800_000),
+)
+"""第二用户卡片展示与分卡限额：与主用户同口径，避免卡片页出现「卡组织未知」。"""
 
 _SECONDARY_HOLDINGS = (
     ("wp_bond", SECONDARY_USER_ID, 120000, "2026-02-20"),
@@ -565,6 +590,28 @@ def seed_secondary_user(store: Store) -> None:
             [(last4, card_id) for card_id, _u, _t, _s, _l, _a, last4 in _SECONDARY_CARDS],
         )
         conn.executemany(
+            "UPDATE cards SET account_id = ? WHERE card_id = ? AND account_id IS NULL",
+            [
+                (account_id, card_id)
+                for card_id, _u, _t, _s, _l, account_id, _last4 in _SECONDARY_CARDS
+            ],
+        )
+        conn.executemany(
+            "UPDATE cards SET"
+            " brand = COALESCE(brand, ?),"
+            " expiry_month = COALESCE(expiry_month, ?),"
+            " expiry_year = COALESCE(expiry_year, ?),"
+            " account_class = COALESCE(account_class, ?),"
+            " atm_limit_cents = COALESCE(atm_limit_cents, ?),"
+            " transfer_limit_cents = COALESCE(transfer_limit_cents, ?),"
+            " purchase_limit_cents = COALESCE(purchase_limit_cents, ?),"
+            " overseas_limit_cents = COALESCE(overseas_limit_cents, ?),"
+            " credit_limit_cents = COALESCE(credit_limit_cents, ?),"
+            " cycle_limit_cents = COALESCE(cycle_limit_cents, ?)"
+            " WHERE card_id = ? AND brand IS NULL",
+            [(*row[1:], row[0]) for row in _SECONDARY_CARD_DETAILS],
+        )
+        conn.executemany(
             "INSERT OR IGNORE INTO wealth_holdings(product_id, user_id, amount_cents,"
             " purchased_on) VALUES(?, ?, ?, ?)",
             _SECONDARY_HOLDINGS,
@@ -637,3 +684,100 @@ def _months(start: tuple[int, int], end: tuple[int, int]) -> tuple[tuple[int, in
         else:
             month += 1
     return tuple(periods)
+
+
+_DEMO_SCHEDULED_TRANSFERS = (
+    # (schedule_id, user_id, account_id, payee_id, amount_cents, booked_on, remark,
+    #  status, method, purpose, fee_cents)
+    (
+        "sch_demo_20261120",
+        DEMO_USER_ID,
+        "acc_current",
+        "p_lina",
+        50000,
+        "2026-11-20",
+        "每月生活费",
+        "scheduled",
+        "next_day",
+        "other",
+        0,
+    ),
+)
+"""演示用未来定时转账：登记不扣款，只用于记录页展示「待到账」。"""
+
+_DEMO_LIFE_EVENT_RECORDS = (
+    (
+        "le_seed_l2_allowance",
+        DEMO_USER_ID,
+        "seed-demo-life",
+        "L2",
+        "定期出资型",
+        "给李娜转生活费",
+        6800,
+        "executed",
+        "2026-09-11T19:40:00+00:00",
+        "2026-09-11T19:40:00+00:00",
+        '[{"index": 1, "action": "transfer.schedule", "label": "定时转账",'
+        ' "amount_cents": 6800, "date": "2026-09-11"}]',
+        "2026-09-11",
+        "normal",
+        "给李娜转68元生活费",
+        None,
+        None,
+        "[]",
+    ),
+    (
+        "le_seed_l7_share",
+        DEMO_USER_ID,
+        "seed-demo-life",
+        "L7",
+        "分摊收款型",
+        "合租水电分摊",
+        10000,
+        "executed",
+        "2026-10-10T19:30:00+00:00",
+        "2026-10-10T19:30:00+00:00",
+        '[{"index": 1, "action": "transfer.request_collection", "label": "发起 AA 收款",'
+        ' "amount_cents": 10000, "date": "2026-10-10"}]',
+        "2026-10-10",
+        "normal",
+        "合租水电费大家分摊一下",
+        None,
+        None,
+        "[]",
+    ),
+)
+"""两条已完成的生活事件样例：让「生活 → 最近记录」在重置后仍有可看的历史。"""
+
+
+def seed_demo_extras(store: Store) -> None:
+    """演示增强数据（仅组合根调用）：未来定时转账 + 两条已完成生活事件。
+
+    与 `seed_database` / `seed_secondary_user` 分开，避免污染依赖「无定时转账 /
+    无生活事件」空态的核心测试。用 `schema_meta` 标记**只播种一次**：用户在演示中
+    取消定时转账或删除事件后，重启服务不会把旧样例复活。
+    """
+
+    with store.transaction() as conn:
+        done = conn.execute(
+            "SELECT 1 FROM schema_meta WHERE key = ?", (DEMO_EXTRAS_KEY,)
+        ).fetchone()
+        if done is not None:
+            return
+        conn.executemany(
+            "INSERT OR IGNORE INTO scheduled_transfers(schedule_id, user_id, account_id,"
+            " payee_id, amount_cents, booked_on, remark, status, method, purpose, fee_cents)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _DEMO_SCHEDULED_TRANSFERS,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO life_event_records"
+            " (record_id, user_id, session_id, event_id, event_name, event_title,"
+            "  amount_cents, status, created_at, updated_at, steps_json, due_on,"
+            "  visibility, utterance, hold_ref, occasion_ref, results_json)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _DEMO_LIFE_EVENT_RECORDS,
+        )
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES(?, '1')", (DEMO_EXTRAS_KEY,)
+        )

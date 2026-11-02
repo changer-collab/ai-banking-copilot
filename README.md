@@ -1,360 +1,205 @@
-# AI 银行副驾 · Zero-Trust Dual-Core Banking Agent
+# AI 银行副驾 · Zero-Trust Banking Agent
 
-> 面向银行业务的 AI 智能体演示项目
+> 一句话办完银行业务，每一步都先过一道「该不该做」的裁决。
 
-**我们不赌 AI 不出错，而是让 AI 错了也越不过边界。**
-听得懂 · 办得成 · 管得住 · 说得清
+**听得懂 · 办得成 · 管得住 · 说得清**
+
+`AI 银行副驾` 是一个面向银行业务的 AI 智能体：用户用自然语言描述需求，Agent 自主拆解意图、规划任务 DAG，并在严格的安全框架内完成转账、账单、理财、卡片、订阅代扣与跨场景联动。
+
+核心不是「AI 能操作」，而是「**敢把操作交给它**」。
+
+![PWA 首页](docs/assets/pwa-home.png)
 
 ---
 
-## 一句话介绍
+## 1. 它解决什么问题
 
-`AI 银行副驾`（AI Bank Copilot）是一个**零信任双核银行 AI 智能体**：用户说一句话，Agent 自主拆解意图、规划任务 DAG（有向无环图），并在严格的安全框架内完成银行业务操作。核心不是"AI 能操作"，而是"**你敢把操作交给它**"。
+传统手机银行完成一笔转账平均要 7 步：找入口、登录、选账户、选收款人、填金额、验证、等回执。真正拦住银行的不是步数，而是三个失败模式：
 
-- **规划内核（能力上限）**：多意图拆解 → 槽位补全 → DAG 任务规划 → 冲突与资源检测；支持**中断 / 回退 / 人工接管**
-- **可信执行内核（安全下限）**：官方**三色权限分级**（绿 / 黄 / 红）→ 计划卡确认 → 工具白名单执行 → 撤销/补偿 → 审计
-- **事实网关**：所有事实与数值来自确定性数据服务（模拟核心银行），LLM 零生成事实
-
-## 零信任三铁律
-
-| 铁律 | 含义 |
+| 失败模式 | 本项目的做法 |
 |---|---|
-| **事实零生成** | 数值 / 实体 / 语义 / 措辞四类事实全部有确定性来源，LLM 不得自由生成 |
-| **动作零越权** | LLM 不持有执行接口；策略引擎（PDP）裁决、执行器（PEP）执行，**无裁决不执行** |
-| **输入零信任** | 备注 / 商户名 / 消息等外部文本**永不被解释为指令**（taint + 控制槽结构约束） |
+| **会编造** | 事实零生成：金额、余额、回执、商户全部来自确定性网关；模型不生成任何数字 |
+| **会被诱导** | 策略层按请求结构裁决，不读模型的话；注入命中直接转人工并触发熔断 |
+| **会越权** | 模型只提案，不持有执行权；28 个白名单动作全部经同一 PDP 与审计链 |
 
-## 覆盖场景（官方六大核心场景）
+---
 
-| # | 场景 | 典型能力 |
+## 2. 核心能力
+
+### 六个官方场景
+
+| # | 场景 | 能力 |
 |---|---|---|
-| 1 | 智能转账 | 按人名 / 手机尾号（4 位）/ 备注转账、拆分 AA 转出、AA 收款请求、预约转账登记；用户检查到期待办后生成计划卡，确认后才派发扣款 |
-| 2 | 账单分析 | 消费分类统计、异常交易识别、月度/年度账单报告，以及带依据的消费占比、支出变化和订阅核对建议 |
-| 3 | 理财操作 | 产品推荐与对比、风险评估、一键申购/赎回 |
-| 4 | 卡片管理 | 临时冻结 / 正式挂失 / 补卡、卡申请、借记卡分通道限额、信用卡额度与周期限额 |
-| 5 | 订阅/代扣管理 | 订阅查询与续费提醒、代扣协议查询、代扣解约（关闭银行卡侧扣款授权） |
-| 6 | 跨场景联动 | 检查生日到期待办（生日前 2 天）→ 生成计划卡 → 确认后执行三节点 DAG：`funds.freeze` 锁定 1000 元预算 → `merchant.order` 下单 299 元（**从冻结额结算**）→ `funds.release` 解冻剩余 701 元；另含通用多域装配支（按域分组 → 合并为单一 `Plan`）与 L1–L7 生活链路原型 |
+| 1 | 智能转账 | 按人名 / 手机号 / 备注转账、拆分 AA 转出、AA 收款、预约转账登记；转账前先出「核对单」，确认后才出计划卡 |
+| 2 | 账单分析 | 消费分类统计、收支与净现金流、预算、异常交易线索、月度 / 年度账单报告 |
+| 3 | 理财操作 | 产品推荐与对比、风险测评、适当性提示、申购 / 份额赎回；统一进确认弹窗 |
+| 4 | 卡片管理 | 临时冻结、正式挂失、补卡、信用卡额度、周期限额、借记卡分通道限额、虚拟卡 |
+| 5 | 订阅 / 代扣 | 订阅查询、续费提醒、代扣协议、累计扣款、涨价历史、本行侧解约 |
+| 6 | 跨场景联动 | 生日预算三节点 DAG：预留 1000 → 下单 299 → 释放 701；另含 L1–L7 生活事件 |
 
-### 场景负责制
+### 三级权限
 
-六个场景按「一人一摊」并行推进：每个场景由一名负责人端到端交付 **D1–D8**（场景卡 / 话术表 / 门卫规则申请卡 / 前端链路 / 联调 / 考题包 / 成绩单 / 材料），渠道由专人独立负责，架构与共享内核由尹辰统一收口。分工与流程见 [docs/2026-10-26/分工文档-2026-10-26.md](docs/2026-10-26/分工文档-2026-10-26.md)，当天交付要求见 [docs/archive/2026-10-26-d0/交付清单-2026-10-26.md](docs/archive/2026-10-26-d0/交付清单-2026-10-26.md)。
+| 级别 | 执行策略 | 典型动作 |
+|---|---|---|
+| 绿 | 自动执行 | 余额、流水、账单、理财收益等纯查询 |
+| 黄 | 展示详情，等待确认 | ≤1000 元日累计转账、订阅取消、临时冻结、周期限额 |
+| 红 | 服务端一次性挑战 | >1000 元转账、正式挂失、改密、理财申购 / 份额赎回、补卡、信用卡额度 |
 
-- `tools/catalog.py`、`policy/*`、`planning/kernel.py` 仅尹辰可改，其余成员以「变更申请卡」提需求。
-- D3（门卫规则申请卡）不单独验收，由尹辰在每日合并窗口统一落地并检查。
-- 用 agent 干活时按工作流走：仓库内置 `.trae/rules/project_rules.md`（常驻硬约束）与 `.trae/skills/scene-workflow/SKILL.md`（S0–S7 八步流程），**开工只说一句自己是谁**即可（不用报工位）。
+计划级还有净效应与 strictest：多步合计过线、含不可逆节点，整条计划升红。
 
-## 官方技术要求对照
+### 五项安全机制
 
-| 官方要求（实现优先级：高） | 本项目落点 |
+| 机制 | 落点 |
 |---|---|
-| 权限分级机制（绿=自动 / 黄=确认 / 红=强验证） | **三色为主干**（绿只含纯查询；日累计 1000 元为黄/红分界）+ 对象态机 + 计划级净效应 |
-| 幻觉防护（不得编造交易结果或账户信息） | **事实零生成四分法**（数值/实体/语义/措辞）+ 数值出处校验；账单解释由结构化 ID 渲染，严格 Reviewer 不输出自由文本 |
-| 注入防御（防特殊 Prompt 绕过权限控制） | **taint + 控制槽结构约束**（schema 层阻断）+ **执行门哈希成员资格** |
-| 操作审计（完整决策链路与执行日志） | 审计链（哈希）+ 决策链路字段（命中规则 / 数值出处 / 授权级别） |
-| 异常熔断（连续失败或可疑行为触发锁定） | 熔断规则（5 类触发）+ 只加严不降级 + 转人工接管；**作用域分层**（会话级 / 全局）+ 状态**默认落盘**（防重启绕过）+ **留痕的运维解锁出口**（见「熔断与恢复」） |
-| 沙箱环境（生成代码在受限隔离环境运行） | 独立子进程只执行基于网关事实的受限分析 DSL；不执行任意 Python，返回完整原始记录出处 |
-| 意图理解与任务规划 | 规划内核：模糊/省略/隐含识别 + DAG + **中断/回退/人工接管** |
+| 幻觉防护 | 事实零生成四分法（数值 / 实体 / 语义 / 措辞）+ 数值出处校验 |
+| 注入防御 | taint + 控制槽类型约束 + 执行门哈希；命中即转人工并熔断 |
+| 操作审计 | 哈希链审计 + 完整决策链路（意图 → DAG → 权限 → 工具 → 结果） |
+| 异常熔断 | 会话级与全局两层；只加严不降级；转人工接管 |
+| 沙箱环境 | 受限子进程只跑白名单算子，不执行任意 Python，事实只从网关取 |
 
-详见 `docs/official-requirements.md`。
+### 意图理解与任务规划
 
-## 目录结构
+- 模糊表达、省略上下文、隐含意图：多轮补槽、派生锚点；
+- 复杂任务拆成有序 DAG：`PlanNode.depends_on` + 资源域检测；
+- 执行中支持中断、回退、人工接管：`/api/interrupt`、`/api/reverse`、人工接管包。
+
+---
+
+## 3. 系统架构
 
 ```
-.
-├── README.md                        # 本文件：项目说明 / 快速开始 / 部署 / 测试
-├── LICENSE                          # 许可证
-├── THIRD_PARTY_NOTICES.md           # 第三方依赖清单（名称/版本/来源/许可证/使用范围）
-├── Dockerfile                       # 容器镜像（api）
-├── docker-compose.yml               # 一键复现编排
-├── .trae/                           # Trae 工作流：rules（常驻硬约束）+ skills/scene-workflow（S0–S7 八步）
-├── docs/
-│   ├── README.md                    # 文档索引（推荐必看 / 本周必交 / 归档）
-│   ├── official-requirements.md     # 官方要求 → 本项目落点 对照表
-│   ├── architecture.md              # 系统架构图与说明
-│   ├── algorithms.md                # 核心算法说明
-│   ├── security-design.md           # 安全设计文档
-│   ├── security-self-assessment.md  # 安全自评报告（权限分级实现说明 + 已知风险清单）
-│   ├── RESULTS.md                   # 评测结果与四个数字口径
-│   ├── 已修复清单-2026-10-08.md      # 缺陷 / 差距台账（含证据、修复方案、验收标准、状态）
-│   ├── 参赛对标与改进方向.md          # 竞品对标与改进方向（答疑素材）
-│   ├── 作品简介.md                   # ≤200 字作品简介（报名系统提交用）
-│   ├── 2026-10-26/                  # 分工文档 / 冲刺方案 / 三色基准表 / 个人交付（delivery/）
-│   ├── 2026-10-27/                  # 排期分工 / 交付清单 / 工作流安装指南
-│   ├── 2026-10-28/                  # 官方答疑 8 问清单
-│   ├── plans/README.md              # 实施计划冻结面与裁决记录（计划正文已归档）
-│   └── archive/                     # 归档：10-08 变更同步 / 10-26 D0 材料 / plans / superpowers / roadmap
-├── src/                             # 源代码
-├── tests/                           # 测试用例（分层单元 / 集成 / 评测套件 / 对抗库）
-└── deploy/                          # 部署说明与 Docker 编排
+意图层 LLM 规划  →  审查层 独立模型（只审不改）  →  治理层 确定性策略 PDP  →  执行层 沙箱 + 审计
 ```
 
-> 各模块以测试为契约验收（`make check` = lint + 类型检查 + 测试）；一键复现见 `deploy/README.md`。
+- **意图层**：听懂模糊表达、拆 DAG、出候选计划；
+- **审查层**：查遗漏动作、额外动作、否定表达、意图偏离；无执行权；
+- **治理层**：权限分级、额度硬限、计划级净效应、人工确认；
+- **执行层**：28 个白名单动作、受限子进程、回执为准、哈希链审计。
 
-## 快速开始
+架构全图见 [`docs/assets/architecture.svg`](docs/assets/architecture.svg)。
+
+---
+
+## 4. 渠道
+
+| 渠道 | 形态 |
+|---|---|
+| Web | 三栏工作台：对话 + 计划卡 + 处理详情 |
+| APP | 可安装 PWA；≤600px 自动切底部四 Tab |
+| IM | 飞书机器人：验签 / AES 解密 / event_id 幂等 / 20 次每分钟限流 / 卡片回调 |
+
+两个演示账号：
+
+| 账号 | 用户名 | user_id | 手机尾号 |
+|---|---|---|---|
+| 陈明 | `chenming` | `u_demo` | 0086 |
+| 林静 | `linjing` | `u_lin` | 3911 |
+
+切换账号后，卡片、账单、持仓、对话历史各自一套；API 按 `user_id` 过滤。
+
+---
+
+## 5. 快速开始
 
 ```bash
 git clone https://github.com/changer-collab/ai-banking-copilot.git
 cd ai-banking-copilot
-python -m pip install -e ".[dev]"
-cp .env.example .env          # 填入大模型 API Key
-make check                    # lint + 类型检查 + 测试
+python -m venv .venv
+.venv/Scripts/activate
+pip install -e ".[dev]"
+cp .env.example .env
+python -m ai_banking_copilot
 ```
 
-> 分支：日常开发在 `sprint/1026`，`main` 只在里程碑合并时更新。克隆后若不在该分支，执行 `git checkout sprint/1026` 再跑 `make check`。
+浏览器打开 `http://127.0.0.1:8000`。
 
-## 理财申购与适当性（S1b）
-
-- **申购前强制风险测评**：`wealth.subscribe` 由受信任调用方注入风险测评事实（`risk_assessments` 表），
-  未测评 / 过期 / 风险等级不匹配一律 **fail-closed 拒绝**；赎回（`wealth.redeem`）不受适当性约束。
-- **默认产品 `wp_cash`**（R1、起购 1 元）：演示与评测的受信任默认值，可在选择对象中覆盖。
-- **基准时钟**：演示与评测的有效期判定统一以 `DEFAULT_BOOKING_DATE` 为基准（已知限制：该基准之外的"今天"不参与测评有效期判定）。
-- **演示入口固定为单用户**；账户、卡、订阅和冻结项仍执行 `user_id` 归属校验，跨用户对象会 fail-closed 拒绝。
-
-## 官方场景完成口径（G13 定档）
-
-| 场景 | 完成口径 | 实现阶段 |
-|---|---|---|
-| ② 异常交易识别 | `account.transactions` 全账户扫描做**阈值异常提示**（≥5000 元支出，复用既有动作、**不加算子**） | **S3 已实现** |
-| ③ 产品推荐与对比 | `wealth.list` 做**产品对比**（只陈述事实与风险等级，不做投资建议，守 H6） | **S3 已实现** |
-| ⑤ 续费提醒 | `subscription.list` 做**到期提醒**（`next_charge_on`，纯查询） | **S3 已实现** |
-
-> 上述三项均**复用既有规范动作**、不新增算子。
-
-**年度账单（P2-1）**：新增动作 `bills.yearly`（纯查询 → 绿），汇总**本年 1 月..基准月**的月度账单
-事实。**年度同比采用「同期（YTD）」口径**：本金区间 = 本年 `1 月 .. 基准月`，对照区间 = 上年
-`1 月 .. 同月`（基准月只来自唯一基准时钟 `scenarios.scheduling.REFERENCE_DATE`）；两个区间的月度账单
-事实各自只走 `sum` 算子、同比走 `yoy` 算子，**全部派生数字只走算子白名单**并携带全部 `record_id`
-出处。NL 触发词为「年度账单 / 全年账单 / 一年的账单 / 年度消费」。评测用例见 `bills-yearly-*`。
-
-演示种子库覆盖 **2025-01 .. 2026-09 共 21 个月**（基准月 = `2026-09`，即基准时钟 `2026-10-01` 的前一
-月），故演示口径下年度同期同比产出**真实百分比**：2026 年 1–9 月支出 `68758.20` 元，较上年同期
-（`58444.47` 元）`+17.65%`。**两种「不可比」如实区分**：上年同期**完全无流水事实** ⇒ 不调用算子，
-声明「上年同期无可比数据」；上年同期**有事实但支出合计为 0** ⇒ 照走算子、由算子拒绝除零，声明
-「同比不可判」（不编造）。
-
-**AA 收款（P2-3）**：新增动作 `transfer.request_collection`（登记**待收款**请求，**不产生资金流**），
-NL 触发词为「AA 收款 / 发起收款 / 让大家还我钱」；与「按份额**转出**」的 `transfer.create`（含
-`split_aa` 均摊）语义**明确区分**。评测用例见 `transfer-collection-*`。
-
-**定时转账登记与到期派发（P2-6）**：动作 `transfer.book` 用于**登记未来转账，登记时不扣款**；
-Web 端通过「检查到期待办」读取服务端业务日期，把到期登记项装配成 `transfer.create` 计划节点，
-用户确认计划卡后才真正扣款。已完成项不再出现在待办中，重复执行不会重复扣款。该链路复用
-`scenarios.scheduling.plan_due`，并由 `web-transfer-book` / `web-transfer-due` 回归用例覆盖。
-
-### 已打通的 Web 可控路径
-
-| 能力 | Web 交互与执行口径 | Web 回归用例 |
-|---|---|---|
-| 本人余额 `account.balance` | 口述查询并选择本人账户；绿色纯查询自动执行，展示事实余额，不产生资金副作用 | `web-bills-balance` |
-| 资金解冻 `funds.release` | 口述解冻并从本人有效冻结记录中选取对象；确认后解除冻结并回读余额和状态 | `web-cross-release` |
-| 代扣解约 `subscription.cancel` | 口述解约并从本人已签代扣协议中选取对象；确认后关闭银行卡侧扣款授权，解约后对账可查 | `web-subs-cancel` |
-| 预约转账 `transfer.book` | 口述「登记预约转账 / 登记定时转账」；登记时不扣款，到期检查后重新生成计划卡并确认执行，完成项不再派发 | `web-transfer-book` / `web-transfer-due` |
-| 生日联动 `birthday_plan` → `merchant.order` | 用户检查到期待办，确认后幂等登记鲜花礼品店演示订单；不扣款、不接真实商户 | `web-cross-birthday` |
-
-这些动作仍受对象归属校验、槽位类型校验和策略裁决约束，不支持客户端直接提交他人对象 ID 绕过选择流程。
-
-`card.unlock`（解挂）**不属能力子集**：有 NL 触发规则、有场景构造路径，也有单元测试，
-仅**未补评测用例**——此处订正先前「缺可控 NL 或构造路径」的过强表述（见 `docs/已修复清单-2026-10-08.md` P2-8）。
-
-`card.apply_virtual` / `card.set_limit` **自 2026-10-08 起也不属能力子集**（本节此前把它们列为子集，
-与实况不符，现订正）：二者**有** NL 规则（`虚拟卡` / `额度|限额`）、**有**场景构造路径、**有**评测用例
-（`cards-apply-virtual-yellow` / `cards-set-limit-red`）；`daily_limit` 槽既可由受信任选定值提供，
-也可由文本解析器 `planning.slots._resolve_daily_limit` 从口述解析（须带单位）。
-
-`取消我的订阅` / `退出我的订阅` 为 **fail-closed（空意图）**：安全语义不变，不降档为只读执行。
-
-### 渠道（P2-7）：Web 多会话 + 飞书 IM
-
-- **Web 多会话**：单页渠道按 `session_id` 维护**相互隔离**的 `Session`（各自 pending / 状态机独立）；
-  未带 `session_id` 的请求落到同一缺省会话，**保持既有单会话行为不变**。
-- **飞书渠道**（`web/channels/feishu.py` · `dispatcher.py` · `identity.py`）：入站 `POST /api/im/feishu`
-  依次做**时间戳 ±5 分钟 + 签名校验 → AES 解密 → 解析文本 / `card.action.trigger` → 身份绑定查表
-  （`channel_identities`，解析失败给绑定指引、不回落默认用户）→ 20 次/分限流 → `event_id` 幂等**，
-  再交给按用户隔离的调度器；出站卡片对超时 / 5xx 重试三次。
-- **会话边界**：各渠道共用同一 `SessionManager` 与状态机，但**会话键是 `channel:chat_id`**，
-  因此 Feishu / Web / PWA 之间**不共享对话上下文**，也不能拿 A 渠道的计划卡去 B 渠道确认；
-  共享的是同一用户的账户事实、三色策略、审计与执行器。
-- **身份绑定**：个人中心「飞书渠道」卡片调用 `POST /api/channels/feishu/link-code` 签发 6 位一次性绑定码
-  （5 分钟 TTL），`DELETE /api/channels/feishu/link` 只解绑当前账号；`/api/me` 返回
-  `feishu: {configured, mode, linked}` 供前端如实渲染。未绑定用户发消息只给绑定指引，不回落默认用户。
-- **能力边界（如实声明）**：不覆盖群聊、富媒体、长连接推送；服务器已写入 4 个 `AIB_FEISHU_*` 凭据
-  （2026-10-30），`GET /api/channels/health`（登录态）显示
-  `feishu.configured=true, mode=adapter, card_action=true`；显式设置 `AIB_FEISHU_REPLAY_MODE=1`
-  时即使凭据齐全也显示 `replay`，仅作断网兜底，现场可用
-  `python scripts/replay_webhook.py normal|tamper|replay|burst` 与 `/im` 联调页复现同一链路。
-
-### Web 业务闭环与可复现评测
-
-- Web 端已打通「事实选项 → 意图提交 → 澄清补槽 → 计划卡 → 确认 / 强验证 → 执行 → 状态回读」链路。
-- `/api/due` 只检查服务端业务日期并生成待确认提案；不会继承登记时授权，也不会自动扣款。
-- Planner 只提出意图，可信补槽和规则风险官仍由确定性代码完成；可选独立 Reviewer 绑定 `execution_id` 与冻结哈希，旁路只审计，严格审查失败的写动作转人工。
-- 真实模型 Planner 的每个动作必须带可回指原文的 `span`；缺失或不属于原文时进入既有确定性模板回退，避免把整句默认当作可信动作锚点。严格 Reviewer 只返回结论状态，澄清和接管原因由服务端固定文案生成。
-- 页面提供同源可安装 PWA 和只读主动洞察（订阅续费、大额待核对、月预算）；金融 API 不进缓存，离线不排队或重发写操作，洞察点击后仍需重新提交并确认。
-- 评测使用真实 FastAPI 路由、固定演示种子和每例独立 SQLite；结果明确标注为自建回归，**不是盲测或真实模型泛化成绩**。
-
-## 大模型通道（可选增强）
-
-- 服务入口默认装配 **真模型优先 + 失败自动降级模板**：设置 `AI_API_KEY`（兼容 `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY`）时走真实 LLM 意图解析；
-  未设置 Key / 未安装 `httpx` / 调用失败时，自动回落**确定性模板通道**（能力子集，非等价实现，H9）。
-- `AIB_DISABLE_LLM=1` 可**强制只用模板通道**（现场演示求稳时使用）。
-- Key 只从环境变量读取；**不写入仓库、不写日志**。
-- Reviewer 默认 `AIB_REVIEW_CHANNEL=bypass`，只作模板旁路诊断；显式设置 `llm-strict` 即强制真实审查通过，不能用 `AIB_REVIEW_REQUIRED=0` 绕过。`AIB_DISABLE_LLM=1` 强制模板与旁路诊断。
-- 配置统一由 `ModelConfig` 解析。Planner/Reviewer 默认超时分别为 20/180 秒，可用 `AI_TIMEOUT_S` 和 `AI_PLANNER_TIMEOUT_S` / `AI_REVIEWER_TIMEOUT_S` 覆盖；模型可分别用 `AI_PLANNER_MODEL` / `AI_REVIEWER_MODEL` 指定。每次提案每角色一次尝试、不自动重试，共享 `AI_MAX_CONCURRENCY` 非阻塞预算。任务视图显示实际通道、模板回退、HTTP 次数和供应商 usage。
-
-### 强验证与会话恢复
-
-- `AIB_VERIFICATION_MODE=demo` 默认使用明确标记的演示码；`external` 使用通用 HTTP JSON 投递，需设置 `AIB_VERIFICATION_ENDPOINT`、`AIB_VERIFICATION_TOKEN`、`AIB_VERIFICATION_TARGET` 与独立 `AIB_VERIFICATION_KEY`。`AIB_VERIFICATION_STRICT=1` 禁止 demo；未配置或投递失败不降级。external 响应省略验证码。
-- 验证挑战仅持久保存 HMAC 摘要，绑定用户、会话、执行和冻结计划，300 秒内一次性使用；真实第二信道尚未联调，不宣称短信、人脸或 U 盾已接入。
-- 强验证失败次数与锁定默认写入独立 SQLite 表，按用户跨 worker 与重启共享；手工构造 `AppDeps` 的内存默认值只用于测试装配，不代表服务默认行为。
-- 默认 SQLite 快照支持单进程、单 worker 的服务重启恢复，`GET /api/session` 只读恢复状态。写节点执行前后设检查点；重启后未完成任务须重新确认，旧 active 挑战失效。回执与审计缺口明确阻止后续执行及回退，不能用新提交覆盖待核对记录。对话与办理记录另存独立消息表（`web/conversation_store.py`，按 `user_id + session_id` 过滤），左侧历史会话可切换与恢复。
-
-## 执行一致性（2026-10-16）
-
-- **完整冻结**：摘要覆盖节点身份、参数、授权锚、依赖与确定性执行顺序；确认后改动即拒绝执行。
-- **独立执行**：每次新提交生成独立 `execution_id`；同次确认重试和恢复沿原节点幂等键复用回执。
-- **写前复核**：在业务写入的同一 SQLite 事务内，按实际结算日读取最新累计与熔断状态；
-  完整计划的正向流出总额不被赎回、解冻或取消抵扣，已完成转账不重复累计。风险升档时保留已完成步骤，要求新卡确认与必要的强验证。
-- **确认与恢复**：确认、挑战绑定执行 ID 与完整计划哈希；确认前中断后恢复只回到待确认。
-  业务已提交但出处核验或审计失败时，明确返回 `committed_unverified` 与回执，停止后续步骤；恢复沿原键核对，避免重复扣款。
-- **严格审计**：服务只接受带密钥的空链、完整 HMAC 链，或由 HMAC 迁移事件绑定条数与链头的 SHA 历史前缀；纯 SHA 与未经显式迁移的混链拒绝启动。
-
-旧 SHA 日志须**停服务**后迁移。`expected-count` / `expected-head` 必须来自外部可信记录与独立核对，
-不能把当前日志自算结果直接当作可信锚；密钥仅从 `AIB_AUDIT_KEY` 读取，且应与服务使用的密钥一致：
-
-```powershell
-.\.venv\Scripts\python.exe scripts/migrate_audit.py --help
-.\.venv\Scripts\python.exe scripts/migrate_audit.py --path runtime/audit.jsonl --expected-count <旧条数> --expected-head <旧链头>
-```
-
-命令先创建不覆盖的 `.bak` 备份再追加迁移事件；错误锚、损坏 / 混存链或备份失败不追加。
-迁移表示运维接收历史，不能追溯证明旧 SHA 未遭改写。当前仍为逐节点事务，业务库与审计没有事务 outbox；
-恢复检查点能检测崩溃缺口，审计缺失仍需人工核对。默认同目录密钥、日志截断检测与密钥轮换的限制仍在。
-
-## 测试
-
-> **测试规范：完成的标准是跑通，不是写完**——每个模块以测试为契约验收。
+**演示模式（确定性模板通道，现场求稳）**：
 
 ```bash
-pytest                                   # 全量（分层单元 + 集成 + 评测）
-pytest tests/eval                        # 原有评测套件（标准、对抗与 held-out 用例）
-pytest tests/gateway tests/tools tests/policy tests/planning tests/scenarios tests/web  # 分层
-python scripts/run_benchmark.py --output runtime/benchmark-final --repeat 2 --channel template --dataset web-smoke-v2 --arm template
-python scripts/run_benchmark.py --output runtime/evidence-dev-v1 --repeat 1 --channel template --dataset evidence-dev-v1 --arm template
-python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --channel llm-strict --dataset web-smoke-v2 --arm reviewer
+AIB_DISABLE_LLM=1 AIB_AUTH_MODE=demo python -m ai_banking_copilot
 ```
 
-评测产物包含配置、源码 / 数据 / 提示词 / 评分器哈希及逐例结果，保存在已忽略的 `runtime/`。
-严格模型通道只接受真实 Planner / Reviewer 结果；缺少凭据、调用失败或解析失败均如实记录，不用模板补分。自建数据仅用于回归验证，不代表未知输入的泛化能力。
+演示口令：`aib-demo-1027`。
 
-### 证据与复跑（2026-10-28）
+**Docker**：
 
-`web-smoke-v2`（21 条 × 2 次、模板通道）四个数字，与 `docs/RESULTS.md` §1 同口径：
+```bash
+docker compose up --build
+```
+
+更完整的部署说明见 [`deploy/README.md`](deploy/README.md)。
+
+---
+
+## 6. 测试与复跑
+
+```bash
+ruff check .
+mypy
+pytest
+python scripts/check_served_page.py
+python scripts/e2e_check.py
+python scripts/check_design_sync.py
+```
+
+**2026-11-02 当前用例收集数：2212 条**（`pytest --collect-only -q`）。
+
+评测复跑：
+
+```bash
+python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2 --repeat 2
+python scripts/run_benchmark.py --output runtime/evidence-dev-v1 --repeat 1 --dataset evidence-dev-v1
+```
+
+四个指标：
 
 | 危险动作拦截率 | 误拒率 | 任务成功率 | 数字可回溯率 |
 |---|---|---|---|
-| 5/5 = **100.00%** | 0/14 = **0.00%** | 14/14 = **100.00%** | 26/26 = **100.00%** |
+| 5/5 = 100% | 0/14 = 0% | 14/14 = 100% | 26/26 = 100% |
+| 31/31 = 100% | 0/49 = 0% | 49/49 = 100% | 74/74 = 100% |
 
-交互实测：平均 **1.000** 用户轮、一句话完成率 **85.71%**、业务完成率 **100.00%**；错误恢复成功率 **null**（本批产物无出错样本，不写 0）。
-审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
-逐例证据：[`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)、[`docs/results/evidence-dev-v1-cases.csv`](docs/results/evidence-dev-v1-cases.csv)（由 `python scripts/export_cases_csv.py --input <run 目录> --output <csv>` 从 `results.json` 扁平化生成，不重跑评测；`evidence_dev_v1` 93 条同样四个数字全满：31/31、0/49、49/49、74/74）。
+数据集为自建回归集；逐例结果与口径见 [`docs/RESULTS.md`](docs/RESULTS.md)。
 
-最近一次门禁记录（2026-11-01）：`pytest` **2144 条 / 2143 通过**；唯一失败为飞书 30 连发限流边界的高负载时序抖动，**单跑通过**（见 `docs/RESULTS.md` §17）。**2026-11-02 工作区用例收集数 2193**，新增卡片 / 理财 / 账单 / 代扣用例尚未重跑全量，提交时以实际执行结果为准。`ruff` / `mypy` / `scripts/check_served_page.py` / `scripts/e2e_check.py` / `scripts/check_design_sync.py` 本轮未复跑，提交前需补跑。
+---
 
-```
-python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2
-python scripts/measure_interaction.py --input runtime/benchmark/web-smoke-v2-fix2/run-1 --demo "转给李娜 500 元"
-```
+## 7. 技术文档
 
-对标公开基准（出处与原文数据见 [`docs/参赛对标与改进方向.md`](docs/参赛对标与改进方向.md) 第五节）：
-
-| 指标 | 本仓库（自建回归集、模板通道） | 公开基准（他人报告） |
-|---|---|---|
-| 危险动作拦截率 | `web-smoke-v2` 5/5 = **100.00%**；`evidence_dev_v1` 31/31 = **100.00%** | APort Vault：加入确定性事前检查后违规划转 **140 次 → 0 次**（25,640 次调用中否决 187 次） |
-| Agent 攻击安全性 | 同上，攻击用例 31/31 全部拦下 | FraudBench：四个 agent **49%–65%** |
-| 误拒率 | 0/14 = **0.00%**；0/49 = **0.00%** | APort Vault：同期 **25,370 笔**合法支付照常执行（原文未给误拒率） |
-| 任务成功率 | 14/14；49/49 | 各基准未报同一指标，不并列 |
-| 数字可回溯率 | 26/26；74/74 | 公开基准无此口径 |
-
-读法：本仓库数字来自**自建回归集 + 确定性模板通道**，**不是盲测，也不是真实模型泛化成绩**；两条公开基准是对方论文/报告口径，数据集、攻击构造与判定标准都不同，只能作横向参照，**不能直接相减或换算成提升百分比**。
-
-## 熔断与恢复（裁决 #27）
-
-熔断**只加严、不降级**；降级只有一条出口，且必须**显式、带理由、留痕**。
-
-- **作用域分层**：触发 3（高频）/ 4（连续策略拒绝）/ 5（会话异常）落**会话级**——只让该会话在确认时
-  转人工接管，其他会话不受影响（Web 端**每个页面实例一个新会话**，所以「新开页面 / 刷新」即恢复）；
-  触发 1（连续授权失败）/ 2（注入检测）落**全局**——拒绝所有用户的非纯查询动作。
-  **纯查询在任何熔断状态下都可用**。
-- **计数口径**：「未识别 / 无匹配场景」是**能力边界**而非策略拒绝，**不计入**触发 4（否则用户正常的
-  探索输入连着三次就会把系统锁死）。
-- **状态持久化**：全局熔断状态**默认落盘**（SQLite 独立表 `breaker_state`，不并入 `gateway/store.py`
-  的 `SCHEMA_SQL`），跨重启 / 跨 worker 可见——内存态下「重启即复位」等于给安全机制留了一条绕过路径。
-  `AIB_BREAKER_STATE=memory` 可退回进程内（仅限本地调试）。
-- **运维解锁**（唯一降级出口）：
-
-```bash
-# 终端 A：带运维口令起服务（不配置该变量 ⇒ 解锁端点一律 403，fail-closed）
-AIB_OPERATOR_TOKEN=<口令> python -m ai_banking_copilot
-# 终端 B：解锁（必须给理由；前后状态 / 触发项 / 理由写入审计链）
-python scripts/operator_unlock.py --reason "注入误报，已人工核实"
-```
-
-## 部署与线上环境
-
-### 当前线上环境（华为云 ECS + Cloudflare Tunnel）
-
-| 项 | 值 |
+| 文档 | 内容 |
 |---|---|
-| 云服务器 | **华为云 ECS**（Ubuntu 22.04 / x86_64 / Docker 29.3.1），登录 `aistock@121.37.46.229` |
-| 运行形态 | Docker Compose 项目 `aib`：`aib-api`（应用，容器内 8000，宿主 **18080**）+ `aib-tunnel`（cloudflared） |
-| 公网入口 | **Cloudflare Tunnel**（quick tunnel）：`https://<当日隧道域名>`，自带 https |
-| 域名 | **暂无**（境内备案周期长）→ 用云隧道临时域名代替，**免域名、免备案、免开端口** |
-| 数据 | 宿主 `/home/aistock/aib/runtime/`，挂载进容器；容器重建不丢会话 / 计划卡 / 审计链 |
-| 当前地址 | <https://speeches-plant-confidence-constantly.trycloudflare.com>（隧道重启即变，以当天群里发的为准） |
+| [`docs/architecture.md`](docs/architecture.md) | 系统架构与分层职责 |
+| [`docs/algorithms.md`](docs/algorithms.md) | 意图、补槽、DAG、审查、权限裁决、生活事件 |
+| [`docs/security-design.md`](docs/security-design.md) | 零信任设计、三色、审计、熔断、沙箱 |
+| [`docs/security-self-assessment.md`](docs/security-self-assessment.md) | 权限分级实现说明 + 已知风险清单 |
+| [`docs/official-requirements.md`](docs/official-requirements.md) | 能力逐条对照 |
+| [`docs/作品简介.md`](docs/作品简介.md) | 190 字作品简介 |
 
-入口（把 `<tunnel>` 换成当天域名）：
+---
 
-| 用途 | 地址 |
-|---|---|
-| 网页端 | `https://<tunnel>/` |
-| 手机 / APP 端（可安装 PWA） | `https://<tunnel>/`（≤600px 自动切底部四 Tab，无独立 `/m` 入口） |
-| 本地联调页（不算产品页） | `https://<tunnel>/im` |
-| 渠道健康 | `https://<tunnel>/api/channels/health` |
-| 飞书回调（已接线，凭据已配置） | `https://<tunnel>/api/im/feishu` |
+## 8. 目录结构
 
-> 多用户登录为**可选增强**：服务器 `.env` 设 `AIB_AUTH_MODE=demo` + `AIB_DEMO_PASSWORD` 后启用
-> Cookie 会话与 CSRF；未设置时沿用单用户演示身份。
+```
+src/ai_banking_copilot/
+├── planning/      意图提案、槽位、DAG、独立审查
+├── policy/        PDP 三色裁决、PEP 执行、审计、熔断、saga
+├── scenarios/     六大场景 + 生活事件 L1–L7
+├── gateway/       事实网关（TCB）、模拟核心银行、沙箱、算子
+├── contracts/     计划、授权、taint 纯契约
+└── web/           Web / PWA / 飞书渠道、计划卡、会话
+tests/             2212 条自动化用例
+docs/              架构、算法、安全设计、安全自评、评测结果
+deploy/            部署说明与 Docker 编排
+```
 
-**为什么这么部署（都是踩过的坑）**：
+---
 
-- 服务器 **8000 / 80 / 443 已被别的项目占用** → 应用走 `API_HOST_PORT=18080`，不与人抢端口；
-- 国内服务器直连 pypi.org **read timeout** → 构建时用 `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`；
-- GitHub 私有库在服务器上**拉不下来** → 用 `git archive` 打包上传（或给仓库配只读 Deploy Key）；
-- 没有域名、也不走备案 → **cloudflared 出站隧道**，不占端口、不动防火墙。
+## 9. 说明
 
-> 线上部署明细、**每日部署清单**、**渠道对接（飞书）步骤**与排障：见 [docs/2026-10-27/公网Demo-部署单.md](docs/2026-10-27/公网Demo-部署单.md)。
-> 本地一键复现（`docker compose up` / `pip install -e .`）：见 [deploy/README.md](deploy/README.md)。
+- 本项目为演示环境，资金操作全部在模拟核心银行中执行，不触达真实账户。
+- 强验证使用服务端一次性挑战码；生产环境可替换为银行统一身份认证。
+- 理财净值、商户、名册、生日等均为演示数据，界面与文档中如实标注。
 
-## 团队与分工
+---
 
-5 人团队，一人一摊，另有副任务：
+## License
 
-| 成员 | 主场景 | 模块 / 副任务 |
-|---|---|---|
-| 尹辰 | ⑥ 跨场景联动（生日预算链 + L1–L7 生活链路） | 规划内核、三色基准、`catalog` / `policy` / `kernel` 变更裁决、架构文档、PPT 统稿与主讲、部署与公网入口（cloudflared） |
-| 王昌泽 | ⑤ 订阅 / 代扣管理 | 渠道（PWA / IM 适配器）、飞书接入配置单、回放入口 |
-| 高婧雯 | ① 智能转账 | 三色分级最完整的样板场景 |
-| 徐思云 | ③ 理财操作（风险测评 → 适当性 → 申购 / 赎回） | 强验证链路样板（红色动作标准写法） |
-| 林晓研 | ② 账单分析 + ④ 卡片管理 | 异常交易识别、挂失 / 解锁 |
-
-分工与流程见 [docs/2026-10-26/分工文档-2026-10-26.md](docs/2026-10-26/分工文档-2026-10-26.md)，后续排期见 [docs/2026-10-27/分工文档-2026-10-27.md](docs/2026-10-27/分工文档-2026-10-27.md)，当日交付要求见 [docs/2026-10-27/交付清单-2026-10-27.md](docs/2026-10-27/交付清单-2026-10-27.md)。
-
-## 第三方与合规
-
-- 使用第三方开源项目 / 模型 / 数据 / 代码的，均在 `THIRD_PARTY_NOTICES.md` 中列明**名称、版本、来源、许可证及具体使用范围**。
-- 本项目**不接真实银行账户、不产生真实资金动作**，全部在模拟核心银行中执行。
-- 本项目**不做投资建议、不承诺收益**。
-- 项目独立完成。
-
-## 许可
-
-见 [LICENSE](LICENSE)。
+见 [`LICENSE`](LICENSE)；第三方依赖与许可证见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

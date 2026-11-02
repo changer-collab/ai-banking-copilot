@@ -1,13 +1,14 @@
 """客户适当性属性：出生年份（65+ 特别提示的唯一事实来源）。
 
 现库 `user_profiles.birthday` 只有 `MM-DD`，算不出年龄；本表独立存放出生年份，
-不改既有生日联动表。演示用户播种 `1990`，不触发 65+ 路径；65+ 路径由测试数据覆盖。
+不改既有生日联动表。两个演示用户分别播种 1990 / 1996，均不触发 65+ 路径；
+65+ 路径由测试数据覆盖。
 """
 
 from __future__ import annotations
 
 from ai_banking_copilot.gateway.models import CustomerSuitabilityProfile
-from ai_banking_copilot.gateway.seed import DEMO_USER_ID
+from ai_banking_copilot.gateway.seed import DEMO_USER_ID, SECONDARY_USER_ID
 from ai_banking_copilot.gateway.store import Store
 
 CUSTOMER_PROFILE_SCHEMA_SQL = """
@@ -17,7 +18,8 @@ CREATE TABLE IF NOT EXISTS customer_suitability_profiles (
 );
 """
 
-_SEEDED = ((DEMO_USER_ID, 1990),)
+_SEEDED = ((DEMO_USER_ID, 1990), (SECONDARY_USER_ID, 1996))
+"""演示用户的出生年份：陈明 1990、林静 1996；均为演示值，不接真实客户资料。"""
 
 
 def init_customer_profile_schema(store: Store) -> None:

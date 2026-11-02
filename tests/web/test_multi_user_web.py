@@ -280,7 +280,7 @@ def test_life_event_recorded_when_clarification_completes_the_plan(
     first = client.post(
         "/api/submit",
         json={
-            "utterance": "我妈下个月过生日，预算 800 元，商户 鲜花礼品店",
+            "utterance": "我妈下个月过生日",
             "session_id": "life-1",
         },
     ).json()
@@ -288,7 +288,7 @@ def test_life_event_recorded_when_clarification_completes_the_plan(
     assert client.get("/api/life-events").json()["records"] == [], "未成卡前不登记"
 
     answers = {
-        ask["slot"]: ("800元" if "amount" in ask["slot"] else "鲜花礼品店")
+        ask["slot"]: ("299元" if "amount" in ask["slot"] else "鲜花礼品店")
         for ask in first["clarifications"]
         if "user_id" not in ask["slot"]
     }

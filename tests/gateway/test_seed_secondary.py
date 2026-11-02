@@ -102,3 +102,25 @@ def test_secondary_payees_and_profile_are_distinct(store: Store) -> None:
         "SELECT birthday FROM user_profiles WHERE user_id = ?", (SECONDARY_USER_ID,)
     )
     assert birthday[0]["birthday"] == "07-18"
+
+
+def test_secondary_cards_carry_demo_details(store: Store) -> None:
+    """第二用户的卡片页不能出现「卡组织未知 / 限额为空」。"""
+
+    seed_secondary_user(store)
+
+    rows = store.query(
+        "SELECT card_id, brand, expiry_month, expiry_year, account_class,"
+        " transfer_limit_cents, credit_limit_cents FROM cards WHERE user_id = ?",
+        (SECONDARY_USER_ID,),
+    )
+    cards = {row["card_id"]: row for row in rows}
+    debit = cards["card_b_debit"]
+    assert debit["brand"] == "unionpay"
+    assert (debit["expiry_month"], debit["expiry_year"]) == (6, 2029)
+    assert debit["account_class"] == "Ⅰ"
+    assert debit["transfer_limit_cents"] == 1_500_000
+    credit = cards["card_b_credit"]
+    assert credit["brand"] == "visa"
+    assert (credit["expiry_month"], credit["expiry_year"]) == (3, 2028)
+    assert credit["credit_limit_cents"] == 3_000_000

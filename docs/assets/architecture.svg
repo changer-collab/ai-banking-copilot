@@ -42,7 +42,7 @@
   <!-- 1 用户入口 -->
   <rect x="48" y="186" width="980" height="64" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5"/>
   <text x="72" y="212" class="layer-title" fill="#075985">用户入口 · 渠道层</text>
-  <text x="72" y="234" class="layer-sub">Web / PWA（可安装 · 离线兜底）　·　飞书 IM 适配器（真回调 · 验签 / AES / 幂等 / 限流）　·　PWA 承担官方"APP"形态</text>
+  <text x="72" y="234" class="layer-sub">Web / PWA（可安装 · 离线回放）　·　飞书 IM 适配器（真回调 · 验签 / AES / 幂等 / 限流）　·　PWA 承担官方"APP"形态</text>
 
   <line x1="538" y1="250" x2="538" y2="274" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="552" y="268" class="arrow-label">自然语言 · 多轮上下文</text>
@@ -61,7 +61,7 @@
   <text x="72" y="410" class="layer-title" fill="#166534">场景装配 scenarios/　（六业务场景 + 生活事件 L1–L7 · 流水与预约）</text>
   <text x="72" y="432" class="layer-sub">转账 · 账单 · 理财 · 卡片 · 订阅 · 跨场景　＋　预算锁定 / 定期出资 / 出行保障 / 大额凑集 / 失卡止损 / 阶段盘点 / 分摊收款</text>
   <text x="72" y="452" class="layer-sub">同一 Plan 结构：动作 / 对象 / 金额 / 时间 / 依赖 / 锚点来源</text>
-  <text x="72" y="470" class="note">官方"至少覆盖 3 个场景" → 本项目 6/6；25 项点名能力 25 有 · 0 半有 · 0 无</text>
+  <text x="72" y="470" class="note">六类场景 6/6；25 项能力全部有独立动作与测试证据</text>
 
   <line x1="538" y1="478" x2="538" y2="502" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="552" y="496" class="arrow-label">Plan 不可改写</text>
@@ -102,14 +102,14 @@
   <rect x="1060" y="186" width="490" height="196" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
   <rect x="1060" y="186" width="490" height="34" rx="10" fill="#16a34a"/>
   <rect x="1060" y="206" width="490" height="14" fill="#16a34a"/>
-  <text x="1078" y="209" class="side-title">官方六场景 × 25 项点名能力</text>
+  <text x="1078" y="209" class="side-title">六类场景 × 25 项能力</text>
   <text x="1078" y="240" class="side-body">① 智能转账　按人名 / 手机号 / 备注 / 定时 / AA 收款</text>
   <text x="1078" y="260" class="side-body">② 账单分析　分类统计 / 异常(7 类) / 月报 / 年报</text>
   <text x="1078" y="280" class="side-body">③ 理财操作　推荐(只读硬筛) / 对比 / 测评(5 题) / 申购 / 份额赎回 · 适当性弹窗</text>
   <text x="1078" y="300" class="side-body">④ 卡片管理　临时冻结 / 正式挂失 / 补卡 / 调额 / 分卡限额 / 周期限额</text>
   <text x="1078" y="320" class="side-body">⑤ 订阅代扣　自动识别扣费 / 续费提醒 / 一键取消</text>
   <text x="1078" y="340" class="side-body">⑥ 跨场景　生日 → 锁定 1000 → 前 2 天下单 → 释放 701</text>
-  <text x="1078" y="362" class="note">25 有 · 0 半有 · 0 无　（逐条对照见 official-requirements.md）</text>
+  <text x="1078" y="362" class="note">25 项能力全部有独立动作与测试证据</text>
 
   <!-- P2 生活场景归类法 -->
   <rect x="1060" y="394" width="490" height="186" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
@@ -142,7 +142,7 @@
   <text x="1078" y="783" class="side-title">评测与验收（可复现）</text>
   <text x="1078" y="814" class="side-body">四个数字：拦截率 · 误拒率 · 任务成功率 · 数字可回溯率</text>
   <text x="1078" y="834" class="side-body">数据集：web-smoke-v2(21) · evidence_dev_v1(93) · heldout_v1(40)</text>
-  <text x="1078" y="854" class="side-body">门禁：ruff · mypy · pytest（2193）· CI</text>
+  <text x="1078" y="854" class="side-body">门禁：ruff · mypy · pytest（2200+）· CI</text>
   <text x="1078" y="874" class="side-body">端到端 7 项：触发 → 追问 → DAG → 计划卡 → 三色 → 审计 → 可恢复</text>
   <text x="1078" y="896" class="note">口径冻结在 RESULTS.md：改定义必须同时改代码与文档</text>
   <text x="1078" y="914" class="note">七项缺一不算完成；生活链路与业务场景用同一套验收</text>
