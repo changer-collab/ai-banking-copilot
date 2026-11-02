@@ -63,10 +63,13 @@ def _message(result: dict[str, object]) -> str:
 # 3. 推荐意图不再被 H6 整句误拒；收益承诺仍被拦
 def test_recommendation_intent_is_not_rejected_by_yield_guard(deps: AppDeps) -> None:
     submitted = _submit(_client(deps), "推荐理财产品")
-    assert submitted["state"] == "awaiting_confirm"
-    text = _card_text(submitted)
-    assert "活期理财篮子" in text
-    assert "成长精选 C" not in text
+    assert submitted["state"] == "idle"
+    assert submitted["card"] is None
+    recommend = submitted["wealth_recommend"]
+    assert isinstance(recommend, dict)
+    names = {item["name"] for item in recommend["products"]}
+    assert "活期理财篮子" in names
+    assert "成长精选 C" not in names
 
 
 def test_yield_promise_is_still_blocked(deps: AppDeps) -> None:
@@ -80,10 +83,9 @@ def test_recommendation_query_has_no_business_writes(deps: AppDeps, rw_store: St
     before = _business_state(rw_store)
     client = _client(deps)
     submitted = _submit(client, "比较几款理财产品")
-    assert submitted["state"] == "awaiting_confirm"
-    result = _confirm(client, submitted)
-    assert result["state"] == "completed"
-    assert "合格候选" in _message(result)
+    assert submitted["state"] == "idle"
+    assert submitted["card"] is None
+    assert submitted["wealth_recommend"] is not None
     assert _business_state(rw_store) == before
 
 
@@ -94,16 +96,21 @@ def test_r2_recommendation_excludes_higher_risk_products(
     save_risk_assessment(rw_store, DEMO_USER_ID, "R2", DEFAULT_BOOKING_DATE)
     client = _client(deps)
     submitted = _submit(client, "哪款适合我")
-    text = _card_text(submitted)
-    assert "活期理财篮子" in text
-    assert "稳利债券 A" in text
-    assert "均衡配置 B" not in text
-    assert "成长精选 C" not in text
-    message = _message(_confirm(client, submitted))
-    assert "合格候选 3 只" in message
-    assert "wp_mix" not in message
-    assert "wp_equity" not in message
-    assert "用户自助录入" in message
+    assert submitted["state"] == "idle"
+    recommend = submitted["wealth_recommend"]
+    assert isinstance(recommend, dict)
+    products = recommend["products"]
+    assert isinstance(products, list)
+    names = {item["name"] for item in products}
+    ids = {item["product_id"] for item in products}
+    assert {"活期理财篮子", "稳利债券 A"} <= names
+    assert "均衡配置 B" not in names
+    assert "成长精选 C" not in names
+    assert "wp_mix" not in ids
+    assert "wp_equity" not in ids
+    assessment = recommend["assessment"]
+    assert isinstance(assessment, dict)
+    assert assessment["source_label"] == "用户自助录入"
 
 
 # 2. 无测评 / 测评过期：BLOCKED，且不默认任何等级

@@ -39,6 +39,23 @@ def test_recommendation_payload_lists_only_eligible_products(deps: AppDeps) -> N
     assert {item["value"] for item in payload["categories"]} == {"货币类", "债券类", "混合类"}
 
 
+def test_recommendation_request_opens_selectable_product_cards_not_a_query_plan(
+    deps: AppDeps,
+) -> None:
+    """推荐语句应直接进入选品卡，不得生成缺少 product_id 的通用查询计划。"""
+    data = TestClient(create_app(deps)).post(
+        "/api/submit", json={"utterance": "给我推荐一些理财产品"}
+    ).json()
+
+    assert data["state"] == "idle"
+    assert data["card"] is None
+    payload = data["wealth_recommend"]
+    assert payload is not None
+    assert {item["product_id"] for item in payload["products"]} == {
+        "wp_cash", "wp_short", "wp_bond", "wp_mix"
+    }
+
+
 def test_plan_card_repeats_the_product_amount_and_account(deps: AppDeps) -> None:
     """弹窗提交的 utterance + selected 落到计划卡：产品 / 金额 / 账户三处一致。"""
     view = Session(deps).submit(

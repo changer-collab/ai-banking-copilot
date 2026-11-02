@@ -287,6 +287,15 @@ def test_missing_review_fact_does_not_block_a_pure_query(
             "申购 100 元", {"account": "acc_savings", "product": "wp_cash"},
             {"accounts:acc_savings", "wealth_products:wp_cash"},
         ),
+        (
+            "\u8d4e\u56de\u7406\u8d22",
+            {"account": "acc_savings", "product": "wp_bond"},
+            {
+                "accounts:acc_savings",
+                "wealth_products:wp_bond",
+                "wealth_holdings:wp_bond",
+            },
+        ),
     ],
 )
 def test_node_references_use_gateway_record_names(

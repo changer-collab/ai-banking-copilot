@@ -2509,21 +2509,36 @@ class Session:
     def _wealth_recommendation_profile(
         self, intents: Sequence[Intent], asks: Sequence[ClarificationAsk]
     ) -> str | None:
-        """「我要申购理财产品」未指定产品时的推荐视图判据（只读、不生成计划）。
+        """选品推荐的产品卡视图判据（只读、不生成计划）。
 
-        只在**产品来自服务端默认值**且唯一缺槽是金额时接管：把「先问金额」改成
-        「先按测评等级给可申购产品与分类」。用户已点名产品 / 已给金额的既有路径不变。
+        覆盖两类意图：
+        - 「给我推荐 / 比较理财」的 `wealth.list`：不能包装成可办理计划，目录结果
+          必须直接变成可点击的产品卡；
+        - 「我要申购理财产品」但未点名产品：把「先问金额」改成先选产品。
+
+        两条分支都只在服务端注入了有效风险测评时成立。用户已经点名产品或给出
+        金额的申购路径保持不变。
         """
-        if len(intents) != 1 or intents[0].action != "wealth.subscribe":
+        if len(intents) != 1:
             return None
-        if tuple(ask.slot for ask in asks) != ("amount",):
+        intent = intents[0]
+        is_catalog_recommendation = (
+            intent.action == "wealth.list"
+            and is_recommendation_request(intent.evidence)
+            and not asks
+        )
+        is_subscribe_entry = intent.action == "wealth.subscribe" and tuple(
+            ask.slot for ask in asks
+        ) == ("amount",)
+        if not is_catalog_recommendation and not is_subscribe_entry:
             return None
-        if not self._review_intents:
-            return None
-        sources = self._review_intents[-1].get("selected_sources")
-        if not isinstance(sources, dict) or sources.get("product") != "server_default":
-            return None
-        raw = intents[0].slots.get("assessment")
+        if is_subscribe_entry:
+            if not self._review_intents:
+                return None
+            sources = self._review_intents[-1].get("selected_sources")
+            if not isinstance(sources, dict) or sources.get("product") != "server_default":
+                return None
+        raw = intent.slots.get("assessment")
         if not isinstance(raw, RiskAssessment):
             return None
         if raw.state_on(self._deps.today) is not AssessmentState.VALID:

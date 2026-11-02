@@ -81,6 +81,16 @@ def referenced_facts(
                           "product_id": product.product_id,
                           "name": product.name, "risk_level": product.risk_level,
                           "min_amount_cents": product.min_amount.cents})
+    for holding_record in gateway.wealth_holdings_of(user_id):
+        holding = holding_record.payload
+        if holding.product_id in references.get("product", set()):
+            facts.append({
+                "source": "gateway", "record_id": holding_record.record_id,
+                "content_hash": holding_record.content_hash,
+                "product_id": holding.product_id, "user_id": holding.user_id,
+                "amount_cents": holding.amount.cents,
+                "purchased_on": holding.purchased_on.isoformat(),
+            })
     for hold_record in gateway.active_holds_of(user_id):
         hold = hold_record.payload
         if hold.hold_id in references.get("hold", set()):
@@ -114,6 +124,14 @@ def node_review_context(
                 refs.append(record_id)
             else:
                 missing.append(param)
+        if node.action == "wealth.redeem":
+            product_id = node.params.get("product_id")
+            if isinstance(product_id, str):
+                record_id = f"wealth_holdings:{product_id}"
+                if record_id in fact_ids:
+                    refs.append(record_id)
+                else:
+                    missing.append("holding")
         contexts[node.node_id] = {
             "action": node.action, "authorization": "pending_confirmation",
             "intent_scope": (
