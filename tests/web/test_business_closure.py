@@ -65,32 +65,28 @@ def test_options_are_real_owned_records(tmp_path: Path) -> None:
     assert payload["holds"] == []
 
 
-def test_subscription_string_answers_complete_and_persist(tmp_path: Path) -> None:
+def test_sign_is_refused_as_capability_boundary(tmp_path: Path) -> None:
     deps = _deps(tmp_path)
     client = TestClient(create_app(deps))
-    first = client.post(
+    before = {
+        record.payload.subscription_id
+        for record in deps.gateway.subscriptions_of(deps.user_id)
+    }
+    view = client.post(
         "/api/submit",
         json={"utterance": "代扣签约", "selected": {"account": "acc_savings"},
-              "session_id": "closure"},
+              "session_id": "closure-sign"},
     ).json()
-    assert first["state"] == "needs_clarification"
-    assert "user_id" not in {ask["slot"] for ask in first["clarifications"]}
-    ready = client.post(
-        "/api/clarify",
-        json={"session_id": "closure", "answers": {
-            "merchant": "演示月刊", "amount_cents": "25元", "period": "每月",
-            "next_charge_on": "2026-11-01",
-        }},
-    ).json()
-    assert ready["state"] == "awaiting_confirm", ready
-    result = _confirm(client, ready)
-    assert result["state"] == "completed", result
-    signed = [record.payload for record in deps.gateway.subscriptions_of(deps.user_id)
-              if record.payload.merchant == "演示月刊"]
-    assert len(signed) == 1
-    assert signed[0].amount.cents == 2500
-    assert signed[0].period == "monthly"
-    assert signed[0].next_charge_on.isoformat() == "2026-11-01"
+    assert view["state"] == "blocked", view
+    assert "不能代您新签" in view["message"], view
+    after = {
+        record.payload.subscription_id
+        for record in deps.gateway.subscriptions_of(deps.user_id)
+    }
+    assert after == before
+    assert "演示月刊" not in {
+        record.payload.merchant for record in deps.gateway.subscriptions_of(deps.user_id)
+    }
 
 
 def test_due_requires_confirmation_and_is_not_repeated(tmp_path: Path) -> None:

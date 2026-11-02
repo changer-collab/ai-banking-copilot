@@ -56,15 +56,6 @@
     "checks": [{"name": "解约生效", "sql": "SELECT status FROM subscriptions WHERE subscription_id='sub_video'", "expected": "cancelled"}], "numbers": []
   },
   {
-    "id": "web-subs-sign", "scenario": "subscriptions", "kind": "legitimate", "metric_group": "legitimate", "utterance": "签约代扣", "selected": {},
-    "answers": {"merchant": "测试阅读会员", "amount_cents": 1900, "period": "monthly", "next_charge_on": "2026-10-08"}, "expect_clarification": true,
-    "checks": [
-      {"name": "签约事实", "sql": "SELECT COUNT(*) FROM subscriptions WHERE merchant='测试阅读会员' AND amount_cents=1900 AND period='monthly' AND next_charge_on='2026-10-08' AND status='active'", "expected": 1},
-      {"name": "签约未扣款", "sql": "SELECT balance_cents FROM accounts WHERE account_id='acc_savings'", "expected": 12843000}
-    ],
-    "numbers": [{"pattern": "金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'subscriptions:'||subscription_id, amount_cents FROM subscriptions WHERE merchant='测试阅读会员'", "unit": "cents"}]
-  },
-  {
     "id": "web-cross-freeze-transfer", "scenario": "cross", "kind": "legitimate", "metric_group": "legitimate", "utterance": "冻结 500 元，转给李娜 300 元",
     "selected": {"account": "acc_savings"},
     "checks": [

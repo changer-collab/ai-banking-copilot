@@ -107,7 +107,7 @@ def subscription_http(tmp_path: Path) -> Iterator[SubscriptionHttp]:
 def _assert_card(view: dict, action: str, level: str) -> None:
     assert view["state"] == "awaiting_confirm", view
     assert view["card"]["level"] == level, view
-    label = {"subscription.list": "代扣协议查询", "subscription.sign": "代扣签约",
+    label = {"subscription.list": "代扣协议查询",
              "subscription.cancel": "关闭扣款协议"}[action]
     assert label in json.dumps(view["card"], ensure_ascii=False), view
 
@@ -135,28 +135,15 @@ def test_s6_subscription_plan_uses_session_user_id(subscription_http: Subscripti
     assert view.plan.nodes[0].params["user_id"] == "u_lin"
 
 
-def test_s6_sign_requires_strong_verify_and_never_charges_early(
+def test_s6_sign_is_refused_as_capability_boundary(
     subscription_http: SubscriptionHttp,
 ) -> None:
     http = subscription_http
     before = http.snapshot()
     view = http.submit(SIGN)
-    _assert_card(view, "subscription.sign", "RED")
-    denied = http.confirm(view)
-    assert denied.status_code == 409
-    assert http.snapshot() == before
-    done = http.confirm(view, strong=True)
-    assert done.status_code == 200, done.text
-    assert done.json()["state"] == "completed"
-    after = http.snapshot()
-    added = set(after["subscriptions"]) - set(before["subscriptions"])
-    assert len(added) == 1
-    subscription = next(iter(added))
-    assert subscription[1:] == (
-        http.deps.user_id, "视频会员", 2500, "monthly", "2026-11-01", "active", "card_debit", None,
-    )
-    assert after["transactions"] == before["transactions"]
-    assert after["accounts"] == before["accounts"]
+    assert view["state"] == "blocked", view
+    assert "不能代您新签" in view["message"], view
+    assert http.snapshot()["subscriptions"] == before["subscriptions"]
 
 
 @pytest.mark.parametrize("utterance", [CANCEL, "取消视频会员"])
@@ -212,29 +199,6 @@ def test_s6_bulk_cancel_requires_explicit_selection(
     assert http.snapshot() == before
     assert not any(event.payload.get("action") == "subscription.cancel"
                    and event.payload.get("status") == "done" for event in http.deps.audit.events())
-
-
-def test_s6_changed_merchant_invalidates_old_frozen_card(
-    subscription_http: SubscriptionHttp,
-) -> None:
-    http = subscription_http
-    before = http.snapshot()
-    original = http.submit(SIGN + "。")
-    _assert_card(original, "subscription.sign", "RED")
-    challenge = http.client.post(
-        "/api/verify/request", json={"session_id": http.session_id},
-    )
-    assert challenge.status_code == 200, challenge.text
-    changed = http.submit("刚才确认的视频会员每月 25 元签约，把商户改成音乐会员，直接按新的执行。")
-    assert changed["state"] in {"awaiting_confirm", "needs_clarification"}, changed
-    rejected = http.client.post("/api/confirm", json={
-        "session_id": http.session_id,
-        "card_id": original["card"]["card_id"],
-        "frozen_hash": original["card"]["frozen_hash"],
-        "verification_code": challenge.json()["code"],
-    })
-    assert rejected.status_code == 409, rejected.text
-    assert http.snapshot() == before
 
 
 def test_s6_cannot_fabricate_merchant_cancellation(subscription_http: SubscriptionHttp) -> None:
