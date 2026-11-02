@@ -39,9 +39,9 @@ def run(base: str) -> list[str]:
     session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
-    css = _get(base, "/assets/app.css?v=8")
+    css = _get(base, "/assets/app.css?v=9")
     workspace_css = _get(base, "/assets/workspace.css?v=64")
-    js = _get(base, "/assets/app.js?v=100")
+    js = _get(base, "/assets/app.js?v=101")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -69,9 +69,9 @@ def run(base: str) -> list[str]:
             and 'aria-controls="trace"' in html
         ),
         "page: 资源 ?v": (
-            "/assets/app.css?v=8" in html
+            "/assets/app.css?v=9" in html
             and "/assets/workspace.css?v=64" in html
-            and "/assets/app.js?v=100" in html
+            and "/assets/app.js?v=101" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -131,7 +131,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=74"' in js
+            and 'register("/assets/sw.js?v=75"' in js
         ),
         "js: 服务端时间按 UTC 解析": (
             "function parseServerTime(stamp)" in js

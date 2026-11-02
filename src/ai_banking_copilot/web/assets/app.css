@@ -834,6 +834,46 @@ body {
 .takeover__grid dt { color: var(--ink-3); }
 .takeover__grid dd { margin: 0; }
 
+.takeover-status {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-4);
+  border: 1px solid var(--lvl-denied);
+  border-left: 4px solid var(--lvl-denied);
+  border-radius: var(--r-card);
+  background: var(--lvl-denied-bg);
+}
+
+.takeover-status__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.takeover-status__eyebrow,
+.takeover-status p {
+  margin: 0;
+}
+
+.takeover-status__eyebrow {
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.takeover-status h3 {
+  margin: var(--s-2) 0 6px;
+  font-size: var(--fs-h3);
+}
+
+.takeover-status p {
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.takeover-status__rules { margin-top: var(--s-3) !important; }
+
 /* 令牌展示（设计规范页用） ------------------------------------------------ */
 .swatches {
   display: grid;

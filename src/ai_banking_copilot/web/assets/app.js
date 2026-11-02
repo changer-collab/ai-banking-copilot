@@ -55,6 +55,7 @@ const LEVEL = {
   GREEN: { cls: "green", code: "L0", name: "绿色", text: "核验通过", policy: "自动执行" },
   YELLOW: { cls: "yellow", code: "L1", name: "黄色", text: "待您确认", policy: "用户确认" },
   RED: { cls: "red", code: "L2", name: "红色", text: "强验证", policy: "服务端挑战" },
+  MANUAL: { cls: "denied", code: "L3", name: "人工复核", text: "人工接管", policy: "暂停执行" },
   DENIED: { cls: "denied", code: "L4", name: "拒绝", text: "拒绝并解释", policy: "安全拒绝" },
 };
 
@@ -5433,6 +5434,7 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
   const frozen = card.frozen_hash || "";
   const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
   const readOnly = opts.readOnly === true;
+  const paused = opts.paused === true;
   const reviewEditable = !readOnly && Boolean(state.review)
     && (state.phase === "awaiting_confirm" || state.phase === "strong-verify");
   const stepStates = Array.isArray(opts.stepStates) ? opts.stepStates : state.stepStates;
@@ -5441,7 +5443,7 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
     ${sealHtml(card.level)}
     <div class="voucher__head">
       <div class="doc-no">
-        <span class="doc-no__label">${readOnly ? "计划编号" : "凭证号"}</span>
+        <span class="doc-no__label">${paused ? "冻结计划" : readOnly ? "计划编号" : "凭证号"}</span>
         <span class="doc-no__value">${esc(readOnly ? String(card.card_id || "—") : receiptNo(frozen))}</span>
         <span class="doc-no__label tech" style="margin-top: 6px">计划冻结哈希（cfhash）</span>
         <span class="tech">${esc(frozen)}</span>
@@ -5459,7 +5461,7 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
       </dl>
       <div class="amount">
         <span class="amount__value">${lines.length} 步</span>
-        <span class="amount__note">${readOnly ? "历史计划快照 · 只读" : "确认即锁定本计划 · 计划级 + 节点级双层执行门"}</span>
+        <span class="amount__note">${paused ? "已暂停，未执行 · 等待人工复核" : readOnly ? "历史计划快照 · 只读" : "确认即锁定本计划 · 计划级 + 节点级双层执行门"}</span>
       </div>
     </div>
 
@@ -5555,6 +5557,17 @@ function takeoverHtml(pack) {
   </div>`;
 }
 
+function takeoverStatusHtml(decision) {
+  const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
+  return `<section class="takeover-status" aria-label="人工接管状态">
+    <div class="takeover-status__head"><span class="takeover-status__eyebrow">L3 人工复核</span>
+      <span class="chip chip--denied">暂停执行</span></div>
+    <h3>本次办理已暂停</h3>
+    <p>系统识别到需要人工复核的风险信号，资金和卡片状态均未发生变更。</p>
+    ${reasons.length ? `<p class="takeover-status__rules">${rulesHtml(reasons)}</p>` : ""}
+  </section>`;
+}
+
 /* ---------------- 渲染装配 ---------------- */
 
 /* 只重绘最新回复；历史记录保存真实 DOM 快照，不再带授权控件。 */
@@ -5568,10 +5581,13 @@ function renderStage() {
   const note = answerNoteHtml(state.answerNote);
   const workflow = workflowHtml(state.workflow);
   const draft = transactionDraftHtml(state.draft);
+  const takenOver = state.phase === "taken_over";
   state.response.innerHTML = inReview
     ? workflow + reviewHtml() + state.notice
     : state.card
-      ? draft + note + workflow + voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
+      ? draft + note + workflow + (takenOver ? takeoverStatusHtml(state.decision) : "")
+        + voucherHtml(state.card, state.decision, takenOver ? { readOnly: true, paused: true } : {})
+        + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
       : note + (state.panel || "") + state.notice;
   if (runChain) {
     /* 三分类 / 澄清回合没有可执行计划：运行链路里的「已拒绝 · 未执行」只会让人误以为被风控拦了 */
@@ -5881,6 +5897,7 @@ function setButtons() {
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
   const inReview = state.phase === "review" || state.phase === "review-edit";
+  const takenOver = state.phase === "taken_over";
   const operationUnknown = state.operationUnknown;
   /* 只读历史：输入框与发送一律不可用，避免「文案说需新建对话、实际还能直接发」 */
   const archiveOnly = state.archiveReadOnly === true;
@@ -5897,7 +5914,12 @@ function setButtons() {
   /* 核对单阶段由卡内按钮负责确认/修改，底部操作条整体让位，避免绕过核对直接执行。 */
   el("task-actions").hidden = inReview || !state.task || (!state.card && !state.decision);
   /* 没有计划卡就没有「确认并执行」：三分类 / 澄清回合不该出现一个永远点不动的按钮 */
-  el("btn-confirm").hidden = !state.card || inReview;
+  el("btn-confirm").hidden = !state.card || inReview || takenOver;
+  ["btn-interrupt", "btn-resume", "btn-reject", "btn-reverse"].forEach((id) => {
+    el(id).hidden = takenOver;
+  });
+  const moreSummary = document.querySelector("#task-actions .task-more summary");
+  if (moreSummary) moreSummary.textContent = takenOver ? "人工复核信息" : "更多办理操作";
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     el(`select-${slot}`).disabled = offline || busy || !state.options;
   });
@@ -6026,6 +6048,24 @@ async function applySubmission(data) {
         card: data.card,
       }).catch(() => {});
     }
+    return;
+  }
+  if (data.state === "taken_over" && data.card) {
+    state.card = data.card;
+    state.decision = data.decision || null;
+    state.workflow = null;
+    state.draft = null;
+    state.phase = "taken_over";
+    state.panel = "";
+    state.stepStates = (data.card.lines || []).map(() => "pending");
+    state.nodeStatus = {};
+    (data.card.nodes || []).forEach((node) => { state.nodeStatus[node.node_id] = "pending"; });
+    collapseTaskMore();
+    chainAdd("人工复核已接管", "计划冻结，未执行");
+    renderStage();
+    setButtons();
+    timelineAdd("人工接管 · 计划已冻结，未执行", "stop");
+    snapshotTrace();
     return;
   }
   state.review = null;
@@ -9981,7 +10021,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/assets/sw.js?v=74", { scope: "/" }).catch(() => {
+  navigator.serviceWorker.register("/assets/sw.js?v=75", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

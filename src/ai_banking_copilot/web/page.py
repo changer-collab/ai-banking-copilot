@@ -26,7 +26,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="manifest" href="/assets/manifest.json?v=1" />
 <link rel="icon" href="/assets/icon.svg?v=1" type="image/svg+xml" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
-<link rel="stylesheet" href="/assets/app.css?v=8" />
+<link rel="stylesheet" href="/assets/app.css?v=9" />
 <link rel="stylesheet" href="/assets/workspace.css?v=64" />
 </head>
 <body>
@@ -717,7 +717,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=100"></script>
+<script src="/assets/app.js?v=101"></script>
 <script src="/assets/wealth_trade.js?v=3"></script>
 </body>
 </html>
