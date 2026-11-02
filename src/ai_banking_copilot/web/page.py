@@ -51,7 +51,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="bills">账单</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="wealth">理财</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="cards">卡片</button>
-          <button class="appnav__tile" type="button" data-nav="scene" data-scene="subscriptions">代扣协议</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="life">生活</button>
         </div>
         <p class="side__label">工具</p>
@@ -149,8 +149,8 @@ _PAGE_HTML = """<!DOCTYPE html>
           </div>
         </article>
         <article class="scene-card">
-          <p class="scene-card__k">⑤ 代扣协议</p>
-          <p class="scene-card__d">关闭银行卡侧扣款授权；签约、累计扣款与解约后对账可查。</p>
+          <p class="scene-card__k">⑤ 订阅</p>
+          <p class="scene-card__d">管理代扣协议：查询已签协议、关闭银行卡侧扣款授权；累计扣款与解约后对账可查。</p>
           <div class="scene-card__row">
             <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="subscriptions">进入功能页</button>
             <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="关闭扣款协议">去对话</button>
@@ -506,7 +506,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div class="scene-block" data-scene-block="subscriptions" hidden>
         <section class="panel" id="subscription-panel">
           <div class="scene-head">
-            <p class="panel__title">代扣协议管理</p>
+            <p class="panel__title">订阅管理</p>
             <span class="muted" id="subscription-status">正在读取代扣协议…</span>
           </div>
           <p class="muted" id="subscription-boundary" hidden></p>
@@ -801,7 +801,7 @@ LOGIN_HTML = """<!DOCTYPE html>
     <summary>先逛逛：功能预览（只读，不会办理）</summary>
     <div class="preview-grid">
       <span>智能转账</span><span>账单分析</span><span>卡片管理</span>
-      <span>理财</span><span>代扣协议</span><span>生活事件</span>
+      <span>理财</span><span>订阅</span><span>生活事件</span>
     </div>
     <ul>
       <li>AI 先给出办理方案，确认后才执行；高风险动作需要额外验证。</li>

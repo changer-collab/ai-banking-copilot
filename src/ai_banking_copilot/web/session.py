@@ -1020,6 +1020,9 @@ class Session:
             third_party = _third_party_account_refusal(utterance)
             if third_party is not None:
                 return self._refuse(third_party, utterance, capability_boundary=True)
+            sign_request = _subscription_sign_refusal(utterance)
+            if sign_request is not None:
+                return self._refuse(sign_request, utterance, capability_boundary=True)
             # 「改余额 + 买理财」同属**能力边界**：余额只能由真实资金变动产生，
             # 整句拒绝，避免拿伪造的余额去生成申购卡（S6-7）。
             balance_tamper = _balance_tamper_refusal(utterance)
@@ -1047,6 +1050,10 @@ class Session:
                 intents, asks, notes = self._assemble_intents(utterance, selected)
             except _WealthRefusal as refusal:
                 return self._refuse(str(refusal), utterance)
+            if any(intent.action == "subscription.sign" for intent in intents):
+                return self._refuse(
+                    _SUBSCRIPTION_SIGN_BOUNDARY, utterance, capability_boundary=True
+                )
             self._remember_wealth_attempt(intents)
             # 账户查询带金额条件：查询动作本身不支持该条件，先如实说明能力边界，
             # 不能出一张「条件被静默忽略」的查询卡。
@@ -1642,7 +1649,7 @@ class Session:
             key = self._pending_slot_key(slot)
             accepted = _accepted_answer(slot, candidate)
             return {key: accepted} if key is not None and accepted is not None else {}
-        if re.search(r"取消|查|转|买|卖|冻结|解冻|订阅|账单|余额|理财", candidate):
+        if re.search(r"取消|查|转|买|卖|冻结|解冻|订阅|账单|余额|理财|签约|代扣", candidate):
             return {}
         amount = parse_amount(candidate, bare_amounts=True)
         if amount.matched and amount.value is not None:
@@ -3789,6 +3796,14 @@ _THIRD_PARTY_REFUSAL = (
     "能力边界：仅支持操作你本人名下的账户与银行卡，不支持代他人申购或赎回理财；"
     "如需帮家人办理，请由账户本人登录后操作。"
 )
+_SUBSCRIPTION_SIGN_BOUNDARY = (
+    "银行 Agent 不能代您新签第三方代扣协议：签约必须由商户侧发起并经您本人授权。"
+    "我可以帮您查询已签的代扣协议，或关闭某项扣款授权。"
+)
+_SIGN_REQUEST = re.compile(
+    r"代扣签约|签约代扣|开通代扣|新签代扣|新增代扣|帮我签约|自动续费签约"
+)
+_SIGN_QUERY_OR_CANCEL = re.compile(r"取消|解约|关闭|终止|查询|查看|记录|信息|时间|详情")
 
 
 _AMOUNT_FILTER = re.compile(
@@ -3852,6 +3867,15 @@ def _third_party_account_refusal(utterance: str) -> str | None:
     if not any(marker in utterance for marker in _WEALTH_MARKERS):
         return None
     return _THIRD_PARTY_REFUSAL
+
+
+def _subscription_sign_refusal(utterance: str) -> str | None:
+    """新签第三方代扣协议属于**能力边界**：Agent 只查询 / 解约，不代办签约。"""
+    if _SIGN_REQUEST.search(utterance) and not _SIGN_QUERY_OR_CANCEL.search(utterance):
+        return _SUBSCRIPTION_SIGN_BOUNDARY
+    if "签约" in utterance and not _SIGN_QUERY_OR_CANCEL.search(utterance):
+        return _SUBSCRIPTION_SIGN_BOUNDARY
+    return None
 
 
 _BALANCE_MARKERS = ("余额", "存款")

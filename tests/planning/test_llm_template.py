@@ -145,7 +145,7 @@ def test_subscription_precedence_changes_are_frozen() -> None:
         assert actions and actions[0] == "subscription.list", utterance
     for utterance in ("续费", "签约", "代扣", "自动续费"):
         actions = _actions(utterance)
-        assert actions and actions[0] == "subscription.sign", utterance
+        assert actions and actions[0] == "subscription.list", utterance
 
 
 def test_bare_verbs_keep_write_semantics() -> None:

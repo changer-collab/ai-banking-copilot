@@ -1235,6 +1235,11 @@ def create_app(deps: AppDeps) -> FastAPI:
                 "external_cancel_integrated": False,
                 "can_request_external_cancel": False,
                 "can_local_cancel": True,
+                "can_sign": False,
+                "sign_boundary": (
+                    "银行 Agent 不代办新签代扣协议；"
+                    "仅支持查询已有协议与关闭银行卡侧扣款授权。"
+                ),
                 "close_action_label": "关闭扣款协议",
                 "can_close_bank_side": True,
                 "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
