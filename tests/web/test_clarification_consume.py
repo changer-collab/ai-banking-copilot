@@ -63,6 +63,19 @@ def test_form_answers_are_all_consumed(deps: AppDeps) -> None:
         assert ask.slot not in FORM_ANSWERS
 
 
+def test_l1_asks_for_a_bouquet_after_store_and_order_date(deps: AppDeps) -> None:
+    """订花日期是 L1 扩展槽，答完后必须进入花束档位，不得构造默认金额计划。"""
+    session = Session(deps)
+    session.submit("我爱人生日快到了")
+    view = session.clarify({
+        "merchant": "花间集（西湖店）",
+        "order_on": "2026-11-06",
+    })
+
+    assert view.state is SessionState.NEEDS_CLARIFICATION
+    assert [ask.slot for ask in view.clarifications] == ["amount"]
+
+
 def test_freeform_multi_slot_answer_is_consumed(deps: AppDeps) -> None:
     session = Session(deps)
     session.submit(FLOWER)

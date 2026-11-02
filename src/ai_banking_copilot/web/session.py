@@ -1741,6 +1741,13 @@ class Session:
                 # 订花澄清只问下单日期（order_on）：用户写「送达时间」也视为同一事实，
                 # 与 Session.clarify 里 delivery_time → order_on 的口径保持一致。
                 key = self._pending_slot_key("order_on")
+            if key is None and slot == "amount" and (
+                self._pending_slot_key("merchant") is not None
+                or self._pending_slot_key("order_on") is not None
+            ):
+                # 订花是**一张多字段澄清单**（门店/日期/档位）：门店与日期已问到时，
+                # 用户在同一条补充里写下档位也应一次吃下，而不是答完再问一轮。
+                key = "amount"
             if key is None or key in answers:
                 continue
             accepted = _accepted_answer(slot, value)
@@ -2082,6 +2089,7 @@ class Session:
                     self._deps.today,
                     semantic_frame=semantic_frame,
                     budget_override_cents=_draft_money_cents(slot_selected.get("budget_limit")),
+                    order_on=slot_selected.get("order_on"),
                 )
             elif (
                 life_event_id == "L2"
@@ -5157,6 +5165,7 @@ def _l1_fill(
     *,
     semantic_frame: SemanticFrame | None = None,
     budget_override_cents: int | None = None,
+    order_on: object | None = None,
 ) -> tuple[SlotFill, tuple[ClarificationAsk, ...]]:
     """L1 预算锁定：先确认花店与订花日期，再选择预算内花束档位。
 
@@ -5178,6 +5187,10 @@ def _l1_fill(
         slots.pop("amount", None)
     if explicit_order_cents is not None:
         slots["amount"] = explicit_order_cents
+    # `order_on` 是生活场景扩展槽，不在通用 `merchant.order` 控制槽表中；
+    # 澄清答案会留在 `slot_selected`，须在这里显式带入，不能误当作仍未回答。
+    if isinstance(order_on, str) and order_on.strip():
+        slots.setdefault("order_on", order_on.strip())
     slots.setdefault("budget_cents", budget)
     merchant = slots.get("merchant")
     if not isinstance(merchant, str) or merchant not in {offer.merchant for offer in offers}:
