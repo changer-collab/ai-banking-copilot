@@ -626,10 +626,9 @@ _PAGE_HTML = """<!DOCTYPE html>
       <button class="btn btn--ghost" id="btn-close-trace" type="button">关闭</button>
     </div>
 
-    <section class="panel" id="insights-panel">
-      <p class="panel__title">主动洞察</p>
-      <p class="muted" id="insights-status">正在读取站内洞察…</p>
-      <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
+    <section class="panel">
+      <p class="panel__title">执行时间线</p>
+      <ul class="timeline" id="timeline"><li class="timeline__item">等待操作…</li></ul>
     </section>
 
     <section class="panel">
@@ -637,9 +636,10 @@ _PAGE_HTML = """<!DOCTYPE html>
       <ul class="chain" id="chain"><li class="chain__empty">尚未产生事件</li></ul>
     </section>
 
-    <section class="panel">
-      <p class="panel__title">执行时间线</p>
-      <ul class="timeline" id="timeline"><li class="timeline__item">等待操作…</li></ul>
+    <section class="panel" id="insights-panel">
+      <p class="panel__title">主动洞察</p>
+      <p class="muted" id="insights-status">正在读取站内洞察…</p>
+      <div id="insights-list"><p class="muted">尚未读取洞察。</p></div>
     </section>
   </aside>
 
