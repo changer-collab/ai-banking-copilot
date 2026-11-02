@@ -1737,6 +1737,10 @@ class Session:
             if slot is None or not value:
                 continue
             key = self._pending_slot_key(slot)
+            if key is None and slot == "delivery_time":
+                # 订花澄清只问下单日期（order_on）：用户写「送达时间」也视为同一事实，
+                # 与 Session.clarify 里 delivery_time → order_on 的口径保持一致。
+                key = self._pending_slot_key("order_on")
             if key is None or key in answers:
                 continue
             accepted = _accepted_answer(slot, value)
@@ -5227,7 +5231,8 @@ def _l1_fill(
                 options=merchant_options,
             )
         )
-    if not isinstance(slots.get("order_on"), str) or not slots["order_on"].strip():
+    order_on = slots.get("order_on")
+    if not isinstance(order_on, str) or not order_on.strip():
         asks.append(
             ClarificationAsk(
                 slot="order_on",

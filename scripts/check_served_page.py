@@ -39,8 +39,8 @@ def run(base: str) -> list[str]:
     session_id = f"page-check-{uuid.uuid4().hex}"
 
     html = _get(base, "/")
-    css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=63")
+    css = _get(base, "/assets/app.css?v=8")
+    workspace_css = _get(base, "/assets/workspace.css?v=64")
     js = _get(base, "/assets/app.js?v=100")
 
     checks = {
@@ -69,8 +69,8 @@ def run(base: str) -> list[str]:
             and 'aria-controls="trace"' in html
         ),
         "page: 资源 ?v": (
-            "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=63" in html
+            "/assets/app.css?v=8" in html
+            and "/assets/workspace.css?v=64" in html
             and "/assets/app.js?v=100" in html
         ),
         "page: PWA 安装与订阅入口": (

@@ -10,7 +10,7 @@ def test_index_exposes_versioned_installable_shell(deps: object) -> None:
     assert page.headers["cache-control"] == "no-store", "壳 HTML 内嵌版本号，不能被缓存"
     assert 'rel="manifest"' in html
     assert "/assets/manifest.json?v=1" in html
-    assert "/assets/app.js?v=99" in html
+    assert "/assets/app.js?v=100" in html
     assert "/assets/workspace.css?v=64" in html
     assert "当前离线" in html
     assert 'id="conversation-sidebar"' in html
@@ -50,11 +50,11 @@ def test_service_worker_keeps_api_network_only(deps: object) -> None:
     assert workspace.status_code == 200
     assert ".layout.layout--workspace" in workspace.text
     assert ".layout--workspace [hidden]" in workspace.text
-    assert 'const CACHE_NAME = "aib-static-shell-v85"' in worker.text
+    assert 'const CACHE_NAME = "aib-static-shell-v86"' in worker.text
     assert '"/assets/workspace.css?v=64"' in worker.text
-    assert '"/assets/app.js?v=99"' in worker.text
-    assert '"/assets/app.css?v=7"' in worker.text
-    app_js = client.get("/assets/app.js?v=99")
+    assert '"/assets/app.js?v=100"' in worker.text
+    assert '"/assets/app.css?v=8"' in worker.text
+    app_js = client.get("/assets/app.js?v=100")
     assert 'register("/assets/sw.js?v=74"' in app_js.text
     assert "beforeinstallprompt" in app_js.text
     assert "appinstalled" in app_js.text

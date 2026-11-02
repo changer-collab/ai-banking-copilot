@@ -72,6 +72,8 @@ def test_birthday_draft_keeps_budget_separate_from_order_amount(deps: AppDeps) -
         json={
             "utterance": (
                 "\u7231\u4eba\u751f\u65e5\u9884\u7b97800\u5143\uff0c\u8ba2299\u5143\u9c9c\u82b1"
+                "\uff0c\u5546\u6237 \u82b1\u95f4\u96c6\uff08\u897f\u6e56\u5e97\uff09"
+                "\uff0c\u9001\u8fbe\u65f6\u95f4 2026-11-04"
             )
         },
     ).json()
