@@ -1780,7 +1780,7 @@ async function sceneRunTask(options) {
   setStatus("正在生成办理计划…");
   let result;
   try {
-    result = await post("/api/submit", { utterance: options.utterance, selected: options.selected || {} });
+    result = await post("/api/submit", { utterance: options.utterance, selected: options.selected || {}, new_intent: true });
   } catch (error) {
     if (host) host.innerHTML = "";
     setStatus(fetchErrorMessage(error, "提交失败，请稍后重试。"));
@@ -3703,7 +3703,7 @@ async function submitCardFlow() {
   let result;
   try {
     result = await post("/api/submit", {
-      utterance: submission.utterance, selected: submission.selected,
+      utterance: submission.utterance, selected: submission.selected, new_intent: true,
     });
   } catch (error) {
     cardFlowState.busy = false;
@@ -3720,6 +3720,10 @@ async function submitCardFlow() {
   const data = result.data || {};
   if (data.state !== "awaiting_confirm" || !data.card) {
     renderCardFlow();
+    if (data.state === "needs_clarification" && data.clarifications?.length) {
+      cardFlowError(`${data.message} 若缺失项不在本弹窗内，请回到对话补充后再提交。`);
+      return;
+    }
     cardFlowError(data.message || "这次操作没有生成可执行计划，请检查填写内容。");
     return;
   }

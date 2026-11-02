@@ -815,10 +815,13 @@ class Session:
         selected: Mapping[str, object] | None = None,
         now: datetime | None = None,
         on_stage: Callable[[str], None] | None = None,
+        new_intent: bool = False,
     ) -> SubmissionView:
         """一次新的用户意图拥有独立执行身份，即使内容完全相同。
 
         `on_stage` 是**旁路观测**回调（阶段可见），不参与任何判定，异常一律吞掉。
+        `new_intent=True` 表示表单类提交（卡片弹窗 / 场景页），强制开启新意图，
+        不并入旧澄清；缺省 `False` 保持聊天补答的既有行为。
         """
         reference = resolve_reference(utterance, self._memory)
         if reference.kind is ReferenceKind.UNDO:
@@ -828,6 +831,7 @@ class Session:
             view = self._submit(
                 utterance, selected=selected, now=now,
                 execution_id=secrets.token_hex(16), on_stage=on_stage,
+                new_intent=new_intent,
             )
             return replace(view, visibility=self._visibility)
         rewritten, inherited, note = rewrite
@@ -835,6 +839,7 @@ class Session:
         view = self._submit(
             rewritten, selected=applied, now=now,
             execution_id=secrets.token_hex(16), on_stage=on_stage,
+            new_intent=new_intent,
         )
         return replace(
             view,
@@ -950,6 +955,7 @@ class Session:
         clarification_keys: frozenset[str] = frozenset(),
         on_stage: Callable[[str], None] | None = None,
         allow_freeform_clarification: bool = True,
+        new_intent: bool = False,
     ) -> SubmissionView:
         """提交一句自然语言：装配意图 → 选场景 → 组装计划 → 裁决 → 计划卡。
 
@@ -958,6 +964,7 @@ class Session:
         """
         if (
             allow_freeform_clarification
+            and not new_intent
             and self._state is SessionState.NEEDS_CLARIFICATION
             and self._last_utterance is not None
             and utterance.strip() != self._last_utterance.strip()

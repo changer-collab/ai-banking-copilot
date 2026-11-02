@@ -32,3 +32,23 @@ def test_l5_formal_flow_executes_one_node(deps: AppDeps, gateway: FactGateway) -
     )
     assert done.state is SessionState.COMPLETED
     assert gateway.card("card_debit").payload.status == "lost"
+
+
+def test_card_form_submit_is_not_hijacked_by_pending_payee(deps: AppDeps) -> None:
+    session = Session(deps)
+    pending = session.submit("转账 300 元")
+    assert pending.state is SessionState.NEEDS_CLARIFICATION
+    assert "收款人" in pending.message
+    view = session.submit(
+        "申请补卡",
+        selected={
+            "card": "card_debit",
+            "address": "上海市浦东新区世纪大道 100 号",
+            "mail_method": "standard",
+            "replace": "yes",
+        },
+        new_intent=True,
+    )
+    assert view.state is SessionState.AWAITING_CONFIRM
+    assert [node.action for node in view.plan.nodes] == ["card.replace"]
+    assert "收款人" not in view.message

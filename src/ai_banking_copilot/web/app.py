@@ -429,6 +429,8 @@ class _SubmitRequest(BaseModel):
     """
     request_id: str | None = None
     """阶段进度标识：前端生成，仅用于 `GET /api/progress` 拉取处理阶段，不参与业务判定。"""
+    new_intent: bool = False
+    """表单类提交（卡片弹窗/场景页）置 `true`，强制开启新意图，不并入旧澄清。"""
 
 
 class _LoginRequest(BaseModel):
@@ -2286,6 +2288,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 request.utterance,
                 selected=request.selected,
                 on_stage=on_stage,
+                new_intent=request.new_intent,
             )
         except SessionStateError as error:
             _append_channel_audit(
