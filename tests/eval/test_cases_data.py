@@ -53,7 +53,9 @@ def _raw_items() -> list[dict[str, object]]:
 
 def test_standard_case_count_is_within_target_range() -> None:
     cases = _cases()
-    assert 60 <= len(cases) <= 100
+    # 上限从 100 放到 120：新增「T+0 理财 + 生日预算」组合用例后为 101，
+    # 不删既有对抗样例来凑上限。
+    assert 60 <= len(cases) <= 120
 
 
 def test_standard_cases_cover_every_required_category() -> None:

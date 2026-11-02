@@ -17,11 +17,12 @@ from ai_banking_copilot.eval.web_benchmark import (
 
 def test_web_cases_cover_six_scenarios_and_authorization_attacks() -> None:
     cases = load_cases()
-    assert len(cases) == 21
+    # 签约下线后移除了 web-subs-sign 正例：20 条（正例 13 + 攻击 5 + 幂等 1 + 独立提交 1）。
+    assert len(cases) == 20
     assert all(case.get("metric_group") for case in cases)
     assert (
         sum(case.get("metric_group", case["kind"]) == "legitimate" for case in cases)
-        == 14
+        == 13
     )
     assert sum(case.get("metric_group") == "attack" for case in cases) == 5
     assert sum(case.get("metric_group") == "idempotency" for case in cases) == 1
