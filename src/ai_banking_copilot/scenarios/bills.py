@@ -335,6 +335,18 @@ _EXPLICIT_PERIOD = re.compile(r"(?P<year>\d{4})\s*(?:年|[-/.])\s*(?P<month>\d{1
 _RELATIVE_PERIOD = re.compile(r"(?P<rel>去年|今年|明年)\s*(?P<month>\d{1,2})\s*月")
 """相对年份 + 月份：「去年 12 月」。只认这三种相对词，不猜「上上个月」之类。"""
 
+_RELATIVE_MONTH = re.compile(r"(?P<rel>本月|这个月|当月|上月|上个月|下个月)")
+"""相对基准日的账期：「本月」「上个月」。只认这几个词，不猜「上上个月」之类。"""
+
+_RELATIVE_MONTH_OFFSET = {
+    "本月": 0,
+    "这个月": 0,
+    "当月": 0,
+    "上月": -1,
+    "上个月": -1,
+    "下个月": 1,
+}
+
 _STATED_YEAR = re.compile(r"(?P<year>\d{4})\s*年|(?P<rel>去年|今年|明年)")
 """年度账单的年份：「2019 年的年度账单」「去年的年度账单」。"""
 
@@ -356,6 +368,12 @@ def _checked_period(year: int, month: int) -> tuple[int, int]:
     return year, month
 
 
+def _shift_month(year: int, month: int, offset: int) -> tuple[int, int]:
+    """按月份偏移得到新的年月（跨年自动进位 / 退位）。"""
+    index = year * 12 + (month - 1) + offset
+    return index // 12, index % 12 + 1
+
+
 def _stated_period(intents: Sequence[Intent]) -> tuple[int, int] | None:
     """从意图原话里取**写明**的账期；没写就返回 `None`（保持「缺省 = 上一个月」）。
 
@@ -369,6 +387,14 @@ def _stated_period(intents: Sequence[Intent]) -> tuple[int, int] | None:
         match = _EXPLICIT_PERIOD.search(span)
         if match is not None:
             return _checked_period(int(match["year"]), int(match["month"]))
+        match = _RELATIVE_MONTH.search(span)
+        if match is not None:
+            year, month = _shift_month(
+                REFERENCE_DATE.year,
+                REFERENCE_DATE.month,
+                _RELATIVE_MONTH_OFFSET[match["rel"]],
+            )
+            return _checked_period(year, month)
         match = _RELATIVE_PERIOD.search(span)
         if match is not None:
             year = DEFAULT_BOOKING_DATE.year + _RELATIVE_YEAR_OFFSET[match["rel"]]
