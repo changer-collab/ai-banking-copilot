@@ -114,6 +114,7 @@ def run_scenario(
             exec_results=(),
             message=str(error),
             record_ids=(),
+            clarification=error,
         )
     except ScenarioRefused as error:
         return ScenarioOutcome(

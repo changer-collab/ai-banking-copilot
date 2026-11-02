@@ -38,6 +38,7 @@ const SLOT_LABELS = {
   monthly_day: "每月转账日",
   period: "扣费周期", merchant: "商户名称", product: "理财产品",
   delivery_address: "配送地址", delivery_time: "送达时间",
+  loss_type: "挂失类型",
 };
 const MONEY_SLOTS = new Set(["amount", "amount_cents", "daily_limit"]);
 const MONEY_UNIT = /[元块万亿]/;
@@ -5715,6 +5716,11 @@ function clarifyControl(ask) {
   if (slot === "period") {
     return `<select ${attrs}><option value="">请选择扣费周期</option>` +
       `<option value="monthly">每月</option><option value="yearly">每年</option></select>`;
+  }
+  if (slot === "loss_type") {
+    return `<select ${attrs}><option value="">请选择挂失类型</option>` +
+      `<option value="temporary">临时冻结（可解，5–15 天，免费）</option>` +
+      `<option value="formal">正式挂失（不可逆，需要补卡）</option></select>`;
   }
   if (slot === "when" || slot === "next_charge_on" || slot === "delivery_time") {
     return `<input ${attrs} type="date" />`;

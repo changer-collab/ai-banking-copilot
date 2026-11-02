@@ -1319,6 +1319,14 @@ class Session:
         if outcome.status is ScenarioStatus.NEEDS_CLARIFICATION:
             self._state = SessionState.NEEDS_CLARIFICATION
             self._message = _with_notes(outcome.message, notes)
+            if not asks and outcome.clarification is not None:
+                asks = (
+                    ClarificationAsk(
+                        slot=outcome.clarification.slot,
+                        prompt=outcome.clarification.prompt,
+                    ),
+                )
+                questions = tuple(ask.prompt for ask in asks)
             if asks:
                 self._pending_slots = frozenset(ask.slot for ask in asks)
             return self._privacy_note(SubmissionView(
@@ -1557,8 +1565,17 @@ class Session:
         self._clear_policy_rejections()
         prefill = _redemption_prefill_payload(plan, self._deps)
         self._state = SessionState.AWAITING_CONFIRM
+        transfer_only = bool(plan.nodes) and all(
+            node.action in {"transfer.create", "transfer.book", "transfer.schedule"}
+            for node in plan.nodes
+        )
         self._message = _with_notes(
-            f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）", notes
+            (
+                f"转账核对单已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）"
+                if transfer_only
+                else f"计划卡已生成（{len(plan.nodes)} 步，级别 {decision.level.name}）"
+            ),
+            notes,
         )
         if prefill is not None:
             holding_text = (

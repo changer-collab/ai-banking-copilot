@@ -70,6 +70,8 @@ class ScenarioOutcome:
     exec_results: tuple[ExecResult, ...]
     message: str
     record_ids: tuple[str, ...]
+    clarification: ClarificationRequired | None = None
+    """场景层主动追问；会话层据此生成结构化澄清字段（`None` = 无追问）。"""
 
 
 @runtime_checkable

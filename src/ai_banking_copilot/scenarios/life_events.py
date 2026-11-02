@@ -158,16 +158,13 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         event_id="L5",
         name="失卡止损型",
         triggers=("卡丢了", "银行卡丢", "卡片丢失", "手机丢了", "钱包被偷", "钱包丢了", "疑似盗刷"),
-        domains=("card", "account"),
-        skeleton=(
-            "card.lock",
-            "card.report_lost",
-            "card.apply_virtual",
-            "password.change",
-            "account.transactions",
-        ),
+        domains=("card",),
+        skeleton=("card.lock", "card.report_lost"),
         reuse="scenarios.cards",
-        description="锁卡 → 挂失 → 补虚拟卡 → 改密码 → 查近期交易，五步止损。",
+        description=(
+            "先区分暂时找不到（临时冻结，可解）与确认丢失（正式挂失，不可逆需补卡），"
+            "再只做对应的那一步。"
+        ),
         example="我的借记卡丢了",
         cases=(
             ("卡丢了", "我的借记卡丢了"),
@@ -1005,64 +1002,38 @@ def _build_l4(
 def _build_l5(
     params: Mapping[str, object], gateway: FactGateway, ledger: AnchorLedger, prefix: str
 ) -> tuple[PlanNode, ...]:
-    """L5 失卡止损型：锁卡 → 挂失 → 补虚拟卡 → 改密码 → 近期交易核查。"""
+    """L5 失卡止损型：先澄清「临时冻结 / 正式挂失」，再只生成对应的那一步。"""
     card_id = _text(params, "card", "card")
     card = _card_of(gateway, card_id)
-    virtual_limit = _opt_cents(params, "virtual_limit")
-    limit_cents = card.daily_limit.cents if virtual_limit is None else virtual_limit
-    if limit_cents <= 0:
-        raise ScenarioRefused("虚拟卡日限额必须为正")
-    nodes = [
-        _node(
-            ledger,
-            f"{prefix}1",
-            "card.lock",
-            {"card_id": card_id},
-            detail="先行锁卡",
-        ),
-        _node(
-            ledger,
-            f"{prefix}2",
-            "card.report_lost",
-            {"card_id": card_id, "loss_type": "formal"},
-            detail="挂失",
-            depends_on=(f"{prefix}1",),
-        ),
-        _node(
-            ledger,
-            f"{prefix}3",
-            "card.apply_virtual",
-            {"user_id": DEMO_USER_ID, "daily_limit_cents": limit_cents},
-            detail="补虚拟卡",
-            depends_on=(f"{prefix}2",),
-        ),
-        _node(
-            ledger,
-            f"{prefix}4",
-            "password.change",
-            {"user_id": DEMO_USER_ID},
-            detail="改交易密码",
-            depends_on=(f"{prefix}3",),
-        ),
-    ]
-    account = _savings_account(gateway)
-    if account is not None:
-        start, end = _window(params)
-        nodes.append(
+    loss_type = _opt_text(params, "loss_type")
+    if card.status == "lost":
+        raise ScenarioRefused(
+            "这张卡已正式挂失：不能再临时冻结，也无需重复挂失；如需用卡请申请补卡。"
+        )
+    if loss_type == "temporary":
+        return (
             _node(
                 ledger,
-                f"{prefix}5",
-                "account.transactions",
-                {
-                    "account_id": account.account_id,
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                },
-                detail="近期交易核查",
-                depends_on=(f"{prefix}4",),
-            )
+                f"{prefix}1",
+                "card.lock",
+                {"card_id": card_id, "duration_days": 7},
+                detail="临时冻结（口头挂失）",
+            ),
         )
-    return tuple(nodes)
+    if loss_type == "formal":
+        return (
+            _node(
+                ledger,
+                f"{prefix}1",
+                "card.report_lost",
+                {"card_id": card_id, "loss_type": "formal"},
+                detail="正式挂失",
+            ),
+        )
+    raise ClarificationRequired(
+        "loss_type",
+        "卡片是暂时找不到，还是确认丢失？临时冻结可解、5–15 天；正式挂失不可逆，需要补卡。",
+    )
 
 
 def _build_l6(

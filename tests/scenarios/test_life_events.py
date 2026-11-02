@@ -174,17 +174,16 @@ def test_l4_redeems_exactly_the_gap(gateway: FactGateway) -> None:
     assert plan.nodes[2].depends_on == ("n2",)
 
 
-def test_l5_reports_the_loss_and_issues_a_virtual_card(gateway: FactGateway) -> None:
-    plan = build_life_event("L5", {"card": "card_debit"}, gateway)
-    assert _actions(plan) == [
-        "card.lock",
-        "card.report_lost",
-        "card.apply_virtual",
-        "password.change",
-        "account.transactions",
-    ]
-    assert plan_net_effect(plan, gateway).irreversibles == ("n2",)
-    assert plan.nodes[2].params["daily_limit_cents"] == 2000000
+def test_l5_formal_reports_the_loss_only(gateway: FactGateway) -> None:
+    plan = build_life_event("L5", {"card": "card_debit", "loss_type": "formal"}, gateway)
+    assert _actions(plan) == ["card.report_lost"]
+    assert plan_net_effect(plan, gateway).irreversibles == ("n1",)
+
+
+def test_l5_temporary_builds_a_freeze_node(gateway: FactGateway) -> None:
+    plan = build_life_event("L5", {"card": "card_debit", "loss_type": "temporary"}, gateway)
+    assert _actions(plan) == ["card.lock"]
+    assert plan.nodes[0].params["duration_days"] == 7
 
 
 def test_l6_is_a_pure_query_and_runs_green(gateway: FactGateway) -> None:
