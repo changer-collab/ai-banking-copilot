@@ -111,6 +111,8 @@ _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 
 REVIEW_CHANNEL_ENV = "AIB_REVIEW_CHANNEL"
 REVIEW_REQUIRED_ENV = "AIB_REVIEW_REQUIRED"
+REAL_PLANNER_REQUIRED_ENV = "AIB_REQUIRE_REAL_PLANNER"
+"""置为真值时，写操作必须由真实 Planner 提案；默认允许规则回退继续进入审查。"""
 INSIGHT_DB_ENV = "AIB_INSIGHT_DB"
 
 PUSH_ENABLED_ENV = "AIB_ENABLE_PUSH"
@@ -178,9 +180,12 @@ def reviewer_required(env: Mapping[str, str] | None = None) -> bool:
 
 
 def real_planner_required(env: Mapping[str, str] | None = None) -> bool:
-    """真实模式的写操作不接受模板规划回退。"""
+    """仅在显式开启时，写操作才因 Planner 回退转人工。
+
+    规划回退不等于授权放行：默认路径仍须经过独立 Reviewer、风险分级、用户确认和 PEP。
+    """
     source = os.environ if env is None else env
-    return source.get(DISABLE_LLM_ENV, "").strip().lower() not in _DISABLED_VALUES
+    return source.get(REAL_PLANNER_REQUIRED_ENV, "").strip().lower() in _DISABLED_VALUES
 
 
 AUDIT_KEY_ENV = "AIB_AUDIT_KEY"

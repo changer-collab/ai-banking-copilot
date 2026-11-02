@@ -357,7 +357,7 @@ class AppDeps:
     reviewer_required: bool = False
     """是否把 Reviewer 结果接入执行前状态机；旁路模式只审计诊断。"""
     real_planner_required: bool = False
-    """真实模式写操作必须由真实 Planner 提案；模板回退一律转人工。"""
+    """显式严格模式下，写操作必须由真实 Planner 提案；否则允许规则回退进入审查。"""
     insights: InsightService | None = None
     """只读主动洞察服务；元数据存储与银行事实连接由组合根隔离装配。"""
     bill_analysis: BillAnalysisStore | None = None

@@ -11,6 +11,7 @@ import pytest
 from ai_banking_copilot.compose import (
     AUDIT_KEY_ENV,
     DISABLE_LLM_ENV,
+    REAL_PLANNER_REQUIRED_ENV,
     build_audit_log,
     build_deps,
     build_intent_model,
@@ -111,7 +112,7 @@ def test_disabled_llm_forces_reviewer_bypass_even_when_strict_requested() -> Non
 def test_default_reviewer_is_strict_and_required() -> None:
     assert isinstance(build_reviewer({}), StrictPlanReviewer)
     assert reviewer_required({}) is True
-    assert real_planner_required({}) is True
+    assert real_planner_required({}) is False
 
 
 def test_strict_channel_always_requires_review_unless_llm_is_disabled() -> None:
@@ -119,6 +120,7 @@ def test_strict_channel_always_requires_review_unless_llm_is_disabled() -> None:
     assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", "AIB_REVIEW_REQUIRED": "0"})
     assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", DISABLE_LLM_ENV: "1"}) is False
     assert real_planner_required({DISABLE_LLM_ENV: "1"}) is False
+    assert real_planner_required({REAL_PLANNER_REQUIRED_ENV: "1"}) is True
 
 
 def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
@@ -133,7 +135,7 @@ def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
     assert deps.intent_model._primary._prompt_version == "planner-v2"
     assert deps.reviewer._timeout_s == 90
     assert deps.reviewer_required is True
-    assert deps.real_planner_required is True
+    assert deps.real_planner_required is False
 
 
 def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:
