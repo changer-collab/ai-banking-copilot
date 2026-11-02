@@ -587,6 +587,10 @@ def plan_nodes_payload(plan: Plan | None) -> list[dict[str, object]]:
             "resource": resource_key(node) or "",
             "resource_label": _resource_label(node),
             "index": index,
+            # 卡片弹窗需要按卡定位：只透出计划里已裁决的 card_id。
+            "card_id": node.params.get("card_id")
+            if isinstance(node.params.get("card_id"), str)
+            else "",
             # 理财确认弹窗需要预填：只透出已裁决计划里的产品 / 金额 / 份额事实。
             "product_id": node.params.get("product_id")
             if isinstance(node.params.get("product_id"), str)

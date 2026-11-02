@@ -3184,8 +3184,9 @@ function openCardDetail(card, kind) {
 
 /* 对话里的卡片计划卡：沿用已冻结的计划，直接进入「验证与确认」一步。 */
 async function openCardFlowFromPlan(plan) {
-  const node = (plan.nodes || []).find((item) => String(item.action || "").startsWith("card."));
-  const cardId = node && node.params ? node.params.card_id : "";
+  const cardNodes = (plan.nodes || []).filter((item) => String(item.action || "").startsWith("card."));
+  const node = cardNodes[0];
+  const cardId = node && (node.card_id || (node.params && node.params.card_id)) || "";
   let card = (state.cards || []).find((item) => item.card_id === cardId) || null;
   if (!card && cardId) {
     try {
@@ -3196,9 +3197,15 @@ async function openCardFlowFromPlan(plan) {
       card = null;
     }
   }
-  if (!card) return;
+  if (!card) {
+    state.notice = interceptHtml("无法打开操作确认", "计划里没有找到可操作的卡片，请刷新卡片列表后重试。", false);
+    renderStage();
+    return;
+  }
   const action = node ? String(node.action || "") : "";
-  const flow = {
+  const actions = new Set(cardNodes.map((item) => String(item.action || "")));
+  const composite = cardNodes.length > 1 || actions.size > 1;
+  const flow = composite ? "" : ({
     "card.lock": "freeze",
     "card.report_lost": "report",
     "card.unlock": "unlock",
@@ -3207,7 +3214,7 @@ async function openCardFlowFromPlan(plan) {
     "card.set_cycle_limit": "cycle",
     "card.set_limit": "debit_limit",
     "card.apply_virtual": "virtual",
-  }[action] || "";
+  })[action] || "";
   cardFlowState.open = true;
   cardFlowState.mode = "plan";
   cardFlowState.flow = flow;
@@ -3520,7 +3527,7 @@ function renderCardFlow() {
   cardFlowState.step = step;
   const title = el("card-flow-title");
   const sub = el("card-flow-sub");
-  if (title) title.textContent = CARD_FLOW_TITLES[flow] || "卡片操作";
+  if (title) title.textContent = flow ? (CARD_FLOW_TITLES[flow] || "卡片操作") : "组合操作确认";
   if (sub) {
     sub.textContent = cardFlowState.card
       ? `${cardFlowState.card.type_label} · ${cardFlowState.card.masked_no || "卡号未知"} · ${cardFlowState.card.status_label}`
@@ -3604,6 +3611,7 @@ function cardFlowDetailHtml() {
 
 function cardFlowConfirmLabel() {
   const flow = cardFlowState.flow;
+  if (!flow) return "确认执行";
   if (flow === "freeze") return "确认冻结";
   if (flow === "report") return cardFlowState.form.withReplace === "yes" ? "确认挂失并补卡" : "确认挂失";
   if (flow === "replace") return "确认补卡";
