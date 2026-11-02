@@ -79,6 +79,11 @@ const GLOSS = {
 
 const state = {
   card: null,
+  review: null,
+  reviewBaseline: null,
+  reviewConfirmed: false,
+  reviewEditFrom: null,
+  reviewError: "",
   decision: null,
   questions: [],
   stepStates: [],
@@ -144,9 +149,16 @@ function quotaHtml(card) {
   const used = card.daily_accumulated_cents;
   if (typeof limit !== "number" || typeof used !== "number") return "";
   const remaining = limit - used;
-  const head = `本人当日限额 <b class="quota__val">${yuan(limit)}</b> · 已用 <b class="quota__val">${yuan(used)}</b>`;
+  /* 转账的 1000 元是黄/红分档阈值，不是硬限额：用「免验证额度」表述，
+     避免出现「已超额却仍可验证执行」的口径冲突。 */
+  const transfer = (card.nodes || []).some(
+    (node) => String((node && node.action) || "").startsWith("transfer."),
+  );
+  const limitLabel = transfer ? "免验证额度" : "本人当日限额";
+  const head = `${limitLabel} <b class="quota__val">${yuan(limit)}</b> · 已用 <b class="quota__val">${yuan(used)}</b>`;
   if (remaining < 0) {
-    return `<p class="quota quota--over">${head} · 已超额 <b class="quota__val">${yuan(-remaining)}</b></p>`;
+    const overLabel = transfer ? "超出" : "已超额";
+    return `<p class="quota quota--over">${head} · ${overLabel} <b class="quota__val">${yuan(-remaining)}</b></p>`;
   }
   return `<p class="quota">${head} · 剩余 <b class="quota__val">${yuan(remaining)}</b></p>`;
 }
@@ -5118,6 +5130,121 @@ function previewHtml(card, decisionReasons) {
   </details>`;
 }
 
+/* ---------------- 转账核对单（计划卡之前的一层） ---------------- */
+
+function reviewAmountText(review) {
+  const n = Number(review && review.amount);
+  if (!Number.isFinite(n)) return (review && review.amount_display) || "¥—";
+  return `¥${n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function reviewFieldValue(key) {
+  const values = (state.review && state.review.values) || {};
+  return values[key] === undefined || values[key] === null ? "" : String(values[key]);
+}
+
+/* 来源标签：用户改过的字段优先显示「已修改」，其余用服务端给的来源。 */
+function reviewSource(field) {
+  const baseline = state.reviewBaseline || {};
+  const key = field.key;
+  if (Object.prototype.hasOwnProperty.call(baseline, key)
+    && String(baseline[key] ?? "") !== reviewFieldValue(key)) {
+    return "已修改";
+  }
+  return field.source || "";
+}
+
+function reviewCheckHtml(check) {
+  const tone = check.tone === "danger" || check.tone === "warn" ? check.tone : "ok";
+  const icon = tone === "danger" ? "✗" : tone === "warn" ? "!" : "✓";
+  return `<div class="review-check review-check--${tone}">
+    <span class="review-check__icon" aria-hidden="true">${icon}</span>
+    <span class="review-check__label">${esc(check.label || "")}</span>
+    <span class="review-check__value">${esc(check.value || "")}</span>
+    <span class="review-check__status">${esc(check.status || "")}</span>
+  </div>`;
+}
+
+function reviewRow(field) {
+  const edited = reviewSource(field) === "已修改";
+  return `<div class="review-row">
+    <span class="review-key">${esc(field.label || "")}</span>
+    <span class="review-val">${esc(field.display || "—")}</span>
+    <span class="review-tag${edited ? " review-tag--edited" : ""}">${esc(reviewSource(field))}</span>
+  </div>`;
+}
+
+function reviewEditRow(field) {
+  const value = reviewFieldValue(field.key);
+  const label = `<label class="review-key" for="review-${esc(field.key)}">${esc(field.label || "")}</label>`;
+  if (field.control === "select") {
+    const options = (field.options || []).map((item) => {
+      const selected = String(item.value) === value ? " selected" : "";
+      return `<option value="${esc(item.value)}"${selected}>${esc(item.label)}</option>`;
+    }).join("");
+    return `<div class="review-row review-row--edit">
+      ${label}
+      <select class="input" id="review-${esc(field.key)}" data-review-field="${esc(field.key)}">${options}</select>
+    </div>`;
+  }
+  const maxlength = field.maxlength ? ` maxlength="${Number(field.maxlength)}"` : "";
+  return `<div class="review-row review-row--edit">
+    ${label}
+    <input class="input" id="review-${esc(field.key)}" data-review-field="${esc(field.key)}"
+      type="text" value="${esc(value)}" placeholder="选填"${maxlength} />
+  </div>`;
+}
+
+function reviewHtml() {
+  const review = state.review;
+  if (!review) return "";
+  const editing = state.phase === "review-edit";
+  const fields = review.fields || [];
+  const rows = fields.map((field) => (editing ? reviewEditRow(field) : reviewRow(field))).join("");
+  const amount = editing
+    ? `<input class="input review-amount__input" id="review-amount" data-review-field="amount"
+        type="number" inputmode="decimal" min="0.01" step="0.01" value="${esc(reviewFieldValue("amount"))}" />`
+    : `<span class="review-amount__value">${esc(reviewAmountText(review))}</span>`;
+  const amountEdited = Object.prototype.hasOwnProperty.call(state.reviewBaseline || {}, "amount")
+    && String((state.reviewBaseline || {}).amount ?? "") !== reviewFieldValue("amount");
+  const confirmLabel = "确认信息，查看计划卡";
+  const actions = editing
+    ? `<button class="btn btn--primary" type="button" data-review-action="save">保存并重新核对</button>
+       <button class="btn" type="button" data-review-action="cancel-edit">取消</button>`
+    : `<button class="btn btn--primary" type="button" data-review-action="confirm"
+         ${review.can_confirm === false ? "disabled" : ""}>${confirmLabel}</button>
+       <button class="btn" type="button" data-review-action="edit">修改信息</button>`;
+  const hint = !editing && review.can_confirm === false
+    ? `<p class="review-hint">当前信息不能直接执行，请先修改收款人、付款账户或金额。</p>`
+    : "";
+  return `<article class="voucher review-card${editing ? " review-card--edit" : ""}">
+    <div class="review-head">
+      <div>
+        <p class="review-kicker">转账核对单</p>
+        <h3 class="review-title">${editing ? "修改转账信息" : "请核对这笔转账"}</h3>
+        <p class="review-sub">${editing
+          ? "改完会重新核对，不会直接执行"
+          : "确认后展示计划卡；执行前仍需确认或验证"}</p>
+      </div>
+      <span class="review-badge">${editing ? "修改中" : "待核对"}</span>
+    </div>
+    <div class="review-amount">
+      <span class="review-amount__label">转账金额${amountEdited
+        ? ' <span class="review-tag review-tag--edited">已修改</span>'
+        : ""}</span>
+      ${amount}
+    </div>
+    <div class="review-rows">${rows}</div>
+    ${(review.checks || []).length ? `<div class="review-checks">
+      <p class="review-checks__title">执行前校验</p>
+      ${(review.checks || []).map(reviewCheckHtml).join("")}
+    </div>` : ""}
+    ${hint}
+    ${state.reviewError ? `<p class="review-error">${esc(state.reviewError)}</p>` : ""}
+    <div class="review-actions">${actions}</div>
+  </article>`;
+}
+
 function voucherHtml(card = state.card, decision = state.decision, options = {}) {
   if (!card) return "";
   const opts = options || {};
@@ -5125,6 +5252,8 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
   const frozen = card.frozen_hash || "";
   const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
   const readOnly = opts.readOnly === true;
+  const reviewEditable = !readOnly && Boolean(state.review)
+    && (state.phase === "awaiting_confirm" || state.phase === "strong-verify");
   const stepStates = Array.isArray(opts.stepStates) ? opts.stepStates : state.stepStates;
   const stamp = opts.timeLabel || clock();
   return `<article class="voucher${readOnly ? " voucher--snapshot" : ""}">
@@ -5152,6 +5281,11 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
         <span class="amount__note">${readOnly ? "历史计划快照 · 只读" : "确认即锁定本计划 · 计划级 + 节点级双层执行门"}</span>
       </div>
     </div>
+
+    ${reviewEditable ? `<div class="voucher__review-row">
+      <span class="voucher__review-ok">信息已核对</span>
+      <button class="btn btn--sm btn--ghost" type="button" data-review-action="edit">修改信息</button>
+    </div>` : ""}
 
     ${quotaHtml(card)}
 
@@ -5224,9 +5358,13 @@ function renderStage() {
   const code = el("vcode") ? el("vcode").value : "";
   /* 运行链路是这一条回复的过程记录，重绘正文时保留下来（已折叠的仍保持折叠） */
   const runChain = state.response.querySelector(".run-chain");
-  state.response.innerHTML = state.card
-    ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
-    : (state.panel || "") + state.notice;
+  const inReview = Boolean(state.review)
+    && (state.phase === "review" || state.phase === "review-edit");
+  state.response.innerHTML = inReview
+    ? reviewHtml() + state.notice
+    : state.card
+      ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
+      : (state.panel || "") + state.notice;
   if (runChain) {
     /* 三分类 / 澄清回合没有可执行计划：运行链路里的「已拒绝 · 未执行」只会让人误以为被风控拦了 */
     runChain.hidden = Boolean(state.triage) || (state.phase === "blocked" && !state.decision);
@@ -5508,6 +5646,7 @@ function setButtons() {
   const offline = state.offline || (typeof navigator !== "undefined" && navigator.onLine === false);
   const awaiting = state.phase === "awaiting_confirm";
   const strongPhase = state.phase === "strong-verify";
+  const inReview = state.phase === "review" || state.phase === "review-edit";
   const operationUnknown = state.operationUnknown;
   /* 只读历史：输入框与发送一律不可用，避免「文案说需新建对话、实际还能直接发」 */
   const archiveOnly = state.archiveReadOnly === true;
@@ -5521,9 +5660,10 @@ function setButtons() {
   el("btn-submit").disabled = archiveOnly || offline || busy || !state.options;
   el("btn-due").disabled = archiveOnly || offline || busy || !state.options;
   el("btn-reset").disabled = busy;
-  el("task-actions").hidden = !state.task || (!state.card && !state.decision);
+  /* 核对单阶段由卡内按钮负责确认/修改，底部操作条整体让位，避免绕过核对直接执行。 */
+  el("task-actions").hidden = inReview || !state.task || (!state.card && !state.decision);
   /* 没有计划卡就没有「确认并执行」：三分类 / 澄清回合不该出现一个永远点不动的按钮 */
-  el("btn-confirm").hidden = !state.card;
+  el("btn-confirm").hidden = !state.card || inReview;
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     el(`select-${slot}`).disabled = offline || busy || !state.options;
   });
@@ -5557,6 +5697,11 @@ function setButtons() {
 
 function reset(keepUtterance) {
   state.card = null;
+  state.review = null;
+  state.reviewBaseline = null;
+  state.reviewConfirmed = false;
+  state.reviewEditFrom = null;
+  state.reviewError = "";
   state.decision = null;
   state.questions = [];
   state.stepStates = [];
@@ -5599,6 +5744,28 @@ async function applySubmission(data) {
     state.stepStates = (data.card.lines || []).map(() => "pending");
     state.nodeStatus = {};
     (data.card.nodes || []).forEach((node) => { state.nodeStatus[node.node_id] = "pending"; });
+    const review = data.review && data.review.kind === "transfer" ? data.review : null;
+    if (review) {
+      /* 转账先出核对单：用户核对/修改后才展示冻结的计划卡。 */
+      state.review = review;
+      if (!state.reviewBaseline) state.reviewBaseline = { ...review.values };
+      state.reviewConfirmed = false;
+      state.reviewEditFrom = null;
+      state.reviewError = "";
+      state.phase = "review";
+      collapseTaskMore();
+      chainAdd("核对单已生成", `待核对 ${review.amount_display || ""}`);
+      renderStage();
+      setButtons();
+      timelineAdd(`转账核对单 · ${review.amount_display || ""} · 待核对`, "live");
+      if (data.card.level !== "GREEN") snapshotTrace();
+      return;
+    }
+    state.review = null;
+    state.reviewBaseline = null;
+    state.reviewConfirmed = false;
+    state.reviewEditFrom = null;
+    state.reviewError = "";
     state.phase = "awaiting_confirm";
     collapseTaskMore();
     chainAdd("计划卡已冻结", `cfhash ${String(data.card.frozen_hash).slice(0, 12)}`);
@@ -5620,6 +5787,11 @@ async function applySubmission(data) {
     }
     return;
   }
+  state.review = null;
+  state.reviewBaseline = null;
+  state.reviewConfirmed = false;
+  state.reviewEditFrom = null;
+  state.reviewError = "";
   if (data.state === "idle" && Array.isArray(data.questionnaire) && data.questionnaire.length) {
     /* 「我要做风险测评」⇒ 聊天内直接出 5 题表单；等级仍由服务端算分，前端不填等级 */
     state.phase = "idle";
@@ -5877,6 +6049,116 @@ async function requestVerification() {
   renderStage();
   timelineAdd(`红色：已下发强验证挑战（${result.data.channel} → ${result.data.target}）`, "warn");
   setButtons();
+}
+
+/* ---------------- 核对单动作 ---------------- */
+
+function confirmReview() {
+  if (!state.review || !state.card || state.review.can_confirm === false) return;
+  state.reviewConfirmed = true;
+  state.reviewEditFrom = null;
+  state.reviewError = "";
+  state.phase = "awaiting_confirm";
+  renderStage();
+  setButtons();
+  chainAdd("信息核对通过", "转入执行确认");
+  timelineAdd("转账信息已核对 · 计划卡已展开", "done");
+  snapshotTrace();
+}
+
+function openReviewEdit() {
+  if (!state.review) return;
+  state.reviewEditFrom = state.reviewConfirmed ? "awaiting_confirm" : "review";
+  state.reviewError = "";
+  state.phase = "review-edit";
+  renderStage();
+  setButtons();
+}
+
+function cancelReviewEdit() {
+  state.phase = state.reviewEditFrom || "review";
+  state.reviewError = "";
+  renderStage();
+  setButtons();
+}
+
+function readReviewControl(key) {
+  const root = state.response;
+  const node = root ? root.querySelector(`[data-review-field="${key}"]`) : null;
+  return node ? String(node.value || "").trim() : "";
+}
+
+async function saveReview() {
+  const review = state.review;
+  if (!review) return;
+  const amount = Number(readReviewControl("amount"));
+  if (!Number.isFinite(amount) || amount <= 0) {
+    state.reviewError = "金额需大于 0，请重新填写。";
+    renderStage();
+    return;
+  }
+  const payeeId = readReviewControl("payee");
+  const accountId = readReviewControl("account");
+  const method = readReviewControl("transfer_method") || "realtime";
+  const remark = readReviewControl("remark").slice(0, 50);
+  if (!payeeId || !accountId) {
+    state.reviewError = "请选择收款人和付款账户。";
+    renderStage();
+    return;
+  }
+  const payeeField = (review.fields || []).find((field) => field.key === "payee");
+  const payeeOption = payeeField && (payeeField.options || []).find(
+    (item) => String(item.value) === String(payeeId),
+  );
+  const payeeName = String(
+    (payeeOption && payeeOption.name)
+    || (review.values && review.values.payee_name)
+    || "",
+  ).trim();
+  if (!payeeName) {
+    state.reviewError = "未能识别收款人姓名，请重新选择。";
+    renderStage();
+    return;
+  }
+  const methodLabel = TRANSFER_METHOD_LABELS[method] || "实时到账";
+  /* 次日到账必须让「延时语义」出现在转账动词前，才能稳定落到 transfer.book（登记不扣款）。 */
+  const utterance = method === "next_day"
+    ? `次日到账转给${payeeName} ${amount} 元`
+    : `给${payeeName}转 ${amount} 元，${methodLabel}`;
+  const selected = {
+    account: accountId,
+    payee: payeeId,
+    amount: `${amount} 元`,
+    transfer_method: method,
+  };
+  if (remark) selected.remark = remark;
+  state.reviewError = "";
+  const result = await post("/api/submit", { utterance, selected });
+  if (result.status !== 200) {
+    state.reviewError = String(
+      (result.data && result.data.detail) || "修改未提交成功，请稍后重试。",
+    );
+    renderStage();
+    return;
+  }
+  await applySubmission(result.data);
+  timelineAdd(`已修改核对单：${amount} 元 · ${methodLabel}`, "live");
+}
+
+async function runReviewSave() {
+  if (state.busy) return;
+  state.busy = true;
+  setButtons();
+  try {
+    await saveReview();
+  } catch (error) {
+    state.reviewError = fetchErrorMessage(error, "修改未提交成功，请稍后重试。");
+    state.phase = "review-edit";
+    renderStage();
+  } finally {
+    state.busy = false;
+    setButtons();
+  }
 }
 
 async function onConfirm() {
@@ -8121,6 +8403,15 @@ el("btn-close-trace").addEventListener("click", () => {
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  const reviewTrigger = target ? target.closest("[data-review-action]") : null;
+  if (reviewTrigger) {
+    const reviewAction = reviewTrigger.dataset.reviewAction;
+    if (reviewAction === "confirm") action(confirmReview)();
+    else if (reviewAction === "edit") action(openReviewEdit)();
+    else if (reviewAction === "cancel-edit") action(cancelReviewEdit)();
+    else if (reviewAction === "save") runReviewSave().catch(() => {});
+    return;
+  }
   const trigger = target ? target.closest("[data-action]") : null;
   if (trigger && trigger.dataset.action === "open-subscriptions") {
     setMobileDrawer("trace", true);

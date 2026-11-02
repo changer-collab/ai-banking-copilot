@@ -2242,7 +2242,11 @@ def create_app(deps: AppDeps) -> FastAPI:
         except SessionStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         _record_answer(user_id, request.session_id, view)
-        return _response(request.session_id, user_id, _submission_payload(view))
+        return _response(
+            request.session_id,
+            user_id,
+            _submission_payload(view, gateway=deps.gateway, user_id=user_id),
+        )
 
     @app.post("/api/life-schedules/retry")
     def retry_life_schedule(
@@ -2336,7 +2340,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             user_id, request.session_id, request.utterance, request.selected, view
         )
         _record_answer(user_id, request.session_id, view)
-        payload = _submission_payload(view)
+        payload = _submission_payload(view, gateway=deps.gateway, user_id=user_id)
         card = payload.get("card")
         card_map = card if isinstance(card, dict) else {}
         _append_channel_audit(
@@ -2384,7 +2388,11 @@ def create_app(deps: AppDeps) -> FastAPI:
                 user_id, request.session_id, pending_utterance, request.answers, view,
             )
         _record_answer(user_id, request.session_id, view)
-        return _response(request.session_id, user_id, _submission_payload(view))
+        return _response(
+            request.session_id,
+            user_id,
+            _submission_payload(view, gateway=deps.gateway, user_id=user_id),
+        )
 
     @app.post("/api/verify/request")
     def request_verification(
@@ -3867,7 +3875,211 @@ def _position_payload(position: Mapping[str, object]) -> dict[str, object]:
     return {key: position.get(key) for key in keys}
 
 
-def _submission_payload(view: SubmissionView) -> dict[str, object]:
+_TRANSFER_REVIEW_ACTIONS = frozenset({"transfer.create", "transfer.book", "transfer.schedule"})
+"""需要「先核对、再出计划卡」的转账动作（单节点）。"""
+
+_TRANSFER_REVIEW_METHODS: dict[str, str] = {
+    "realtime": "实时到账",
+    "normal": "普通到账",
+    "next_day": "次日到账",
+    "large": "大额通道",
+}
+
+_REVIEW_ACCOUNT_KINDS: dict[str, str] = {
+    "savings": "储蓄",
+    "current": "活期",
+}
+
+
+def _review_payee_label(payee: Payee) -> str:
+    return f"{payee.full_name} · {payee.bank_name or '开户行未知'} 尾号 {payee.account_tail}"
+
+
+def _review_account_label(account: object) -> str:
+    """账户展示：只回显网关事实（类型 + 可用余额），不补卡号。"""
+    kind = getattr(account, "kind", "")
+    balance = getattr(account, "balance", None)
+    if not isinstance(kind, str) or balance is None:
+        return "付款账户"
+    return f"{_REVIEW_ACCOUNT_KINDS.get(kind, kind)}账户 · 可用 ¥{balance.yuan:,.2f}"
+
+
+def _transfer_review_payload(
+    view: SubmissionView, gateway: FactGateway, user_id: str
+) -> dict[str, object] | None:
+    """转账「核对单」：只回显服务端已解析的节点事实，并给出可改字段。
+
+    这不是第二个计划：核对单只是把计划节点的参数、网关事实和额度校验摆到用户面前。
+    用户确认后才展示计划卡；修改会重新走一次 `/api/submit`，重新裁决并冻结新计划。
+    """
+    if view.card is None or view.plan is None or len(view.plan.nodes) != 1:
+        return None
+    node = view.plan.nodes[0]
+    if node.action not in _TRANSFER_REVIEW_ACTIONS:
+        return None
+    # 到期派发（带 schedule_id）不是一次新的用户指令：不能在核对单里改完再重提交，
+    # 否则会把「执行原预约」变成「新建一笔转账」。
+    if isinstance(node.params.get("schedule_id"), str):
+        return None
+    payee_id = node.params.get("payee_id")
+    account_id = node.params.get("account_id")
+    amount_cents = node.params.get("amount_cents")
+    if not isinstance(payee_id, str) or not isinstance(account_id, str):
+        return None
+    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool):
+        return None
+    try:
+        payee = gateway.payee(payee_id).payload
+        account = gateway.account(account_id).payload
+    except GatewayNotFoundError:
+        return None
+
+    raw_method = node.params.get("transfer_method")
+    method = (
+        raw_method
+        if isinstance(raw_method, str) and raw_method
+        else ("next_day" if node.action == "transfer.book" else "realtime")
+    )
+    method_label = _TRANSFER_REVIEW_METHODS.get(method, method)
+    raw_remark = node.params.get("remark")
+    remark = raw_remark if isinstance(raw_remark, str) else ""
+    amount_yuan = f"{Money(amount_cents).yuan}"
+    payee_display = _review_payee_label(payee)
+    account_display = _review_account_label(account)
+
+    payee_options: list[dict[str, object]] = []
+    for payee_record in gateway.payees_of(user_id):
+        payee_item = payee_record.payload
+        if payee_item.blocked:
+            continue
+        payee_options.append({
+            "value": payee_item.payee_id,
+            "label": _review_payee_label(payee_item),
+            "name": payee_item.full_name,
+        })
+    account_options: list[dict[str, object]] = []
+    for account_record in gateway.accounts_of(user_id):
+        account_item = account_record.payload
+        account_options.append({
+            "value": account_item.account_id,
+            "label": _review_account_label(account_item),
+        })
+    method_options = [
+        {"value": key, "label": label}
+        for key, label in _TRANSFER_REVIEW_METHODS.items()
+    ]
+
+    checks: list[dict[str, object]] = []
+    can_confirm = True
+    if payee.blocked:
+        checks.append({
+            "label": "收款人",
+            "value": "该收款人已停用",
+            "tone": "danger",
+            "status": "不可转",
+        })
+        can_confirm = False
+    elif payee.identity_confirmed:
+        checks.append({
+            "label": "收款人",
+            "value": "名册已核对",
+            "tone": "ok",
+            "status": "通过",
+        })
+    else:
+        checks.append({
+            "label": "收款人",
+            "value": "未完成账户核验",
+            "tone": "warn",
+            "status": "待核实",
+        })
+    balance_ok = account.balance.cents >= amount_cents
+    checks.append({
+        "label": "账户余额",
+        "value": f"可用 ¥{account.balance.yuan:,.2f}",
+        "tone": "ok" if balance_ok else "danger",
+        "status": "充足" if balance_ok else "不足",
+    })
+    if not balance_ok:
+        can_confirm = False
+    checks.append({
+        "label": "手续费",
+        "value": "¥0.00（演示免收）",
+        "tone": "ok",
+        "status": "免收",
+    })
+    if view.quota is not None:
+        limit = view.quota.limit_cents
+        after = view.quota.accumulated_cents
+        over = after > limit
+        checks.append({
+            "label": "免验证额度",
+            "value": (
+                f"本笔后累计 ¥{Money(after).yuan:,.2f} / ¥{Money(limit).yuan:,.2f}"
+            ),
+            "tone": "warn" if over else "ok",
+            "status": "需强验证" if over else "免强验证",
+        })
+
+    return {
+        "kind": "transfer",
+        "level": view.card.level.name,
+        "strong_verify": view.card.level.name == "RED",
+        "can_confirm": can_confirm,
+        "amount": amount_yuan,
+        "amount_display": f"¥{Money(amount_cents).yuan:,.2f}",
+        "values": {
+            "payee": payee_id,
+            "payee_name": payee.full_name,
+            "account": account_id,
+            "amount": amount_yuan,
+            "transfer_method": method,
+            "remark": remark,
+        },
+        "fields": [
+            {
+                "key": "payee",
+                "label": "收款人",
+                "display": payee_display,
+                "source": "你说",
+                "control": "select",
+                "options": payee_options,
+            },
+            {
+                "key": "account",
+                "label": "付款账户",
+                "display": account_display,
+                "source": "默认",
+                "control": "select",
+                "options": account_options,
+            },
+            {
+                "key": "transfer_method",
+                "label": "到账方式",
+                "display": method_label,
+                "source": "默认",
+                "control": "select",
+                "options": method_options,
+            },
+            {
+                "key": "remark",
+                "label": "附言",
+                "display": remark or "未填写",
+                "source": "未填" if not remark else "你说",
+                "control": "text",
+                "maxlength": 50,
+            },
+        ],
+        "checks": checks,
+    }
+
+
+def _submission_payload(
+    view: SubmissionView,
+    *,
+    gateway: FactGateway | None = None,
+    user_id: str | None = None,
+) -> dict[str, object]:
     card = _card_payload(view.card, view.plan)
     if card is not None and view.quota is not None:
         card = {
@@ -3875,9 +4087,20 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
             "daily_limit_cents": view.quota.limit_cents,
             "daily_accumulated_cents": view.quota.accumulated_cents,
         }
+    review = (
+        _transfer_review_payload(view, gateway, user_id)
+        if gateway is not None and user_id is not None
+        else None
+    )
     return {
         "state": view.state.value,
-        "message": view.message,
+        # 转账先出核对单：Web 端的下一步是核对，不是直接看计划卡；
+        # 渠道层（IM）没有核对单，仍用 Session 的「计划卡已生成」文案。
+        "message": (
+            "转账核对单已生成，请先核对信息；确认后展示计划卡。"
+            if review is not None
+            else view.message
+        ),
         "questions": list(view.questions),
         "clarifications": [
             {
@@ -3895,6 +4118,7 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
             for ask in view.clarifications
         ],
         "card": card,
+        "review": review,
         "triage": None if view.triage is None else {
             "kind": view.triage.kind,
             "suggestions": [

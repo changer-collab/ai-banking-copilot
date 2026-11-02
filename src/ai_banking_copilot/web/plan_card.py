@@ -311,6 +311,7 @@ def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
             for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
         ]
     if len(plan.nodes) == 1 and plan.nodes[0].action in _TRANSFER_ACTIONS:
+        existing.extend(_transfer_account_lines(plan.nodes[0], gateway))
         existing.extend(_transfer_method_lines(plan.nodes[0]))
     seen = [line.value for line in existing]
     extra: list[PlanLine] = []
@@ -327,6 +328,25 @@ def _step_value(node: PlanNode, triple: PlanTriple) -> str:
     amount = _amount_value(node)
     head = f"{triple.object_label} {amount}" if amount else triple.object_label
     return f"{head}（{triple.when_label}）"
+
+
+_ACCOUNT_KIND_LABELS: dict[str, str] = {
+    "savings": "储蓄",
+    "current": "活期",
+}
+
+
+def _transfer_account_lines(node: PlanNode, gateway: FactGateway) -> list[PlanLine]:
+    """付款账户事实：只回显网关的账户类型与可用余额，不补卡号。"""
+    account_id = _str_param(node, "account_id")
+    if account_id is None:
+        return []
+    try:
+        account = gateway.account(account_id).payload
+    except GatewayNotFoundError:
+        return []
+    kind = _ACCOUNT_KIND_LABELS.get(account.kind, account.kind)
+    return [PlanLine("付款账户", f"{kind}账户 · 可用 {account.balance.yuan:,.2f} 元")]
 
 
 def _transfer_method_lines(node: PlanNode) -> list[PlanLine]:

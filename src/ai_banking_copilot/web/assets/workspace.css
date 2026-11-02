@@ -3035,3 +3035,48 @@ html[data-demo-readonly="1"] [data-requires-login] {
 .sub-card__recon--bad { color: var(--lvl-red); font-weight: 600; }
 .sub-card--focus { outline: 2px solid var(--blue-600); outline-offset: 2px; }
 .sub-group__head { margin: var(--s-3) 0 var(--s-2); }
+
+/* ---------------- 转账核对单（计划卡之前） ---------------- */
+.review-card { display: grid; gap: 0; }
+.review-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-3); padding-bottom: var(--s-3); border-bottom: 1px dashed var(--rule-strong); }
+.review-kicker { margin: 0 0 2px; color: var(--blue-700); font-size: 11px; letter-spacing: .08em; }
+.review-title { margin: 0; color: var(--ink); font-size: var(--fs-h2); font-weight: 600; line-height: var(--lh-tight); }
+.review-sub { margin: 4px 0 0; color: var(--ink-3); font-size: var(--fs-small); }
+.review-badge { flex: none; padding: 3px 10px; border: 1px solid var(--rule-strong); border-radius: var(--r-chip); background: var(--voucher-alt); color: var(--ink-2); font-size: var(--fs-small); }
+.review-amount { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); padding: var(--s-4) 0 var(--s-3); border-bottom: 1px solid var(--rule); }
+.review-amount__label { color: var(--ink-3); font-size: var(--fs-small); }
+.review-amount__value { color: var(--blue-ink); font-family: var(--font-mono); font-size: var(--fs-amount); font-variant-numeric: tabular-nums; line-height: 1; }
+.review-amount__input { width: 200px; text-align: right; font-family: var(--font-mono); font-size: var(--fs-h2); }
+.review-rows { display: grid; }
+.review-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); min-height: 42px; padding: var(--s-2) 0; border-bottom: 1px solid var(--rule); }
+.review-key { color: var(--ink-3); font-size: var(--fs-small); }
+.review-val { min-width: 0; color: var(--ink); font-size: var(--fs-body); overflow-wrap: anywhere; }
+.review-tag { display: inline-flex; align-items: center; justify-self: end; padding: 2px 8px; border: 1px solid var(--rule); border-radius: var(--r-chip); background: var(--voucher-alt); color: var(--ink-3); font-size: 11px; white-space: nowrap; }
+.review-tag--edited { border-color: var(--blue-300); background: var(--blue-050); color: var(--blue-700); }
+.review-row--edit { grid-template-columns: 76px minmax(0, 1fr); }
+.review-row--edit .input { min-width: 0; padding: 8px 10px; }
+.review-checks { margin-top: var(--s-3); padding: var(--s-3); border-radius: var(--r-control); background: var(--voucher-alt); }
+.review-checks__title { margin: 0 0 4px; color: var(--ink-3); font-size: 11px; letter-spacing: .08em; }
+.review-check { display: grid; grid-template-columns: 16px auto minmax(0, 1fr) auto; align-items: center; gap: var(--s-2); min-height: 26px; color: var(--ink-2); font-size: var(--fs-small); }
+.review-check + .review-check { border-top: 1px solid var(--rule); }
+.review-check__icon { color: var(--lvl-green); font-weight: 700; text-align: center; }
+.review-check__label { color: var(--ink-3); white-space: nowrap; }
+.review-check__value { min-width: 0; overflow-wrap: anywhere; }
+.review-check__status { color: var(--lvl-green); font-weight: 600; white-space: nowrap; }
+.review-check--warn .review-check__icon,
+.review-check--warn .review-check__status { color: var(--lvl-yellow); }
+.review-check--danger .review-check__icon,
+.review-check--danger .review-check__status { color: var(--lvl-red); }
+.review-hint { margin: var(--s-3) 0 0; color: var(--lvl-red); font-size: var(--fs-small); }
+.review-error { margin: var(--s-3) 0 0; color: var(--lvl-red); font-size: var(--fs-small); }
+.review-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: var(--s-4); }
+.voucher__review-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); padding: var(--s-2) 0; border-bottom: 1px solid var(--rule); font-size: var(--fs-small); }
+.voucher__review-ok { color: var(--lvl-green); font-weight: 600; }
+
+@media (max-width: 560px) {
+  .review-row { grid-template-columns: 64px minmax(0, 1fr); }
+  .review-tag { grid-column: 2; justify-self: start; }
+  .review-amount__input { width: 150px; }
+  .review-check { grid-template-columns: 16px minmax(0, 1fr) auto; }
+  .review-check__label { display: none; }
+}
