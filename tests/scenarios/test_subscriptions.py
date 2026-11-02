@@ -10,6 +10,7 @@ from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.policy.saga import ReversalState, ReversalWindow, Saga
 from ai_banking_copilot.scenarios.base import ScenarioRefused, plan_is_pure_query, plan_net_effect
+from ai_banking_copilot.scenarios.ledger import charge_groups, charge_summary
 from ai_banking_copilot.scenarios.subscriptions import (
     SubscriptionsHandler,
     describe_detected_charges,
@@ -136,3 +137,32 @@ def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> 
 
 def test_detected_charges_are_empty_for_an_unknown_user(gateway: FactGateway) -> None:
     assert detected_charges(gateway, "user_nobody") == ()
+
+
+def test_charge_groups_use_one_window_for_count_total_and_rows(
+    gateway: FactGateway,
+) -> None:
+    """扣款记录的唯一事实源：窗口计数、合计与明细行必须逐项同源。"""
+    groups = charge_groups(gateway, DEMO_USER_ID, as_of=date(2026, 10, 31))
+    summary = charge_summary(groups)
+    assert summary["window_count"] == 26
+    assert summary["window_total_cents"] == 81800
+    assert summary["history_count"] == 46
+    assert summary["history_total_cents"] == 116800
+    by_merchant = {group.merchant: group for group in groups}
+    cloud = by_merchant["云盘会员"]
+    assert (cloud.window_count, cloud.window_total_cents) == (2, 39600)
+    assert cloud.window_count == len(cloud.charges)
+    assert cloud.next_charge_on == date(2027, 3, 1)
+    video = by_merchant["视频会员"]
+    assert (video.window_count, video.window_total_cents) == (12, 30000)
+    assert video.window_count == len(video.charges)
+    music = by_merchant["音乐会员"]
+    assert (music.window_count, music.window_total_cents) == (12, 12200)
+    assert music.window_count == len(music.charges)
+    assert all(
+        charge.instrument.display_label == "借记卡（尾号 4471）"
+        and charge.instrument.is_settlement
+        for group in groups
+        for charge in group.charges
+    )

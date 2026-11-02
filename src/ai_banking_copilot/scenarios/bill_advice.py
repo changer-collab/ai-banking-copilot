@@ -10,6 +10,10 @@ from ai_banking_copilot.gateway.models import BillSummary, Money
 from ai_banking_copilot.gateway.operators import run_operator
 from ai_banking_copilot.scenarios.bill_categories import is_consumption_category
 from ai_banking_copilot.scenarios.bill_findings import consumption_totals
+from ai_banking_copilot.scenarios.subscriptions import (
+    AGREEMENT_ACTIVE,
+    subscription_report,
+)
 
 # 仅作为产品提醒规则，不据此判断消费是否必要。
 _ADJUSTABLE_CATEGORIES = frozenset({"购物", "餐饮", "娱乐"})
@@ -81,21 +85,31 @@ def build_bill_advice(
     if growth is not None:
         results.append(growth)
 
-    subscriptions = tuple(
-        record
+    # 与订阅页共用流水派生日期，不另用登记值算一套「下次扣费」。
+    report = subscription_report(gateway, user_id, as_of=as_of)
+    subscription_records = {
+        record.payload.subscription_id: record
         for record in gateway.subscriptions_of(user_id)
         if record.payload.user_id == user_id
-        and record.payload.status == "active"
-        and record.payload.next_charge_on >= as_of
+    }
+    subscriptions = tuple(
+        item
+        for item in report.insights
+        if item.agreement_status == AGREEMENT_ACTIVE
+        and item.subscription_id is not None
+        and item.next_charge_on is not None
+        and item.next_charge_on >= as_of
+        # 无流水且登记日期已过的项只是顺延预测，不当作「当前待续费」提醒。
+        and (item.last_charged_on is not None or not item.next_charge_is_prediction)
     )
     if subscriptions:
         groups: list[str] = []
         for cycle, label in (("monthly", "月度"), ("yearly", "年度")):
             entries = [
-                f"订阅 {record.payload.subscription_id}，每期 {record.payload.amount.yuan} 元，"
-                f"下次扣费 {record.payload.next_charge_on.isoformat()}"
-                for record in subscriptions
-                if record.payload.period == cycle
+                f"订阅 {item.subscription_id}，每期 {Money(item.amount_cents).yuan} 元，"
+                f"下次扣费 {item.next_charge_on.isoformat() if item.next_charge_on else '未知'}"
+                for item in subscriptions
+                if item.cycle == cycle
             ]
             if entries:
                 groups.append(f"{label}：" + "；".join(entries))
@@ -109,7 +123,14 @@ def build_bill_advice(
                     "逐项核对续费是否仍需要，以及实际使用情况，再决定是否保留；"
                     "月度与年度费用分别核对，不直接相加。"
                 ),
-                source_refs=tuple((item.record_id, item.content_hash) for item in subscriptions),
+                source_refs=tuple(
+                    (
+                        subscription_records[item.subscription_id].record_id,
+                        subscription_records[item.subscription_id].content_hash,
+                    )
+                    for item in subscriptions
+                    if item.subscription_id in subscription_records
+                ),
             )
         )
     return tuple(results)

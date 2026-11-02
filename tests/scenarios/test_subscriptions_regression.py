@@ -120,8 +120,8 @@ def test_s6_list_next_month_is_green_and_read_only(subscription_http: Subscripti
     response = http.confirm(view)
     assert response.status_code == 200, response.text
     assert response.json()["state"] == "completed"
-    # 提醒展示登记日期而非模型生成日期；预测日期另有明确标记。
-    assert "2026-11-08" in json.dumps(view, ensure_ascii=False)
+    # 计划卡展示与订阅页同一份流水派生日期；登记值仍保留在事实层，不冒充商户确认日。
+    assert "2026-11-18" in json.dumps(view, ensure_ascii=False)
     assert http.deps.gateway.subscription("sub_video").payload.next_charge_on == date(2026, 11, 8)
     assert http.snapshot() == before
     assert len(http.deps.audit.events()) > audit_count
@@ -155,7 +155,7 @@ def test_s6_cancel_is_red_before_local_execution(
     view = http.submit(utterance)
     _assert_card(view, "subscription.cancel", "YELLOW")
     assert http.snapshot() == before
-    done = http.confirm(view, strong=True)
+    done = http.confirm(view)
     assert done.status_code == 200, done.text
     cancel = done.json()["subscription_cancel"]
     assert cancel["state"] == "local_simulated_cancelled"
@@ -258,7 +258,7 @@ def test_s2_cancel_does_not_guarantee_merchant_stops_charging(
     http = subscription_http
     view = http.submit(CANCEL)
     _assert_card(view, "subscription.cancel", "YELLOW")
-    assert http.confirm(view, strong=True).status_code == 200
+    assert http.confirm(view).status_code == 200
     assert all(
         item.subscription_id != "sub_video"
         for item in upcoming_charges(http.deps.gateway, http.deps.user_id)
@@ -297,15 +297,14 @@ def test_s6_duplicate_evidence_resolves_to_same_real_record(
     assert http.snapshot() == before
 
 
-def test_s2_missing_sign_information_is_clarified_without_writes(
+def test_s2_sign_request_is_refused_without_writes(
     subscription_http: SubscriptionHttp,
 ) -> None:
     http = subscription_http
     before = http.snapshot()
     view = http.submit("开通自动扣款")
-    assert view["state"] == "needs_clarification", view
+    # 签约已下线：缺信息也不再追问槽位，直接按能力边界拒绝。
+    assert view["state"] == "blocked", view
     assert view["card"] is None
-    assert {ask["slot"] for ask in view["clarifications"]} >= {
-        "merchant", "amount_cents", "period", "next_charge_on",
-    }
+    assert "不能代您新签" in view["message"], view
     assert http.snapshot() == before

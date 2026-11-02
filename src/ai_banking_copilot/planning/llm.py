@@ -318,6 +318,14 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "bills.monthly", "命中『账单分析』模板",
     ),
     (
+        # 「上周三星巴克 128 元是不是盗刷」：带核实语气的单笔交易核实 = 只读查流水。
+        # 必须排在 L5「疑似盗刷」之前，避免被当成挂失；也不抢「我卡被盗刷了，帮我冻结」
+        # 这类明确要处置的说法（没有「是不是 / 是否 / 吗」）。
+        re.compile(r"(?:是不是|是否|有没有|会不会).{0,8}盗刷|盗刷.{0,6}(?:吗|么|嘛)"),
+        "account.transactions",
+        "命中『单笔盗刷核实』模板（只读查询）",
+    ),
+    (
         re.compile(r"异常交易|可疑交易|大额交易|交易记录|交易明细|交易流水|有没有异常|异常流水"),
         "account.transactions",
         "命中『异常交易』模板",
@@ -354,10 +362,41 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
 """规则按**优先级**排列：更具体的规则在前（如"定时"先于"转账"）。"""
 
 
+_WHOLE_UTTERANCE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (
+        # 「生日预算的 1000，帮我买个 T+0 理财」：预算只是**资金来源**，
+        # 主意图是申购。整句优先于分句的「生日 → merchant.order」，
+        # 否则会被 L1 花店/配送澄清抢走。
+        re.compile(
+            r"(?:预算.{0,24}(?:买|申购|购买).{0,16}(?:T\+0|理财)"
+            r"|(?:买|申购|购买).{0,16}(?:T\+0|理财).{0,24}预算)",
+            re.IGNORECASE,
+        ),
+        "wealth.subscribe",
+        "命中『预算买理财』模板（整句优先）",
+    ),
+)
+"""整句级规则：必须在分句前命中，避免预算 / 生活事件词抢走主意图。"""
+
+
 class TemplateIntentModel:
     """降级通道：确定性模板 + 规则（零模型、零网络）。"""
 
     def propose(self, utterance: str, context: Mapping[str, object]) -> IntentProposal:
+        for pattern, action, evidence in _WHOLE_UTTERANCE_RULES:
+            if pattern.search(utterance):
+                return IntentProposal(
+                    intents=(
+                        Intent(
+                            action=action,
+                            slots={"span": utterance},
+                            confidence=0.9,
+                            evidence=evidence,
+                        ),
+                    ),
+                    raw=utterance,
+                    channel="template",
+                )
         intents: list[Intent] = []
         for clause in _split_clauses(utterance):
             for pattern, action, evidence in _TEMPLATE_RULES:

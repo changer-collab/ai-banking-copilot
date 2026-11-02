@@ -27,7 +27,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="icon" href="/assets/icon.svg?v=1" type="image/svg+xml" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=60" />
+<link rel="stylesheet" href="/assets/workspace.css?v=63" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -134,10 +134,10 @@ _PAGE_HTML = """<!DOCTYPE html>
         </article>
         <article class="scene-card">
           <p class="scene-card__k">③ 理财</p>
-          <p class="scene-card__d">风险测评 → 适当性 → 申购 / 赎回；超等级灰显并写原因。</p>
+          <p class="scene-card__d">按你的风险等级筛选产品，支持申购与赎回。</p>
           <div class="scene-card__row">
             <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="wealth">进入功能页</button>
-            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="查余额">去对话</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="我想买理财，帮我推荐几只适合的">让 AI 帮我选理财</button>
           </div>
         </article>
         <article class="scene-card">
@@ -450,6 +450,7 @@ _PAGE_HTML = """<!DOCTYPE html>
             <p class="panel__title">理财</p>
             <span class="muted" id="wealth-status">正在读取测评状态与持仓…</span>
           </div>
+          <p class="wealth-demo-note">演示环境 · 模拟数据；业绩比较基准≠实际收益；测评次数按模拟业务日计数；登记编码可在中国理财网核验。</p>
           <div id="wealth-viz">
             <div class="wealth-loading" role="status" aria-live="polite">
               <p class="muted">正在读取风险等级与持仓占比…</p>
@@ -463,13 +464,14 @@ _PAGE_HTML = """<!DOCTYPE html>
             </div>
             <div id="wealth-assessment-body"><p class="muted">尚未读取风险测评问卷。</p></div>
           </dialog>
-          <p class="panel__title panel__title--sub">产品目录 <span class="tech">按测评等级判定，超等级不可买</span></p>
+          <p class="panel__title panel__title--sub">产品目录</p>
           <div id="wealth-products">
             <div class="wealth-loading" role="status" aria-live="polite">
               <p class="muted">正在读取产品目录…</p>
               <span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span>
             </div>
           </div>
+          <div id="wealth-compare-bar" class="wealth-compare-bar" hidden></div>
           <p class="panel__title panel__title--sub">我的持仓</p>
           <div id="wealth-holdings">
             <div class="wealth-loading" role="status" aria-live="polite">
@@ -483,6 +485,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="holdings">看持仓记录</button>
           </div>
+          <p class="muted wealth-footer-note">以上产品、净值与收益均为演示数据，不构成投资建议。</p>
         </section>
       </div>
 
@@ -585,10 +588,11 @@ _PAGE_HTML = """<!DOCTYPE html>
       <header class="view__head">
         <div>
           <h2>记录与明细</h2>
-          <p class="muted">AI 做过的事都在这里查得到；扣款记录按账户显示这笔钱从哪扣出。</p>
+          <p class="muted">AI 做过的事都在这里查得到；扣款记录显示扣款时使用的借记卡/账户。</p>
         </div>
       </header>
       <div class="tabs" id="records-tabs" role="tablist" aria-label="记录分类">
+        <button class="tab" type="button" role="tab" data-record-tab="bills" aria-selected="false">账单明细</button>
         <button class="tab" type="button" role="tab" data-record-tab="transfers" aria-selected="true">转账记录</button>
         <button class="tab" type="button" role="tab" data-record-tab="holdings" aria-selected="false">持仓</button>
         <button class="tab" type="button" role="tab" data-record-tab="cards" aria-selected="false">卡片状态</button>
@@ -713,8 +717,8 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=92"></script>
-<script src="/assets/wealth_trade.js?v=1"></script>
+<script src="/assets/app.js?v=99"></script>
+<script src="/assets/wealth_trade.js?v=3"></script>
 </body>
 </html>
 """

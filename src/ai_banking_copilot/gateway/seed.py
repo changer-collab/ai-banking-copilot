@@ -42,8 +42,8 @@ _PAYEES = (
 
 _CARDS = (
     # (card_id, user_id, card_type, status, daily_limit_cents, account_id, last4)
-    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000, "acc_savings", "4471"),
-    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000, "acc_savings", "9021"),
+    ("card_debit", DEMO_USER_ID, "debit", "active", 2000000, "acc_current", "4471"),
+    ("card_credit", DEMO_USER_ID, "credit", "active", 5000000, "acc_current", "9021"),
 )
 """`last4` 为**演示卡号后四位**（不是真实卡号），只用于界面显示「尾号 9021」。"""
 
@@ -113,7 +113,7 @@ _SUBSCRIPTIONS = (
     # (subscription_id, user_id, merchant, amount_cents, period, next_charge_on, status, card_id)
     ("sub_video", DEMO_USER_ID, "视频会员", 2500, "monthly", "2026-11-08", "active", "card_debit"),
     ("sub_music", DEMO_USER_ID, "音乐会员", 1200, "monthly", "2026-11-15", "active", "card_debit"),
-    ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active", "card_credit"),
+    ("sub_cloud", DEMO_USER_ID, "云盘会员", 19800, "yearly", "2027-03-01", "active", "card_debit"),
 )
 
 _SEED_FIRST: tuple[int, int] = (2025, 1)
@@ -167,7 +167,7 @@ _TXN_SPECS = (
     (8, "acc_current", -42000, "购物", "云购物商城", "app", "21:05", "杭州", None),
     (11, "acc_current", -6800, "转账", "转给李娜", "app", "19:40", "杭州", None),
     (14, "acc_current", -19900, "生活缴费", "水电燃气", "app", "10:00", "杭州", None),
-    (18, "acc_current", -2500, "娱乐", "视频会员", "app", "20:30", "杭州", "4821"),
+    (18, "acc_current", -2500, "娱乐", "视频会员", "app", "20:30", "杭州", "4471"),
     (23, "acc_savings", 1850000, "工资", "工资代发", "bank", "09:00", None, None),
     # 深夜 + 异地：账单「深夜 / 异地」两类判据的确定性正例（未知商户 6880 元）。
     (27, "acc_current", -688000, "购物", "未知商户 9921", "web", "02:17", "深圳", None),
@@ -273,6 +273,7 @@ def seed_database(store: Store) -> None:
         )
         _upgrade_seeded_amounts(conn)
         _upgrade_fixed_price_amounts(conn)
+        _upgrade_payment_identity(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,)
         )
@@ -377,7 +378,7 @@ def _recurring_charge_rows() -> tuple[tuple[object, ...], ...]:
             rows.append((
                 f"txn_{year}{month:02d}01_cloud",
                 DEMO_USER_ID,
-                "acc_savings",
+                "acc_current",
                 booked_on,
                 -19800,
                 "云盘会员",
@@ -386,7 +387,7 @@ def _recurring_charge_rows() -> tuple[tuple[object, ...], ...]:
                 "out",
                 f"{booked_on}T10:10:00",
                 "杭州",
-                "9021",
+                "4471",
             ))
     return tuple(rows)
 
@@ -409,6 +410,41 @@ def _upgrade_seeded_amounts(conn: sqlite3.Connection) -> None:
             "UPDATE transactions SET amount_cents = ? WHERE txn_id = ? AND amount_cents = ?",
             (amount_cents, txn_id, legacy_cents),
         )
+
+
+def _upgrade_payment_identity(conn: sqlite3.Connection) -> None:
+    """把旧库中仍等于旧种子值的付款身份升级为结算账户口径。
+
+    只命中「旧值逐字相等」的行：演示中人工改过的卡、订阅或流水不会被覆盖。
+    新库由 `_CARDS` / `_SUBSCRIPTIONS` / `_TXN_SPECS` / `_recurring_charge_rows`
+    直接播种正确值，本函数对它们等价 no-op。
+    """
+    conn.execute(
+        "UPDATE cards SET account_id = 'acc_current'"
+        " WHERE card_id IN ('card_debit', 'card_credit') AND account_id = 'acc_savings'"
+    )
+    conn.execute(
+        "UPDATE subscriptions SET card_id = 'card_debit'"
+        " WHERE subscription_id = 'sub_cloud' AND card_id = 'card_credit'"
+    )
+    # 旧库补列后 account_id / card_id 为 NULL：只补空值，不覆盖演示中人工改过的绑定。
+    conn.executemany(
+        "UPDATE cards SET account_id = ? WHERE card_id = ? AND account_id IS NULL",
+        [(account_id, card_id) for card_id, _u, _t, _s, _l, account_id, _last4 in _CARDS],
+    )
+    conn.executemany(
+        "UPDATE subscriptions SET card_id = ? WHERE subscription_id = ? AND card_id IS NULL",
+        [(row[7], row[0]) for row in _SUBSCRIPTIONS],
+    )
+    conn.execute(
+        "UPDATE transactions SET account_id = 'acc_current', card_tail = '4471'"
+        " WHERE txn_id LIKE 'txn_%_cloud' AND account_id = 'acc_savings'"
+        " AND card_tail = '9021'"
+    )
+    conn.execute(
+        "UPDATE transactions SET card_tail = '4471'"
+        " WHERE merchant = '视频会员' AND card_tail = '4821'"
+    )
 
 
 def _upgrade_fixed_price_amounts(conn: sqlite3.Connection) -> None:

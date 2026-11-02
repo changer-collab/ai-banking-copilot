@@ -3080,3 +3080,123 @@ html[data-demo-readonly="1"] [data-requires-login] {
   .review-check { grid-template-columns: 16px minmax(0, 1fr) auto; }
   .review-check__label { display: none; }
 }
+
+/* ---------------- 理财页：卡片瘦身 / 页面级免责 / 右侧详情抽屉 ---------------- */
+.wealth-demo-note {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--lvl-yellow);
+  border-radius: var(--r-control);
+  background: var(--lvl-yellow-bg);
+  color: var(--lvl-yellow);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+.wealth-footer-note { margin: var(--s-4) 0 0; font-size: var(--fs-small); }
+.wealth-row__pick { margin: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
+.wealth-row__act { flex-wrap: wrap; justify-content: flex-end; }
+.wealth-row__meta { line-height: 1.5; }
+
+.wealth-detail__fees {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-control);
+  background: var(--voucher-alt);
+  color: var(--ink-3);
+  font-size: var(--fs-small);
+}
+.wealth-detail__fees b { color: var(--ink); font-family: var(--font-mono); font-weight: 600; }
+.wealth-detail__nav { display: grid; gap: var(--s-2); }
+.wealth-detail__nav .nav-spark { width: 100%; height: 84px; }
+.wealth-detail__nav .nav-spark svg { height: 100%; }
+
+/* 产品详情：居中弹窗，紧凑行距，标签灰 / 值深色 */
+.wealth-sheet--detail {
+  width: min(680px, 94vw);
+  height: auto;
+  max-height: 90vh;
+  margin: auto;
+  border-radius: 16px;
+}
+.wealth-sheet--detail .wealth-sheet__form { gap: 0; padding: 18px 20px 16px; }
+.wealth-sheet--detail .wealth-sheet__head { padding-bottom: 10px; }
+.wealth-detail__section { padding: 12px 0; border-top: 1px solid var(--rule); }
+.wealth-detail__section:first-of-type { border-top: 0; padding-top: 6px; }
+.wealth-detail__section-title {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+.wealth-detail__facts { display: grid; gap: 6px; margin: 0; }
+.wealth-detail__facts > div {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+.wealth-detail__facts dt { color: var(--ink-3); font-size: var(--fs-small); }
+.wealth-detail__facts dd { margin: 0; color: var(--ink); font-size: var(--fs-body); line-height: 1.45; }
+.wealth-detail__sub { display: block; margin-top: 2px; color: var(--ink-3); font-size: var(--fs-small); }
+.wealth-detail__line { margin: 6px 0 0; color: var(--ink); font-size: var(--fs-small); line-height: 1.5; }
+.wealth-detail__hint { margin: 6px 0 0; color: var(--ink-3); font-size: var(--fs-small); line-height: 1.5; }
+.wealth-detail__opinion { margin: 8px 0; color: var(--ink); font-size: var(--fs-small); line-height: 1.55; }
+.wealth-detail__opinion .muted { color: var(--ink-3); }
+
+@media (max-width: 640px) {
+  .wealth-sheet--detail {
+    width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+}
+
+/* 理财对比 */
+.wealth-compare__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.wealth-compare__pick input { margin: 0; }
+.wealth-compare-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r-control);
+  background: var(--voucher-alt);
+}
+.wealth-compare-bar__count { margin-right: auto; color: var(--ink-2); font-size: var(--fs-small); }
+.wealth-compare-dialog { width: min(860px, 94vw); max-height: 90vh; }
+.wealth-compare { padding: 18px 20px; }
+.wealth-compare__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+  color: var(--ink);
+}
+.wealth-compare__scroll { overflow-x: auto; }
+.wealth-compare table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.wealth-compare th,
+.wealth-compare td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+.wealth-compare thead th { color: var(--ink); font-weight: 600; }
+.wealth-compare tbody th { color: var(--ink-3); font-weight: 400; white-space: nowrap; }
+.wealth-compare td { color: var(--ink); min-width: 140px; }
+.wealth-compare thead th .chip { margin-left: 4px; }

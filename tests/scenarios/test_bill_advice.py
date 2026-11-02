@@ -103,10 +103,10 @@ def test_demo_advice_uses_real_net_amounts_and_current_subscriptions(gateway: Fa
         "月度",
         "年度",
         "25.00 元",
-        "12.00 元",
+        "10.00 元",
         "198.00 元",
-        "2026-11-08",
-        "2026-11-15",
+        "2026-10-19",
+        "2026-10-16",
         "2027-03-01",
     ):
         assert value in subscription.evidence

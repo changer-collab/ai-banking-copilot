@@ -93,6 +93,14 @@ FINDING_KINDS = (
     "remote-city",
 )
 FINDING_STATUSES = ("confirmed", "suspected", "normal")
+RISK_FINDING_KINDS = frozenset(
+    {"duplicate-charge", "abnormal-spend", "late-night", "remote-city"}
+)
+"""进入「可疑清单 / 风险核对工作台」的线索类型。"""
+SUBSCRIPTION_INFO_KINDS = frozenset(
+    {"price-change", "auto-renewal", "recurring-subscription"}
+)
+"""信息型线索：归订阅页/自动续费区，不再混进风险清单。"""
 SAVING_BASES = ("confirmed", "potential", "none")
 LEAD_STATES = ("normal", "abnormal", "ignored")
 LEAD_STATE_LABELS = {"normal": "确认正常", "abnormal": "标记异常", "ignored": "已忽略"}
@@ -160,6 +168,10 @@ class Finding:
     suggestion: str
     detail: str
     saving_allocations: tuple[tuple[str, int], ...] = ()
+    impact_scope: str = "current_period"
+    """影响金额口径：`current_period` = 本期多付/本次金额；`annualized` 另给年化值。"""
+    annualized_impact_cents: int | None = None
+    """可选：按 12 期估算的未来影响；仅在规则能确定周期时给出。"""
 
 
 @dataclass(frozen=True)
@@ -277,6 +289,9 @@ def finding_basis(finding: Finding) -> dict[str, object]:
         "detail": finding.detail,
         "assumption": finding.assumption,
         "confidence": str(finding.confidence),
+        "impact_basis": finding.impact_basis,
+        "impact_scope": finding.impact_scope,
+        "annualized_impact_cents": finding.annualized_impact_cents,
     }
 
 
@@ -285,16 +300,20 @@ def build_leads(
     *,
     period: str,
     states: Mapping[str, str] | None = None,
+    kinds: Collection[str] | None = None,
 ) -> tuple[ReviewLead, ...]:
     """按主交易聚合命中，合并标签，并按置信度分层。
 
     - 同一交易的多重命中只出现一次，``impact_cents`` 取最大值而非累加；
     - ``status=normal`` 的订阅核验不进入线索；
-    - 已核对（state 非空）的线索保留状态，但不再进入待核对层级。
+    - ``kinds`` 可限定只收风险类命中；信息型线索由订阅页消费；
+    - 已核对（normal/ignored）的线索保留状态并归档；标记异常仍留在重点核对。
     """
     grouped: dict[str, list[Finding]] = {}
     for finding in findings:
         if finding.status == "normal":
+            continue
+        if kinds is not None and finding.kind not in kinds:
             continue
         primary = finding.evidence[-1].txn_id if finding.evidence else finding.txn_ids[-1]
         grouped.setdefault(primary, []).append(finding)
@@ -305,21 +324,25 @@ def build_leads(
         for finding in items:
             for row in finding.evidence:
                 evidence.setdefault(row.txn_id, row)
-        kinds = tuple(dict.fromkeys(finding.kind for finding in items))
+        lead_kinds = tuple(dict.fromkeys(finding.kind for finding in items))
         confidence = max(finding.confidence for finding in items)
         impact_cents = max(finding.impact_cents for finding in items)
         state = (states or {}).get(f"lead-{primary}", "")
-        tier = "resolved" if state else lead_tier(confidence, impact_cents)
+        if state in {"normal", "ignored"}:
+            tier = "resolved"
+        elif state == "abnormal":
+            tier = "key"
+        else:
+            tier = lead_tier(confidence, impact_cents)
         suggestions = [finding.suggestion for finding in items if finding.suggestion]
         leads.append(
             ReviewLead(
                 lead_id=f"lead-{primary}",
                 period=period,
                 txn_ids=tuple(evidence),
-                kinds=kinds,
-                labels=tuple(FINDING_LABELS.get(kind, kind) for kind in kinds),
-                status="confirmed" if any(item.status == "confirmed" for item in items)
-                else "suspected",
+                kinds=lead_kinds,
+                labels=tuple(FINDING_LABELS.get(kind, kind) for kind in lead_kinds),
+                status="suspected",
                 confidence=confidence,
                 tier=tier,
                 impact_cents=impact_cents,
@@ -362,6 +385,7 @@ def lead_payload(lead: ReviewLead) -> dict[str, object]:
         "evidence": [
             {
                 "txn_id": item.txn_id,
+                "record_no": item.txn_id,
                 "record_id": item.record_id,
                 "content_hash": item.content_hash,
                 "booked_on": item.booked_on.isoformat(),
@@ -541,6 +565,7 @@ def _finding_payload(finding: Finding) -> dict[str, object]:
         "evidence": [
             {
                 "txn_id": item.txn_id,
+                "record_no": item.txn_id,
                 "record_id": item.record_id,
                 "content_hash": item.content_hash,
                 "booked_on": item.booked_on.isoformat(),
@@ -552,6 +577,8 @@ def _finding_payload(finding: Finding) -> dict[str, object]:
             for item in finding.evidence
         ],
         "impact_cents": finding.impact_cents,
+        "impact_scope": finding.impact_scope,
+        "annualized_impact_cents": finding.annualized_impact_cents,
         "impact_basis": finding.impact_basis,
         "saving_basis": finding.saving_basis,
         "assumption": finding.assumption,
@@ -578,15 +605,28 @@ def report_payload(
     confirmed = sum(1 for item in report.findings if item.status == "confirmed")
     suspected = sum(1 for item in report.findings if item.status == "suspected")
     normal = sum(1 for item in report.findings if item.status == "normal")
-    leads = build_leads(report.findings, period=report.period, states=lead_states)
+    risk_findings = tuple(
+        item for item in report.findings if item.kind in RISK_FINDING_KINDS
+    )
+    info_findings = tuple(
+        item for item in report.findings if item.kind in SUBSCRIPTION_INFO_KINDS
+    )
+    leads = build_leads(
+        risk_findings,
+        period=report.period,
+        states=lead_states,
+        kinds=RISK_FINDING_KINDS,
+    )
     visible = [item for item in leads if item.tier in {"key", "more"}]
     key_leads = [item for item in leads if item.tier == "key"]
+    resolved_leads = [item for item in leads if item.tier == "resolved"]
     review_amount = sum(item.impact_cents for item in visible)
     auto_renewals = [
         finding
-        for finding in report.findings
+        for finding in info_findings
         if finding.kind in {"auto-renewal", "recurring-subscription"}
     ]
+    price_changes = [finding for finding in info_findings if finding.kind == "price-change"]
     return {
         "user_id": report.user_id,
         "period": report.period,
@@ -606,9 +646,12 @@ def report_payload(
             "confirmed_count": confirmed,
             "suspected_count": suspected,
             "normal_count": normal,
+            "risk_finding_count": len(risk_findings),
+            "subscription_info_count": len(info_findings),
             "normal_transaction_count": len(report.normal_txn_ids),
             "lead_count": len(visible),
             "key_lead_count": len(key_leads),
+            "resolved_lead_count": len(resolved_leads),
             "review_amount_cents": review_amount,
             "lookback_months": LOOKBACK_MONTHS,
         },
@@ -641,8 +684,13 @@ def report_payload(
             for item in report.transfers
         ],
         "findings": [_finding_payload(finding) for finding in report.findings],
+        "risk_findings": [_finding_payload(finding) for finding in risk_findings],
+        "subscription_findings": [
+            _finding_payload(finding) for finding in info_findings
+        ],
         "leads": [lead_payload(lead) for lead in leads],
         "auto_renewals": [_finding_payload(finding) for finding in auto_renewals],
+        "price_changes": [_finding_payload(finding) for finding in price_changes],
         "normal_txn_ids": list(report.normal_txn_ids),
         "confirmed_saving_cents": report.confirmed_saving_cents,
         "potential_saving_cents": report.potential_saving_cents,
@@ -954,7 +1002,12 @@ def bill_profile(
         item.amount.cents // 12 if item.period == "yearly" else item.amount.cents
         for item in subscriptions
     )
-    risky = [item for item in report.findings if item.status in {"confirmed", "suspected"}]
+    risky = [
+        item
+        for item in report.findings
+        if item.status in {"confirmed", "suspected"}
+        and item.kind in RISK_FINDING_KINDS
+    ]
     return BillProfile(
         top_category=top.category if top is not None else None,
         top_category_cents=top.expense_cents if top is not None else 0,
@@ -1050,33 +1103,53 @@ def _price_change_findings(
         prior = [charge for charge in items[:-1] if charge.booked_on < latest.booked_on]
         if not prior:
             continue
+        previous = prior[-1]
         baseline = _median([charge.amount_cents for charge in prior])
-        if baseline <= 0:
+        if baseline <= 0 or previous.amount_cents <= 0:
             continue
-        delta = latest.amount_cents - baseline
+        delta = latest.amount_cents - previous.amount_cents
         if delta < PRICE_CHANGE_MIN_CENTS:
             continue
-        if delta * 100 < baseline * PRICE_CHANGE_MIN_PERCENT:
+        if delta * 100 < previous.amount_cents * PRICE_CHANGE_MIN_PERCENT:
             continue
         covered.add(latest.txn_id)
         allocated[latest.txn_id] = delta
         sufficient = len(prior) >= SUBSCRIPTION_MIN_CHARGES
+        percent = (
+            Decimal(delta) * 100 / Decimal(previous.amount_cents)
+        ).quantize(Decimal("0.1"))
+        gap = (latest.booked_on - previous.booked_on).days
+        if CYCLE_YEARLY_DAYS[0] <= gap <= CYCLE_YEARLY_DAYS[1]:
+            annualized = delta
+            annual_text = f"未来 12 个月约多付 {Money(delta).yuan} 元（年付按 1 期计）"
+        elif CYCLE_MONTHLY_DAYS[0] <= gap <= CYCLE_MONTHLY_DAYS[1]:
+            annualized = delta * 12
+            annual_text = (
+                f"若价格持续，未来 12 个月约多付 {Money(delta * 12).yuan} 元"
+                "（按 12 期估算）"
+            )
+        else:
+            annualized = None
+            annual_text = "周期不固定，无法估算未来 12 个月影响"
         findings.append(
             Finding(
                 finding_id=f"price-change-{len(findings) + 1:02d}",
                 kind="price-change",
-                status="confirmed" if sufficient else "suspected",
+                # 规则只能证明「价格确实变了」，不能替用户确认这笔消费是否合理。
+                status="suspected",
                 confidence=Decimal("0.80") if sufficient else Decimal("0.55"),
-                txn_ids=(*(charge.txn_id for charge in prior[-3:]), latest.txn_id),
-                evidence=tuple(_evidence(charge) for charge in (*prior[-3:], latest)),
+                txn_ids=(previous.txn_id, latest.txn_id),
+                evidence=(_evidence(previous), _evidence(latest)),
                 impact_cents=delta,
                 impact_basis=(
-                    f"按本期扣款较历史中位扣款（{Money(baseline).yuan} 元）的差额估算；"
-                    "差额是本期扣款较历史中位的增加额，仅用于核对。"
+                    f"本期较上一期多付 {Money(delta).yuan} 元；{annual_text}；"
+                    "仅作核对参考，不构成可避免支出的最终结论。"
                 ),
+                impact_scope="current_period",
+                annualized_impact_cents=annualized,
                 saving_basis="potential",
                 assumption=(
-                    "假设上涨来自同商户价格上调或套餐变更，而非购买数量变化；"
+                    "假设两次扣款对应同一服务/套餐，且期间没有购买数量或权益变化；"
                     f"历史样本 {len(prior)} 期，结论仅反映流水事实。"
                 ),
                 suggestion=(
@@ -1084,8 +1157,11 @@ def _price_change_findings(
                     "可取消或更换服务，差额部分才是可避免支出。"
                 ),
                 detail=(
-                    f"{latest.merchant_label} 本期扣款 {Money(latest.amount_cents).yuan} 元，"
-                    f"历史中位 {Money(baseline).yuan} 元，上涨 {Money(delta).yuan} 元。"
+                    f"{latest.merchant_label} 于 {previous.booked_on.isoformat()} 扣款 "
+                    f"{Money(previous.amount_cents).yuan} 元，"
+                    f"{latest.booked_on.isoformat()} 涨至 {Money(latest.amount_cents).yuan} 元，"
+                    f"涨幅 {percent}%，自 {latest.booked_on.isoformat()} 起生效；"
+                    f"此前历史中位 {Money(baseline).yuan} 元（样本 {len(prior)} 期）。"
                 ),
                 saving_allocations=((latest.txn_id, delta),),
             )
@@ -1558,7 +1634,9 @@ def _fallback_narrative(report: BillFindingsReport, reason: str) -> BillNarrativ
 
 def _render_summary(report: BillFindingsReport) -> str:
     """根据报告事实渲染整体结论：收支结构在前，线索在后。"""
-    leads = build_leads(report.findings, period=report.period)
+    leads = build_leads(
+        report.findings, period=report.period, kinds=RISK_FINDING_KINDS
+    )
     key_count = sum(1 for lead in leads if lead.tier == "key")
     more_count = sum(1 for lead in leads if lead.tier == "more")
     parts = [

@@ -156,6 +156,7 @@ from ai_banking_copilot.scenarios.registry import (
 from ai_banking_copilot.scenarios.wealth import (
     FORBIDDEN_HINTS,
     WEALTH_ACTIONS,
+    AssessmentState,
     RiskAssessment,
     describe_assessment,
     filter_candidates,
@@ -449,6 +450,12 @@ class SubmissionView:
 
     redemption_prefill: dict[str, object] | None = None
     """赎回意图命中的持仓预填（产品 / 份额 / 金额 / 到期日）：只预填弹窗，不执行。"""
+
+    wealth_recommend: str | None = None
+    """理财推荐视图的风险等级（有效测评）：前端据此渲染可申购产品卡，不生成计划。"""
+
+    answer_note: str | None = None
+    """查询的确定性答复（如「未查询到该笔交易」）：只展示网关事实，不进计划 / 审计。"""
 
 
 @dataclass(frozen=True)
@@ -1070,6 +1077,19 @@ class Session:
                     amount_filter.message, utterance,
                     capability_boundary=True, triage_verdict=amount_filter,
                 )
+            recommend_profile = self._wealth_recommendation_profile(intents, asks)
+            if recommend_profile is not None:
+                # 「我要申购理财产品」：先按测评等级给可申购产品与分类，不先问金额。
+                self._state = SessionState.IDLE
+                self._pending_slots = frozenset()
+                self._message = (
+                    f"按你的风险测评等级 {recommend_profile}，先看可申购产品；"
+                    "你想买哪类？"
+                )
+                return self._privacy_note(SubmissionView(
+                    self._state, self._message, None, None, None, (),
+                    wealth_recommend=recommend_profile,
+                ))
             if asks:
                 self._state = SessionState.NEEDS_CLARIFICATION
                 scope = ""
@@ -1151,6 +1171,9 @@ class Session:
                 ):
                     # 到期日已过 / 未到：都只补一句推算口径；赎回与下单仍未执行（不得写成已到账）。
                     view = replace(view, message=f"{view.message}\n{note}")
+            lookup_note = self._transaction_lookup_note(utterance, view.plan)
+            if lookup_note is not None:
+                view = replace(view, answer_note=lookup_note)
             return self._privacy_note(view)
         finally:
             _notify(on_stage, "done")
@@ -2393,6 +2416,82 @@ class Session:
             product_id = _slot_str(intent.slots, "product")
             if product_id:
                 self._last_wealth = product_id
+
+    def _wealth_recommendation_profile(
+        self, intents: Sequence[Intent], asks: Sequence[ClarificationAsk]
+    ) -> str | None:
+        """「我要申购理财产品」未指定产品时的推荐视图判据（只读、不生成计划）。
+
+        只在**产品来自服务端默认值**且唯一缺槽是金额时接管：把「先问金额」改成
+        「先按测评等级给可申购产品与分类」。用户已点名产品 / 已给金额的既有路径不变。
+        """
+        if len(intents) != 1 or intents[0].action != "wealth.subscribe":
+            return None
+        if tuple(ask.slot for ask in asks) != ("amount",):
+            return None
+        if not self._review_intents:
+            return None
+        sources = self._review_intents[-1].get("selected_sources")
+        if not isinstance(sources, dict) or sources.get("product") != "server_default":
+            return None
+        raw = intents[0].slots.get("assessment")
+        if not isinstance(raw, RiskAssessment):
+            return None
+        if raw.state_on(self._deps.today) is not AssessmentState.VALID:
+            return None
+        return raw.risk_profile
+
+    def _transaction_lookup_note(self, utterance: str, plan: Plan | None) -> str | None:
+        """单笔交易核实的确定性答复：只陈述区间笔数与是否匹配，不编造「已核实」。
+
+        计划本身仍只执行 `account.transactions` 的区间查询；本答复用同一份网关事实
+        判断「有没有这一笔」，不新增动作、不产生写入。
+        """
+        if plan is None or len(plan.nodes) != 1:
+            return None
+        node = plan.nodes[0]
+        if node.action != "account.transactions":
+            return None
+        if _LOOKUP_QUESTION.search(utterance) is None:
+            return None
+        account_id = node.params.get("account_id")
+        start = node.params.get("start")
+        end = node.params.get("end")
+        if not (
+            isinstance(account_id, str)
+            and isinstance(start, str)
+            and isinstance(end, str)
+        ):
+            return None
+        parsed = parse_amount(utterance)
+        if not parsed.matched or parsed.value is None:
+            return None
+        cents = parsed.value.cents
+        hint = _lookup_hint(utterance)
+        try:
+            rows = self._deps.gateway.transactions_between(
+                account_id, date.fromisoformat(start), date.fromisoformat(end)
+            )
+        except (GatewayError, ValueError):
+            return None
+        matched = [
+            record.payload
+            for record in rows
+            if abs(record.payload.amount.cents) == cents
+            and (not hint or hint in record.payload.merchant)
+        ]
+        amount_text = f"{Money(cents).yuan} 元"
+        scope = f"{hint} {amount_text}" if hint else amount_text
+        if matched:
+            first = min(matched, key=lambda item: (item.booked_on, item.txn_id))
+            return (
+                f"查到 {len(matched)} 笔金额相符的交易（最早 {first.booked_on.isoformat()}）；"
+                "演示口径，需人工核对，不代表银行已认定异常。"
+            )
+        return (
+            f"未查询到与「{scope}」相符的交易：{start}~{end} 共 {len(rows)} 笔，均不匹配。"
+            "未编造结果；可到「记录页 → 可疑清单」逐笔核对（演示口径）。"
+        )
 
     def _wealth_recall_answer(self, utterance: str) -> SubmissionView | None:
         """「就买刚才那个」——上一轮被拒的理财申购，**只澄清、不执行**（实测 WEA-Q05）。
@@ -3853,6 +3952,8 @@ _SUBSCRIPTION_SIGN_BOUNDARY = (
 )
 _SIGN_REQUEST = re.compile(
     r"代扣签约|签约代扣|开通代扣|新签代扣|新增代扣|帮我签约|自动续费签约"
+    r"|开通.{0,10}(?:自动扣款|自动续费|代扣)"
+    r"|(?:自动扣款|自动续费|代扣).{0,6}(?:开通|签约|新签)"
 )
 _SIGN_QUERY_OR_CANCEL = re.compile(r"取消|解约|关闭|终止|查询|查看|记录|信息|时间|详情")
 
@@ -3878,6 +3979,25 @@ _AMOUNT_FILTER_VERDICT_MESSAGE = (
     "账户流水目前只能按时间区间查，暂不支持「金额超过多少元」这类金额条件——这是当前能力子集。"
     "可以改看月度账单分析（会把大额项单独列出），或按时间区间查看交易明细。"
 )
+
+_LOOKUP_QUESTION = re.compile(r"(?:是不是|是否).{0,6}盗刷|盗刷.{0,6}(?:吗|么|嘛)")
+"""单笔交易核实问法（「上周星巴克 128 元是不是盗刷」）：只读查流水，不代替挂失。"""
+_LOOKUP_AMOUNT_TEXT = re.compile(r"\d+(?:\.\d{1,2})?\s*(?:元|块|块钱)?")
+_LOOKUP_NOISE = re.compile(
+    r"上周|本周|这周|最近(?:一周|7天|七天)|昨天|前天|今天|"
+    r"请问|帮我|帮忙|查一下|查查|看一下|看看|"
+    r"是不是|是否|有没有|会不会|盗刷|被盗刷|"
+    r"一笔|这笔|那笔|的|吗|呢|嘛|？|\?|[，,。；;：:]"
+)
+"""从原话里剥掉时间 / 疑问 / 动作词，留下商户线索（只做展示，不当控制槽）。"""
+
+
+def _lookup_hint(utterance: str) -> str:
+    """提取用户口中的商户线索；提不出（太短 / 太长）就返回空串，不猜。"""
+    text = _LOOKUP_AMOUNT_TEXT.sub(" ", utterance)
+    text = _LOOKUP_NOISE.sub(" ", text)
+    hint = re.sub(r"\s+", "", text)
+    return hint if 2 <= len(hint) <= 20 else ""
 
 
 def _base_slot_name(slot: str) -> str:

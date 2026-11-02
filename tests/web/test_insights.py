@@ -34,16 +34,16 @@ def _service(db_path: Path, metadata: MemoryInsightMetadataStore) -> InsightServ
 
 
 def _pin_upcoming_subscription(db_path: Path) -> None:
-    """把视频会员的下次扣费钉进本文件自选的扫描窗口（`as_of` 起 7 天内）。
+    """把视频会员的流水派生下次扣费钉进 `as_of` 起 7 天内。
 
-    种子按演示时钟（2026-10-31）把下次扣费顺移到 2026-11-08；本文件固定用
-    2026-10-01 扫描，故在此显式构造「即将续费」数据，避免用例结果随演示时钟漂移。
+    续费提醒现在与订阅页共用流水派生日期，不再读登记值；本文件固定用
+    2026-10-01 扫描，故把最近一期视频扣款移到 2026-09-05（+31 天 = 2026-10-06）。
     """
     store = Store(db_path)
     with store.transaction() as conn:
         conn.execute(
-            "UPDATE subscriptions SET next_charge_on = '2026-10-05'"
-            " WHERE subscription_id = 'sub_video'"
+            "UPDATE transactions SET booked_on = '2026-09-05'"
+            " WHERE txn_id = 'txn_20260918'"
         )
     store.close()
 

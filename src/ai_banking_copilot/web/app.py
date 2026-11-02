@@ -91,6 +91,14 @@ from ai_banking_copilot.scenarios.bill_findings import (
     report_payload,
     top_merchants,
 )
+from ai_banking_copilot.scenarios.ledger import (
+    CHARGE_WINDOW,
+    account_options,
+    charge_groups,
+    charge_payload,
+    charge_summary,
+    payment_account_label,
+)
 from ai_banking_copilot.scenarios.life_events import (
     LIFE_EVENT_COMBOS,
     LIFE_EVENT_PROTOTYPES,
@@ -104,6 +112,7 @@ from ai_banking_copilot.scenarios.subscriptions import (
     CANCEL_STATE_LABELS,
     EXTERNAL_CANCEL_NOT_INTEGRATED,
     SUBSCRIPTION_CANCEL_BOUNDARY,
+    SUBSCRIPTION_DATA_SOURCE,
     cancel_state_from_receipt,
     insights_payload,
     subscription_report,
@@ -1070,6 +1079,15 @@ def create_app(deps: AppDeps) -> FastAPI:
         )
         if event_id is None:
             return view
+        # 「生日预算的 1000，帮我买个 T+0 理财」：句子里有生日触发词，但计划是纯理财。
+        # 生活事件只登记命中其**骨架动作**的计划，避免把理财申购记成一场生日。
+        prototype = next(
+            (item for item in LIFE_EVENT_PROTOTYPES if item.event_id == event_id), None
+        )
+        if prototype is not None and view.plan is not None:
+            skeleton = set(prototype.skeleton)
+            if not any(node.action in skeleton for node in view.plan.nodes):
+                return view
         event_name = _life_event_name(event_id)
         # 事件金额取**计划里的资金口径**（预留额 > 赎回额 > 下单额），
         # 不能把花束档位 299 当成整件事的 1000 预算。
@@ -1196,7 +1214,6 @@ def create_app(deps: AppDeps) -> FastAPI:
     def options(user_id: str = Depends(current_user)) -> dict[str, object]:
         """对象选择只展示当前用户的事实；金额不由前端编造。"""
         gateway = deps.gateway
-        account_kinds = {"savings": "储蓄", "current": "活期"}
         card_types = {"debit": "借记", "credit": "信用", "virtual": "虚拟"}
         statuses = {"active": "正常", "locked": "已锁定", "lost": "已挂失", "cancelled": "已取消"}
         return {
@@ -1205,13 +1222,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             # （同 policy/execution.py 口径），已用取当日已记账转出合计。
             # 两者都由 gateway 给事实，前端不计算。
             "quota": _transfer_quota_payload(gateway, user_id, deps.today),
-            "accounts": [
-                {"id": record.payload.account_id,
-                 "label": f"{account_kinds.get(record.payload.kind, record.payload.kind)}账户"
-                          f" · 余额 {record.payload.balance.yuan} 元",
-                 "balance_cents": record.payload.balance.cents}
-                for record in gateway.accounts_of(user_id)
-            ],
+            "accounts": account_options(gateway, user_id),
             "cards": [
                 {"id": record.payload.card_id,
                  "label": f"{card_types.get(record.payload.card_type, record.payload.card_type)}卡"
@@ -1250,6 +1261,22 @@ def create_app(deps: AppDeps) -> FastAPI:
                     for state, label in CANCEL_STATE_LABELS.items()
                 ],
             },
+        }
+
+    @app.get("/api/records/charges")
+    def record_charges(user_id: str = Depends(current_user)) -> dict[str, object]:
+        """扣款记录 = 流水读模型的「代扣/自动续费」筛选视图。
+
+        计数、聚合金额与明细行全部由 `ledger.charge_groups` 的同一窗口数组派生，
+        不再从订阅证据或前端去重结果各算一套；不返回账户当前余额。
+        """
+        groups = charge_groups(deps.gateway, user_id, as_of=deps.today)
+        return {
+            "as_of": deps.today.isoformat(),
+            "data_source": SUBSCRIPTION_DATA_SOURCE,
+            "window": CHARGE_WINDOW,
+            "summary": charge_summary(groups),
+            "groups": [charge_payload(group) for group in groups],
         }
 
     @app.get("/api/cards")
@@ -1495,19 +1522,36 @@ def create_app(deps: AppDeps) -> FastAPI:
         profile = deps.gateway.customer_suitability_profile(user_id)
         birth_year = profile.payload.birth_year if profile is not None else None
         customer_age = deps.today.year - birth_year if birth_year is not None else None
+        holdings_rows = list(
+            holdings_payload(deps.gateway, user_id, disclosures=disclosures)
+        )
+        catalog = list(
+            product_catalog(
+                products,
+                risk_profile,
+                nav=nav_by_product(deps.gateway, products),
+                disclosures=disclosures,
+            )
+        )
+        held = {
+            str(row.get("product_id")): row
+            for row in holdings_rows
+            if row.get("product_id")
+        }
+        for item in catalog:
+            if item.get("eligible") is not True:
+                continue
+            position = held.get(str(item.get("product_id")))
+            if position is None:
+                continue
+            amount = Decimal(str(position.get("amount_yuan") or "0"))
+            line = str(item.get("advantage_line") or "")
+            prefix = f"你已持有 ¥{amount:,.2f}，可继续加购"
+            item["advantage_line"] = f"{prefix}；{line}" if line else prefix
         return {
             "assessment": assessment,
-            "products": list(
-                product_catalog(
-                    products,
-                    risk_profile,
-                    nav=nav_by_product(deps.gateway, products),
-                    disclosures=disclosures,
-                )
-            ),
-            "holdings": list(
-                holdings_payload(deps.gateway, user_id, disclosures=disclosures)
-            ),
+            "products": catalog,
+            "holdings": holdings_rows,
             "customer_age": customer_age,
             "senior_notice": customer_age is not None and customer_age >= 65,
             "birth_year_known": birth_year is not None,
@@ -1528,7 +1572,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             {product_id: disclosure.payload} if disclosure is not None else {}
         )
         entry = product_catalog(
-            [product], _valid_risk_profile(deps, user_id), disclosures=disclosures
+            [product],
+            _valid_risk_profile(deps, user_id),
+            disclosures=disclosures,
+            nav=nav_by_product(deps.gateway, [product]),
         )[0]
         profile = deps.gateway.customer_suitability_profile(user_id)
         birth_year = profile.payload.birth_year if profile is not None else None
@@ -2038,13 +2085,6 @@ def create_app(deps: AppDeps) -> FastAPI:
         for payee in payees:
             by_name.setdefault(payee.full_name, []).append(payee)
         accounts = gateway.accounts_of(user_id)
-        kinds = {record.payload.account_id: record.payload.kind for record in accounts}
-        labels = {"savings": "储蓄账户", "current": "活期账户"}
-        card_tails: dict[str, str] = {}
-        for record in gateway.cards_of(user_id):
-            card = record.payload
-            if card.account_id and card.last4:
-                card_tails.setdefault(card.account_id, card.last4)
         start = deps.today - timedelta(days=days)
         horizon = deps.today + timedelta(days=days)
         items: list[dict[str, object]] = []
@@ -2066,7 +2106,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 raw_payee = txn.merchant.removeprefix("转给")
                 matched_payee: Payee | None = payee_for(raw_payee)
                 source = "seed" if _is_seed_transaction(txn.txn_id) else "live"
-                method = txn.transfer_method or ("history" if source == "seed" else "realtime")
+                method = txn.transfer_method or ("history" if source == "seed" else "unknown")
                 purpose = txn.transfer_purpose or ""
                 items.append(
                     {
@@ -2084,7 +2124,9 @@ def create_app(deps: AppDeps) -> FastAPI:
                         ),
                         "amount_cents": -txn.amount.cents,
                         "booked_on": txn.booked_on.isoformat(),
-                        "status": "已到账" if txn.booked_on <= deps.today else "处理中",
+                        "status": _transfer_record_status(
+                            method, txn.booked_on, deps.today
+                        ),
                         "method": method,
                         "method_label": _transfer_method_label(method),
                         "eta_label": _transfer_eta_label(method),
@@ -2092,8 +2134,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                         "purpose": purpose,
                         "purpose_label": _transfer_purpose_label(purpose),
                         "remark": txn.transfer_remark or "",
-                        "account": labels.get(kinds.get(account.payload.account_id, ""), "账户"),
-                        "account_tail": card_tails.get(account.payload.account_id, ""),
+                        "account": payment_account_label(
+                            gateway, user_id, txn.account_id, txn.card_tail
+                        ),
+                        "account_tail": txn.card_tail or "",
                         "channel": txn.channel,
                         "can_repeat": matched_payee is not None and not matched_payee.blocked,
                         "can_cancel": False,
@@ -2130,14 +2174,11 @@ def create_app(deps: AppDeps) -> FastAPI:
                     ),
                     "amount_cents": booking.amount.cents,
                     "booked_on": booking.booked_on.isoformat(),
-                    "status": (
-                        "已撤销"
-                        if cancelled
-                        else (
-                            "已发出申请·可撤销"
-                            if booking.booked_on > deps.today
-                            else "已发出申请·待处理"
-                        )
+                    "status": _scheduled_transfer_status(
+                        method,
+                        booking.booked_on,
+                        deps.today,
+                        cancelled=cancelled,
                     ),
                     "method": method,
                     "method_label": _transfer_method_label(method),
@@ -2146,8 +2187,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "purpose": booking.purpose or "",
                     "purpose_label": _transfer_purpose_label(booking.purpose or ""),
                     "remark": booking.remark,
-                    "account": labels.get(kinds.get(booking.account_id, ""), "账户"),
-                    "account_tail": card_tails.get(booking.account_id, ""),
+                    "account": payment_account_label(
+                        gateway, user_id, booking.account_id, None
+                    ),
+                    "account_tail": "",
                     "channel": "agent",
                     "can_repeat": scheduled_payee is not None and not scheduled_payee.blocked,
                     "can_cancel": booking.status == "scheduled",
@@ -2245,7 +2288,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         return _response(
             request.session_id,
             user_id,
-            _submission_payload(view, gateway=deps.gateway, user_id=user_id),
+            _submission_payload(view, gateway=deps.gateway, user_id=user_id, deps=deps),
         )
 
     @app.post("/api/life-schedules/retry")
@@ -2340,7 +2383,9 @@ def create_app(deps: AppDeps) -> FastAPI:
             user_id, request.session_id, request.utterance, request.selected, view
         )
         _record_answer(user_id, request.session_id, view)
-        payload = _submission_payload(view, gateway=deps.gateway, user_id=user_id)
+        payload = _submission_payload(
+            view, gateway=deps.gateway, user_id=user_id, deps=deps
+        )
         card = payload.get("card")
         card_map = card if isinstance(card, dict) else {}
         _append_channel_audit(
@@ -2391,7 +2436,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         return _response(
             request.session_id,
             user_id,
-            _submission_payload(view, gateway=deps.gateway, user_id=user_id),
+            _submission_payload(view, gateway=deps.gateway, user_id=user_id, deps=deps),
         )
 
     @app.post("/api/verify/request")
@@ -3597,6 +3642,7 @@ _TRANSFER_METHOD_LABELS = {
     "next_day": "次日到账",
     "large": "大额通道",
     "history": "历史转账",
+    "unknown": "到账方式未记录",
 }
 
 _TRANSFER_ETA_LABELS = {
@@ -3605,7 +3651,34 @@ _TRANSFER_ETA_LABELS = {
     "next_day": "次日 00:00 后发出，到账前可撤销",
     "large": "工作日大额通道处理，周末与节假日顺延（演示环境按强验证处理）",
     "history": "历史记录，时效以当时渠道为准",
+    "unknown": "到账方式未记录，以银行为准",
 }
+
+_PENDING_TRANSFER_METHODS = frozenset({"normal", "next_day", "large"})
+"""只有普通 / 次日 / 大额通道可能处于「处理中」；实时到账不应显示处理中。"""
+
+
+def _transfer_record_status(method: str, booked_on: date, today: date) -> str:
+    """已记账转账的状态：实时到账恒为已到账，慢通道未到记账日才处理中。"""
+    if method in _PENDING_TRANSFER_METHODS and booked_on > today:
+        return "处理中"
+    if method == "unknown" and booked_on > today:
+        return "待到账"
+    return "已到账"
+
+
+def _scheduled_transfer_status(
+    method: str, booked_on: date, today: date, *, cancelled: bool
+) -> str:
+    """定时/登记转账的状态：只有慢通道会出现「处理中」。"""
+    if cancelled:
+        return "已撤销"
+    if method == "next_day" and booked_on > today:
+        return "已发出申请·可撤销"
+    if method in _PENDING_TRANSFER_METHODS:
+        return "处理中"
+    return "已发出申请" if booked_on > today else "已发出申请·待处理"
+
 
 _TRANSFER_PURPOSE_LABELS = {
     "rent": "房租",
@@ -3732,6 +3805,77 @@ def _valid_risk_profile(deps: AppDeps, user_id: str) -> str | None:
     if isinstance(raw, str) and assessment.get("state") == AssessmentState.VALID.value:
         return raw
     return None
+
+
+def _wealth_recommend_payload(
+    deps: AppDeps, user_id: str, risk_profile: str
+) -> dict[str, object]:
+    """申购前的只读推荐视图：按测评等级硬筛选 + 事实推荐理由。
+
+    只返回 `eligible` 的产品；推荐理由只由风险等级、起购、期限与披露流动性拼装，
+    不含任何收益暗示（H6），也不生成计划或写操作。
+    """
+    products = deps.gateway.wealth_products()
+    disclosures = {
+        record.payload.product_id: record.payload
+        for record in deps.gateway.wealth_disclosures()
+    }
+    catalog = product_catalog(
+        products,
+        risk_profile,
+        nav=nav_by_product(deps.gateway, products),
+        disclosures=disclosures,
+    )
+    eligible = [dict(item) for item in catalog if item.get("eligible") is True]
+    counts: dict[str, int] = {}
+    for item in eligible:
+        category = str(item.get("category") or "未分类")
+        counts[category] = counts.get(category, 0) + 1
+    for item in eligible:
+        item["recommend_reason"] = _recommend_reason(item, risk_profile)
+    message = (
+        f"按你的风险测评等级 {risk_profile}，可申购 {len(eligible)} 只。"
+        "你想买哪类？点分类筛选，或直接看下方产品。"
+        if eligible
+        else (
+            f"按你的风险测评等级 {risk_profile}，当前没有可申购产品；"
+            "请先重新测评或稍后再看。"
+        )
+    )
+    return {
+        "risk_profile": risk_profile,
+        "assessment": _risk_payload(deps, user_id),
+        "message": message,
+        "categories": [
+            {"label": f"{name} · {count} 只", "value": name}
+            for name, count in counts.items()
+        ],
+        "products": eligible,
+        "data_source": PRODUCT_DATA_SOURCE,
+        "disclaimer": (
+            "推荐只按风险等级、起购金额、期限与披露流动性做事实匹配，不构成投资建议；"
+            "业绩比较基准≠实际收益。"
+        ),
+    }
+
+
+def _recommend_reason(item: Mapping[str, object], risk_profile: str) -> str:
+    """推荐理由：只写适配事实（等级 / 起购 / 期限 / 流动性），不写收益。"""
+    parts = [f"风险等级 {item.get('risk_level', '—')} ≤ 你的测评 {risk_profile}"]
+    min_amount = item.get("min_amount_yuan")
+    if min_amount is not None:
+        parts.append(f"起购 {min_amount} 元")
+    term = item.get("term_days")
+    if term == 0:
+        parts.append("无固定期限")
+    elif term is not None:
+        parts.append(f"期限 {term} 天")
+    liquidity = item.get("liquidity")
+    if isinstance(liquidity, Mapping):
+        label = liquidity.get("label")
+        if isinstance(label, str) and label:
+            parts.append(label)
+    return "；".join(parts)
 
 
 def _yuan_text(cents: int) -> str:
@@ -4079,6 +4223,7 @@ def _submission_payload(
     *,
     gateway: FactGateway | None = None,
     user_id: str | None = None,
+    deps: AppDeps | None = None,
 ) -> dict[str, object]:
     card = _card_payload(view.card, view.plan)
     if card is not None and view.quota is not None:
@@ -4130,6 +4275,14 @@ def _submission_payload(
         "plan_digest": view.card.frozen_hash if view.card is not None else "",
         "questionnaire": list(view.questionnaire),
         "redemption_prefill": view.redemption_prefill,
+        "wealth_recommend": (
+            _wealth_recommend_payload(deps, user_id, view.wealth_recommend)
+            if deps is not None
+            and user_id is not None
+            and view.wealth_recommend is not None
+            else None
+        ),
+        "answer_note": view.answer_note,
     }
 
 

@@ -25,7 +25,9 @@ def test_bill_analysis_exposes_trend_profile_and_category_share(deps: AppDeps) -
     assert profile["top_category_cents"] == data["category_share"][0]["expense_cents"]
     assert profile["subscription_monthly_cents"] > 0
     risky = [
-        item for item in data["findings"] if item["status"] in {"confirmed", "suspected"}
+        item
+        for item in data["risk_findings"]
+        if item["status"] in {"confirmed", "suspected"}
     ]
     assert profile["suspicious_count"] == len(risky)
 

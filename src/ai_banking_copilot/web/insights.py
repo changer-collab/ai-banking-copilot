@@ -19,6 +19,8 @@ from typing import Protocol, cast
 
 from ai_banking_copilot.gateway.facts import FactGateway, Record
 from ai_banking_copilot.gateway.models import Subscription, Transaction
+from ai_banking_copilot.scenarios.bill_categories import is_consumption_category
+from ai_banking_copilot.scenarios.subscriptions import subscription_report
 
 RULE_SUBSCRIPTION = "subscription-renewal"
 RULE_LARGE_EXPENSE = "large-expense-review"
@@ -424,12 +426,27 @@ class InsightService:
         self, gateway: FactGateway, user_id: str, as_of: date, updated_at: str
     ) -> list[Insight]:
         results: list[Insight] = []
-        subscriptions = gateway.subscriptions_of(user_id)
-        for record in subscriptions:
-            subscription = record.payload
-            days = (subscription.next_charge_on - as_of).days
-            if subscription.status == "active" and 0 <= days <= LOOKAHEAD_DAYS:
-                results.append(self._subscription_insight(record, as_of, days, updated_at))
+        subscription_records = {
+            record.payload.subscription_id: record
+            for record in gateway.subscriptions_of(user_id)
+        }
+        # 续费提醒与订阅页共用同一份流水派生结果，不用登记日期另算一套。
+        report = subscription_report(gateway, user_id, as_of=as_of)
+        for item in report.insights:
+            if (
+                item.agreement_status != "active"
+                or item.subscription_id is None
+                or item.next_charge_on is None
+            ):
+                continue
+            days = (item.next_charge_on - as_of).days
+            record = subscription_records.get(item.subscription_id)
+            if record is not None and 0 <= days <= LOOKAHEAD_DAYS:
+                results.append(
+                    self._subscription_insight(
+                        record, item.next_charge_on, days, as_of, updated_at
+                    )
+                )
 
         transactions = self._transactions(
             gateway, user_id, as_of - _days(RECENT_EXPENSE_DAYS - 1), as_of
@@ -445,11 +462,13 @@ class InsightService:
         budget = self._metadata.get_budget(user_id, month)
         month_start = date(as_of.year, as_of.month, 1)
         month_transactions = self._transactions(gateway, user_id, month_start, as_of)
+        # 预算口径与账单页一致：只算消费，转账/还款/理财不计入。
         expense = sum(
             (
                 -record.payload.amount.cents
                 for record in month_transactions
                 if record.payload.amount.cents < 0
+                and is_consumption_category(record.payload.category)
             ),
             0,
         )
@@ -476,7 +495,11 @@ class InsightService:
 
     @staticmethod
     def _subscription_insight(
-        record: Record[Subscription], as_of: date, days: int, updated_at: str
+        record: Record[Subscription],
+        next_charge_on: date,
+        days: int,
+        as_of: date,
+        updated_at: str,
     ) -> Insight:
         subscription = record.payload
         return _insight(
@@ -486,15 +509,15 @@ class InsightService:
             window_start=as_of,
             window_end=as_of + _days(LOOKAHEAD_DAYS),
             object_id=subscription.subscription_id,
-            business_day=subscription.next_charge_on,
+            business_day=next_charge_on,
             source_refs=(SourceRef(record.record_id, record.content_hash),),
             formula=(
-                f"days_until(next_charge_on={subscription.next_charge_on.isoformat()}, "
+                f"days_until(next_charge_on={next_charge_on.isoformat()}, "
                 f"as_of={as_of.isoformat()})={days}"
             ),
             value={"amount_cents": subscription.amount.cents, "days_remaining": days},
             suggestion=(
-                f"{subscription.merchant} 将在 {subscription.next_charge_on.isoformat()} "
+                f"{subscription.merchant} 将在 {next_charge_on.isoformat()} "
                 "自动续费，建议确认是否继续。"
             ),
             updated_at=updated_at,

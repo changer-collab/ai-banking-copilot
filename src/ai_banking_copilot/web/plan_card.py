@@ -17,6 +17,7 @@ from typing import Protocol
 
 from ai_banking_copilot.contracts.authorization import Decision, Level
 from ai_banking_copilot.contracts.plan import Plan, PlanNode, cfhash, validate_plan
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money
@@ -441,10 +442,15 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
         start = _str_param(node, "start")
         end = _str_param(node, "end")
         if account_id is not None and start is not None and end is not None:
-            large = bills.large_transactions(
-                gateway, account_id, date.fromisoformat(start), date.fromisoformat(end)
+            start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
+            rows = gateway.transactions_between(account_id, start_date, end_date)
+            large = bills.large_transactions(gateway, account_id, start_date, end_date)
+            # 先摊开区间总笔数，再给大额口径：只报「未发现大额」会让用户误以为
+            # 系统回答了他问的那一笔；具体是否匹配由会话层的查询答复另给。
+            return (
+                f"账户 {account_id}：区间交易 {len(rows)} 笔；"
+                f"{bills.describe_large_transactions(large)}"
             )
-            return f"账户 {account_id}：{bills.describe_large_transactions(large)}"
     payee_id = _str_param(node, "payee_id")
     if payee_id is not None:
         try:
@@ -459,7 +465,16 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
             product = gateway.wealth_product(product_id).payload
         except GatewayNotFoundError:
             return f"理财产品 {product_id}"
-        return f"{product.name}（{product.risk_level}）"
+        label = f"{product.name}（{product.risk_level}）"
+        account_id = _str_param(node, "account_id")
+        if account_id is not None and node.action in {"wealth.subscribe", "wealth.redeem"}:
+            try:
+                account = gateway.account(account_id).payload
+            except GatewayNotFoundError:
+                return f"{label} · 账户 {account_id}"
+            kind = _ACCOUNT_KIND_LABELS.get(account.kind, account.kind)
+            return f"{label} · {kind}账户"
+        return label
     if node.action == "subscription.cancel":
         subscription_id = _str_param(node, "subscription_id")
         if subscription_id is not None:
@@ -522,8 +537,20 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
     if node.action == "subscription.list":
         user_id = _str_param(node, "user_id")
         if user_id is not None:
-            upcoming = subscriptions.upcoming_charges(gateway, user_id)
-            if upcoming:
+            report = subscriptions.subscription_report(
+                gateway, user_id, as_of=DEFAULT_BOOKING_DATE
+            )
+            upcoming = sorted(
+                (
+                    item
+                    for item in report.insights
+                    if item.agreement_status == subscriptions.AGREEMENT_ACTIVE
+                    and item.next_charge_on is not None
+                    and item.next_charge_on > DEFAULT_BOOKING_DATE
+                ),
+                key=lambda item: item.next_charge_on or date.max,
+            )
+            if upcoming and upcoming[0].next_charge_on is not None:
                 return upcoming[0].next_charge_on.isoformat()
             return "—"
     booked_on = _str_param(node, "booked_on")
@@ -532,9 +559,19 @@ def _when_label(node: PlanNode, gateway: FactGateway) -> str:
     subscription_id = _str_param(node, "subscription_id")
     if subscription_id is not None:
         try:
-            return gateway.subscription(subscription_id).payload.next_charge_on.isoformat()
+            record = gateway.subscription(subscription_id)
         except GatewayNotFoundError:
             return "—"
+        report = subscriptions.subscription_report(
+            gateway, record.payload.user_id, as_of=DEFAULT_BOOKING_DATE
+        )
+        item = next(
+            (row for row in report.insights if row.subscription_id == subscription_id),
+            None,
+        )
+        if item is not None and item.next_charge_on is not None:
+            return item.next_charge_on.isoformat()
+        return "—"
     return "—"
 
 

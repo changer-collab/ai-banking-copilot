@@ -12,7 +12,7 @@ import calendar
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from ai_banking_copilot.contracts.plan import (
@@ -223,7 +223,8 @@ class BillsHandler(ScenarioHandler):
             )
         if account_txn:
             year, month = _period(intents)
-            start, end = _month_range(year, month)
+            month_start, month_end = _month_range(year, month)
+            start, end = _transaction_range(account_txn) or (month_start, month_end)
             account_ids: list[str] = []
             for intent in account_txn:
                 if "account" in intent.slots or "account_id" in intent.slots:
@@ -441,6 +442,42 @@ def _previous_month(year: int, month: int) -> tuple[int, int]:
 def _month_range(year: int, month: int) -> tuple[date, date]:
     _, last_day = calendar.monthrange(year, month)
     return date(year, month, 1), date(year, month, last_day)
+
+
+_LAST_WEEK = re.compile(r"上周")
+
+_THIS_WEEK = re.compile(r"本周|这周")
+_RECENT_WEEK = re.compile(r"最近(?:一周|7天|七天)")
+_YESTERDAY = re.compile(r"昨天")
+_DAY_BEFORE = re.compile(r"前天")
+
+
+def _transaction_range(intents: Sequence[Intent]) -> tuple[date, date] | None:
+    """交易明细的相对区间（确定性、零模型）：上周 / 本周 / 最近一周 / 昨天 / 前天。
+
+    只覆盖 `account.transactions` 的原话时间词；没命中就返回 `None`，调用方沿用
+    账期区间。基准日与账单场景同源（`DEFAULT_BOOKING_DATE`），不读系统时钟。
+    """
+    for intent in intents:
+        span = intent.slots.get("span")
+        if not isinstance(span, str):
+            continue
+        today = DEFAULT_BOOKING_DATE
+        this_monday = today - timedelta(days=today.weekday())
+        last_monday = this_monday - timedelta(days=7)
+        if _LAST_WEEK.search(span) is not None:
+            return last_monday, last_monday + timedelta(days=6)
+        if _THIS_WEEK.search(span) is not None:
+            return this_monday, today
+        if _RECENT_WEEK.search(span) is not None:
+            return today - timedelta(days=6), today
+        if _DAY_BEFORE.search(span) is not None:
+            day = today - timedelta(days=2)
+            return day, day
+        if _YESTERDAY.search(span) is not None:
+            day = today - timedelta(days=1)
+            return day, day
+    return None
 
 
 def _chosen_category(intents: Sequence[Intent], summary: BillSummary) -> str:

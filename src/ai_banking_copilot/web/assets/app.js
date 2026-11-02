@@ -108,6 +108,7 @@ const state = {
   operationUnknown: false,
   insights: [],
   wealth: { products: [], holdings: [] },
+  wealthCompare: [],
   cards: [],
   bills: null,
   billsPeriod: null,
@@ -118,6 +119,7 @@ const state = {
   billsHighlightTxn: "",
   pendingBillLead: null,
   billCategoryTarget: null,
+  answerNote: "",
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -145,16 +147,19 @@ function yuan(cents) {
    绿卡（纯查询）、转人工、拒绝一律不显示——只透结论性数字（min 后的有效阈值），不解释来源。 */
 function quotaHtml(card) {
   if (card.level !== "YELLOW" && card.level !== "RED") return "";
+  /* 当日额度只属于转账：理财申购 / 冻结 / 下单没有「本人当日限额」这条口径，
+     挂上去会让用户把转账阈值误读成理财限额（实测截图里就出现了 1000 / 已用 4000）。 */
+  const transfer = (card.nodes || []).some(
+    (node) => String((node && node.action) || "").startsWith("transfer."),
+  );
+  if (!transfer) return "";
   const limit = card.daily_limit_cents;
   const used = card.daily_accumulated_cents;
   if (typeof limit !== "number" || typeof used !== "number") return "";
   const remaining = limit - used;
   /* 转账的 1000 元是黄/红分档阈值，不是硬限额：用「免验证额度」表述，
      避免出现「已超额却仍可验证执行」的口径冲突。 */
-  const transfer = (card.nodes || []).some(
-    (node) => String((node && node.action) || "").startsWith("transfer."),
-  );
-  const limitLabel = transfer ? "免验证额度" : "本人当日限额";
+  const limitLabel = "免验证额度";
   const head = `${limitLabel} <b class="quota__val">${yuan(limit)}</b> · 已用 <b class="quota__val">${yuan(used)}</b>`;
   if (remaining < 0) {
     const overLabel = transfer ? "超出" : "已超额";
@@ -603,114 +608,190 @@ function wealthGradeHtml(assessment) {
         usedUp ? " disabled" : ""}>${esc(retakeText)}</button>
     </div>
     ${demoNote}${limitNote}${expiryNote}
-    <p class="muted wealth-grade__warn">依据《金融机构产品适当性管理办法》第二十九条；演示环境按模拟数据日计数。</p>
+    <p class="muted wealth-grade__warn">依据《金融机构产品适当性管理办法》第二十九条。</p>
   </div>`;
 }
 
-/* 产品卡可展开解释：文案与图谱路径全部来自服务端
-   （`/api/wealth/overview` 的 `products[*].explanation`），前端只渲染、不生成任何数字。 */
-function wealthWhyHtml(item) {
-  const why = item.explanation;
-  if (!why || !why.title) return "";
-  const reasons = (why.reasons || []).map((text) => `<li>${esc(text)}</li>`).join("");
-  const path = (why.path || []).map((step) => esc(step)).join(" → ");
-  return `<details class="wealth-why">
-    <summary>${esc(why.title)}</summary>
-    <ul>${reasons}</ul>
-    ${path ? `<p class="muted">知识图谱路径：${path}</p>` : ""}
-    <p class="muted"><span class="tech">${esc(why.data_source || "")}</span> · 只读解释，不含业绩承诺</p>
-  </details>`;
-}
-
-/* 产品行：**只做展示**，金额输入与直接申购已移除；交易统一进确认弹窗。
-   披露字段全部来自服务端；缺数据的产品标「暂不可售」，不估算、不隐藏。 */
+/* 产品卡只保留五要素：名称+风险/类别、业绩比较基准+期限+起购、一句「为什么选它」、
+   产品详情/立即申购。费率、流动性、净值图、登记编码全部进右侧详情抽屉。
+   不可买产品只保留一个「为什么不能买」，并给出重新测评/查看匹配产品的出路。 */
 function wealthWhyNotBuyHtml(item) {
-  const assessment = (state.wealth && state.wealth.assessment) || {};
-  const level = assessment.risk_profile || "未测评";
-  const expires = assessment.expires_on || "—";
   if (item.reason_code === "DISCLOSURE_INCOMPLETE") {
     return `<details class="wealth-why">
       <summary>为什么不能买</summary>
-      <p>${esc(item.reason || "信息披露不完整")}</p>
-      <p class="muted">当前只做提示：请查看产品详情里的缺失字段，或联系客服。演示环境不提供申购入口。</p>
-      <p class="muted">演示环境：登记编码/费率/流动性/评级均为演示数据。</p>
+      <p>产品披露信息不完整，暂不可售；可点「产品详情」查看缺失字段。</p>
     </details>`;
   }
   return `<details class="wealth-why">
     <summary>为什么不能买</summary>
-    <p>当前测评等级：<b>${esc(level)}</b> · 有效期至 ${esc(expires)}</p>
-    <p>${esc(item.reason || "等级或状态不匹配")}</p>
-    <p class="muted">可以：① 重新测评；② 查看与你当前等级匹配的产品；③ 联系客服。</p>
+    <p>按当前测评等级不能买。可以重新测评，或查看与你当前等级匹配的产品。</p>
     <div class="btn-row">
       <button class="btn btn--sm" type="button" data-wealth-retake>重新测评</button>
-      <button class="btn btn--sm" type="button" data-wealth-matched>查看匹配产品</button>
-      <span class="muted">客服：演示环境未接入在线客服</span>
+      <button class="btn btn--sm" type="button" data-wealth-matched="${esc(item.category || "")}">查看可买的同类产品</button>
     </div>
   </details>`;
 }
 
-function wealthProductHtml(item) {
+function wealthProductHtml(item, options) {
+  const opts = options || {};
   const disabled = item.eligible !== true;
-  const minText = yuan(Math.round((Number(item.min_amount_yuan) || 0) * 100));
-  const incrementText = item.increment_yuan && item.increment_yuan !== "未知"
-    ? `${item.increment_yuan} 元`
-    : "未知";
-  const fees = item.fees || {};
-  const liquidity = item.liquidity || {};
-  const issuer = item.issuer_risk_level;
-  const seller = item.seller_risk_level;
-  const riskChips = issuer && seller && issuer !== seller
-    ? `<span class="chip">发行 ${esc(issuer)}</span><span class="chip">销售 ${esc(seller)}</span>`
-    : "";
+  const minValue = Number(item.min_amount_yuan);
+  const minText = Number.isFinite(minValue) ? yuan(Math.round(minValue * 100)) : "未知";
+  const termValue = Number(item.term_days);
+  const termText = Number.isFinite(termValue)
+    ? (termValue === 0 ? "期限 0 天（随时申赎）" : `期限 ${termValue} 天`)
+    : "期限未知";
+  const benchmark = String(item.benchmark_label || "业绩比较基准未知")
+    .replace("（模拟）", " ")
+    .replace(/\s+/g, " ")
+    .trim() || "业绩比较基准未知";
+  const rawPick = disabled
+    ? String(item.reason || "当前不可买")
+    : String(item.advantage_line || item.recommend_reason || "风险等级与你的测评匹配");
+  const pick = /[。！？]$/.test(rawPick) ? rawPick : `${rawPick}。`;
+  const detail = `<button class="btn btn--sm" type="button"
+    data-wealth-detail="${esc(item.product_id)}">产品详情</button>`;
   const action = disabled
-    ? '<span class="chip chip--denied">不可买</span>'
-    : `<button class="btn btn--sm" type="button" data-wealth-detail="${esc(item.product_id)}">产品详情</button>`
-      + `<button class="btn btn--sm btn--primary" type="button" data-wealth-subscribe="${esc(item.product_id)}" data-requires-login>立即申购</button>`;
-  return `<article class="wealth-row${disabled ? " wealth-row--off" : ""}">
+    ? `<span class="chip chip--denied">不可买</span>${detail}`
+    : `${detail}<button class="btn btn--sm btn--primary" type="button"
+        data-wealth-subscribe="${esc(item.product_id)}" data-requires-login>立即申购</button>`;
+  return `<article class="wealth-row${disabled ? " wealth-row--off" : ""}"
+    data-wealth-cat-row="${esc(item.category || "")}">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
         <span class="chip">${esc(item.risk_level)}</span>
         ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}
-        ${riskChips}
-        ${item.disclosure_complete === false ? '<span class="chip chip--denied">暂不可售</span>' : ""}</div>
-      <p class="wealth-row__meta">${esc(item.benchmark_label || `业绩比较基准（模拟）${item.yield_bp}bp`)}
-        · ${esc(item.benchmark_note || "业绩比较基准≠实际收益")}</p>
-      <p class="wealth-row__meta">期限 ${esc(item.term_days)} 天 · 起购 ${minText} · 递增 ${esc(incrementText)}</p>
-      <p class="wealth-row__meta">费率：申购 ${esc(fees.subscription || "未知")}
-        · 销售服务 ${esc(fees.service || "未知")}/年
-        · 托管 ${esc(fees.custody || "未知")}/年</p>
-      <p class="wealth-row__meta">流动性：${esc(liquidity.label || "未知")}
-        · 申购截止 ${esc(liquidity.purchase_cutoff || "—")}</p>
-      <p class="wealth-row__meta">登记编码：<span class="mono">${esc(item.registration_code || "未披露")}</span>
-        · ${esc(item.registration_note || "")}
-        <a href="https://www.chinawealth.com.cn/" target="_blank" rel="noopener">中国理财网查询</a></p>
-      <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
-      ${item.reason ? `<p class="wealth-reason">${esc(item.reason)}</p>` : ""}
+        ${item.disclosure_complete === false ? '<span class="chip chip--denied">暂不可售</span>' : ""}
+        <label class="wealth-compare__pick"><input type="checkbox"
+          data-wealth-compare="${esc(item.product_id)}"
+          ${(state.wealthCompare || []).includes(item.product_id) ? "checked" : ""}>对比</label></div>
+      <p class="wealth-row__meta">${esc(benchmark)} ｜ ${esc(termText)} ｜ 起购 ${minText}</p>
+      <p class="${disabled ? "wealth-reason" : "wealth-row__pick"}">${opts.showRecommend ? "<b>推荐理由：</b>" : ""}${esc(pick)}</p>
     </div>
     <div class="wealth-row__act">${action}</div>
     <p class="muted wealth-error" data-wealth-error hidden></p>
-    ${wealthWhyHtml(item)}
     ${disabled ? wealthWhyNotBuyHtml(item) : ""}
   </article>`;
 }
 
-/* 持仓行：只展示份额 / 金额 / 到期日 / 到账口径，右侧只放赎回入口；
-   金额输入已移除，赎回统一进确认弹窗。封闭期内不可赎回时按钮置灰并写原因。 */
+/* 「我要申购理财产品」的推荐视图：服务端已按测评等级硬筛选，前端只做分类过滤。
+   产品卡、详情与申购弹窗全部复用理财页同一套组件，避免两套口径。 */
+function wealthRecommendHtml(payload) {
+  const data = payload || {};
+  const products = Array.isArray(data.products) ? data.products : [];
+  const categories = Array.isArray(data.categories) ? data.categories : [];
+  const cards = products.map((item) => `<div data-wealth-card-cat="${esc(item.category || "未分类")}">
+      ${wealthProductHtml(item, { showRecommend: true })}
+    </div>`).join("");
+  const chips = categories.length
+    ? `<div class="btn-row wealth-recommend__cats">
+        <button class="btn btn--sm" type="button" data-wealth-cat="" aria-pressed="true">全部</button>
+        ${categories.map((item) => `<button class="btn btn--sm" type="button"
+          data-wealth-cat="${esc(item.value)}" aria-pressed="false">${esc(item.label)}</button>`).join("")}
+      </div>`
+    : "";
+  const source = data.data_source ? ` · 数据来源：${esc(data.data_source)}` : "";
+  return `<div class="takeover wealth-recommend">
+    <p class="wealth-invite">${esc(data.message || "先看可申购产品。")}</p>
+    ${chips}
+    <div class="wealth-recommend__list">${cards || `<p class="muted">当前没有可申购产品。</p>
+      <div class="btn-row"><button class="btn btn--sm" type="button" data-wealth-retake>重新测评</button></div>`}</div>
+    <p class="muted">${esc(data.disclaimer || "")}${source}</p>
+  </div>`;
+}
+
+/* 产品对比：勾选 2–3 只，只比事实字段；数据全部来自同一份 `/api/wealth/overview`。 */
+function renderWealthCompareBar() {
+  const bar = el("wealth-compare-bar");
+  if (!bar) return;
+  const ids = state.wealthCompare || [];
+  if (!ids.length) {
+    bar.hidden = true;
+    bar.innerHTML = "";
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = `<span class="wealth-compare-bar__count">已选 ${ids.length}/3 只</span>
+    <button class="btn btn--sm btn--primary" type="button" data-wealth-compare-open
+      ${ids.length < 2 ? "disabled" : ""}>对比</button>
+    <button class="btn btn--sm btn--ghost" type="button" data-wealth-compare-clear>清空</button>`;
+}
+
+function wealthCompareHtml(products) {
+  const facts = [
+    ["风险等级", (item) => item.risk_level || "—"],
+    ["业绩比较基准", (item) => String(item.benchmark_label || "—").replace("（模拟）", " ")],
+    ["期限", (item) => {
+      const term = Number(item.term_days);
+      return Number.isFinite(term) ? (term === 0 ? "0 天（随时申赎）" : `${term} 天`) : "—";
+    }],
+    ["起购", (item) => (item.min_amount_yuan ? `¥${item.min_amount_yuan}` : "—")],
+    ["费率", (item) => {
+      const fees = item.fees || {};
+      return `申购 ${fees.subscription || "未知"} · 销售服务 ${fees.service || "未知"}/年 · 托管 ${fees.custody || "未知"}/年`;
+    }],
+    ["流动性", (item) => (item.liquidity && item.liquidity.label) || "未知"],
+  ];
+  const head = products.map((item) =>
+    `<th>${esc(item.name)}<span class="chip">${esc(item.risk_level || "—")}</span></th>`
+  ).join("");
+  const body = facts.map(([label, read]) =>
+    `<tr><th>${label}</th>${products.map((item) => `<td>${esc(read(item) || "—")}</td>`).join("")}</tr>`
+  ).join("");
+  return `<div class="wealth-compare">
+    <header class="wealth-compare__head"><b>产品对比</b>
+      <button class="btn btn--sm btn--ghost" type="button" data-wealth-compare-close>关闭</button></header>
+    <div class="wealth-compare__scroll"><table>
+      <thead><tr><th>对比项</th>${head}</tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function openWealthCompare() {
+  const ids = state.wealthCompare || [];
+  const products = ids
+    .map((id) => (state.wealth.products || []).find((item) => item.product_id === id))
+    .filter(Boolean);
+  if (products.length < 2) return;
+  let dialog = el("wealth-compare-dialog");
+  if (!dialog) {
+    dialog = document.createElement("dialog");
+    dialog.id = "wealth-compare-dialog";
+    dialog.className = "wealth-sheet wealth-compare-dialog";
+    document.body.appendChild(dialog);
+    dialog.addEventListener("click", (event) => {
+      if (event.target.closest("[data-wealth-compare-close]")) closeDialog(dialog);
+    });
+    bindDialogDismiss(dialog);
+  }
+  dialog.innerHTML = wealthCompareHtml(products);
+  dialog.querySelectorAll("[data-wealth-compare-close]").forEach((button) => {
+    button.addEventListener("click", () => closeDialog(dialog));
+  });
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+/* 持仓行：份额 / 最新净值 / 市值 / 累计收益 + 到期或下一开放日 + 赎回入口。
+   净值与收益均来自模拟序列；无净值数据时如实标「未知」，不补 0、不推算。 */
 function wealthHoldingHtml(item) {
-  const maxText = yuan(Math.round((Number(item.amount_yuan) || 0) * 100));
   const redeemable = item.redeemable !== false;
-  const maturity = item.maturity_on || "无固定到期日";
   const shares = item.shares || "—";
+  const navNow = item.nav_now || "未知";
+  const marketValue = item.market_value_yuan ? `¥${item.market_value_yuan}` : "未知";
+  const income = item.income_short || item.current_income || "未知";
+  const nextOpen = item.next_open_on || item.maturity_on || "无固定到期日";
   return `<article class="wealth-row">
     <div class="wealth-row__main">
       <div class="wealth-row__name"><b>${esc(item.name)}</b>
         <span class="chip">${esc(item.risk_level)}</span>
         ${item.category ? `<span class="chip">${esc(item.category)}</span>` : ""}</div>
-      <p class="wealth-row__meta">持有 ${esc(shares)} 份 · 金额 <b>${maxText}</b>
-        · 起息 ${esc(item.purchased_on)} · 到期 ${esc(maturity)}</p>
-      <p class="wealth-row__meta">收益 ${esc(item.current_income)}
+      <p class="wealth-row__meta">持有 ${esc(shares)} 份 · 最新净值 ${esc(navNow)}
+        · 市值 ${esc(marketValue)} · 累计收益（模拟）${esc(income)}</p>
+      <p class="wealth-row__meta">起息 ${esc(item.purchased_on)}
+        · 到期/下一开放日 ${esc(nextOpen)}
         · 到账 ${esc(item.arrival_label || "未知")}</p>
-      <div class="wealth-row__curve">${navSparkHtml(item.nav_series, { empty: "无序列" })}</div>
       ${redeemable ? "" : `<p class="muted wealth-reason">${esc(item.redeem_reason || "封闭期内不可赎回")}</p>`}
     </div>
     <div class="wealth-row__act">
@@ -747,14 +828,9 @@ function holdingsShareHtml(holdings) {
   const rows = holdingsCategoryRows(holdings);
   const total = rows.reduce((sum, row) => sum + row.value, 0);
   if (!total) {
-    const legend = rows.map((row) =>
-      `<li><i class="chart-dot" style="background:${row.color}"></i>` +
-      `<span class="chart-legend__name">${esc(row.label)}</span>` +
-      `<span class="chart-legend__val">¥0.00 · 未持有</span></li>`).join("");
     return `<div class="wealth-viz__block">
       <p class="wealth-viz__k">持仓占比（按大类）</p>
       <p class="muted">当前没有持仓，暂无可计算的占比。</p>
-      <ul class="chart-legend">${legend}</ul>
     </div>`;
   }
   return `<div class="wealth-viz__block">
@@ -765,9 +841,11 @@ function holdingsShareHtml(holdings) {
       stroke: 15,
       empty: "暂无可绘制占比",
       percentDigits: 1,
-      showZeroRows: true,
+      showZeroRows: false,
     })}
-    <p class="muted wealth-viz__note">金额来自本人持仓事实；产品级明细见下方「我的持仓」。</p>
+    <p class="muted wealth-viz__note">金额来自本人持仓事实；
+      <button class="btn btn--sm btn--ghost" type="button" data-scroll-wealth-holdings>查看产品级持仓明细</button>
+    </p>
   </div>`;
 }
 
@@ -844,7 +922,13 @@ function renderWealth(data) {
   };
   wealthRendered = true;
   const status = el("wealth-status");
-  if (status) status.textContent = "测评与持仓已读取";
+  if (status) {
+    const level = assessment.state === "valid" && assessment.risk_profile
+      ? assessment.risk_profile
+      : "未测评";
+    const total = holdingsTotal(payload.holdings || []);
+    status.textContent = `已载入你的风险测评（${level}）与持仓（${yuan(Math.round(total * 100))}）`;
+  }
   const viz = el("wealth-viz");
   if (viz) viz.innerHTML = wealthVizHtml(payload);
   const box = el("wealth-assessment-body");
@@ -875,6 +959,9 @@ function renderWealth(data) {
         <p class="muted">还没有理财申购记录；在上方产品行输入金额申购后，这里会出现持仓。</p>
       </article>`;
   }
+  const validIds = new Set((payload.products || []).map((item) => String(item.product_id)));
+  state.wealthCompare = (state.wealthCompare || []).filter((id) => validIds.has(String(id)));
+  renderWealthCompareBar();
 }
 
 async function refreshWealth() {
@@ -1132,10 +1219,15 @@ function onWealthAction(trigger) {
     timelineAdd("未取到产品编号，请重新加载理财面板后再试。", "stop");
     return;
   }
+  /* 对话内发起：弹窗确认后生成计划卡；理财页发起：沿用页内确认后执行 */
+  const fromChat = Boolean(trigger.closest("#active-response"));
   if (trigger.hasAttribute("data-wealth-redeem")) {
-    return openWealthRedeemSheet({ productId });
+    const holding = ((state.wealth && state.wealth.holdings) || []).find(
+      (item) => String(item.product_id) === String(productId),
+    ) || null;
+    return openWealthRedeemSheet({ productId, holding, fromChat });
   }
-  return openWealthTradeSheet({ mode: "subscribe", productId });
+  return openWealthTradeSheet({ mode: "subscribe", productId, fromChat });
 }
 
 function insightRuleLabel(ruleId) {
@@ -1341,11 +1433,21 @@ function yuanText(cents) {
 
 let lastTransfers = [];
 
+/* 旧服务进程把实时到账的未到记账日条目标成「处理中」；实时/历史渠道一律按已完成显示。
+   新后端已直接给出正确状态，这里只是未重启进程的展示兜底。 */
+function transferDisplayStatus(item) {
+  const method = String((item && item.method) || "");
+  const status = String((item && item.status) || "");
+  if (status === "处理中" && (method === "realtime" || method === "history")) return "已到账";
+  if (status === "处理中" && method === "unknown") return "待到账";
+  return status;
+}
+
 function transferStatusClass(status) {
   const text = String(status || "");
   if (text.includes("已到账")) return "chip chip--green";
   if (text.includes("撤销")) return "chip chip--yellow";
-  if (text.includes("处理中") || text.includes("已发出")) return "chip chip--yellow";
+  if (text.includes("处理中") || text.includes("已发出") || text.includes("待到账")) return "chip chip--yellow";
   return "chip";
 }
 
@@ -1420,7 +1522,7 @@ function renderTransfers(payload) {
       <details>
         <summary>
           <b>${esc(transferPayeeText(item))}</b>
-          <span class="${transferStatusClass(item.status)}">${esc(item.status)}</span>
+          <span class="${transferStatusClass(transferDisplayStatus(item))}">${esc(transferDisplayStatus(item))}</span>
           ${scheduled}${tag}
           <span class="mono">${esc(yuanText(item.amount_cents))}</span>
           <span class="muted">${esc(item.booked_on)}</span>
@@ -1613,6 +1715,12 @@ function isWealthCard(card) {
   return Boolean(card && (card.nodes || []).some(
     (node) => String(node.action || "").startsWith("wealth.")
   ));
+}
+
+/* 申购弹窗已经收过交易信息：计划卡直接走「获取验证码 / 确认并执行」，
+   不再二次打开弹窗（否则弹窗确认后又要回弹窗执行）。 */
+function wealthSheetHandled(card) {
+  return Boolean(card && card.sheet_done === true);
 }
 
 /* 卡片域写操作：对话里仍可生成计划，但确认与强验证统一收口到卡片弹窗（AI 不代执行）。 */
@@ -2563,9 +2671,13 @@ function subscriptionCardHtml(item, index) {
   const next = item.next_charge_on
     ? `${esc(item.next_charge_on)}${item.next_charge_state === "overdue" ? "（已逾期）" : "（推算）"}`
     : "未提供";
+  const windowText = item.window_charged_total_cents == null
+    ? ""
+    : ` · 近 ${Number(item.charge_window) || 12} 期 ${Number(item.window_charge_count) || 0} 笔 `
+      + yuan(item.window_charged_total_cents);
   const total = item.charged_total_cents == null
     ? "累计扣款数据不足"
-    : `已扣 ${Number(item.charge_count) || 0} 期 ${yuan(item.charged_total_cents)}`;
+    : `已扣 ${Number(item.charge_count) || 0} 期 ${yuan(item.charged_total_cents)}${windowText}`;
   const typeChip = item.agreement_type_label
     ? `<span class="chip chip--muted">${esc(item.agreement_type_label)}</span>` : "";
   const state = cancelled ? '<span class="chip">已解约</span>'
@@ -2621,12 +2733,17 @@ function subscriptionBasisHtml(item) {
     : `累计 ${Number(item.charge_count) || 0} 期 ${yuan(item.charged_total_cents)}`;
   const charges = (item.evidence || []).slice(0, 12).map((txn) =>
     `<li><span class="mono">${esc(txn.booked_on)} · ${yuan(Math.abs(txn.amount_cents))}</span>
-      <span class="tech">渠道 ${esc(txn.channel || "—")} · 卡尾号 ${esc(txn.card_tail || "—")} ·
-      ${esc(txn.record_id)}</span></li>`).join("");
+      <span class="tech">渠道 ${esc(txn.channel || "—")} ·
+      付款账户 ${esc(txn.payment_account_label || (txn.card_tail ? `尾号 ${txn.card_tail}` : "未提供"))} ·
+      ${esc(txn.record_no || txn.txn_id || txn.record_id)}</span></li>`).join("");
+  const nonSettlement = (item.evidence || []).filter(
+    (txn) => txn.is_settlement === false
+  );
   return `<p class="sub-detail__lead">${esc(item.merchant)} ·
       ${esc(item.agreement_type_label || "类型未知")} · 协议 ${esc(item.agreement_no || "未匹配")}</p>
     <p>签约 ${esc(item.signed_on || "未知")} · ${total} · 最近扣款 ${esc(item.last_charged_on || "未知")}</p>
     <p>${price}</p>
+    ${nonSettlement.length ? `<p class="sub-card__recon sub-card__recon--bad">有 ${nonSettlement.length} 笔扣款来自非结算账户（储蓄账户或信用卡），请核对代扣协议绑定账户。</p>` : ""}
     <p class="muted">下次扣款 ${esc(item.next_charge_on || "未知")}
       ${item.next_charge_on ? "（推算）" : ""} · 置信度 ${esc(confidenceLabel(item.confidence))}</p>
     ${item.agreement_status === "cancelled" ? agreementReconHtml(item) : ""}
@@ -3969,7 +4086,6 @@ const FINDING_LABELS = {
   "late-night": "深夜交易",
   "remote-city": "异地交易",
 };
-const FINDING_STATUS = { confirmed: "已确认", suspected: "疑似", normal: "正常" };
 const LEAD_STATE_LABELS = { normal: "确认正常", abnormal: "标记异常", ignored: "已忽略" };
 const LEAD_STATE_ACTION_LABELS = { normal: "确认正常", abnormal: "标记异常", ignored: "忽略" };
 
@@ -3986,7 +4102,8 @@ function billTierLabel(tier) {
 function findingEvidenceHtml(item) {
   const rows = (item.evidence || []).map((evidence) => {
     const moment = evidence.booked_at ? String(evidence.booked_at).slice(11, 16) : "";
-    return `<li>${esc(evidence.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(evidence.city || "地点未知")} · ${esc(evidence.merchant_label)} · ${yuan(evidence.amount_cents)}</li>`;
+    const recordNo = evidence.record_no || evidence.txn_id || "";
+    return `<li>${esc(evidence.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(evidence.city || "地点未知")} · ${esc(evidence.merchant_label)} · ${yuan(evidence.amount_cents)}${recordNo ? ` · <span class="tech">${esc(recordNo)}</span>` : ""}</li>`;
   }).join("");
   return rows ? `<ul class="evidence">${rows}</ul>` : "";
 }
@@ -3998,6 +4115,7 @@ function leadBasisHtml(lead) {
     <p class="muted">规则：${esc(basis.rule || "—")}</p>
     <p class="muted">阈值：${esc(basis.threshold || "—")}</p>
     <p>${esc(basis.detail || "")}</p>
+    <p class="muted">影响口径：${esc(basis.impact_basis || "—")}</p>
     <p class="muted">${esc(basis.assumption || "")}</p>
   </li>`).join("");
   return rows ? `<ul class="lead-basis">${rows}</ul>` : "";
@@ -4045,27 +4163,34 @@ function leadHtml(lead) {
   </details>`;
 }
 
-/* 识别线索：按交易去重后分层展示；<50% 不在这里出现。 */
-function billsFindingsHtml(payload) {
+/* 识别线索：账单页与可疑清单共用同一份 `leads` 与同一套分层/操作。 */
+function leadsBlockHtml(payload) {
   const leads = payload.leads || [];
   const key = leads.filter((lead) => lead.tier === "key");
   const more = leads.filter((lead) => lead.tier === "more");
   const resolved = leads.filter((lead) => lead.tier === "resolved");
   const empty = !key.length && !more.length
-    ? '<p class="muted">本期没有高置信待核对线索。识别结果仅供核对，不作最终结论。</p>'
+    ? '<p class="muted">本期没有待核对的风险线索。识别结果仅供核对，不作最终结论。</p>'
     : "";
   return `<section class="bills-leads-block">
     <div class="scene-head">
       <p class="panel__title panel__title--sub">重点核对（${key.length}）</p>
-      <span class="muted">置信度 ≥70% 才进入这里</span>
+      <span class="muted">置信度 ≥70% 且金额 ≥¥5 才进入这里；标记异常不受此限</span>
     </div>
     ${key.length ? key.map(leadHtml).join("") : empty}
     ${more.length ? `<details class="bills-more bills-more--inline">
       <summary>更多线索（${more.length} 条 · 50%–70%）</summary>
       ${more.map(leadHtml).join("")}
     </details>` : ""}
-    ${resolved.length ? `<p class="muted bills-resolved">已核对 ${resolved.length} 条，不再重复提示。</p>` : ""}
+    ${resolved.length ? `<details class="bills-more bills-more--inline bills-resolved">
+      <summary>已核对（${resolved.length} 条 · 已归档，不再重复提示）</summary>
+      ${resolved.map(leadHtml).join("")}
+    </details>` : ""}
   </section>`;
+}
+
+function billsFindingsHtml(payload) {
+  return leadsBlockHtml(payload);
 }
 
 function billsTableHtml(payload) {
@@ -4529,6 +4654,11 @@ async function setBillLeadState(leadId, period, leadState) {
     return;
   }
   await refreshBills();
+  /* 可疑清单是账单页的同源视图：核对后同步重拉，避免两页状态分裂。 */
+  const recordsView = el("view-records");
+  if (currentRecordTab === "suspicions" && recordsView && !recordsView.hidden) {
+    await renderRecordsTab("suspicions");
+  }
 }
 
 function askBillLead(leadId) {
@@ -5288,6 +5418,7 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
     </div>` : ""}
 
     ${quotaHtml(card)}
+    ${sheetFieldsHtml(card)}
 
     ${previewHtml(card, reasons)}
 
@@ -5305,6 +5436,20 @@ function voucherHtml(card = state.card, decision = state.decision, options = {})
   </article>`;
 }
 
+/* 申购弹窗填写的交易信息：计划卡上方原样回显，保证「卡上字段 = 弹窗填写值」 */
+function sheetFieldsHtml(card) {
+  const fields = card && card.sheet_fields;
+  if (!fields) return "";
+  return `<div class="takeover takeover--note" style="margin-bottom: var(--s-3)">
+    <p class="muted">本次申购信息 · 与申购弹窗填写一致</p>
+    <p><b>${esc(fields.product || "")}</b>
+      ${fields.risk ? `<span class="chip">${esc(fields.risk)}</span>` : ""}</p>
+    <p>申购金额 <b>${esc(String(fields.amount || "—"))} 元</b>
+      · 交易账户 ${esc(fields.account || "—")}</p>
+    <p>分红方式 ${esc(fields.dividend || "—")}</p>
+  </div>`;
+}
+
 /* 历史里的执行回执：与实时回执同一视觉，只读；没有结果行就只留一句结论 */
 function receiptSnapshotHtml(receipt, stamp) {
   const info = receipt || {};
@@ -5318,6 +5463,15 @@ function receiptSnapshotHtml(receipt, stamp) {
     <p class="receipt__title"><span class="receipt__tick" aria-hidden="true">${completed ? "✓" : "!"}</span>${esc(info.message || "执行回执")}</p>
     ${lines.length ? `<ul class="receipt__list">${lines.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
     ${meta ? `<p class="muted history-receipt__meta">${esc(meta)}</p>` : ""}
+  </div>`;
+}
+
+/* 查询答复：服务端确定性给出的「查到 / 没查到」结论，挂在计划卡或回执上方 */
+function answerNoteHtml(note) {
+  if (!note) return "";
+  return `<div class="takeover takeover--note" style="margin-bottom: var(--s-3)">
+    <p class="muted">查询答复</p>
+    <p>${esc(note)}</p>
   </div>`;
 }
 
@@ -5360,11 +5514,12 @@ function renderStage() {
   const runChain = state.response.querySelector(".run-chain");
   const inReview = Boolean(state.review)
     && (state.phase === "review" || state.phase === "review-edit");
+  const note = answerNoteHtml(state.answerNote);
   state.response.innerHTML = inReview
     ? reviewHtml() + state.notice
     : state.card
-      ? voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
-      : (state.panel || "") + state.notice;
+      ? note + voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
+      : note + (state.panel || "") + state.notice;
   if (runChain) {
     /* 三分类 / 澄清回合没有可执行计划：运行链路里的「已拒绝 · 未执行」只会让人误以为被风控拦了 */
     runChain.hidden = Boolean(state.triage) || (state.phase === "blocked" && !state.decision);
@@ -5687,7 +5842,7 @@ function setButtons() {
   const expired = !Number.isNaN(cardExpiresAt) && Date.now() >= cardExpiresAt;
   el("btn-confirm").textContent = expired
     ? "计划已过期 · 重新发起"
-    : isWealthCard(state.card)
+    : isWealthCard(state.card) && !wealthSheetHandled(state.card)
       ? "打开交易确认"
       : isCardWriteCard(state.card)
         ? "打开操作确认"
@@ -5717,6 +5872,7 @@ function reset(keepUtterance) {
   state.questions = [];
   state.stepStates = [];
   state.nodeStatus = {};
+  state.answerNote = "";
   state.phase = "idle";
   state.chain = [];
   state.panel = "";
@@ -5749,6 +5905,8 @@ function renderPresets() {
 async function applySubmission(data) {
   showModelMetadata(data.model);
   markRunOutcome(data.state);
+  /* 查询答复（如「未查询到该笔交易」）：服务端确定性给出，挂在卡/回执上方一起展示 */
+  state.answerNote = String(data.answer_note || "");
   if (data.state === "awaiting_confirm" && data.card) {
     state.card = data.card;
     state.decision = data.decision || null;
@@ -5812,6 +5970,14 @@ async function applySubmission(data) {
     </div>`;
     renderStage();
     timelineAdd("风险测评 · 已下发 5 道题（答完由服务端算分定级）", "done");
+    return;
+  }
+  if (data.state === "idle" && data.wealth_recommend) {
+    /* 「我要申购理财产品」：先按测评等级推荐，不先问金额；仍用理财页同一套产品卡 */
+    state.phase = "idle";
+    state.panel = wealthRecommendHtml(data.wealth_recommend);
+    renderStage();
+    timelineAdd("理财推荐 · 按测评等级硬筛选（只读，不生成计划）", "done");
     return;
   }
   if (data.state === "idle") {
@@ -6175,7 +6341,7 @@ async function runReviewSave() {
 async function onConfirm() {
   if (!state.card) return;
   state.historyRestored = false;
-  if (isWealthCard(state.card)
+  if (isWealthCard(state.card) && !wealthSheetHandled(state.card)
     && (state.phase === "awaiting_confirm" || state.phase === "strong-verify")) {
     /* 理财交易统一进确认弹窗：弹窗负责四件套、份额/金额、验证码与二次确认。 */
     const redeem = (state.card.nodes || []).some((node) => node.action === "wealth.redeem");
@@ -6397,7 +6563,16 @@ function executionFailureHtml(data) {
 
 function applyExecution(data) {
   showModelMetadata(data.model);
-  if (data.card) state.card = data.card;
+  if (data.card) {
+    /* 同一张计划卡的服务端回执不带前端标记：保留「弹窗已确认」状态与回显字段，
+       否则执行/恢复后按钮会退回「打开交易确认」。 */
+    const previous = state.card;
+    if (previous && previous.card_id === data.card.card_id && previous.sheet_done) {
+      data.card.sheet_done = true;
+      data.card.sheet_fields = previous.sheet_fields;
+    }
+    state.card = data.card;
+  }
   if (data.decision) state.decision = data.decision;
   if (data.state === "awaiting_confirm") state.verification = null;
   renderSubscriptionCancel(data.subscription_cancel);
@@ -8509,13 +8684,46 @@ document.addEventListener("click", async (event) => {
     renderInsightCards();
     return;
   }
+  if (target.closest("[data-wealth-cat]")) {
+    /* 推荐视图的分类筛选：只隐藏卡片，不改服务端结果 */
+    const chip = target.closest("[data-wealth-cat]");
+    const cat = chip.dataset.wealthCat || "";
+    document.querySelectorAll("[data-wealth-cat]").forEach((node) => {
+      node.setAttribute("aria-pressed", node === chip ? "true" : "false");
+    });
+    document.querySelectorAll("[data-wealth-card-cat]").forEach((row) => {
+      row.hidden = Boolean(cat) && row.dataset.wealthCardCat !== cat;
+    });
+    return;
+  }
+  if (target.closest("[data-wealth-compare-open]")) {
+    openWealthCompare();
+    return;
+  }
+  if (target.closest("[data-wealth-compare-clear]")) {
+    state.wealthCompare = [];
+    document.querySelectorAll("[data-wealth-compare]").forEach((input) => {
+      input.checked = false;
+    });
+    renderWealthCompareBar();
+    return;
+  }
+  if (target.closest("[data-scroll-wealth-holdings]")) {
+    const section = el("wealth-holdings");
+    const anchor = section && section.previousElementSibling ? section.previousElementSibling : section;
+    if (anchor) anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
   if (target.closest("[data-wealth-detail]")) {
     const node = target.closest("[data-wealth-detail]");
-    openWealthProductDetail(node.dataset.wealthDetail).catch(() => {});
+    openWealthProductDetail(node.dataset.wealthDetail, {
+      fromChat: Boolean(node.closest("#active-response")),
+    }).catch(() => {});
     return;
   }
   if (target.closest("[data-wealth-matched]")) {
-    focusMatchedWealthProducts();
+    const node = target.closest("[data-wealth-matched]");
+    focusMatchedWealthProducts(node.dataset.wealthMatched || "");
     return;
   }
   const trigger = target.closest("[data-wealth-subscribe], [data-wealth-redeem]");
@@ -8531,10 +8739,39 @@ document.addEventListener("click", async (event) => {
   }
 });
 
-function focusMatchedWealthProducts() {
-  const rows = Array.from(
-    document.querySelectorAll("#wealth-products .wealth-row:not(.wealth-row--off)")
-  );
+document.addEventListener("change", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const input = target ? target.closest("[data-wealth-compare]") : null;
+  if (!input) return;
+  const id = input.dataset.wealthCompare || "";
+  if (!id) return;
+  const selected = new Set(state.wealthCompare || []);
+  if (input.checked) {
+    if (selected.size >= 3) {
+      input.checked = false;
+      return;
+    }
+    selected.add(id);
+  } else {
+    selected.delete(id);
+  }
+  state.wealthCompare = Array.from(selected);
+  renderWealthCompareBar();
+});
+
+function focusMatchedWealthProducts(category) {
+  const selector = category
+    ? `#wealth-products .wealth-row[data-wealth-cat-row="${category}"]:not(.wealth-row--off)`
+    : "#wealth-products .wealth-row:not(.wealth-row--off)";
+  let rows = Array.from(document.querySelectorAll(selector));
+  if (!rows.length && category) {
+    rows = Array.from(
+      document.querySelectorAll("#wealth-products .wealth-row:not(.wealth-row--off)")
+    );
+    if (rows.length) {
+      timelineAdd("同类暂无可买产品，已标出当前可买的其他产品。", "warn");
+    }
+  }
   if (!rows.length) {
     timelineAdd("当前等级下没有匹配产品，请先重新测评或联系客服。", "warn");
     return;
@@ -8592,9 +8829,9 @@ const SCENES = {
   },
   wealth: {
     title: "理财",
-    sub: "风险测评 → 适当性 → 申购 / 赎回；超等级产品灰显并写原因。",
-    short: "测评、按等级灰显与持仓",
-    prefill: "查余额",
+    sub: "先看适合你的产品，也可以赎回已有持仓。",
+    short: "选产品、看持仓、申购赎回",
+    prefill: "我想买理财，帮我推荐几只适合的",
   },
   cards: {
     title: "卡片",
@@ -8628,6 +8865,21 @@ function renderHomeSceneList() {
     </button>`;
   }).join("");
 }
+/* 旧服务进程的 HTML 还没有「账单明细」tab：脚本补一个，避免必须重启才能看到。
+   新服务端已自带该 tab，这里等价 no-op。 */
+function ensureRecordBillsTab() {
+  const tabs = el("records-tabs");
+  if (!tabs || tabs.querySelector('[data-record-tab="bills"]')) return;
+  const button = document.createElement("button");
+  button.className = "tab";
+  button.type = "button";
+  button.setAttribute("role", "tab");
+  button.dataset.recordTab = "bills";
+  button.setAttribute("aria-selected", "false");
+  button.textContent = "账单明细";
+  tabs.insertBefore(button, tabs.firstChild);
+}
+ensureRecordBillsTab();
 renderHomeSceneList();
 
 /* 首页余额卡：分与元的格式化只做展示，数值一律来自服务端；读不到就保持「—」。 */
@@ -8651,7 +8903,8 @@ async function refreshHomeBalance() {
     const centsOf = (item) => Number(item.balance_cents) || 0;
     const total = accounts.reduce((sum, item) => sum + centsOf(item), 0);
     const current = accounts
-      .filter((item) => String(item.label || "").includes("活期"))
+      .filter((item) => item.kind === "current"
+        || String(item.label || "").includes("活期"))
       .reduce((sum, item) => sum + centsOf(item), 0);
     const limit = (cards.cards || []).reduce(
       (sum, card) => sum + (Number(card.daily_limit_cents) || 0),
@@ -8668,27 +8921,43 @@ async function refreshHomeBalance() {
 void refreshHomeBalance();
 
 const RECORD_TABS = {
+  bills: { label: "账单明细", hint: "与账单分析页同源的消费明细；转账 / 还款不计入消费，见转账记录。" },
   transfers: { label: "转账记录", hint: "每笔含收款人（脱敏）、账号尾号、方式、手续费、状态与用途；可再转一笔。" },
   holdings: { label: "持仓", hint: "理财申购后的持仓（产品 / 金额 / 起息日）；无净值数据时收益标「未知」。" },
   cards: { label: "卡片状态", hint: "锁卡 / 挂失 / 补卡后的最新状态与可执行动作。" },
-  suspicions: { label: "可疑清单", hint: "账单异常标记、置信度与「不当作已确认」的免责说明。" },
-  charges: { label: "扣款记录", hint: "订阅扣款证据：商户 / 金额 / 时间 / 渠道 / 记录号。" },
+  suspicions: { label: "可疑清单", hint: "只显示待核对的风险线索；按置信度分层，可确认正常 / 标记异常 / 忽略。" },
+  charges: { label: "扣款记录", hint: "代扣 / 自动续费流水；近 12 期与全量汇总同源。" },
 };
 
 const RECORD_TAB_LOADERS = {
+  bills: () => {
+    const request = billsRequestQuery();
+    return apiFetch("GET", `/api/bills/analysis${request.query}`);
+  },
   transfers: () => apiFetch("GET", "/api/transfers"),
   holdings: () => apiFetch("GET", "/api/wealth/overview"),
   cards: () => apiFetch("GET", "/api/cards"),
-  suspicions: () => apiFetch("GET", "/api/bills/analysis"),
-  charges: () => apiFetch("GET", "/api/options"),
+  suspicions: () => {
+    const request = billsRequestQuery();
+    return apiFetch("GET", `/api/bills/analysis${request.query}`);
+  },
+  charges: async () => {
+    const result = await apiFetch("GET", "/api/records/charges");
+    if (result.ok || result.status !== 404) return result;
+    /* 兼容尚未重启的旧服务进程：用订阅证据回退，避免整页「读取失败」。 */
+    const legacy = await apiFetch("GET", "/api/options");
+    if (!legacy.ok) return result;
+    return { status: 200, ok: true, data: legacyChargePayload(legacy.data) };
+  },
 };
 
 const RECORD_HEADERS = {
+  bills: ["时间", "商户", "分类", "MCC", "地点", "金额"],
   transfers: ["记账日", "收款人", "金额", "方式", "状态", "用途", "记录号", "详情"],
   holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益"],
   cards: ["卡号", "类型", "状态", "日限额"],
-  suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户"],
-  charges: ["商户", "金额", "扣费日", "扣款账户", "记录号"],
+  suspicions: [],
+  charges: ["时间", "类型", "商户", "金额", "方向", "付款账户", "状态", "记录号"],
 };
 
 let recordsRequestToken = 0;
@@ -8734,13 +9003,27 @@ function recordsErrorHtml(message) {
 
 function recordsRowsFor(key, payload) {
   const data = payload || {};
+  if (key === "bills") {
+    /* 与账单分析页 `billsTableHtml` 同一份 payload.transactions，不另算一份。 */
+    return (data.transactions || []).map((item) => {
+      const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
+      return recordsRow([
+        `<span class="mono">${esc(item.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
+        esc(item.merchant_label || "—"),
+        `${esc(item.category_l2 || item.category || "—")} <span class="muted">${esc(item.category || "")}</span>`,
+        esc(item.mcc || "—"),
+        esc(item.city || "—"),
+        `<span class="mono">${yuan(item.amount_cents || 0)}</span>`,
+      ]);
+    });
+  }
   if (key === "transfers") {
     return (data.items || []).map((item) => recordsRow([
       `<span class="mono">${esc(item.booked_on || "—")}</span>`,
       esc(transferPayeeText(item)),
       `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
       esc(item.method_label || "—"),
-      `<span class="${transferStatusClass(item.status)}">${esc(item.status || "—")}</span>`,
+      `<span class="${transferStatusClass(transferDisplayStatus(item))}">${esc(transferDisplayStatus(item) || "—")}</span>`,
       esc(item.purpose_label || item.remark || "—"),
       `<span class="mono">${esc(item.record_id || "—")}</span>`,
       `<details class="records-detail"><summary>详情</summary>
@@ -8775,50 +9058,151 @@ function recordsRowsFor(key, payload) {
       `<span class="mono">${yuan(item.daily_limit_cents || 0)}</span>`,
     ]));
   }
-  if (key === "suspicions") {
-    return (data.findings || []).map((item) => {
-      const evidenceLines = (item.evidence || []).map((row) => {
-        const moment = row.booked_at ? String(row.booked_at).slice(11, 16) : "";
-        return `${esc(row.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(row.city || "地点未知")} · ${esc(row.merchant_label || "—")}`;
-      }).join("<br>");
-      return recordsRow([
-        esc(FINDING_LABELS[item.kind] || item.kind),
-        esc(FINDING_STATUS[item.status] || item.status),
-        esc(confidenceLabel(item.confidence)),
-        `<span class="mono">${yuan(item.impact_cents || 0)}</span>`,
-        `<span class="mono">${evidenceLines || "—"}</span>`,
-      ]);
-    });
-  }
-  if (key === "charges") {
-    /* 订阅扣款证据：`/api/options` 的 subscription_details.insights[].evidence[]，
-       同一笔流水可能被多条洞察引用，按 record_id 去重。
-       扣款账户按 evidence.account_id 映射账户事实（名称 + 当前余额），前端不推导。 */
-    const details = data.subscription_details || {};
-    const accountById = new Map(
-      (data.accounts || []).map((item) => [String(item.id || ""), item])
-    );
-    const seen = new Set();
-    const rows = [];
-    (details.insights || []).forEach((item) => {
-      (item.evidence || []).forEach((evidence) => {
-        const key0 = evidence.record_id || `${evidence.booked_on}-${evidence.amount_cents}`;
-        if (seen.has(key0)) return;
-        seen.add(key0);
-        const moment = evidence.booked_at ? String(evidence.booked_at).slice(11, 16) : "";
-        const account = accountById.get(String(evidence.account_id || ""));
-        rows.push(recordsRow([
-          esc(evidence.merchant_label || item.merchant || "—"),
-          `<span class="mono">${yuan(Math.abs(Number(evidence.amount_cents) || 0))}</span>`,
-          `<span class="mono">${esc(evidence.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
-          account ? esc(account.label) : "—",
-          `<span class="mono">${esc(evidence.record_id || "—")}</span>`,
-        ]));
+  return [];
+}
+
+/* 扣款明细：类型 / 状态 / 方向全部来自服务端流水读模型，前端不再按账户 label 猜余额。 */
+function chargeEntryRowHtml(entry) {
+  const moment = entry.booked_at ? String(entry.booked_at).slice(11, 16) : "";
+  const amount = Number(entry.amount_cents) || 0;
+  const signed = `${amount < 0 ? "-" : "+"}${yuan(Math.abs(amount))}`;
+  const account = entry.payment_account || {};
+  const accountLabel = account.display_label || account.account_label || "—";
+  const warning = account.warning
+    ? ` <span class="chip chip--yellow">${esc(account.warning)}</span>`
+    : "";
+  return recordsRow([
+    `<span class="mono">${esc(entry.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
+    esc(entry.type_label || "—"),
+    esc(entry.merchant_label || "—"),
+    `<span class="mono">${signed}</span>`,
+    esc(entry.direction_label || "—"),
+    `${esc(accountLabel)}${warning}`,
+    esc(entry.status_label || "—"),
+    `<span class="mono">${esc(entry.record_no || entry.txn_id || "—")}</span>`,
+  ]);
+}
+
+/* 旧服务进程没有 `/api/records/charges`：用 `/api/options` 的订阅证据回退。
+   只用于「未重启」的兼容窗口；重启后自动走新流水读模型。 */
+function legacyChargePayload(options) {
+  const data = options || {};
+  const details = data.subscription_details || {};
+  const accountById = new Map(
+    (data.accounts || []).map((item) => [String(item.id || ""), item])
+  );
+  const seen = new Set();
+  const charges = [];
+  (details.insights || []).forEach((item) => {
+    (item.evidence || []).forEach((evidence) => {
+      const key = evidence.record_id || `${evidence.booked_on}-${evidence.amount_cents}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const account = accountById.get(String(evidence.account_id || ""));
+      const label = evidence.payment_account_label
+        || (account ? String(account.label || "").split(" · 余额")[0] : "")
+        || "—";
+      charges.push({
+        txn_id: evidence.txn_id || key,
+        record_no: evidence.txn_id || evidence.record_id || key,
+        booked_on: evidence.booked_on,
+        booked_at: evidence.booked_at,
+        merchant_label: evidence.merchant_label || item.merchant || "—",
+        amount_cents: evidence.amount_cents,
+        direction_label: "支出",
+        type_label: "代扣",
+        status_label: "成功",
+        payment_account: { display_label: label, warning: "" },
       });
     });
-    return rows;
+  });
+  const total = charges.reduce(
+    (sum, item) => sum + Math.abs(Number(item.amount_cents) || 0),
+    0
+  );
+  return {
+    as_of: details.as_of || data.today || "",
+    data_source: details.data_source || "服务端订阅证据（旧接口回退）",
+    window: 12,
+    fallback: true,
+    summary: {
+      window: 12,
+      window_count: charges.length,
+      window_total_cents: total,
+      history_count: charges.length,
+      history_total_cents: total,
+    },
+    groups: charges.length ? [{ merchant: "", charges }] : [],
+  };
+}
+
+function chargesPanelHtml(payload) {
+  const groups = payload.groups || [];
+  const rows = [];
+  groups.forEach((group) => {
+    (group.charges || []).forEach((entry) => rows.push(entry));
+  });
+  if (!rows.length) return recordsEmptyHtml(RECORD_TABS.charges);
+  rows.sort((a, b) => String(b.booked_on || "").localeCompare(String(a.booked_on || ""))
+    || String(b.booked_at || "").localeCompare(String(a.booked_at || ""))
+    || String(b.txn_id || "").localeCompare(String(a.txn_id || "")));
+  const summary = payload.summary || {};
+  const window = Number(summary.window) || 12;
+  const count = Number(summary.window_count) || rows.length;
+  const mismatch = count !== rows.length
+    ? `<p class="muted records-note">计数 ${count} 与明细 ${rows.length} 不一致，请刷新后重试。</p>`
+    : "";
+  const totalLabel = payload.fallback ? "当前可见" : "全部历史";
+  const fallbackNote = payload.fallback
+    ? '<p class="muted records-note">当前服务端还是旧进程，暂时用订阅证据回退显示；重启服务后显示完整流水读模型。</p>'
+    : "";
+  return `<p class="muted records-count">
+    近 ${window} 期 ${count} 笔 · ${yuan(summary.window_total_cents || 0)}；
+    ${totalLabel} ${Number(summary.history_count) || 0} 笔 ·
+    ${yuan(summary.history_total_cents || 0)} · 数据截至 ${esc(payload.as_of || "—")}
+  </p>` + fallbackNote + recordsTableHtml(RECORD_HEADERS.charges, rows.map(chargeEntryRowHtml)) + mismatch;
+}
+
+function suspicionTableHtml(leads) {
+  const headers = ["分层", "可疑类型", "状态", "置信度", "影响金额", "证据", "判断依据", "操作"];
+  const rows = (leads || []).map((lead) => {
+    const labels = (lead.labels || []).map(esc).join(" / ");
+    const evidence = (lead.evidence || []).map((row) => {
+      const moment = row.booked_at ? String(row.booked_at).slice(11, 16) : "";
+      return `${esc(row.booked_on)}${moment ? " " + esc(moment) : ""} · ${esc(row.city || "地点未知")} · ${esc(row.merchant_label || "—")} · ${yuan(row.amount_cents)}`;
+    }).join("<br>");
+    const basis = `<details><summary>查看依据</summary>${leadBasisHtml(lead)}</details>`;
+    return recordsRow([
+      esc(billTierLabel(lead.tier)),
+      labels || "—",
+      esc(lead.state_label || "待核对"),
+      esc(confidencePct(lead.confidence)),
+      `<span class="mono">${yuan(lead.impact_cents || 0)}</span>`,
+      evidence || "—",
+      basis,
+      leadActionsHtml(lead),
+    ]);
+  });
+  return recordsTableHtml(headers, rows);
+}
+
+function suspicionPanelHtml(payload) {
+  const summary = payload.summary || {};
+  const leads = payload.leads || [];
+  const key = leads.filter((lead) => lead.tier === "key");
+  const more = leads.filter((lead) => lead.tier === "more");
+  const resolved = leads.filter((lead) => lead.tier === "resolved");
+  const head = `<p class="muted records-count">
+    账期 ${esc(payload.period || "—")} · 待核对 ${Number(summary.lead_count) || 0} 条 ·
+    已核对 ${Number(summary.resolved_lead_count) || 0} 条
+  </p>`;
+  if (!key.length && !more.length && !resolved.length) {
+    return head + '<p class="muted">本期没有待核对的风险线索。识别结果仅供核对，不作最终结论。</p>';
   }
-  return [];
+  return head
+    + (key.length ? `<p class="panel__title panel__title--sub">重点核对（${key.length}）</p>${suspicionTableHtml(key)}` : "")
+    + (more.length ? `<details class="records-summary"><summary>更多线索（${more.length} 条 · 50%–70%）</summary>${suspicionTableHtml(more)}</details>` : "")
+    + (resolved.length ? `<details class="records-summary"><summary>已核对（${resolved.length} 条 · 已归档）</summary>${suspicionTableHtml(resolved)}</details>` : "");
 }
 
 const PANEL_RETRY = {
@@ -8876,15 +9260,28 @@ async function renderRecordsTab(tab) {
     body.innerHTML = recordsErrorHtml(`${spec.label}读取失败，请稍后重试。`);
     return;
   }
-  const rows = recordsRowsFor(key, result.data || {});
+  const data = result.data || {};
   const note = key === "suspicions"
-    ? `<p class="muted records-note">识别结果只作核对线索，不当作已确认；渠道列无来源时显示「—」。数据来源：${esc((result.data || {}).data_source || "服务端事实")}。</p>`
+    ? `<p class="muted records-note">只显示风险类线索：异常大额 / 异地 / 深夜 / 重复扣款。自动续费、涨价、已登记订阅核验在订阅页与账单页；置信度 ≥70% 进重点核对、50–70% 折叠、<50% 不展示。核对结果写回同一线索存储，账单页同步翻转。数据来源：${esc(data.data_source || "服务端事实")}。</p>`
     : key === "charges"
-      ? '<p class="muted records-note">扣款账户为这笔流水所属账户；余额是账户当前余额，不是扣款时点余额。</p>'
-      : key === "transfers"
-        ? '<p class="muted records-note">「AI 办理」是本次演示中真实执行的转账；「演示历史」是预置流水，用于账单与对账演示。次日到账显示「已发出申请·可撤销」，与「已到账」严格区分。</p>'
-        : "";
-  const summary = key === "transfers" ? payeeSummaryHtml((result.data || {}).payee_summary) : "";
+      ? `<p class="muted records-note">扣款记录来自统一流水读模型：付款账户为扣款实际使用的卡/账户，不显示账户当前余额；记录号为 txn_ 开头。数据来源：${esc(data.data_source || "服务端事实")}。</p>`
+      : key === "bills"
+        ? `<p class="muted records-note">与账单分析页同一份消费明细（同账期、同数据源）；转账 / 还款不计入消费，见转账记录。数据来源：${esc(data.data_source || "服务端事实")}。</p>`
+        : key === "transfers"
+          ? '<p class="muted records-note">「AI 办理」是本次演示中真实执行的转账；「演示历史」是预置流水，用于账单与对账演示。次日到账显示「已发出申请·可撤销」，与「已到账」严格区分。</p>'
+          : "";
+  if (key === "charges") {
+    body.innerHTML = chargesPanelHtml(data) + note;
+    return;
+  }
+  if (key === "suspicions") {
+    /* 与账单页共用同一份 payload / leads：核对动作、依据、分层都不再另起一套。 */
+    state.bills = data;
+    body.innerHTML = suspicionPanelHtml(data) + note;
+    return;
+  }
+  const rows = recordsRowsFor(key, data);
+  const summary = key === "transfers" ? payeeSummaryHtml(data.payee_summary) : "";
   body.innerHTML = rows.length
     ? summary +
       `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
@@ -8919,7 +9316,9 @@ function showScene(key, opts) {
   if (chatButton) {
     chatButton.textContent = currentScene === "bills"
       ? "问 AI 账单问题"
-      : currentScene === "transfer" ? "用 AI 助理转账" : "去对话补充";
+      : currentScene === "transfer"
+        ? "用 AI 助理转账"
+        : currentScene === "wealth" ? "让 AI 帮我选理财" : "去对话补充";
   }
   document.querySelectorAll("[data-scene-block]").forEach((block) => {
     block.hidden = block.dataset.sceneBlock !== currentScene;
@@ -9070,6 +9469,27 @@ document.addEventListener("click", (event) => {
     }
     return;
   }
+  const recordsLeadState = target.closest("#records-body [data-lead-state]");
+  if (recordsLeadState) {
+    action(() => setBillLeadState(
+      recordsLeadState.dataset.leadId || "",
+      recordsLeadState.dataset.leadPeriod || "",
+      recordsLeadState.dataset.leadState || "",
+    ))();
+    return;
+  }
+  const recordsLeadAsk = target.closest("#records-body [data-lead-ask]");
+  if (recordsLeadAsk) {
+    askBillLead(recordsLeadAsk.dataset.leadAsk || "");
+    return;
+  }
+  const recordsLeadTxn = target.closest("#records-body [data-lead-txn]");
+  if (recordsLeadTxn) {
+    state.billsHighlightTxn = recordsLeadTxn.dataset.leadTxn || "";
+    navigate("scene", { scene: "bills" });
+    refreshBills().catch(() => {});
+    return;
+  }
   const tab = target.closest("#records-tabs [data-record-tab]");
   if (tab) {
     renderRecordsTab(tab.dataset.recordTab || "transfers");
@@ -9150,6 +9570,19 @@ window.addEventListener("hashchange", () => {
 el("btn-scene-chat")?.addEventListener("click", () => {
   if (currentScene === "transfer") {
     transferToChat().catch(() => {});
+    return;
+  }
+  if (currentScene === "wealth") {
+    const assessment = (state.wealth && state.wealth.assessment) || {};
+    const level = assessment.state === "valid" && assessment.risk_profile
+      ? assessment.risk_profile
+      : "未测评";
+    const total = holdingsTotal((state.wealth && state.wealth.holdings) || []);
+    const input = el("utterance");
+    if (input) {
+      input.value = `我想买理财，我的风险测评是 ${level}，当前持仓 ${yuan(Math.round(total * 100))}；请推荐 2 只适合我的产品。`;
+    }
+    navigate("chat", {});
     return;
   }
   const spec = SCENES[currentScene];
@@ -9388,7 +9821,7 @@ document.addEventListener("click", (event) => {
 }, true);
 
 if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
-navigator.serviceWorker.register("/assets/sw.js?v=73", { scope: "/" }).catch(() => {
+  navigator.serviceWorker.register("/assets/sw.js?v=74", { scope: "/" }).catch(() => {
     timelineAdd("PWA 静态壳注册失败，当前仍可作为同源网页使用。", "warn");
   });
 }

@@ -50,6 +50,7 @@ from ai_banking_copilot.scenarios.base import (
     trusted_slot,
 )
 from ai_banking_copilot.scenarios.bill_categories import display_merchant, normalize_merchant
+from ai_banking_copilot.scenarios.ledger import CHARGE_WINDOW, collect_entries
 
 SUBSCRIPTION_ACTIONS = frozenset({"subscription.list", "subscription.cancel", "subscription.sign"})
 """订阅域动作（README 规范动作表 #7 / #12 / #13）。"""
@@ -268,6 +269,10 @@ class _Outflow:
     booked_at: str | None = None
     card_tail: str | None = None
     account_id: str | None = None
+    card_type: str | None = None
+    card_type_label: str = ""
+    payment_account_label: str = ""
+    is_settlement: bool = True
 
     @property
     def merchant_key(self) -> str:
@@ -293,7 +298,10 @@ class SubscriptionEvidence:
     booked_at: str | None = None
     card_tail: str | None = None
     account_id: str | None = None
-    """这笔扣费从哪个账户支出（前端按账户事实映射名称与当前余额，不在前端推导）。"""
+    """这笔扣费从哪个账户支出（付款账户名称与卡尾号由流水读模型统一给出）。"""
+    card_type_label: str = ""
+    payment_account_label: str = ""
+    is_settlement: bool = True
 
 
 @dataclass(frozen=True)
@@ -504,6 +512,11 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                 "next_charge_is_prediction": item.next_charge_is_prediction,
                 "next_charge_basis": item.next_charge_basis,
                 "charge_count": item.charge_count,
+                "charge_window": CHARGE_WINDOW,
+                "window_charge_count": len(item.evidence),
+                "window_charged_total_cents": sum(
+                    abs(evidence.amount_cents) for evidence in item.evidence
+                ),
                 "price_increased_12m": item.price_increased_12m,
                 "price_change_12m_from_cents": item.price_change_12m_from_cents,
                 "price_change_12m_to_cents": item.price_change_12m_to_cents,
@@ -618,10 +631,14 @@ def _evidence_payload(evidence: SubscriptionEvidence) -> dict[str, object]:
         "booked_on": evidence.booked_on.isoformat(),
         "booked_at": evidence.booked_at,
         "card_tail": evidence.card_tail,
+        "card_type_label": evidence.card_type_label,
+        "payment_account_label": evidence.payment_account_label,
+        "is_settlement": evidence.is_settlement,
         "amount_cents": evidence.amount_cents,
         "merchant_label": evidence.merchant_label,
         "channel": evidence.channel,
         "account_id": evidence.account_id,
+        "record_no": evidence.txn_id,
     }
 
 
@@ -743,7 +760,11 @@ def _registered_insight(
             ))
 
     raw_next, is_prediction, basis = _next_charge(
-        subscription, items, cycle=cycle, median_gap=median_gap
+        subscription,
+        items,
+        cycle=cycle,
+        median_gap=median_gap,
+        as_of=as_of,
     )
     next_charge_on, overdue_days = (
         _advance_until_future(raw_next, cycle, as_of) if raw_next else (None, None)
@@ -962,8 +983,13 @@ def _next_charge(
     *,
     cycle: str,
     median_gap: int | None,
+    as_of: date,
 ) -> tuple[date | None, bool, str]:
-    """下次扣费：有流水依据时**标注为预测值**，否则退回登记日期并说明非预测。"""
+    """下次扣费：有流水依据时**标注为预测值**；只有无流水才退回登记值。
+
+    登记日期已过 `as_of` 时不得原样展示为「下次扣款」：能判定周期就顺延并标预测，
+    周期未知则返回 `None`，由页面显示「无法推算」。
+    """
     if subscription.status != "active":
         return None, False, "订阅已不在有效状态，无下次扣费。"
     if items and cycle != CYCLE_UNKNOWN and median_gap is not None:
@@ -973,12 +999,28 @@ def _next_charge(
             f"按最近 {len(items) - 1} 次扣费间隔的中位数 {median_gap} 天推得，"
             "仅作预测；实际扣费日以商户为准。",
         )
+    registered = subscription.next_charge_on
+    if registered < as_of:
+        registered_cycle = _registered_cycle(subscription)
+        if registered_cycle != CYCLE_UNKNOWN:
+            advanced, _ = _advance_until_future(registered, registered_cycle, as_of)
+            return (
+                advanced,
+                True,
+                f"登记日期 {registered.isoformat()} 已过，按登记周期顺延为 "
+                f"{advanced.isoformat()}，待银行确认。",
+            )
+        return (
+            None,
+            False,
+            f"登记日期 {registered.isoformat()} 已过，且周期未知，无法推算下次扣款。",
+        )
     reason = (
         "流水间隔无法判定周期，改用登记值"
         if items else "无流水可核验，取登记值"
     )
     return (
-        subscription.next_charge_on,
+        registered,
         False,
         f"取订阅登记中的下次扣费日（{reason}，非预测值）。",
     )
@@ -1075,35 +1117,28 @@ def _registered_cycle(subscription: Subscription) -> str:
 
 
 def _outflows(gateway: FactGateway, user_id: str, as_of: date) -> tuple[_Outflow, ...]:
-    """汇总 `as_of` 之前的支出流水；同 `txn_id` 只保留一次（跨账户亦不重复）。"""
-    collected: dict[str, _Outflow] = {}
-    for account in gateway.accounts_of(user_id):
-        for record in gateway.transactions_between(account.payload.account_id, date.min, as_of):
-            transaction = record.payload
-            if (
-                transaction.user_id != user_id
-                or transaction.direction != "out"
-                or transaction.amount.cents >= 0
-                or transaction.booked_on > as_of
-            ):
-                continue
-            collected[transaction.txn_id] = _Outflow(
-                txn_id=transaction.txn_id,
-                booked_on=transaction.booked_on,
-                amount_cents=-transaction.amount.cents,
-                merchant=transaction.merchant,
-                category=transaction.category,
-                record_id=record.record_id,
-                content_hash=record.content_hash,
-                channel=transaction.channel,
-                booked_at=transaction.booked_at,
-                card_tail=transaction.card_tail,
-                account_id=account.payload.account_id,
-            )
-    return tuple(sorted(
-        collected.values(),
-        key=lambda item: (item.booked_on, item.booked_at or "", item.txn_id),
-    ))
+    """从统一流水读模型取 `as_of` 之前的支出流水（单一事实源，不另扫账本）。"""
+    return tuple(
+        _Outflow(
+            txn_id=entry.txn_id,
+            booked_on=entry.booked_on,
+            amount_cents=-entry.amount_cents,
+            merchant=entry.merchant,
+            category=entry.category,
+            record_id=entry.record_id,
+            content_hash=entry.content_hash,
+            channel=entry.channel,
+            booked_at=entry.booked_at,
+            card_tail=entry.card_tail,
+            account_id=entry.account_id,
+            card_type=entry.instrument.card_type,
+            card_type_label=entry.instrument.card_type_label,
+            payment_account_label=entry.instrument.display_label,
+            is_settlement=entry.instrument.is_settlement,
+        )
+        for entry in collect_entries(gateway, user_id, as_of=as_of)
+        if entry.direction == "out" and entry.amount_cents < 0
+    )
 
 
 def _group_outflows(flows: Sequence[_Outflow]) -> dict[str, list[_Outflow]]:
@@ -1184,6 +1219,9 @@ def _evidence(flow: _Outflow) -> SubscriptionEvidence:
         booked_at=flow.booked_at,
         card_tail=flow.card_tail,
         account_id=flow.account_id,
+        card_type_label=flow.card_type_label,
+        payment_account_label=flow.payment_account_label,
+        is_settlement=flow.is_settlement,
     )
 
 

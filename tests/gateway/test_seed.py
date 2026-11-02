@@ -134,7 +134,7 @@ def test_seed_subscription_charges_have_explicit_card_tail(seeded_db: Path) -> N
 
     assert video_charges
     assert all(row["booked_at"] is not None for row in video_charges)
-    assert {row["card_tail"] for row in video_charges} == {"4821"}
+    assert {row["card_tail"] for row in video_charges} == {"4471"}
     assert invalid_tails == []
     store.close()
 

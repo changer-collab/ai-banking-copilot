@@ -13,6 +13,7 @@ import pytest
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.scenarios.bill_findings import (
+    RISK_FINDING_KINDS,
     TREND_MONTHS,
     BillFindingsReport,
     analyze_bill,
@@ -74,6 +75,7 @@ def test_profile_is_derived_from_report_and_subscriptions(gateway: FactGateway) 
         item
         for item in report.findings
         if item.status in {"confirmed", "suspected"}
+        and item.kind in RISK_FINDING_KINDS
     ]
     assert profile.suspicious_count == len(risky)
     assert profile.max_suspicious_cents == max((item.impact_cents for item in risky), default=0)

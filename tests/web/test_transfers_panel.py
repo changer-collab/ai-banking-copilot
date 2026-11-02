@@ -40,7 +40,7 @@ def test_executed_transfer_is_listed_with_masked_payee(deps: AppDeps) -> None:
     assert record["payee"] == "李*", "收款人姓名必须脱敏（李娜 → 李*）"
     assert record["status"] == "已到账"
     assert record["record_id"].startswith("txn")
-    assert record["account"] == "储蓄账户"
+    assert record["account"] == "储蓄存款账户"
 
 
 def test_transfer_records_endpoint_is_read_only(deps: AppDeps) -> None:

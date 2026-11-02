@@ -442,6 +442,10 @@ def _maturity_of(intent: Intent) -> bool:
 
 
 def _life_event_of(intent: Intent) -> str | None:
+    # 明确的理财动作优先：句子里出现「生日」只说明资金来源 / 场景，
+    # 不能把「生日预算买理财」改写成生日花店订单。
+    if intent.action.startswith("wealth."):
+        return None
     for key in ("life_event", "event"):
         raw = intent.slots.get(key)
         if raw is not None:

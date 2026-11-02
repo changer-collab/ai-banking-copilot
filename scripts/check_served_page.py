@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=60")
-    js = _get(base, "/assets/app.js?v=92")
+    workspace_css = _get(base, "/assets/workspace.css?v=63")
+    js = _get(base, "/assets/app.js?v=99")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=60" in html
-            and "/assets/app.js?v=92" in html
+            and "/assets/workspace.css?v=63" in html
+            and "/assets/app.js?v=99" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -119,8 +119,9 @@ def run(base: str) -> list[str]:
         "js: 扣款记录复用通用表格": (
             'if (key === "charges")' in js
             and 'class="charge-records-table"' not in js
-            and "seen.has(key0)" in js
-            and "data.subscription_details" in js
+            and "/api/records/charges" in js
+            and "chargeEntryRowHtml" in js
+            and "recordsTableHtml(RECORD_HEADERS.charges" in js
         ),
         "js: 审计渠道与摘要": (
             'payload.channel || "未记录"' in js
@@ -130,7 +131,7 @@ def run(base: str) -> list[str]:
         "js: PWA 安装交互": (
             "beforeinstallprompt" in js
             and "appinstalled" in js
-            and 'register("/assets/sw.js?v=73"' in js
+            and 'register("/assets/sw.js?v=74"' in js
         ),
         "js: 服务端时间按 UTC 解析": (
             "function parseServerTime(stamp)" in js

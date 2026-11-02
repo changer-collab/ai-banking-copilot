@@ -139,10 +139,16 @@ def test_price_change_requires_enough_samples_and_ten_percent(
     changes = [item for item in report.findings if item.kind == "price-change"]
     assert len(changes) == 1
     finding = changes[0]
-    assert finding.status == "confirmed"
+    # 规则只能证明价格变了，不能替用户确认；只有用户核对动作才能改状态。
+    assert finding.status == "suspected"
+    assert finding.confidence == Decimal("0.80")
     assert finding.impact_cents == 1000
+    assert finding.impact_scope == "current_period"
+    assert finding.annualized_impact_cents == 12000
     assert finding.saving_basis == "potential"
-    assert len(finding.evidence) == 4
+    assert len(finding.evidence) == 2
+    assert "涨幅" in finding.detail
+    assert "未来 12 个月" in finding.impact_basis
     assert report.confirmed_saving_cents == 0
     assert report.potential_saving_cents == 1000
 

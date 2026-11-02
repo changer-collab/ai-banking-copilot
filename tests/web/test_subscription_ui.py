@@ -34,18 +34,20 @@ def test_charge_records_share_the_generic_records_table(deps: AppDeps) -> None:
     stylesheet = client.get("/assets/workspace.css").text
     assert 'data-record-tab="charges"' in html
     assert 'if (key === "charges")' in script
-    assert "data.subscription_details" in script
-    assert "seen.has(key0)" in script
-    assert "seen.add(key0)" in script
+    assert "/api/records/charges" in script
+    assert "chargesPanelHtml" in script
+    assert "chargeEntryRowHtml" in script
+    assert "payment_account" in script
+    assert "record_no" in script
     assert "charge-records-table" not in script
     assert "charge-records-table" not in stylesheet
     # 列定义仍由 `RECORD_HEADERS` 提供，且顺序固定
     headers_block = script.split("charges: [", 1)[1].split("]", 1)[0]
-    headers = ("商户", "金额", "扣费日", "扣款账户", "记录号")
+    headers = ("时间", "类型", "商户", "金额", "方向", "付款账户", "状态", "记录号")
     positions = [headers_block.index(f'"{header}"') for header in headers]
     assert positions == sorted(positions)
-    assert "evidence.booked_on" in script
-    assert "evidence.booked_at ? String(evidence.booked_at).slice(11, 16)" in script
+    assert "legacyChargePayload" in script
+    assert "recordsTableHtml(RECORD_HEADERS.charges" in script
     assert "/api/charges" not in script
 
 

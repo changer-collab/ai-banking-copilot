@@ -31,14 +31,10 @@ def _cancel(deps: AppDeps, *, subscription: str = "sub_video") -> dict:
     ).json()
     card = submitted["card"]
     assert card is not None, submitted
-    prompt = client.post("/api/verify/request", json={}).json()
+    # 取消已是黄卡：用户确认即执行，不再申请强验证挑战。
     confirmed = client.post(
         "/api/confirm",
-        json={
-            "card_id": card["card_id"],
-            "frozen_hash": card["frozen_hash"],
-            "verification_code": prompt["code"],
-        },
+        json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},
     ).json()
     return confirmed
 
@@ -77,7 +73,7 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
     assert video["price_change_12m_to_cents"] == 2500
     latest = video["evidence"][-1]
     assert latest["booked_at"] == "2026-10-18T20:30:00"
-    assert latest["card_tail"] == "4821"
+    assert latest["card_tail"] == "4471"
     assert latest["channel"] == "app"
     music = by_id["subscription:sub_music"]
     assert music["price_increased_12m"] is True
@@ -131,7 +127,39 @@ def test_options_expose_false_price_state_without_changing_evidence_contract(
     assert video["next_charge_on"]
     for evidence in video["evidence"]:
         assert {"merchant_label", "amount_cents", "booked_at", "booked_on", "card_tail",
-                "channel", "record_id", "content_hash"} <= evidence.keys()
+                "channel", "record_id", "content_hash", "record_no",
+                "payment_account_label"} <= evidence.keys()
+
+
+def test_options_accounts_use_debit_card_naming(deps: AppDeps) -> None:
+    """活期账户按借记卡+尾号命名；储蓄账户不再与活期混用同一个名字。"""
+    accounts = _client(deps).get("/api/options").json()["accounts"]
+    by_id = {item["id"]: item for item in accounts}
+    current = by_id["acc_current"]
+    assert current["kind"] == "current"
+    assert current["label"] == "借记卡（尾号 4471） · 活期结算"
+    assert current["card_tail"] == "4471"
+    savings = by_id["acc_savings"]
+    assert savings["kind"] == "savings"
+    assert savings["label"] == "储蓄存款账户"
+    assert savings["card_tail"] is None
+
+
+def test_record_charges_endpoint_count_and_rows_share_one_window(deps: AppDeps) -> None:
+    body = _client(deps).get("/api/records/charges").json()
+    summary = body["summary"]
+    assert summary["window_count"] == 26
+    assert summary["window_total_cents"] == 81800
+    assert summary["history_count"] == 46
+    assert summary["history_total_cents"] == 116800
+    assert sum(group["window_count"] for group in body["groups"]) == summary["window_count"]
+    assert sum(len(group["charges"]) for group in body["groups"]) == summary["window_count"]
+    for group in body["groups"]:
+        for charge in group["charges"]:
+            assert charge["record_no"].startswith("txn_")
+            assert "transactions:" not in charge["record_no"]
+            assert charge["payment_account"]["display_label"] == "借记卡（尾号 4471）"
+            assert charge["payment_account"]["is_settlement"] is True
 
 
 def test_cancel_reports_local_simulation_not_merchant_confirmation(deps: AppDeps) -> None:

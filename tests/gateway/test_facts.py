@@ -79,7 +79,7 @@ def test_transaction_facts_hydrate_booked_at_and_card_tail(gateway: FactGateway)
 
     assert len(rows) == 1
     assert rows[0].payload.booked_at == "2026-09-18T20:30:00"
-    assert rows[0].payload.card_tail == "4821"
+    assert rows[0].payload.card_tail == "4471"
 
 
 @pytest.mark.parametrize(

@@ -580,7 +580,62 @@ def product_catalog(
             risk_profile,
         )
         catalog.append(entry)
+    _annotate_advantages(catalog)
     return tuple(catalog)
+
+
+_SCENARIO_LINES: Mapping[str, str] = {
+    "货币类": "适合日常闲钱停泊，随时要用的钱放这里",
+    "混合类": "适合能承受一定波动、期限更长的钱",
+    "权益类": "适合能承受较大波动、长期不用的钱",
+}
+"""产品场景句：只写用途与风险承受，不写收益暗示（H6）。"""
+
+
+def _scenario_line(entry: Mapping[str, object]) -> str:
+    category = str(entry.get("category") or "")
+    if category == "债券类":
+        term = entry.get("term_days")
+        if isinstance(term, int) and not isinstance(term, bool):
+            if term <= 30:
+                return "适合 1 个月左右不用的钱"
+            if term <= 90:
+                return "适合 3 个月左右不用的钱"
+        return "适合更长期限的稳健配置"
+    return _SCENARIO_LINES.get(category, "适合作为组合中的补充配置")
+
+
+def _term_days(entry: Mapping[str, object]) -> int:
+    term = entry.get("term_days")
+    return term if isinstance(term, int) and not isinstance(term, bool) else 0
+
+
+def _annotate_advantages(catalog: list[dict[str, object]]) -> None:
+    """给可买产品补一句「为什么选它」：只做目录内横向对比 + 场景，不重复卡片参数。"""
+    eligible = [entry for entry in catalog if entry.get("eligible") is True]
+    if not eligible:
+        return
+    count = len(eligible)
+    terms = [_term_days(entry) for entry in eligible]
+    min_term = min(terms)
+    unique_shortest = count > 1 and terms.count(min_term) == 1
+    cash = [entry for entry in eligible if entry.get("product_type") == "cash"]
+    unique_cash = count > 1 and len(cash) == 1
+    for entry in catalog:
+        if entry.get("eligible") is not True:
+            entry["advantage_line"] = ""
+            continue
+        parts: list[str] = []
+        if count == 1:
+            parts.append("当前唯一可买")
+        else:
+            if unique_shortest and _term_days(entry) == min_term:
+                parts.append(f"可买 {count} 只中期限最短")
+            if unique_cash and entry.get("product_type") == "cash":
+                parts.append("唯一支持实时赎回")
+        if not parts:
+            parts.append("风险等级与你的测评匹配")
+        entry["advantage_line"] = "、".join(parts) + "；" + _scenario_line(entry)
 
 
 HOLDING_INCOME_UNKNOWN = "未知（演示环境无净值数据，不推算盈亏）"
@@ -599,6 +654,14 @@ def _nav_at(series: Sequence[Record[WealthNav]], purchased_on: date) -> Record[W
 def _income_text(cents: int) -> str:
     sign = "+" if cents >= 0 else "-"
     return f"{INCOME_SIMULATED_PREFIX} {sign}{abs(Money(cents).yuan)} 元"
+
+
+def _income_short(cents: int | None) -> str:
+    """持仓行的累计收益短文案：只给数字，来源仍是模拟净值。"""
+    if cents is None:
+        return "未知"
+    sign = "+" if cents >= 0 else "-"
+    return f"{sign}{abs(Money(cents).yuan)} 元"
 
 
 def _shares_text(share_bp: int) -> str:
@@ -687,6 +750,9 @@ def holdings_payload(
                 else ""
             )
             redeem_reason = f"封闭期至 {maturity_on.isoformat()}，期间不可赎回{open_text}"
+        market_value_cents = (
+            holding.amount.cents + income_cents if income_cents is not None else None
+        )
         rows.append(
             {
                 "product_id": holding.product_id,
@@ -714,7 +780,18 @@ def holdings_payload(
                 "nav_series": list(simulated),
                 "nav_start": _nav_text(series[0].payload.nav_bp) if series else None,
                 "nav_now": _nav_text(series[-1].payload.nav_bp) if series else None,
+                "market_value_yuan": (
+                    str(Money(market_value_cents).yuan)
+                    if market_value_cents is not None
+                    else None
+                ),
+                "next_open_on": (
+                    disclosure.next_open_date.isoformat()
+                    if disclosure is not None and disclosure.next_open_date is not None
+                    else (maturity_on.isoformat() if maturity_on is not None else None)
+                ),
                 "income_cents": income_cents,
+                "income_short": _income_short(income_cents),
                 "current_income": current_income,
                 "simulated": True,
                 "record_id": record.record_id,

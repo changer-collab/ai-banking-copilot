@@ -20,6 +20,8 @@ const WEALTH_DOC_LABELS = {
 
 let wealthSheetState = null;
 let wealthDetailState = null;
+/* 详情弹窗是否由对话内推荐卡打开：决定「立即申购」后弹窗确认的去向（计划卡 / 页内执行） */
+let wealthDetailFromChat = false;
 
 function wealthCentsText(cents) {
   const value = Number(cents);
@@ -108,7 +110,8 @@ function wealthEnsureDialog() {
   return dialog;
 }
 
-async function openWealthProductDetail(productId) {
+async function openWealthProductDetail(productId, options) {
+  wealthDetailFromChat = Boolean(options && options.fromChat);
   const result = await apiFetch("GET", `/api/wealth/products/${encodeURIComponent(productId)}`);
   if (!result.ok) {
     timelineAdd(`产品详情读取失败：${result.data.detail || "请稍后重试"}`, "stop");
@@ -126,11 +129,19 @@ async function openWealthProductDetail(productId) {
       if (event.target.closest("[data-wealth-detail-subscribe]")) {
         const id = event.target.closest("[data-wealth-detail-subscribe]").dataset.wealthDetailSubscribe;
         closeDialog(dialog);
-        openWealthTradeSheet({ mode: "subscribe", productId: id }).catch(() => {});
+        openWealthTradeSheet({
+          mode: "subscribe",
+          productId: id,
+          fromChat: wealthDetailFromChat,
+        }).catch(() => {});
       }
     });
+    bindDialogDismiss(dialog);
   }
   dialog.innerHTML = wealthDetailHtml(wealthDetailState);
+  dialog.querySelectorAll("[data-wealth-detail-close]").forEach((button) => {
+    button.addEventListener("click", () => closeDialog(dialog));
+  });
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
 }
@@ -141,6 +152,14 @@ function wealthDetailHtml(item) {
   const suitability = item.suitability || {};
   const risk = item.risk_level || "—";
   const canBuy = item.eligible === true;
+  const termDays = Number(item.term_days);
+  const termText = Number.isFinite(termDays)
+    ? (termDays === 0 ? "0 天（随时申赎）" : `${termDays} 天`)
+    : "未知";
+  const benchmark = String(item.benchmark_label || "业绩比较基准未知")
+    .replace("（模拟）", " ")
+    .replace(/\s+/g, " ")
+    .trim();
   const docs = Object.keys(item.documents || {}).map((id) => {
     const doc = item.documents[id];
     return `<details class="wealth-doc"><summary>《${esc(doc.title)}》<span class="chip">${esc(doc.version)}</span></summary>
@@ -152,22 +171,41 @@ function wealthDetailHtml(item) {
         <span class="chip">${esc(item.category || "")}</span></div>
       <button class="btn btn--sm btn--ghost" type="button" data-wealth-detail-close>关闭</button>
     </header>
-    <p class="muted">${esc(item.risk_basis || "")}</p>
-    <p class="muted">${esc(item.benchmark_label || "")} · ${esc(item.benchmark_note || "")}</p>
-    <p class="muted">起购 ${esc(item.min_amount_yuan || "—")} 元 · 递增 ${esc(item.increment_yuan || "—")} 元
-      · 期限 ${esc(String(item.term_days ?? "—"))} 天</p>
-    <p class="muted">费率：申购 ${esc(fees.subscription || "未知")} · 销售服务 ${esc(fees.service || "未知")}/年
-      · 托管 ${esc(fees.custody || "未知")}/年</p>
-    <p class="muted">${esc(liquidity.label || "")} · 申购截止 ${esc(liquidity.purchase_cutoff || "—")}</p>
-    <p class="muted">登记编码：<span class="mono">${esc(item.registration_code || "未披露")}</span>
-      · ${esc(item.registration_note || "")}
-      <a href="https://www.chinawealth.com.cn/" target="_blank" rel="noopener">中国理财网查询</a></p>
-    <div class="wealth-sheet__notice">
+    <section class="wealth-detail__section">
+      <p class="wealth-detail__section-title">产品要素</p>
+      <dl class="wealth-detail__facts">
+        <div><dt>风险评级</dt><dd>${esc(risk)}
+          <span class="wealth-detail__sub">${esc(item.risk_basis || "")}</span></dd></div>
+        <div><dt>业绩比较基准</dt><dd>${esc(benchmark)}
+          <span class="wealth-detail__sub">${esc(item.benchmark_note || "")}</span></dd></div>
+        <div><dt>期限</dt><dd>${esc(termText)}</dd></div>
+        <div><dt>起购 / 递增</dt><dd>${esc(item.min_amount_yuan || "—")} 元 / ${esc(item.increment_yuan || "—")} 元</dd></div>
+      </dl>
+    </section>
+    <section class="wealth-detail__section">
+      <p class="wealth-detail__section-title">费率与流动性</p>
+      <div class="wealth-detail__fees">
+        <span>申购费 <b>${esc(fees.subscription || "未知")}</b></span>
+        <span>销售服务费 <b>${esc(fees.service || "未知")}/年</b></span>
+        <span>托管费 <b>${esc(fees.custody || "未知")}/年</b></span>
+      </div>
+      <p class="wealth-detail__line">${esc(liquidity.label || "")} · 申购截止 ${esc(liquidity.purchase_cutoff || "—")}
+        ${liquidity.next_open_date ? ` · 下一开放日 ${esc(liquidity.next_open_date)}` : ""}</p>
+      <p class="wealth-detail__line">登记编码 <span class="mono">${esc(item.registration_code || "未披露")}</span>
+        · ${esc(item.registration_note || "")}</p>
+    </section>
+    <section class="wealth-detail__section">
+      <p class="wealth-detail__section-title">模拟净值走势</p>
+      <div class="wealth-detail__nav">${navSparkHtml(item.nav_series, { empty: "暂无净值序列" })}</div>
+      <p class="wealth-detail__hint">模拟数据，非真实行情；不构成收益承诺。</p>
+    </section>
+    <div class="wealth-sheet__notice wealth-detail__opinion">
       <b>匹配意见：</b>${esc(suitability.conclusion || "—")}<br>
       主要风险：${esc((suitability.main_risks || []).join("、") || "—")}<br>
       不适用人群：${esc((suitability.unsuitable_for || []).join("、") || "—")}<br>
       <span class="muted">${esc(suitability.basis || "")} · ${esc(suitability.disclaimer || "")}</span>
     </div>
+    <p class="wealth-detail__section-title">产品文件</p>
     <div class="wealth-sheet__docs">${docs}</div>
     <footer class="wealth-sheet__foot">
       ${canBuy
@@ -218,9 +256,11 @@ async function openWealthTradeSheet(options) {
   const defaultAccount = prefill.account_id || (accounts[0] && accounts[0].id) || "acc_savings";
   wealthSheetState = {
     mode,
+    fromChat: Boolean(opts.fromChat),
     product,
     detail: detail.data,
     card: card || prefill.card || null,
+    holding: opts.holding || null,
     accounts,
     accountId: defaultAccount,
     amount: prefill.amount_yuan || "",
@@ -310,8 +350,18 @@ function renderWealthSheet() {
           placeholder="请逐字抄录上方声明">${esc(sheet.declaration)}</textarea>
       </div>`
     : "";
+  const redeemFacts = isRedeem && sheet.holding
+    ? `<div class="wealth-sheet__notice">
+        <b>可赎回：</b>${esc(sheet.holding.shares || "—")} 份
+        · 市值 ${sheet.holding.market_value_yuan ? `¥${esc(sheet.holding.market_value_yuan)}` : "未知"}
+        · 参考到账 ${esc(sheet.holding.arrival_label || "未知")}
+        ${sheet.holding.redeemable === false
+          ? `<br><span class="muted">${esc(sheet.holding.redeem_reason || "封闭期内不可赎回")}</span>`
+          : ""}
+      </div>`
+    : "";
   const redeemFields = isRedeem
-    ? `<label class="wealth-field">赎回方式
+    ? `${redeemFacts}<label class="wealth-field">赎回方式
         <select id="wealth-sheet-redeem-mode" class="input"${locked ? " disabled" : ""}>
           <option value="all"${sheet.redeemMode === "all" ? " selected" : ""}>全部赎回</option>
           <option value="shares"${sheet.redeemMode === "shares" ? " selected" : ""}>部分赎回（按份额）</option>
@@ -380,7 +430,9 @@ function renderWealthSheet() {
     </section>
     <section class="wealth-sheet__section">
       <h3>④ 验证与确认</h3>
-      <p class="muted">申购/赎回均为红色动作，需要服务端一次性验证码；演示环境会直接显示验证码。</p>
+      <p class="muted">${sheet.fromChat
+        ? "确认信息后先生成计划卡；强验证与执行在计划卡上完成（演示环境会直接显示验证码）。"
+        : "申购/赎回均为红色动作，需要服务端一次性验证码；演示环境会直接显示验证码。"}</p>
       <div id="wealth-sheet-code-area" class="wealth-sheet__notice"${sheet.challenge ? "" : " hidden"}>
         <b>验证码已下发</b> <span id="wealth-sheet-code-target"></span>
         <input id="wealth-sheet-code" class="input" inputmode="numeric" maxlength="6" placeholder="6 位验证码">
@@ -390,7 +442,7 @@ function renderWealthSheet() {
     </section>
     <footer class="wealth-sheet__foot">
       <button class="btn btn--sm" type="button" data-wealth-sheet-close>取消</button>
-      <button class="btn btn--sm btn--primary" type="button" data-wealth-sheet-next>下一步：获取验证码</button>
+      <button class="btn btn--sm btn--primary" type="button" data-wealth-sheet-next>${sheet.fromChat ? "确认信息，生成计划卡" : "下一步：获取验证码"}</button>
       <button class="btn btn--sm btn--primary" type="button" data-wealth-sheet-confirm hidden>${isRedeem ? "确认赎回" : "确认申购"}</button>
       <button class="btn btn--sm btn--primary" type="button" data-wealth-sheet-finish hidden>完成</button>
     </footer>
@@ -653,6 +705,29 @@ async function wealthSheetNext() {
       if (submit.data.state !== "awaiting_confirm" || !submit.data.card) {
         throw new Error(submit.data.message || "没有生成可确认的计划");
       }
+      if (sheet.fromChat) {
+        /* 对话内：弹窗确认 → 立即出计划卡；字段全部取自本次弹窗填写值。
+           强验证与执行交给计划卡（不再在弹窗里做第二次确认）。 */
+        const accountLabel = ((wealthAccountById(sheet.accountId) || {}).label || sheet.accountId)
+          .split(" · ")[0];
+        const amountText = wealthCentsText(Math.round(Number(sheet.amount) * 100));
+        submit.data.card.sheet_done = true;
+        submit.data.card.sheet_fields = {
+          product: sheet.product.name,
+          risk: sheet.detail.risk_level || sheet.product.risk_level,
+          amount: amountText,
+          account: accountLabel,
+          dividend: sheet.dividend === "cash" ? "现金分红" : "红利再投资",
+        };
+        closeWealthTradeSheet();
+        await applySubmission(submit.data);
+        setButtons();
+        timelineAdd(
+          `已按申购弹窗生成计划卡：${sheet.product.name} · ${sheet.amount} 元 · ${accountLabel}`,
+          "live"
+        );
+        return;
+      }
       sheet.card = submit.data.card;
     }
     if ((sheet.card.requires || []).includes("strong_verify")) {
@@ -680,7 +755,7 @@ async function wealthSheetNext() {
     sheet.busy = false;
     if (button && !button.hidden) {
       button.disabled = false;
-      button.textContent = "下一步：获取验证码";
+      button.textContent = sheet.fromChat ? "确认信息，生成计划卡" : "下一步：获取验证码";
     }
   }
 }

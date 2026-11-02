@@ -215,3 +215,32 @@ def test_completed_bill_attaches_findings_and_other_intents_do_not(deps: AppDeps
     assert balance["state"] == "completed"
     assert balance["bill_findings"] is None
     assert deps.audit.verify_chain() is True
+
+
+def test_risk_leads_merge_multi_tag_and_exclude_subscription_info(
+    deps: AppDeps,
+) -> None:
+    """可疑清单只收风险类命中；¥6,880 双标签合并，涨价归信息型线索。"""
+    body = TestClient(create_app(deps)).get(
+        "/api/bills/analysis?year=2026&month=10"
+    ).json()
+    assert body["summary"]["lead_count"] == 2
+    assert body["summary"]["key_lead_count"] == 1
+    kinds = [lead["kinds"] for lead in body["leads"]]
+    assert ["abnormal-spend", "remote-city"] in kinds
+    assert all("price-change" not in lead_kinds for lead_kinds in kinds)
+    assert all("recurring-subscription" not in lead_kinds for lead_kinds in kinds)
+    merged = next(
+        lead for lead in body["leads"]
+        if "abnormal-spend" in lead["kinds"] and "remote-city" in lead["kinds"]
+    )
+    assert merged["impact_cents"] == 688000
+    assert len(merged["evidence"]) == 1
+
+    price = body["price_changes"][0]
+    assert price["status"] == "suspected"
+    assert price["impact_cents"] == 200
+    assert price["annualized_impact_cents"] == 2400
+    assert len(price["evidence"]) == 2
+    assert "涨幅 20.0%" in price["detail"]
+    assert "未来 12 个月" in price["impact_basis"]
