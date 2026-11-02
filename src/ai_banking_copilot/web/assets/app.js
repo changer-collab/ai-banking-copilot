@@ -5517,10 +5517,17 @@ function hasUnfinishedTask() {
   return Boolean(state.task && !["idle", "done", "failed", "blocked", "reversed", "taken_over"].includes(state.phase));
 }
 
-function requestStart(start) {
+function requestStart(start, { allowAbandon = true } = {}) {
   if (hasUnfinishedTask()) {
     state.pendingStart = start;
     el("task-guard-title").textContent = "当前办理尚未结束";
+    /* 只有“待确认/强验证”才允许放弃当前计划后在同一会话继续；
+       executing / interrupted 等状态不提供该入口，避免绕过执行中/未恢复的计划。 */
+    const abandon = el("btn-abandon-task");
+    if (abandon) {
+      abandon.hidden = !allowAbandon
+        || !["awaiting_confirm", "strong-verify"].includes(state.phase);
+    }
     /* 提示条是全局浮层，但对话内容在 #view-chat 里：先切回去，
        否则用户在记录页/场景页点「新建对话」会以为没反应。 */
     if (el("app")?.dataset.viewName !== "chat") navigate("chat", {});
@@ -5539,10 +5546,14 @@ function collapseTaskMore() {
 }
 
 function beginTask(text, selected = {}) {
+  /* 同一会话连续对话：默认沿用当前 SESSION_ID，办完一笔再说话仍落在同一条对话。
+     只有显式「新建对话 / 结束并新建 / 删除当前会话」或执行结果未知（需要重新核对回执）
+     才换新会话；否则会把上一笔的待核对回执覆盖掉。 */
+  const recoveryUnknown = state.operationUnknown;
   archiveTask();
   reset(true);
   state.historyRestored = false;
-  SESSION_ID = newSessionId();
+  if (recoveryUnknown) SESSION_ID = newSessionId();
   const welcome = el("conversation-welcome");
   if (welcome) welcome.hidden = true;
   const task = document.createElement("section");
@@ -5570,7 +5581,7 @@ function beginTask(text, selected = {}) {
 }
 
 async function startFreshConversation() {
-  if (!requestStart(startFreshConversation)) return;
+  if (!requestStart(startFreshConversation, { allowAbandon: false })) return;
   archiveTask();
   reset(false);
   SESSION_ID = newSessionId();
@@ -8288,6 +8299,16 @@ el("btn-continue-task").addEventListener("click", () => {
   el("task-guard").hidden = true;
   if (state.response) state.response.scrollIntoView({ behavior: "smooth", block: "center" });
 });
+el("btn-abandon-task")?.addEventListener("click", action(async () => {
+  const next = state.pendingStart;
+  state.pendingStart = null;
+  el("task-guard").hidden = true;
+  /* 同一会话放弃：旧计划保留为只读记录，新消息继续用当前 SESSION_ID。
+     后端在下一次 /api/submit 时会重置待确认计划，旧计划的冻结哈希随即失效。 */
+  archiveTask(true);
+  reset(true);
+  if (next) await next();
+}));
 el("btn-end-task").addEventListener("click", action(async () => {
   const next = state.pendingStart;
   state.pendingStart = null;

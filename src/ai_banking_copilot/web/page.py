@@ -613,9 +613,10 @@ _PAGE_HTML = """<!DOCTYPE html>
   <section id="task-guard" class="task-guard" role="alertdialog" aria-modal="false"
            aria-labelledby="task-guard-title" hidden>
     <h2 id="task-guard-title">当前办理尚未结束</h2>
-    <p>您可以继续当前办理，或结束后开始新的办理。结束仅放弃未执行部分，不会冲正已执行的资金操作；如需退回，请先使用当前计划的回退入口。</p>
+    <p>您可以继续当前办理、放弃待确认计划并直接发送新指令，或结束后开始新的办理。放弃 / 结束仅放弃未执行部分，不会冲正已执行的资金操作；如需退回，请先使用当前计划的回退入口。</p>
     <div class="btn-row">
       <button class="btn btn--primary" id="btn-continue-task" type="button">继续当前办理</button>
+      <button class="btn" id="btn-abandon-task" type="button" hidden>放弃计划并发送</button>
       <button class="btn" id="btn-end-task" type="button">结束并新建</button>
     </div>
   </section>
