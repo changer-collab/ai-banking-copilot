@@ -11,7 +11,7 @@ import pytest
 
 from ai_banking_copilot.contracts.taint import Trust, Value
 from ai_banking_copilot.gateway.facts import FactGateway, Record
-from ai_banking_copilot.gateway.models import Account, Money, Subscription, Transaction
+from ai_banking_copilot.gateway.models import Account, Card, Money, Subscription, Transaction
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import Intent
 from ai_banking_copilot.scenarios.base import ScenarioRefused
@@ -85,6 +85,9 @@ class _StubGateway:
         return tuple(
             record for record in self._subscriptions if record.payload.user_id == user_id
         )
+
+    def cards_of(self, user_id: str) -> tuple[Record[Card], ...]:
+        return ()
 
 
 def _gateway(
@@ -308,8 +311,10 @@ def test_date_offset_is_flagged_and_next_charge_is_prediction() -> None:
     insight = _only_insight(gateway)
     assert "date-offset" in _codes(insight)
     assert insight.next_charge_is_prediction is True
-    assert insight.next_charge_on == date(2026, 10, 9)
+    # 按 31 天间隔推得 2026-10-09 已过 as_of(2026-10-21)，须按周期顺延到未来。
+    assert insight.next_charge_on == date(2026, 11, 9)
     assert "预测" in insight.next_charge_basis
+    assert "顺延" in insight.next_charge_basis
 
 
 # 4. 扣费周期改变：最近间隔明显偏离历史中位间隔
@@ -387,13 +392,15 @@ def test_seed_report_marks_prediction_and_matches_raw_transactions(
     assert video.status == INSIGHT_CONFIRMED
     assert video.next_charge_is_prediction is True
     assert "预测" in video.next_charge_basis
-    assert {"amount-change", "date-offset"} <= _codes(video)
+    assert "date-offset" in _codes(video)
+    assert "amount-change" not in _codes(video)
 
     music = by_id["sub_music"]
-    assert music.charge_count == 0
-    assert music.next_charge_is_prediction is False
-    assert music.next_charge_on == date(2026, 11, 15)
-    assert "insufficient-data" in _codes(music)
+    assert music.charge_count == 21
+    assert music.next_charge_is_prediction is True
+    assert music.next_charge_on == date(2026, 10, 16)
+    assert "insufficient-data" not in _codes(music)
+    assert "registered-amount-mismatch" in _codes(music)
 
     for evidence in video.evidence:
         record = gateway.transaction(evidence.txn_id)

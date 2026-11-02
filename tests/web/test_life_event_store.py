@@ -249,7 +249,7 @@ def test_life_events_api_lists_registered_schedules(
     assert schedules[0]["due_on"] == "2026-11-04"
     assert schedules[0]["kind"] == "order"
     assert schedules[0]["record_id"] == record.record_id
-    assert [step["label"] for step in schedules[0]["steps"]] == ["定期转出", "订阅查询"]
+    assert [step["label"] for step in schedules[0]["steps"]] == ["定期转出", "代扣协议查询"]
     assert schedules[0]["steps"][0]["amount_cents"] == 50000
     # 记录本身仍是 `planned`，但要带出到期日：前端据此显示「已登记预约」而不是「待确认」
     assert payload["records"][0]["schedule_due_on"] == "2026-11-04"
@@ -264,7 +264,7 @@ def test_life_events_api_backfills_legacy_steps_from_schedule(
     events = LifeEventStore(rw_store)
     legacy = events.create(
         user_id="u_demo", session_id="s-legacy", event_id="L1",
-        event_name="预算锁定型", event_title="生日礼物", amount_cents=29900,
+        event_name="资金预留型", event_title="生日礼物", amount_cents=29900,
         steps=(), due_on="2026-11-04", now=_T0,
     )
     events.schedule(
@@ -282,5 +282,7 @@ def test_life_events_api_backfills_legacy_steps_from_schedule(
     client = TestClient(create_app(replace(deps, life_events=events)))
 
     record = client.get("/api/life-events").json()["records"][0]
-    assert [step["label"] for step in record["steps"]] == ["冻结预算", "商户下单"]
+    assert [step["label"] for step in record["steps"]] == [
+        "锁定预算（资金预留）", "向商户下单",
+    ]
     assert record["steps"][1]["date"] == "2026-11-04"

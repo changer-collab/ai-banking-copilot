@@ -943,7 +943,7 @@ def test_subscription_cancel_updates_status(pep: Pep, gateway: FactGateway) -> N
             "user_id": _trusted(DEMO_USER_ID),
         },
     )
-    result = _execute_confirmed(pep, call, Level.YELLOW, "k1")
+    result = _execute_confirmed(pep, call, Level.RED, "k1")
     assert result.status == "cancelled"
     assert result.external_status == "not_integrated"
     assert result.previous_status == "active"
@@ -969,7 +969,7 @@ def test_subscription_cancel_refuses_another_users_subscription(
         },
     )
     with pytest.raises(UnknownSubscriptionError):
-        _execute_confirmed(pep, call, Level.YELLOW, "k_other")
+        _execute_confirmed(pep, call, Level.RED, "k_other")
     rows = rw_store.query(
         "SELECT status FROM subscriptions WHERE subscription_id = 'sub_other'"
     )

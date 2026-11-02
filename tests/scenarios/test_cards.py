@@ -24,11 +24,14 @@ def test_report_lost_is_irreversible_and_at_least_red(gateway: FactGateway) -> N
     assert evaluate(loss_report_request(DEMO_USER_ID)).level >= Level.RED
 
 
-def test_lock_builds_node_and_unlock_requires_locked(gateway: FactGateway) -> None:
+def test_lock_builds_node_and_unlock_of_a_healthy_card_builds(
+    gateway: FactGateway,
+) -> None:
+    """口径 2026-11-02 变更：只有已挂失（lost）的卡不可解锁，健康卡可正常出计划。"""
     plan = CardsHandler().build([_card_intent("card.lock")], gateway)
     assert [node.action for node in plan.nodes] == ["card.lock"]
-    with pytest.raises(ScenarioRefused, match="临时冻结"):
-        CardsHandler().build([_card_intent("card.unlock")], gateway)
+    unlock = CardsHandler().build([_card_intent("card.unlock")], gateway)
+    assert [node.action for node in unlock.nodes] == ["card.unlock"]
 
 
 def test_list_plan_is_pure_query(gateway: FactGateway) -> None:

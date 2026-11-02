@@ -43,9 +43,14 @@ def test_retake_quota_is_reported_on_overview(deps: AppDeps) -> None:
 def test_questionnaire_is_capped_per_business_day(deps: AppDeps) -> None:
     client = _client(deps)
     for _ in range(RETAKES_PER_DAY):
-        assert client.post("/api/risk-assessment", json={"answers": _ANSWERS}).status_code == 200
+        response = client.post(
+            "/api/risk-assessment", json={"answers": _ANSWERS, "confirm_change": True}
+        )
+        assert response.status_code == 200, response.text
 
-    blocked = client.post("/api/risk-assessment", json={"answers": _ANSWERS})
+    blocked = client.post(
+        "/api/risk-assessment", json={"answers": _ANSWERS, "confirm_change": True}
+    )
 
     assert blocked.status_code == 429
     body = blocked.json()
@@ -58,13 +63,13 @@ def test_questionnaire_is_capped_per_business_day(deps: AppDeps) -> None:
 def test_attempts_reset_on_the_next_business_day(deps: AppDeps, rw_store: Store) -> None:
     client = _client(deps)
     for _ in range(RETAKES_PER_DAY):
-        client.post("/api/risk-assessment", json={"answers": _ANSWERS})
+        client.post("/api/risk-assessment", json={"answers": _ANSWERS, "confirm_change": True})
 
     assert attempts_on(rw_store, deps.user_id, deps.today) == RETAKES_PER_DAY
 
     tomorrow = replace(deps, today=deps.today + timedelta(days=1))
     assert _client(tomorrow).post(
-        "/api/risk-assessment", json={"answers": _ANSWERS}
+        "/api/risk-assessment", json={"answers": _ANSWERS, "confirm_change": True}
     ).status_code == 200
     assert attempts_on(rw_store, deps.user_id, tomorrow.today) == 1
 

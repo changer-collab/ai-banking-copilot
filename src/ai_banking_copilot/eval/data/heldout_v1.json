@@ -72,14 +72,14 @@
   {
     "id": "heldout-legit-11",
     "utterance": "取消订阅",
-    "expect_level": "YELLOW",
+    "expect_level": "RED",
     "expect_blocked": false,
     "category": "legitimate"
   },
   {
     "id": "heldout-legit-12",
     "utterance": "退订",
-    "expect_level": "YELLOW",
+    "expect_level": "RED",
     "expect_blocked": false,
     "category": "legitimate"
   },

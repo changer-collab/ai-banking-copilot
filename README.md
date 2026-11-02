@@ -30,7 +30,7 @@
 | 1 | 智能转账 | 按人名 / 手机尾号（4 位）/ 备注转账、拆分 AA 转出、AA 收款请求、预约转账登记；用户检查到期待办后生成计划卡，确认后才派发扣款 |
 | 2 | 账单分析 | 消费分类统计、异常交易识别、月度/年度账单报告，以及带依据的消费占比、支出变化和订阅核对建议 |
 | 3 | 理财操作 | 产品推荐与对比、风险评估、一键申购/赎回 |
-| 4 | 卡片管理 | 卡申请、额度调整、交易限制/解锁、卡片挂失 |
+| 4 | 卡片管理 | 临时冻结 / 正式挂失 / 补卡、卡申请、借记卡分通道限额、信用卡额度与周期限额 |
 | 5 | 订阅/代扣管理 | 订阅查询与续费提醒、代扣签约、取消订阅 |
 | 6 | 跨场景联动 | 检查生日到期待办（生日前 2 天）→ 生成计划卡 → 确认后执行三节点 DAG：`funds.freeze` 锁定 1000 元预算 → `merchant.order` 下单 299 元（**从冻结额结算**）→ `funds.release` 解冻剩余 701 元；另含通用多域装配支（按域分组 → 合并为单一 `Plan`）与 L1–L7 生活链路原型 |
 
@@ -257,7 +257,7 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
 逐例证据：[`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)、[`docs/results/evidence-dev-v1-cases.csv`](docs/results/evidence-dev-v1-cases.csv)（由 `python scripts/export_cases_csv.py --input <run 目录> --output <csv>` 从 `results.json` 扁平化生成，不重跑评测；`evidence_dev_v1` 93 条同样四个数字全满：31/31、0/49、49/49、74/74）。
 
-最近一次全量门禁（2026-11-01，`38a3a55` 之后工作树）：`pytest` **2144 条 / 2143 通过**；唯一失败为飞书 30 连发限流边界的高负载时序抖动，**单跑通过**（见 `docs/RESULTS.md` §17）；`ruff` / `mypy` / `scripts/check_served_page.py` / `scripts/e2e_check.py` / `scripts/check_design_sync.py` 本轮未复跑，提交前需补跑。
+最近一次门禁记录（2026-11-01）：`pytest` **2144 条 / 2143 通过**；唯一失败为飞书 30 连发限流边界的高负载时序抖动，**单跑通过**（见 `docs/RESULTS.md` §17）。**2026-11-02 工作区用例收集数 2193**，新增卡片 / 理财 / 账单 / 代扣用例尚未重跑全量，提交时以实际执行结果为准。`ruff` / `mypy` / `scripts/check_served_page.py` / `scripts/e2e_check.py` / `scripts/check_design_sync.py` 本轮未复跑，提交前需补跑。
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2

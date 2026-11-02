@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from datetime import date, timedelta
+from typing import cast
 
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.store import Store
@@ -29,13 +30,14 @@ _ACCOUNTS = (
 )
 
 _PAYEES = (
-    # (payee_id, user_id, full_name, account_tail, phone_tail, identity_confirmed, blocked, phone)
-    ("p_wangwei_a", DEMO_USER_ID, "王伟", "8812", "3301", 1, 0, "13812343301"),
-    ("p_wangwei_b", DEMO_USER_ID, "王伟", "4417", "7788", 0, 0, "13900007788"),
-    ("p_lina", DEMO_USER_ID, "李娜", "9021", "2210", 1, 0, "13812342210"),
-    ("p_zhangqiang", DEMO_USER_ID, "张强", "6633", "5566", 0, 0, "13700005566"),
+    # (payee_id, user_id, full_name, account_tail, phone_tail, identity_confirmed, blocked, phone,
+    #  bank_name)
+    ("p_wangwei_a", DEMO_USER_ID, "王伟", "8812", "3301", 1, 0, "13812343301", "招商银行"),
+    ("p_wangwei_b", DEMO_USER_ID, "王伟", "4417", "7788", 0, 0, "13900007788", "工商银行"),
+    ("p_lina", DEMO_USER_ID, "李娜", "9021", "2210", 1, 0, "13812342210", "招商银行"),
+    ("p_zhangqiang", DEMO_USER_ID, "张强", "6633", "5566", 0, 0, "13700005566", "建设银行"),
     # 赵六（已阻断）刻意不登记完整号码：用于证明「关系未知」的收款人不会被完整号码命中。
-    ("p_zhaoliu", DEMO_USER_ID, "赵六", "0001", "0001", 0, 1, None),
+    ("p_zhaoliu", DEMO_USER_ID, "赵六", "0001", "0001", 0, 1, None, "农业银行"),
 )
 
 _CARDS = (
@@ -149,12 +151,12 @@ _MONTH_SCALE_2026: dict[int, int] = {
 
 - 1–9 月合计仍为 900（= 9 × 100），所以年度同比仍是 `+17.65%`；
 - 目标账期 2026-09 保持 100，本期账单与既有精确断言不变；
-- 只缩放消费类流水；订阅扣费（视频会员）保持原价，避免被误判为「商户涨价」；
+- 只缩放消费类流水；订阅扣费（视频 / 音乐 / 云盘会员）保持原价，避免被误判为「商户涨价」；
 - 本期不高于 8 月，且对近 5 个月中位数的涨幅低于 10%，不会凭空产生 price-change 提醒。
 """
 
-_FIXED_MONTH_MERCHANTS = frozenset({"视频会员"})
-"""逐月保持原价的商户：订阅扣款是固定金额，不应随消费波动。"""
+_FIXED_MONTH_MERCHANTS = frozenset({"视频会员", "音乐会员", "云盘会员"})
+"""逐年逐月保持原价的商户：订阅扣款是固定金额，不应随消费波动（也不参与年度缩放）。"""
 
 _TXN_SPECS = (
     # (day, account_id, amount_cents, category, merchant, channel, time, city, card_tail)
@@ -203,14 +205,20 @@ def seed_database(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
-            " identity_confirmed, blocked, phone) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            " identity_confirmed, blocked, phone, bank_name)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _PAYEES,
         )
-        # 既有库（v5 之前的 payees 无 phone 列）由 `init_schema` 补列后为 NULL：
-        # `INSERT OR IGNORE` 不会更新已存在行，故此处幂等回填，且只填空值不覆盖演示中的改动。
+        # 既有库（v5 之前的 payees 无 phone 列 / v9 之前无 bank_name 列）由 `init_schema`
+        # 补列后为 NULL：`INSERT OR IGNORE` 不会更新已存在行，故此处幂等回填，
+        # 且只填空值不覆盖演示中的改动。
         conn.executemany(
             "UPDATE payees SET phone = ? WHERE payee_id = ? AND phone IS NULL",
             [(row[7], row[0]) for row in _PAYEES if row[7] is not None],
+        )
+        conn.executemany(
+            "UPDATE payees SET bank_name = ? WHERE payee_id = ? AND bank_name IS NULL",
+            [(row[8], row[0]) for row in _PAYEES if row[8] is not None],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"
@@ -264,6 +272,7 @@ def seed_database(store: Store) -> None:
             _build_transactions(),
         )
         _upgrade_seeded_amounts(conn)
+        _upgrade_fixed_price_amounts(conn)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES(?, '1')", (SEEDED_KEY,)
         )
@@ -301,9 +310,10 @@ def _seeded_rows() -> tuple[tuple[tuple[object, ...], int], ...]:
             city,
             card_tail,
         ) in _TXN_SPECS:
-            legacy_cents = cents * year_scale // 100
+            fixed_price = merchant in _FIXED_MONTH_MERCHANTS
+            legacy_cents = cents if fixed_price else cents * year_scale // 100
             amount_cents = legacy_cents
-            if cents < 0 and year == 2026 and merchant not in _FIXED_MONTH_MERCHANTS:
+            if not fixed_price and cents < 0 and year == 2026:
                 amount_cents = legacy_cents * month_scale // 100
             booked_on = date(year, month, day).isoformat()
             rows.append(
@@ -328,8 +338,61 @@ def _seeded_rows() -> tuple[tuple[tuple[object, ...], int], ...]:
     return tuple(rows)
 
 
+_MUSIC_FIRST_CENTS = -1000
+_MUSIC_RAISED_CENTS = -1200
+_MUSIC_RAISE_FROM = (2026, 10)
+"""音乐会员 2025-01 起每月 10 元，2026-10 起 12 元：用于演示涨价与累计扣款。"""
+
+
+def _recurring_charge_rows() -> tuple[tuple[object, ...], ...]:
+    """订阅扣款的演示流水：音乐会员每月 15 日、云盘会员每年 3 月 1 日。
+
+    主键带商户后缀（`txn_YYYYMMDD_music` / `txn_YYYYMMDD_cloud`），与 `_TXN_SPECS`
+    的 `txn_YYYYMMDD` 不撞库；`INSERT OR IGNORE` 保证重复播种幂等。
+    """
+    rows: list[tuple[object, ...]] = []
+    for year, month in _seed_months():
+        booked_on = date(year, month, 15).isoformat()
+        amount = (
+            _MUSIC_RAISED_CENTS
+            if (year, month) >= _MUSIC_RAISE_FROM
+            else _MUSIC_FIRST_CENTS
+        )
+        rows.append((
+            f"txn_{year}{month:02d}15_music",
+            DEMO_USER_ID,
+            "acc_current",
+            booked_on,
+            amount,
+            "音乐会员",
+            "娱乐",
+            "app",
+            "out",
+            f"{booked_on}T07:20:00",
+            "杭州",
+            "4471",
+        ))
+        if month == 3:
+            booked_on = date(year, month, 1).isoformat()
+            rows.append((
+                f"txn_{year}{month:02d}01_cloud",
+                DEMO_USER_ID,
+                "acc_savings",
+                booked_on,
+                -19800,
+                "云盘会员",
+                "娱乐",
+                "app",
+                "out",
+                f"{booked_on}T10:10:00",
+                "杭州",
+                "9021",
+            ))
+    return tuple(rows)
+
+
 def _build_transactions() -> tuple[tuple[object, ...], ...]:
-    return tuple(row for row, _ in _seeded_rows())
+    return tuple(row for row, _ in _seeded_rows()) + _recurring_charge_rows()
 
 
 def _upgrade_seeded_amounts(conn: sqlite3.Connection) -> None:
@@ -345,6 +408,25 @@ def _upgrade_seeded_amounts(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE transactions SET amount_cents = ? WHERE txn_id = ? AND amount_cents = ?",
             (amount_cents, txn_id, legacy_cents),
+        )
+
+
+def _upgrade_fixed_price_amounts(conn: sqlite3.Connection) -> None:
+    """把旧库中订阅商户被年度缩放的 2025 年种子行回填为固定价。
+
+    只命中「`txn_2025*` + 金额仍等于旧缩放值」的行：演示中人工改过的流水不会被覆盖；
+    回填后金额不再等于旧缩放值，重复调用等价 no-op。
+    """
+    scale = _YEAR_SCALE[2025]
+    for row, _ in _seeded_rows():
+        txn_id, merchant = str(row[0]), str(row[5])
+        amount_cents = cast(int, row[4])
+        if merchant not in _FIXED_MONTH_MERCHANTS or not txn_id.startswith("txn_2025"):
+            continue
+        scaled_cents = amount_cents * scale // 100
+        conn.execute(
+            "UPDATE transactions SET amount_cents = ? WHERE txn_id = ? AND amount_cents = ?",
+            (amount_cents, txn_id, scaled_cents),
         )
 
 
@@ -364,9 +446,9 @@ _SECONDARY_ACCOUNTS = (
 
 _SECONDARY_PAYEES = (
     # 一组同名候选（刘伟 ×2）+ 1 个 blocked 收款人：跨用户隔离测试要能区分对象归属。
-    ("p_b_liuwei_a", SECONDARY_USER_ID, "刘伟", "5521", "6602", 1, 0, "13612346602"),
-    ("p_b_liuwei_b", SECONDARY_USER_ID, "刘伟", "1138", "4457", 0, 0, "13500004457"),
-    ("p_b_sunli", SECONDARY_USER_ID, "孙丽", "7788", "9021", 0, 1, "13712349021"),
+    ("p_b_liuwei_a", SECONDARY_USER_ID, "刘伟", "5521", "6602", 1, 0, "13612346602", "招商银行"),
+    ("p_b_liuwei_b", SECONDARY_USER_ID, "刘伟", "1138", "4457", 0, 0, "13500004457", "交通银行"),
+    ("p_b_sunli", SECONDARY_USER_ID, "孙丽", "7788", "9021", 0, 1, "13712349021", "工商银行"),
 )
 
 _SECONDARY_CARDS = (
@@ -424,12 +506,17 @@ def seed_secondary_user(store: Store) -> None:
         )
         conn.executemany(
             "INSERT OR IGNORE INTO payees(payee_id, user_id, full_name, account_tail, phone_tail,"
-            " identity_confirmed, blocked, phone) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            " identity_confirmed, blocked, phone, bank_name)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _SECONDARY_PAYEES,
         )
         conn.executemany(
             "UPDATE payees SET phone = ? WHERE payee_id = ? AND phone IS NULL",
             [(row[7], row[0]) for row in _SECONDARY_PAYEES if row[7] is not None],
+        )
+        conn.executemany(
+            "UPDATE payees SET bank_name = ? WHERE payee_id = ? AND bank_name IS NULL",
+            [(row[8], row[0]) for row in _SECONDARY_PAYEES if row[8] is not None],
         )
         conn.executemany(
             "INSERT OR IGNORE INTO cards(card_id, user_id, card_type, status, daily_limit_cents,"

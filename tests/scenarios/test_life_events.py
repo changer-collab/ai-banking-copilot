@@ -82,15 +82,59 @@ def test_l1_refuses_order_above_the_frozen_budget(gateway: FactGateway) -> None:
         build_life_event("L1", {"budget": Money(100000), "order_cents": Money(200000)}, gateway)
 
 
-def test_l2_schedules_monthly_contribution_then_lists_subscriptions(
+def test_l1_uses_the_relative_date_from_the_utterance(gateway: FactGateway) -> None:
+    """「下周三生日订花」必须落到下周三，不能默认今天（否则当场就执行）。"""
+
+    plan = build_life_event(
+        "L1",
+        {"budget": Money(100000), "order_cents": Money(29900), "span": "我下周三生日"},
+        gateway,
+    )
+    order = next(node for node in plan.nodes if node.action == "merchant.order")
+    assert order.params["order_on"] == "2026-11-04"
+
+
+def test_l1_defaults_the_day_when_the_phrase_has_no_exact_date(
     gateway: FactGateway,
 ) -> None:
+    """「下个月过生日」解析不出具体日期：按基准日 + 7 天确定性默认排期，不按今天当场执行。"""
+
+    plan = build_life_event(
+        "L1",
+        {
+            "budget": Money(100000),
+            "order_cents": Money(29900),
+            "span": "我妈下个月过生日",
+        },
+        gateway,
+    )
+    order = next(node for node in plan.nodes if node.action == "merchant.order")
+    assert order.params["order_on"] == "2026-11-07"
+
+
+def test_l2_schedules_monthly_contribution_without_querying_subscriptions(
+    gateway: FactGateway,
+) -> None:
+    """定期出资只出转账节点：用户没问订阅，就不能顺手塞一条订阅查询。"""
     plan = build_life_event("L2", {"payee": "p_lina", "amount": Money(200000)}, gateway)
-    assert _actions(plan) == ["transfer.schedule", "subscription.list"]
+    assert _actions(plan) == ["transfer.schedule"]
     schedule = plan.nodes[0]
     assert schedule.params["amount_cents"] == 200000
     assert schedule.params["currency"] == "CNY"
     assert schedule.params["booked_on"] == "2026-10-31"
+
+
+def test_l2_appends_subscription_list_only_when_asked(gateway: FactGateway) -> None:
+    plan = build_life_event(
+        "L2",
+        {
+            "payee": "p_lina",
+            "amount": Money(200000),
+            "span": "每月给李娜 500 元生活费，顺便看看订阅",
+        },
+        gateway,
+    )
+    assert _actions(plan) == ["transfer.schedule", "subscription.list"]
     assert plan.nodes[1].depends_on == ("n1",)
 
 
@@ -185,7 +229,7 @@ def test_combo_links_the_first_tail_to_the_second_root(gateway: FactGateway) -> 
     ("utterance", "action", "event_id"),
     [
         ("我妈下个月过生日", "merchant.order", "L1"),
-        ("我卡丢了", "card.lock", "L5"),
+        ("我卡丢了", "card.report_lost", "L5"),
     ],
 )
 def test_spoken_life_events_route_to_the_prototype_handler(

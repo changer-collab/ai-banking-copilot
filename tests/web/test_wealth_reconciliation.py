@@ -136,12 +136,31 @@ def test_redeem_reconciles_balance_and_holding_and_ignores_min_amount(
     assert submitted["state"] == "awaiting_confirm"
     card = submitted["card"]
     assert isinstance(card, dict)
+    assert card["level"] == "RED"
+    assert "strong_verify" in card["requires"]
+
+    # 赎回是红色动作：未通过强验证，一分钱都不能动
+    denied = client.post(
+        "/api/confirm",
+        json={
+            "session_id": _SESSION,
+            "card_id": card["card_id"],
+            "frozen_hash": card["frozen_hash"],
+        },
+    )
+    assert denied.status_code == 409
+    assert _balance(rw_store) == before_balance
+    assert _holding(rw_store, "wp_bond") == before_holding
+
+    prompt = client.post("/api/verify/request", json={"session_id": _SESSION}).json()
+    assert prompt["code"]
     done = client.post(
         "/api/confirm",
         json={
             "session_id": _SESSION,
             "card_id": card["card_id"],
             "frozen_hash": card["frozen_hash"],
+            "verification_code": prompt["code"],
         },
     ).json()
     assert done["state"] == "completed", done
@@ -176,7 +195,8 @@ def test_redeem_beyond_holding_is_refused_and_writes_nothing(
         return
     card = submitted["card"]
     assert isinstance(card, dict)
-    done = client.post(
+    # 红色动作：先走完强验证，再断言执行期余额校验失败如实报 FAILED/PARTIAL、绝不谎报成功
+    denied = client.post(
         "/api/confirm",
         json={
             "session_id": _SESSION,
@@ -184,7 +204,21 @@ def test_redeem_beyond_holding_is_refused_and_writes_nothing(
             "frozen_hash": card["frozen_hash"],
         },
     )
-    # 赎回属于黄档（非红线），无需强验证；执行期余额校验失败如实报 FAILED/PARTIAL，绝不谎报成功。
+    assert denied.status_code == 409
+    assert _balance(rw_store) == before_balance
+    assert _holding(rw_store, "wp_bond") == before_holding
+
+    prompt = client.post("/api/verify/request", json={"session_id": _SESSION}).json()
+    assert prompt["code"]
+    done = client.post(
+        "/api/confirm",
+        json={
+            "session_id": _SESSION,
+            "card_id": card["card_id"],
+            "frozen_hash": card["frozen_hash"],
+            "verification_code": prompt["code"],
+        },
+    )
     assert done.status_code == 200, done.text
     assert done.json()["state"] in {"failed", "partial"}, done.text
     assert _balance(rw_store) == before_balance

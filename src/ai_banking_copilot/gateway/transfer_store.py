@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
@@ -44,10 +45,20 @@ CREATE TABLE IF NOT EXISTS scheduled_transfers (
     amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
     booked_on    TEXT NOT NULL,
     remark       TEXT NOT NULL DEFAULT '',
-    status       TEXT NOT NULL
+    status       TEXT NOT NULL,
+    method       TEXT NOT NULL DEFAULT 'next_day',
+    purpose      TEXT NOT NULL DEFAULT '',
+    fee_cents    INTEGER NOT NULL DEFAULT 0
 );
 """
 """定时转账登记表（独立 DDL；登记不扣款，仅记未来动作）。"""
+
+_SCHEDULED_OPTIONAL_COLUMNS = (
+    ("method", "TEXT NOT NULL DEFAULT 'next_day'"),
+    ("purpose", "TEXT NOT NULL DEFAULT ''"),
+    ("fee_cents", "INTEGER NOT NULL DEFAULT 0"),
+)
+"""v9 转账元数据列：旧库由 `ensure_transfer_schema` 幂等补齐。"""
 
 
 @dataclass(frozen=True)
@@ -75,6 +86,46 @@ class ScheduledTransfer:
     booked_on: date
     remark: str
     status: str
+    method: str = "next_day"
+    purpose: str = ""
+    fee_cents: int = 0
+
+
+def ensure_transfer_schema(conn: sqlite3.Connection) -> None:
+    """幂等建表并补齐 v9 转账元数据列（供组合根与写原语共用）。"""
+    conn.execute(COLLECTION_REQUESTS_SCHEMA_SQL)
+    conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(scheduled_transfers)")}
+    for column, column_type in _SCHEDULED_OPTIONAL_COLUMNS:
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE scheduled_transfers ADD COLUMN {column} {column_type}"
+            )
+
+
+class ScheduledTransferWriter:
+    """定时转账登记的**撤销**通道：登记不扣款，撤销只改状态，不产生资金动作。"""
+
+    def __init__(self, store: Store) -> None:
+        self._store = store
+
+    def cancel(self, *, user_id: str, schedule_id: str) -> bool:
+        with self._store.transaction() as conn:
+            ensure_transfer_schema(conn)
+            row = conn.execute(
+                "SELECT user_id, status FROM scheduled_transfers WHERE schedule_id = ?",
+                (schedule_id,),
+            ).fetchone()
+            if row is None or str(row["user_id"]) != user_id:
+                return False
+            if str(row["status"]) != "scheduled":
+                return False
+            changed = conn.execute(
+                "UPDATE scheduled_transfers SET status = 'cancelled'"
+                " WHERE schedule_id = ? AND status = 'scheduled'",
+                (schedule_id,),
+            ).rowcount
+            return changed == 1
 
 
 def due_execution_key(action: str, user_id: str, reference_id: str) -> str:
@@ -84,7 +135,6 @@ def due_execution_key(action: str, user_id: str, reference_id: str) -> str:
 
 
 def init_transfer_schema(store: Store) -> None:
-    """建转账线两张表（幂等；既有库自动补表）。"""
+    """建转账线两张表并补齐元数据列（幂等；既有库自动补表）。"""
     with store.transaction() as conn:
-        conn.execute(COLLECTION_REQUESTS_SCHEMA_SQL)
-        conn.execute(SCHEDULED_TRANSFERS_SCHEMA_SQL)
+        ensure_transfer_schema(conn)

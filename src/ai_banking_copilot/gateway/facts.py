@@ -410,6 +410,7 @@ class FactGateway:
             identity_confirmed=bool(row["identity_confirmed"]),  # type: ignore[index]
             blocked=bool(row["blocked"]),  # type: ignore[index]
             phone=_optional_text(row["phone"]),  # type: ignore[index]
+            bank_name=_optional_text(row["bank_name"]),  # type: ignore[index]
         )
         return _record("payees", payload.payee_id, payload)
 
@@ -456,6 +457,12 @@ class FactGateway:
             booked_at=_optional_text(row["booked_at"]),  # type: ignore[index]
             city=_optional_text(row["city"]),  # type: ignore[index]
             card_tail=_optional_card_tail(row["card_tail"]),  # type: ignore[index]
+            payee_id=_optional_text(row["payee_id"]),  # type: ignore[index]
+            transfer_method=_optional_text(row["transfer_method"]),  # type: ignore[index]
+            transfer_fee_cents=_optional_int(row["transfer_fee_cents"]),  # type: ignore[index]
+            transfer_purpose=_optional_text(row["transfer_purpose"]),  # type: ignore[index]
+            transfer_remark=_optional_text(row["transfer_remark"]),  # type: ignore[index]
+            transfer_status=_optional_text(row["transfer_status"]),  # type: ignore[index]
         )
         return _record("transactions", payload.txn_id, payload)
 
@@ -469,6 +476,11 @@ class FactGateway:
             next_charge_on=date.fromisoformat(str(row["next_charge_on"])),  # type: ignore[index]
             status=str(row["status"]),  # type: ignore[index]
             card_id=_optional_text(row["card_id"]),  # type: ignore[index]
+            cancelled_on=(
+                date.fromisoformat(str(row["cancelled_on"]))  # type: ignore[index]
+                if row["cancelled_on"]  # type: ignore[index]
+                else None
+            ),
         )
         return _record("subscriptions", payload.subscription_id, payload)
 
@@ -532,6 +544,9 @@ class FactGateway:
             booked_on=date.fromisoformat(str(row["booked_on"])),  # type: ignore[index]
             remark=str(row["remark"]),  # type: ignore[index]
             status=str(row["status"]),  # type: ignore[index]
+            method=str(row["method"] or "next_day"),  # type: ignore[index]
+            purpose=str(row["purpose"] or ""),  # type: ignore[index]
+            fee_cents=int(row["fee_cents"] or 0),  # type: ignore[index]
         )
         return _record("scheduled_transfers", payload.schedule_id, payload)
 

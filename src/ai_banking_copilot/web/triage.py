@@ -97,20 +97,19 @@ _WEALTH_MESSAGE = (
 )
 
 _REPAYMENT_MESSAGE = (
-    "还款代扣不在本应用的订阅管理范围内：这里只管理订阅类商户扣费，"
+    "还款代扣不在本应用的代扣协议管理范围内：这里只管理订阅类商户扣费，"
     "没有接入信用卡、花呗或贷款的还款代扣。擅自关闭还款代扣可能导致逾期、罚息，"
     "也可能影响征信；如需关闭，请到发卡行 App 或支付宝「设置 → 支付设置 → 免密支付/自动扣款」操作。"
 )
 
 _SUBSCRIPTION_BOUNDARY_MESSAGE = (
-    "「本地取消」和「商户取消」是两件事：在本应用点取消订阅，只会把本应用里的订阅状态改为已取消，"
-    "不会通知商户；商户侧是否停止扣费，以商户回执或商户后台为准。"
-    "所以本地显示已取消，不等于下一期不会再扣——建议同时在商户 App 的自动续费管理里关闭。"
+    "在本页关闭的是银行卡对商户的扣款授权：关闭后这张卡不再向该商户放款。"
+    "商户是否继续提供服务、是否停止计费，由商户决定；商户侧订阅状态仍需到商户 App 关闭。"
 )
 
 _SUBSCRIPTION_SUGGESTIONS: tuple[TriageSuggestion, ...] = (
-    TriageSuggestion(label="查看我的订阅", text="查一下我的订阅"),
-    TriageSuggestion(label="取消视频会员", text="把视频会员的自动续费取消"),
+    TriageSuggestion(label="查看我的代扣协议", text="查一下我的代扣协议"),
+    TriageSuggestion(label="关闭视频会员扣款", text="关闭视频会员的扣款协议"),
     TriageSuggestion(label="查上月账单", text="查一下上月账单"),
 )
 

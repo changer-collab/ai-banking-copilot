@@ -67,7 +67,12 @@ def test_transfer_replay_is_idempotent(rw_store: Store) -> None:
 
 def test_idempotency_key_cannot_be_reused_for_other_action(rw_store: Store) -> None:
     bank = CoreBank(rw_store)
-    bank.set_card_status(card_id="card_debit", status="locked", idempotency_key="k9")
+    bank.set_card_status(
+        card_id="card_debit",
+        status="locked",
+        temp_lock_until="2026-11-07",
+        idempotency_key="k9",
+    )
     with pytest.raises(IdempotencyConflictError):
         bank.transfer(
             user_id=DEMO_USER_ID,

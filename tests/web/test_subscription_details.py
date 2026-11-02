@@ -27,13 +27,18 @@ def _cancel(deps: AppDeps, *, subscription: str = "sub_video") -> dict:
     client = _client(deps)
     submitted = client.post(
         "/api/submit",
-        json={"utterance": "取消订阅", "selected": {"subscription": subscription}},
+        json={"utterance": "关闭扣款协议", "selected": {"subscription": subscription}},
     ).json()
     card = submitted["card"]
     assert card is not None, submitted
+    prompt = client.post("/api/verify/request", json={}).json()
     confirmed = client.post(
         "/api/confirm",
-        json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},
+        json={
+            "card_id": card["card_id"],
+            "frozen_hash": card["frozen_hash"],
+            "verification_code": prompt["code"],
+        },
     ).json()
     return confirmed
 
@@ -67,17 +72,17 @@ def test_options_expose_subscription_details_from_raw_transactions(deps: AppDeps
         assert item["card_tail"] == record.payload.card_tail
         assert item["channel"] == record.payload.channel
 
-    assert video["price_increased_12m"] is True
-    assert video["price_change_12m_from_cents"] == 2125
+    assert video["price_increased_12m"] is False
+    assert video["price_change_12m_from_cents"] == 2500
     assert video["price_change_12m_to_cents"] == 2500
     latest = video["evidence"][-1]
     assert latest["booked_at"] == "2026-10-18T20:30:00"
     assert latest["card_tail"] == "4821"
     assert latest["channel"] == "app"
     music = by_id["subscription:sub_music"]
-    assert music["price_increased_12m"] is None
-    assert music["price_change_12m_from_cents"] is None
-    assert music["price_change_12m_to_cents"] is None
+    assert music["price_increased_12m"] is True
+    assert music["price_change_12m_from_cents"] == 1000
+    assert music["price_change_12m_to_cents"] == 1200
 
 
 def test_options_keep_missing_charge_time_and_card_tail_null(
@@ -162,7 +167,7 @@ def test_cancel_of_another_users_subscription_is_blocked(deps: AppDeps) -> None:
     client = _client(replace(deps, user_id="u_other"))
     submitted = client.post(
         "/api/submit",
-        json={"utterance": "取消订阅", "selected": {"subscription": "sub_video"}},
+        json={"utterance": "关闭扣款协议", "selected": {"subscription": "sub_video"}},
     ).json()
     assert submitted["state"] == "blocked"
     assert submitted["card"] is None

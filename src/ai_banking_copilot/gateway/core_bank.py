@@ -305,10 +305,11 @@ class CoreBank:
                     external_status=EXTERNAL_STATUS_NOT_INTEGRATED,
                     previous_status=previous_status,
                 )
+            cancelled_on = DEFAULT_BOOKING_DATE.isoformat()
             changed = conn.execute(
-                "UPDATE subscriptions SET status = 'cancelled' "
-                "WHERE subscription_id = ? AND user_id = ?",
-                (subscription_id, user_id),
+                "UPDATE subscriptions SET status = 'cancelled', cancelled_on = ?"
+                " WHERE subscription_id = ? AND user_id = ?",
+                (cancelled_on, subscription_id, user_id),
             ).rowcount
             if changed != 1:
                 raise UnknownSubscriptionError(subscription_id)
@@ -818,12 +819,19 @@ class CoreBank:
                 raise UnknownCardError(card_id)
             if limit_kind is not None and str(row["card_type"]) != "debit":
                 raise CoreBankError("通道日限额只适用于借记卡")
-            target = "daily_limit_cents" if limit_kind is None else columns[limit_kind]
-            conn.execute(
-                f"UPDATE cards SET {target} = ?, daily_limit_cents = CASE"
-                f" WHEN ? = 'purchase' THEN ? ELSE daily_limit_cents END WHERE card_id = ?",
-                (daily_limit.cents, limit_kind, daily_limit.cents, card_id),
-            )
+            if limit_kind is None:
+                # 只有旧字段时**单列赋值**：同一列写两次会让 CASE 的旧值覆盖新值。
+                conn.execute(
+                    "UPDATE cards SET daily_limit_cents = ? WHERE card_id = ?",
+                    (daily_limit.cents, card_id),
+                )
+            else:
+                target = columns[limit_kind]
+                conn.execute(
+                    f"UPDATE cards SET {target} = ?, daily_limit_cents = CASE"
+                    f" WHEN ? = 'purchase' THEN ? ELSE daily_limit_cents END WHERE card_id = ?",
+                    (daily_limit.cents, limit_kind, daily_limit.cents, card_id),
+                )
             return WriteReceipt(
                 idempotency_key=idempotency_key,
                 action="set_card_limit",
@@ -982,6 +990,9 @@ class CoreBank:
         remark: str,
         idempotency_key: str,
         currency: str | None = None,
+        method: str = "next_day",
+        purpose: str = "",
+        fee_cents: int = 0,
         before_write: BeforeWrite | None = None,
     ) -> WriteReceipt:
         """**登记**一笔未来转账（P2-6；登记时**不扣款**）。
@@ -1012,8 +1023,8 @@ class CoreBank:
             schedule_id = _effect_id("sched", "book_transfer", idempotency_key)
             conn.execute(
                 "INSERT INTO scheduled_transfers(schedule_id, user_id, account_id, payee_id,"
-                " amount_cents, booked_on, remark, status)"
-                " VALUES(?, ?, ?, ?, ?, ?, ?, 'scheduled')",
+                " amount_cents, booked_on, remark, status, method, purpose, fee_cents)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)",
                 (
                     schedule_id,
                     user_id,
@@ -1022,6 +1033,9 @@ class CoreBank:
                     amount.cents,
                     booked_on.isoformat(),
                     remark,
+                    method,
+                    purpose,
+                    max(0, int(fee_cents)),
                 ),
             )
             return WriteReceipt(

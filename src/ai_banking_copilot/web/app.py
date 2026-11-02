@@ -39,7 +39,8 @@ from ai_banking_copilot.contracts.plan import Plan, cfhash
 from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import Card, Money
+from ai_banking_copilot.gateway.models import Card, Money, Payee
+from ai_banking_copilot.gateway.payee_store import PayeeValidationError
 from ai_banking_copilot.gateway.receipt_store import ReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
     RETAKES_PER_12M,
@@ -57,6 +58,7 @@ from ai_banking_copilot.planning.reviewer import Reviewer
 from ai_banking_copilot.planning.task_observations import TaskObservations
 from ai_banking_copilot.policy.audit import (
     KIND_CHANNEL,
+    KIND_EXECUTION,
     KIND_OPERATOR,
     AuditEvent,
     AuditLog,
@@ -71,7 +73,15 @@ from ai_banking_copilot.policy.verification import (
     VerificationAttemptLimiter,
     VerificationProvider,
 )
+from ai_banking_copilot.scenarios.bill_budget import budget_progress
+from ai_banking_copilot.scenarios.bill_categories import (
+    category_option_payload,
+    is_valid_category,
+    normalize_merchant,
+)
 from ai_banking_copilot.scenarios.bill_findings import (
+    LEAD_STATE_LABELS,
+    LEAD_STATES,
     BillNarrator,
     analyze_bill,
     bill_profile,
@@ -79,6 +89,7 @@ from ai_banking_copilot.scenarios.bill_findings import (
     expense_trend,
     narrate_bill_findings,
     report_payload,
+    top_merchants,
 )
 from ai_banking_copilot.scenarios.life_events import (
     LIFE_EVENT_COMBOS,
@@ -111,7 +122,7 @@ from ai_banking_copilot.scenarios.wealth_assessment import (
     questionnaire_payload,
 )
 from ai_banking_copilot.tools.registry import ToolRegistry
-from ai_banking_copilot.web import reminders, wealth_docs, wording
+from ai_banking_copilot.web import life_funding, reminders, wealth_docs, wording
 from ai_banking_copilot.web.auth import (
     DEMO_ACCOUNTS,
     SESSION_IDLE_SECONDS,
@@ -122,6 +133,12 @@ from ai_banking_copilot.web.auth import (
     AuthService,
     AuthSession,
     AuthUser,
+)
+from ai_banking_copilot.web.bill_analysis_store import (
+    BillAnalysisStore,
+    MemoryBillAnalysisStore,
+    category_overrides_for,
+    lead_states_for,
 )
 from ai_banking_copilot.web.channels.contracts import (
     CHANNEL_FEISHU,
@@ -259,6 +276,39 @@ def _cookie_secure() -> bool:
     return _env_flag(COOKIE_SECURE_ENV)
 
 
+_BILL_PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_BILL_LEAD_ID = re.compile(r"^lead-[A-Za-z0-9_-]{1,80}$")
+
+
+def _valid_bill_period(period: str) -> bool:
+    return bool(_BILL_PERIOD.fullmatch(period))
+
+
+def _valid_lead_id(lead_id: str) -> bool:
+    return bool(_BILL_LEAD_ID.fullmatch(lead_id))
+
+
+def _bill_lead_state_from_utterance(utterance: str) -> str | None:
+    """确定性短语 → 线索状态；只处理明确说明，不做语义猜测。
+
+    顺序：异常 > 忽略 > 正常。含金额的句子不在这里处理（由前端交给办理流程，
+    避免把「转给李娜 500 元」误吞成一次线索核对）。
+    """
+    text = utterance.strip()
+    if not text:
+        return None
+    if any(word in text for word in ("不是我", "盗刷", "异常", "报警", "冻结", "被骗")):
+        return "abnormal"
+    if any(word in text for word in ("忽略", "不用管", "别管")):
+        return "ignored"
+    if any(
+        word in text
+        for word in ("转给", "朋友", "家人", "本人", "正常", "我买的", "我知道", "还款")
+    ):
+        return "normal"
+    return None
+
+
 @dataclass(frozen=True)
 class AppDeps:
     """渠道层依赖装配（全部来自上游公开符号；本层不做任何裁决、不持有写连接）。
@@ -282,6 +332,10 @@ class AppDeps:
     读路径仍走 `risk`，写路径与读路径分离，理财推荐只消费读路径事实。"""
     wealth_trades: WealthTradeWriter | None = None
     """理财交易确认留痕通道；`None ⇒ /api/wealth/acknowledgements` 404（fail-closed）。"""
+    payee_writer: object | None = None
+    """收款人名册登记通道；`None ⇒ POST /api/payees` 409，不静默假装成功。"""
+    transfer_schedules: object | None = None
+    """定时转账撤销通道；`None ⇒ POST /api/transfers/cancel` 409。"""
     reversal: ReversalService | None = None
     """补偿通道（组合根注入）：`None ⇒ 回退如实失败`，不谎称已退回（见 `policy/reversal.py`）。"""
     operator_token: str | None = None
@@ -294,6 +348,8 @@ class AppDeps:
     """是否把 Reviewer 结果接入执行前状态机；旁路模式只审计诊断。"""
     insights: InsightService | None = None
     """只读主动洞察服务；元数据存储与银行事实连接由组合根隔离装配。"""
+    bill_analysis: BillAnalysisStore | None = None
+    """账单线索核对状态与分类修正；不写银行事实库。"""
     verification_provider: VerificationProvider | None = None
     verification_key: bytes | None = None
     verification_strict: bool = False
@@ -382,6 +438,15 @@ class _LoginRequest(BaseModel):
     password: str
 
 
+class _CreatePayeeRequest(BaseModel):
+    """收款人登记：只收尾号，不收完整卡号。"""
+
+    full_name: str = Field(min_length=1, max_length=20)
+    account_tail: str = Field(min_length=4, max_length=4)
+    bank_name: str = Field(min_length=2, max_length=20)
+    phone_tail4: str = Field(default="", max_length=4)
+
+
 class _ReverifyRequest(BaseModel):
     """二次验证：校验当前用户口令，换取**一次性**短时票据（删除类动作用）。"""
 
@@ -431,6 +496,31 @@ class _BudgetRequest(BaseModel):
 
     budget_cents: int | None = None
     month: str | None = None
+    categories: dict[str, int] | None = None
+    """分类预算（一级分类 → 整数分）；缺省表示不改动分类预算。"""
+
+
+class _LeadStateRequest(BaseModel):
+    """线索核对状态：只写账单分析元数据，不写银行事实。"""
+
+    period: str
+    state: str
+    note: str = ""
+
+
+class _CategoryOverrideRequest(BaseModel):
+    """用户对商户二级分类的修正；按 merchant_key 记忆。"""
+
+    merchant_key: str
+    category: str
+
+
+class _LeadResolutionRequest(BaseModel):
+    """对话回写：用户对某条线索的说明，由确定性短语规则映射状态。"""
+
+    lead_id: str
+    period: str
+    utterance: str
 
 
 class _RiskAssessmentRequest(BaseModel):
@@ -522,6 +612,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     `current_user` 解析，会话工厂与 IM 调度都按**真实 user** 构造，绝不共用默认用户。
     """
     auth_enabled = deps.auth is not None and deps.auth_mode == AUTH_MODE_DEMO
+    bill_store: BillAnalysisStore = deps.bill_analysis or MemoryBillAnalysisStore()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -978,7 +1069,14 @@ def create_app(deps: AppDeps) -> FastAPI:
         if event_id is None:
             return view
         event_name = _life_event_name(event_id)
-        amount = _selected_amount_cents(selected)
+        # 事件金额取**计划里的资金口径**（预留额 > 赎回额 > 下单额），
+        # 不能把花束档位 299 当成整件事的 1000 预算。
+        amount = _life_plan_amount(view.plan)
+        if amount is None:
+            amount = _selected_amount_cents(selected)
+        if amount is None:
+            amount = _utterance_amount_cents(utterance)
+        hold_ref, occasion_ref = _life_plan_refs(view.plan)
         try:
             store.create(
                 user_id=user_id,
@@ -987,20 +1085,69 @@ def create_app(deps: AppDeps) -> FastAPI:
                 event_name=event_name,
                 # 具体事件：优先用该类型的「常见事件」名，否则压掉金额后的原话
                 event_title=_life_event_title(utterance, fallback=event_name),
-                amount_cents=amount if amount is not None else _utterance_amount_cents(utterance),
+                amount_cents=amount,
                 steps=_life_plan_steps(view.plan),
                 due_on=_life_plan_due_on(view.plan),
                 visibility=view.visibility,
+                utterance=utterance,
+                hold_ref=hold_ref,
+                occasion_ref=occasion_ref,
             )
         except Exception:
             LOGGER.warning("生活事件写入失败：%s / %s", user_id, session_id, exc_info=True)
-        return view
+        return _with_funding_note(view, user_id, amount)
 
-    def _mark_life_event(user_id: str, session_id: str, status: str) -> None:
+    def _with_funding_note(
+        view: SubmissionView, user_id: str, amount_cents: int | None
+    ) -> SubmissionView:
+        """在回复末尾补一句资金可用性提醒；资金来自自身赎回 / 已执行时不提示。"""
+
+        plan = view.plan
+        if plan is None or amount_cents is None:
+            return view
+        if any(node.action == "wealth.redeem" for node in plan.nodes):
+            return view
+        trigger = _life_plan_trigger_day(plan)
+        if trigger is None:
+            return view
+        try:
+            result = life_funding.check(
+                deps.gateway,
+                user_id,
+                amount_cents=amount_cents,
+                trigger_on=trigger,
+                today=deps.today,
+            )
+        except Exception:
+            LOGGER.warning("资金来源核查失败：%s", user_id, exc_info=True)
+            return view
+        message = life_funding.note(result)
+        if message is None:
+            return view
+        return replace(view, message=f"{view.message}\n{message}")
+
+    def _mark_life_event(
+        user_id: str, session_id: str, status: str, view: ExecutionView | None = None
+    ) -> None:
         store = deps.life_events
         if store is None:
             return
         try:
+            if view is not None and view.exec_results:
+                record = store.latest_record(user_id=user_id, session_id=session_id)
+                if record is not None:
+                    store.attach_execution(
+                        user_id=user_id,
+                        record_id=record.record_id,
+                        results=tuple(
+                            {
+                                "action": item.action,
+                                "status": item.status,
+                                "record_ids": list(item.record_ids),
+                            }
+                            for item in view.exec_results
+                        ),
+                    )
             store.mark(user_id=user_id, session_id=session_id, status=status)
         except Exception:
             LOGGER.warning("生活事件状态写入失败：%s / %s", user_id, session_id, exc_info=True)
@@ -1035,7 +1182,9 @@ def create_app(deps: AppDeps) -> FastAPI:
         独立 `session_id`，因此同一账号两个窗口互不干扰。
         """
         view = _session_for(session_id, user_id).current_view()
-        return _response(session_id, user_id, _execution_payload(view))
+        return _response(
+            session_id, user_id, _execution_payload(view, deps.gateway, user_id, deps.today)
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -1053,15 +1202,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             # 场景①「额度卡」只读数据：限额取官方 1000 元与客户分档的较小者
             # （同 policy/execution.py 口径），已用取当日已记账转出合计。
             # 两者都由 gateway 给事实，前端不计算。
-            "quota": {
-                "as_of": deps.today.isoformat(),
-                "daily_limit_cents": min(
-                    DAILY_LIMIT_YUAN * 100, gateway.daily_transfer_limit(user_id).cents
-                ),
-                "daily_accumulated_cents": gateway.daily_transfer_total(
-                    user_id, deps.today
-                ).cents,
-            },
+            "quota": _transfer_quota_payload(gateway, user_id, deps.today),
             "accounts": [
                 {"id": record.payload.account_id,
                  "label": f"{account_kinds.get(record.payload.kind, record.payload.kind)}账户"
@@ -1094,6 +1235,8 @@ def create_app(deps: AppDeps) -> FastAPI:
                 "external_cancel_integrated": False,
                 "can_request_external_cancel": False,
                 "can_local_cancel": True,
+                "close_action_label": "关闭扣款协议",
+                "can_close_bank_side": True,
                 "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
                 "states": [
                     {"state": state, "label": label}
@@ -1168,17 +1311,47 @@ def create_app(deps: AppDeps) -> FastAPI:
 
         return {
             "payees": [
-                {
-                    "payee_id": record.payload.payee_id,
-                    "name": record.payload.full_name,
-                    "account_tail": record.payload.account_tail,
-                    "phone_tail4": tail4(record.payload.phone_tail)
-                    or tail4(record.payload.phone),
-                    "blocked": record.payload.blocked,
-                }
+                _payee_payload(record.payload, tail4)
                 for record in deps.gateway.payees_of(user_id)
             ]
         }
+
+    @app.post("/api/payees")
+    def create_payee(
+        request: _CreatePayeeRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """登记演示收款人：只保存姓名 + 账号后四位 + 开户行 + 手机号后四位。
+
+        这不是资金动作；执行仍走 `transfer.create`，由核心银行校验收款人存在与 blocked。
+        """
+        writer = deps.payee_writer
+        if writer is None:
+            raise HTTPException(status_code=409, detail="收款人名册登记未装配")
+        try:
+            payee = writer.add(  # type: ignore[attr-defined]
+                user_id=user_id,
+                full_name=request.full_name,
+                account_tail=request.account_tail,
+                bank_name=request.bank_name,
+                phone_tail=request.phone_tail4,
+            )
+        except PayeeValidationError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        deps.audit.append(
+            AuditEvent(
+                event_id=f"payee_create_{secrets.token_hex(8)}",
+                kind=KIND_EXECUTION,
+                payload={
+                    "action": "payee.create",
+                    "user_id": user_id,
+                    "payee_id": str(payee.get("payee_id", "")),
+                    "account_tail": str(payee.get("account_tail", "")),
+                    "bank_name": str(payee.get("bank_name", "")),
+                },
+                prev_hash="",
+            )
+        )
+        return {"payee": payee}
 
     @app.get("/api/risk-assessment")
     def risk_assessment_state(user_id: str = Depends(current_user)) -> dict[str, object]:
@@ -1591,28 +1764,118 @@ def create_app(deps: AppDeps) -> FastAPI:
             raise HTTPException(status_code=400, detail="账期非法，需为 2000-2100 年与 1-12 月")
         period_end = date(target_year, target_month, monthrange(target_year, target_month)[1])
         data_through = min(period_end, deps.today)
+        period_str = f"{target_year:04d}-{target_month:02d}"
+        lead_states = lead_states_for(bill_store, user_id, period_str)
+        overrides = category_overrides_for(bill_store, user_id)
         report = analyze_bill(
-            deps.gateway, user_id, target_year, target_month, as_of=deps.today,
+            deps.gateway,
+            user_id,
+            target_year,
+            target_month,
+            as_of=deps.today,
+            overrides=overrides,
         )
         narrative = narrate_bill_findings(report, deps.bill_narrator)
-        profile = bill_profile(deps.gateway, user_id, report)
+        profile = bill_profile(deps.gateway, user_id, report, overrides=overrides)
+        shares = category_shares(
+            deps.gateway, user_id, target_year, target_month, overrides=overrides
+        )
+        trend = expense_trend(
+            deps.gateway, user_id, target_year, target_month, overrides=overrides
+        )
+        merchants = top_merchants(
+            deps.gateway, user_id, target_year, target_month, overrides=overrides
+        )
+        total_budget, category_budgets = (
+            deps.insights.budgets(user_id, period_str)
+            if deps.insights is not None
+            else (None, {})
+        )
+        month_start = date(target_year, target_month, 1)
+        days_left = (
+            (period_end - deps.today).days + 1
+            if month_start <= deps.today <= period_end
+            else 0
+        )
+        budget = budget_progress(
+            month=period_str,
+            consumption_cents=report.consumption_cents,
+            shares=shares,
+            total_budget_cents=total_budget,
+            category_budgets=category_budgets,
+            days_left=days_left,
+            is_current_month=month_start <= deps.today <= period_end,
+        )
         return {
             "demo": _is_anonymous(request),
-            **report_payload(report),
+            **report_payload(report, lead_states=lead_states),
             "period_basis": "explicit" if explicit else "current_month",
             "data_through": data_through.isoformat(),
+            "server_month": deps.today.strftime("%Y-%m"),
             "trend": [
-                {"period": point.period, "expense_cents": point.expense_cents}
-                for point in expense_trend(deps.gateway, user_id, target_year, target_month)
+                {
+                    "period": point.period,
+                    "expense_cents": point.expense_cents,
+                    "income_cents": point.income_cents,
+                    "categories": [
+                        {
+                            "category": item.category,
+                            "category_l1": item.category_l1,
+                            "expense_cents": item.expense_cents,
+                            "share": str(item.share),
+                        }
+                        for item in point.categories
+                    ],
+                    "mom": (
+                        {
+                            "previous_period": point.mom.previous_period,
+                            "change_cents": point.mom.change_cents,
+                            "change_pct": (
+                                str(point.mom.change_pct)
+                                if point.mom.change_pct is not None
+                                else None
+                            ),
+                            "contributions": [
+                                {
+                                    "category": row.category,
+                                    "change_cents": row.change_cents,
+                                }
+                                for row in point.mom.contributions
+                            ],
+                        }
+                        if point.mom is not None
+                        else None
+                    ),
+                }
+                for point in trend
             ],
             "category_share": [
                 {
                     "category": item.category,
+                    "category_l1": item.category_l1,
+                    "mcc": item.mcc,
+                    "mcc_label": item.mcc_label,
                     "expense_cents": item.expense_cents,
                     "share": str(item.share),
                 }
-                for item in category_shares(deps.gateway, user_id, target_year, target_month)
+                for item in shares
             ],
+            "top_merchants": [
+                {
+                    "merchant_key": item.merchant_key,
+                    "merchant_label": item.merchant_label,
+                    "amount_cents": item.amount_cents,
+                    "count": item.count,
+                    "share": str(item.share),
+                    "category_l1": item.category_l1,
+                    "category_l2": item.category_l2,
+                    "mcc": item.mcc,
+                    "mcc_label": item.mcc_label,
+                }
+                for item in merchants
+            ],
+            "category_options": category_option_payload(),
+            "budget": budget,
             "profile": {
                 "top_category": profile.top_category,
                 "top_category_cents": profile.top_category_cents,
@@ -1639,6 +1902,88 @@ def create_app(deps: AppDeps) -> FastAPI:
                 "degrade_reason": narrative.degrade_reason,
                 "channel": narrative.channel,
             },
+        }
+
+    @app.post("/api/bills/leads/{lead_id}")
+    def set_bill_lead_state(
+        lead_id: str,
+        request: _LeadStateRequest,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """核对线索：写独立元数据，刷新后不再重复提示。"""
+        if not _valid_bill_period(request.period):
+            raise HTTPException(status_code=400, detail="账期格式必须为 YYYY-MM")
+        if request.state not in LEAD_STATES:
+            raise HTTPException(status_code=400, detail="线索状态不合法")
+        if not _valid_lead_id(lead_id):
+            raise HTTPException(status_code=400, detail="线索编号不合法")
+        try:
+            bill_store.set_lead_state(
+                user_id, request.period, lead_id, request.state, request.note[:200]
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "recorded": True,
+            "lead_id": lead_id,
+            "state": request.state,
+            "state_label": LEAD_STATE_LABELS.get(request.state, request.state),
+        }
+
+    @app.post("/api/bills/category-override")
+    def set_bill_category_override(
+        request: _CategoryOverrideRequest,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """记住用户对商户分类的修正；只影响后续分析归类。"""
+        merchant_key = normalize_merchant(request.merchant_key)
+        if not merchant_key or len(merchant_key) > 80:
+            raise HTTPException(status_code=400, detail="商户标识不合法")
+        if not is_valid_category(request.category):
+            raise HTTPException(status_code=400, detail="分类不在可选范围内")
+        try:
+            bill_store.set_category_override(user_id, merchant_key, request.category)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {
+            "recorded": True,
+            "merchant_key": merchant_key,
+            "category": request.category,
+        }
+
+    @app.post("/api/bills/lead-resolution")
+    def resolve_bill_lead(
+        request: _LeadResolutionRequest,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """对话回写：按确定性短语把用户说明映射为线索状态。
+
+        这里不做资金判断、不产生执行计划；只把「这笔是转给朋友的」这类
+        明确说明记录为核对结果，避免同一线索反复出现。
+        """
+        if not _valid_bill_period(request.period):
+            raise HTTPException(status_code=400, detail="账期格式必须为 YYYY-MM")
+        if not _valid_lead_id(request.lead_id):
+            raise HTTPException(status_code=400, detail="线索编号不合法")
+        state = _bill_lead_state_from_utterance(request.utterance)
+        if state is None:
+            return {
+                "recorded": False,
+                "lead_id": request.lead_id,
+                "state": "",
+                "state_label": "",
+                "message": "没有识别到明确的核对结论；可以点「确认正常 / 标记异常 / 忽略」。",
+            }
+        bill_store.set_lead_state(
+            user_id, request.period, request.lead_id, state, request.utterance[:200]
+        )
+        label = LEAD_STATE_LABELS.get(state, state)
+        return {
+            "recorded": True,
+            "lead_id": request.lead_id,
+            "state": state,
+            "state_label": label,
+            "message": f"已按您的说明把这条线索标记为「{label}」，之后不再重复提示。",
         }
 
     @app.get("/api/insights")
@@ -1680,16 +2025,30 @@ def create_app(deps: AppDeps) -> FastAPI:
         if not 1 <= days <= 365:
             raise HTTPException(status_code=400, detail="查询区间需为 1-365 天")
         gateway = deps.gateway
-        payee_names = {
-            record.payload.payee_id: record.payload.full_name
-            for record in gateway.payees_of(user_id)
-        }
+        payees = [record.payload for record in gateway.payees_of(user_id)]
+        by_id = {payee.payee_id: payee for payee in payees}
+        by_name: dict[str, list[Payee]] = {}
+        for payee in payees:
+            by_name.setdefault(payee.full_name, []).append(payee)
         accounts = gateway.accounts_of(user_id)
         kinds = {record.payload.account_id: record.payload.kind for record in accounts}
         labels = {"savings": "储蓄账户", "current": "活期账户"}
+        card_tails: dict[str, str] = {}
+        for record in gateway.cards_of(user_id):
+            card = record.payload
+            if card.account_id and card.last4:
+                card_tails.setdefault(card.account_id, card.last4)
         start = deps.today - timedelta(days=days)
         horizon = deps.today + timedelta(days=days)
         items: list[dict[str, object]] = []
+
+        def payee_for(raw: str) -> Payee | None:
+            found = by_id.get(raw)
+            if found is not None:
+                return found
+            same_name = by_name.get(raw, [])
+            return same_name[0] if same_name else None
+
         for account in accounts:
             for txn_record in gateway.transactions_between(
                 account.payload.account_id, start, horizon
@@ -1697,36 +2056,149 @@ def create_app(deps: AppDeps) -> FastAPI:
                 txn = txn_record.payload
                 if txn.category != "转账" or txn.direction != "out":
                     continue
-                payee_id = txn.merchant.removeprefix("转给")
+                raw_payee = txn.merchant.removeprefix("转给")
+                matched_payee: Payee | None = payee_for(raw_payee)
+                source = "seed" if _is_seed_transaction(txn.txn_id) else "live"
+                method = txn.transfer_method or ("history" if source == "seed" else "realtime")
+                purpose = txn.transfer_purpose or ""
                 items.append(
                     {
                         "kind": "transaction",
                         "record_id": txn.txn_id,
-                        "payee": _mask_payee_name(payee_names.get(payee_id, "")),
+                        "source": source,
+                        "payee_id": matched_payee.payee_id if matched_payee else "",
+                        "payee": _display_payee_name(
+                            matched_payee.full_name if matched_payee else raw_payee
+                        ),
+                        "payee_account_tail": matched_payee.account_tail if matched_payee else "",
+                        "payee_bank": (matched_payee.bank_name or "") if matched_payee else "",
+                        "payee_phone_tail4": (
+                            (matched_payee.phone_tail or "")[-4:] if matched_payee else ""
+                        ),
                         "amount_cents": -txn.amount.cents,
                         "booked_on": txn.booked_on.isoformat(),
-                        "status": "已到账" if txn.booked_on <= deps.today else "待到账",
+                        "status": "已到账" if txn.booked_on <= deps.today else "处理中",
+                        "method": method,
+                        "method_label": _transfer_method_label(method),
+                        "eta_label": _transfer_eta_label(method),
+                        "fee_cents": int(txn.transfer_fee_cents or 0),
+                        "purpose": purpose,
+                        "purpose_label": _transfer_purpose_label(purpose),
+                        "remark": txn.transfer_remark or "",
                         "account": labels.get(kinds.get(account.payload.account_id, ""), "账户"),
-                        "remark": "",
+                        "account_tail": card_tails.get(account.payload.account_id, ""),
+                        "channel": txn.channel,
+                        "can_repeat": matched_payee is not None and not matched_payee.blocked,
+                        "can_cancel": False,
                     }
                 )
-        for booking_record in gateway.scheduled_transfers_of(user_id, status="scheduled"):
+        for booking_record in gateway.scheduled_transfers_of(user_id):
             booking = booking_record.payload
+            if booking.status == "completed":
+                continue
+            if not start <= booking.booked_on <= horizon:
+                continue
+            scheduled_payee: Payee | None = by_id.get(booking.payee_id)
+            method = booking.method or "next_day"
+            cancelled = booking.status == "cancelled"
             items.append(
                 {
                     "kind": "scheduled",
                     "record_id": booking.schedule_id,
-                    "payee": _mask_payee_name(payee_names.get(booking.payee_id, "")),
+                    "source": "live",
+                    "payee_id": booking.payee_id,
+                    "payee": _display_payee_name(
+                        scheduled_payee.full_name
+                        if scheduled_payee is not None
+                        else booking.payee_id
+                    ),
+                    "payee_account_tail": (
+                        scheduled_payee.account_tail if scheduled_payee else ""
+                    ),
+                    "payee_bank": (
+                        (scheduled_payee.bank_name or "") if scheduled_payee else ""
+                    ),
+                    "payee_phone_tail4": (
+                        (scheduled_payee.phone_tail or "")[-4:] if scheduled_payee else ""
+                    ),
                     "amount_cents": booking.amount.cents,
                     "booked_on": booking.booked_on.isoformat(),
-                    "status": "待到账",
-                    "account": labels.get(kinds.get(booking.account_id, ""), "账户"),
+                    "status": (
+                        "已撤销"
+                        if cancelled
+                        else (
+                            "已发出申请·可撤销"
+                            if booking.booked_on > deps.today
+                            else "已发出申请·待处理"
+                        )
+                    ),
+                    "method": method,
+                    "method_label": _transfer_method_label(method),
+                    "eta_label": _transfer_eta_label(method),
+                    "fee_cents": int(booking.fee_cents or 0),
+                    "purpose": booking.purpose or "",
+                    "purpose_label": _transfer_purpose_label(booking.purpose or ""),
                     "remark": booking.remark,
+                    "account": labels.get(kinds.get(booking.account_id, ""), "账户"),
+                    "account_tail": card_tails.get(booking.account_id, ""),
+                    "channel": "agent",
+                    "can_repeat": scheduled_payee is not None and not scheduled_payee.blocked,
+                    "can_cancel": booking.status == "scheduled",
                 }
             )
         items.sort(key=lambda item: str(item["booked_on"]), reverse=True)
         items.sort(key=lambda item: item["status"] == "已到账")
-        return {"items": items, "as_of": deps.today.isoformat(), "window_days": days}
+        summary: dict[str, dict[str, object]] = {}
+        for item in items:
+            key = str(item["payee_id"] or item["payee"])
+            row = summary.setdefault(
+                key,
+                {
+                    "payee": item["payee"],
+                    "payee_account_tail": item["payee_account_tail"],
+                    "count": 0,
+                    "total_cents": 0,
+                    "last_on": item["booked_on"],
+                },
+            )
+            row["count"] = int(str(row["count"])) + 1
+            row["total_cents"] = int(str(row["total_cents"])) + int(str(item["amount_cents"]))
+        return {
+            "items": items,
+            "payee_summary": sorted(
+                summary.values(), key=lambda row: int(str(row["total_cents"])), reverse=True
+            ),
+            "as_of": deps.today.isoformat(),
+            "window_days": days,
+        }
+
+    @app.post("/api/transfers/cancel")
+    def cancel_scheduled_transfer(
+        request: _ScheduleRequest, user_id: str = Depends(current_user)
+    ) -> dict[str, object]:
+        """撤销一笔**尚未执行**的次日/定时转账登记（登记时不扣款，撤销不动资金）。"""
+        writer = deps.transfer_schedules
+        if writer is None:
+            raise HTTPException(status_code=409, detail="定时转账撤销未装配")
+        changed = writer.cancel(  # type: ignore[attr-defined]
+            user_id=user_id, schedule_id=request.schedule_id
+        )
+        if not changed:
+            raise HTTPException(status_code=409, detail="该笔申请不可撤销或已执行")
+        deps.audit.append(
+            AuditEvent(
+                event_id=f"transfer_cancel_{secrets.token_hex(8)}",
+                kind=KIND_EXECUTION,
+                payload={
+                    "action": "transfer.cancel",
+                    "user_id": user_id,
+                    "schedule_id": request.schedule_id,
+                    "status": "cancelled",
+                },
+                prev_hash="",
+            )
+        )
+        return {"cancelled": True, "schedule_id": request.schedule_id}
 
     @app.post("/api/insights/budget")
     def set_insight_budget(
@@ -1740,7 +2212,12 @@ def create_app(deps: AppDeps) -> FastAPI:
         if len(month) != 7 or month[4] != "-":
             raise HTTPException(status_code=400, detail="月份格式必须为 YYYY-MM")
         try:
-            service.set_budget(user_id, month, request.budget_cents)
+            if request.categories is None:
+                service.set_budget(user_id, month, request.budget_cents)
+            else:
+                service.set_budgets(
+                    user_id, month, request.budget_cents, request.categories
+                )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         result = service.scan(user_id, deps.today)
@@ -1944,14 +2421,18 @@ def create_app(deps: AppDeps) -> FastAPI:
             # 到期重新提案并再次确认后才转 `executed`（由预约结算负责）。
             pass
         elif view.state.value in ("completed", "partial"):
-            _mark_life_event(user_id, request.session_id, STATUS_EXECUTED)
+            _mark_life_event(user_id, request.session_id, STATUS_EXECUTED, view)
         elif view.state.value in _ERROR_STATES:
-            _mark_life_event(user_id, request.session_id, STATUS_FAILED)
+            _mark_life_event(user_id, request.session_id, STATUS_FAILED, view)
         _record_message(
             user_id, request.session_id, "assistant", "receipt", view.message,
             {"receipt": _receipt_payload(view)},
         )
-        return _response(request.session_id, user_id, _execution_payload(view))
+        return _response(
+            request.session_id,
+            user_id,
+            _execution_payload(view, deps.gateway, user_id, deps.today),
+        )
 
     @app.post("/api/reject")
     def reject(request: _EmptyRequest, user_id: str = Depends(current_user)) -> dict[str, object]:
@@ -1987,7 +2468,11 @@ def create_app(deps: AppDeps) -> FastAPI:
             user_id, request.session_id, "assistant", "receipt", view.message,
             {"receipt": _receipt_payload(view)},
         )
-        return _response(request.session_id, user_id, _execution_payload(view))
+        return _response(
+            request.session_id,
+            user_id,
+            _execution_payload(view, deps.gateway, user_id, deps.today),
+        )
 
     @app.post("/api/reverse")
     def reverse(request: _EmptyRequest, user_id: str = Depends(current_user)) -> dict[str, object]:
@@ -2312,15 +2797,10 @@ def create_app(deps: AppDeps) -> FastAPI:
             if store is None
             else store.list_for_user(user_id, limit=5, visibility=PRIVATE_VISIBILITY)
         )
-        budget = _life_budget_progress(deps.gateway, user_id)
-        # 记录本身不存预约类型：按 `record_id` 反查预约（`reminder` / `order`），
-        # 仅供日历区分「提醒」与「下单」点，前端不得自行猜。
-        schedule_kinds = {} if store is None else store.schedule_kinds(user_id)
-        # 已登记但未到期的预约：生活页需要一处能看见它们，此前只在确认回执里一闪而过。
+        # 已登记但未到期的预约：按 `record_id` 折叠进同一条记录，不再单独列一块。
         schedules = () if store is None else store.active_schedules(user_id)
-        # 来源记录 → 预约到期日：记录仍是 `planned`，但对用户来说已经「登记完了」。
-        schedule_due = {
-            schedule.record_id: schedule.due_on.isoformat()
+        schedule_by_record = {
+            schedule.record_id: schedule
             for schedule in schedules
             if schedule.record_id is not None
         }
@@ -2333,7 +2813,68 @@ def create_app(deps: AppDeps) -> FastAPI:
                 payload["steps"] = list(
                     _steps_from_nodes(schedule_nodes.get(record.record_id, ()))
                 )
+            steps = payload.get("steps")
+            payload["steps"] = _enrich_life_steps(
+                deps.gateway, steps if isinstance(steps, list) else (),
+            )
+            schedule = schedule_by_record.get(record.record_id)
+            trigger_text = (
+                schedule.due_on.isoformat()
+                if schedule is not None
+                else record.due_on
+            )
+            trigger_on: date | None = None
+            if trigger_text:
+                try:
+                    trigger_on = date.fromisoformat(str(trigger_text)[:10])
+                except ValueError:
+                    trigger_on = None
+            payload.update({
+                "schedule": None if schedule is None else {
+                    "schedule_id": schedule.schedule_id,
+                    "due_on": schedule.due_on.isoformat(),
+                    "kind": schedule.kind,
+                    "notify_on": (
+                        None if schedule.notify_on is None else schedule.notify_on.isoformat()
+                    ),
+                },
+                # 日历落点：有触发日就用触发日，没有才回落到创建时间
+                "calendar_on": trigger_text or record.created_at,
+                "budget": _life_budget_progress(
+                    deps.gateway, user_id, record.hold_ref, record.occasion_ref,
+                ),
+                "funding": _life_funding_for(
+                    deps.gateway,
+                    user_id,
+                    amount_cents=record.amount_cents,
+                    trigger_on=trigger_on,
+                    today=deps.today,
+                    record=record,
+                ),
+                "orders": _life_orders(deps.gateway, record),
+            })
             return payload
+
+        record_payloads = [
+            {
+                **_record_payload(record),
+                # 兼容字段：预约类型 / 触发日（与 `schedule` 同源）
+                "schedule_kind": (
+                    schedule_by_record[record.record_id].kind
+                    if record.record_id in schedule_by_record
+                    else "order"
+                ),
+                "schedule_due_on": (
+                    schedule_by_record[record.record_id].due_on.isoformat()
+                    if record.record_id in schedule_by_record
+                    else None
+                ),
+            }
+            for record in records
+        ]
+        private_payloads = [
+            {**_record_payload(record), "budget": None} for record in private_records
+        ]
 
         return {
             "demo": _is_anonymous(request),
@@ -2359,18 +2900,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                 {"combo_id": combo.combo_id, "name": combo.name}
                 for combo in LIFE_EVENT_COMBOS
             ],
-            "records": [
-                {
-                    **_record_payload(record),
-                    # `order` / `reminder`：来自该记录的预约类型，查不到按 `order`
-                    "schedule_kind": schedule_kinds.get(record.record_id, "order"),
-                    # 已登记未到期时带到期日：前端据此把「待确认」显示成「已登记预约」
-                    "schedule_due_on": schedule_due.get(record.record_id),
-                    # 只有 L1 有可核的冻结链；其余事件不给预算块（前端不画，不造 0）
-                    "budget": budget if record.event_id == "L1" else None,
-                }
-                for record in records
-            ],
+            "records": record_payloads,
             # 已登记预约：只读列出到期日 / 类型 / 冻结的步骤；到期后由 /api/due 重新提案。
             "schedules": [
                 {
@@ -2389,10 +2919,10 @@ def create_app(deps: AppDeps) -> FastAPI:
                 }
                 for schedule in schedules
             ],
+            # 同一场合出现两个用钱日：只提示，不替用户改期 / 合并记录
+            "date_conflicts": _life_date_conflicts([*record_payloads, *private_payloads]),
             # 私密记录单独返回：普通列表里看不到，前端默认折叠成一行计数。
-            "private_records": [
-                {**_record_payload(record), "budget": None} for record in private_records
-            ],
+            "private_records": private_payloads,
             "private_count": len(private_records),
             "records_available": store is not None,
             "maturities": _life_maturities(deps.gateway, user_id, deps.today),
@@ -3023,6 +3553,112 @@ def _mask_payee_name(name: str) -> str:
     return "收款人已隐藏"
 
 
+def _display_payee_name(name: str) -> str:
+    """界面展示用：解析不到时写「收款人未知」，不把解析失败说成隐私隐藏。"""
+    masked = _mask_payee_name(name)
+    return "收款人未知" if masked == "收款人已隐藏" else masked
+
+
+def _payee_payload(
+    payee: Payee, tail4: Callable[[str | None], str]
+) -> dict[str, object]:
+    tail = str(payee.account_tail or "")
+    return {
+        "payee_id": payee.payee_id,
+        "name": payee.full_name,
+        "account_tail": tail,
+        "masked_account": f"**** **** **** {tail}" if tail else "",
+        "bank_name": payee.bank_name or "",
+        "phone_tail4": tail4(payee.phone_tail) or tail4(payee.phone),
+        "identity_confirmed": payee.identity_confirmed,
+        "blocked": payee.blocked,
+    }
+
+
+_TRANSFER_METHOD_LABELS = {
+    "realtime": "实时到账",
+    "normal": "普通到账",
+    "next_day": "次日到账",
+    "large": "大额通道",
+    "history": "历史转账",
+}
+
+_TRANSFER_ETA_LABELS = {
+    "realtime": "7×24 小时，预计秒到",
+    "normal": "预计 2 小时内到账",
+    "next_day": "次日 00:00 后发出，到账前可撤销",
+    "large": "工作日大额通道处理，周末与节假日顺延（演示环境按强验证处理）",
+    "history": "历史记录，时效以当时渠道为准",
+}
+
+_TRANSFER_PURPOSE_LABELS = {
+    "rent": "房租",
+    "salary": "工资",
+    "reimburse": "报销",
+    "other": "其他",
+}
+
+
+def _is_seed_transaction(txn_id: str) -> bool:
+    """种子流水 id 固定为 `txn_YYYYMMDD`；演示中真实执行的 id 是 `txn_<hex>`。"""
+    return re.fullmatch(r"txn_\d{8}", txn_id) is not None
+
+
+def _transfer_method_label(method: str) -> str:
+    return _TRANSFER_METHOD_LABELS.get(method, method or "—")
+
+
+def _transfer_eta_label(method: str) -> str:
+    return _TRANSFER_ETA_LABELS.get(method, "以银行为准")
+
+
+def _transfer_purpose_label(purpose: str) -> str:
+    return _TRANSFER_PURPOSE_LABELS.get(purpose, purpose or "")
+
+
+def _transfer_quota_payload(
+    gateway: FactGateway, user_id: str, today: date
+) -> dict[str, object]:
+    """转账额度只读口径：单笔 / 日累计 / 月累计三个维度。
+
+    日累计沿用既有 PDP 口径（只加严不放宽）；单笔取卡片转账通道限额；
+    月累计是**演示口径**（日累计 × 30），页面必须标注“演示”。
+    """
+    daily_limit = min(DAILY_LIMIT_YUAN * 100, gateway.daily_transfer_limit(user_id).cents)
+    daily_used = gateway.daily_transfer_total(user_id, today).cents
+    transfer_limits = [
+        record.payload.transfer_limit.cents
+        for record in gateway.cards_of(user_id)
+        if record.payload.transfer_limit is not None
+        and record.payload.status == "active"
+    ]
+    single_limit = min(50_000_00, max(transfer_limits)) if transfer_limits else daily_limit
+    month_start = today.replace(day=1)
+    monthly_used = 0
+    for account in gateway.accounts_of(user_id):
+        for txn_record in gateway.transactions_between(
+            account.payload.account_id, month_start, today
+        ):
+            txn = txn_record.payload
+            if txn.category == "转账" and txn.direction == "out":
+                monthly_used += -txn.amount.cents
+    monthly_limit = daily_limit * 30
+    return {
+        "as_of": today.isoformat(),
+        "daily_limit_cents": daily_limit,
+        "daily_accumulated_cents": daily_used,
+        "single_limit_cents": single_limit,
+        "monthly_limit_cents": monthly_limit,
+        "monthly_accumulated_cents": monthly_used,
+        "limit_notes": [
+            "单笔限额来自卡片转账通道；日累计限额由演示风控规则固定。",
+            "如需调整卡片通道限额，可在「卡片」页发起调整。",
+            "历史记录可能发生在限额调整前；单笔超过当前限额不代表异常。",
+            "月累计为演示口径（日累计 × 30），不构成监管或银行承诺。",
+        ],
+    }
+
+
 def _retake_payload(deps: AppDeps, user_id: str) -> dict[str, object] | None:
     """当日与 12 个月重测额度；写通道未装配时返回 `None`（前端据此不显示次数）。"""
     writer = deps.risk_writer
@@ -3265,11 +3901,17 @@ def _submission_payload(view: SubmissionView) -> dict[str, object]:
     }
 
 
-def _subscription_cancel_payload(view: ExecutionView) -> dict[str, object] | None:
+def _subscription_cancel_payload(
+    view: ExecutionView,
+    gateway: FactGateway | None = None,
+    user_id: str | None = None,
+    as_of: date | None = None,
+) -> dict[str, object] | None:
     """订阅取消的**操作状态**（与"取消指引/打开第三方页面"明确区分）。
 
     只有回执明确带 `confirmed_by_merchant` 才可能标记为商户确认；本项目当前没有真实
     商户取消接口，因此本地执行只会落在"本地已取消（商户未确认）"。
+    传入事实依赖时补解约对账（解约日、最后一笔、解约后扣款）与**演示**短信回执。
     """
     results = [item for item in view.exec_results if item.action == "subscription.cancel"]
     if not results:
@@ -3278,7 +3920,7 @@ def _subscription_cancel_payload(view: ExecutionView) -> dict[str, object] | Non
     state = cancel_state_from_receipt(
         status=last.status, external_status=last.external_status
     )
-    return {
+    payload: dict[str, object] = {
         "state": state,
         "label": CANCEL_STATE_LABELS[state],
         "external_status": last.external_status or EXTERNAL_CANCEL_NOT_INTEGRATED,
@@ -3288,10 +3930,71 @@ def _subscription_cancel_payload(view: ExecutionView) -> dict[str, object] | Non
         "record_ids": list(last.record_ids),
         "effect_ids": list(last.effect_ids),
         "boundary": SUBSCRIPTION_CANCEL_BOUNDARY,
+        "cancelled_on": None,
+        "last_charge_on": None,
+        "last_charge_cents": None,
+        "post_cancel_charges": [],
+        "sms_receipt": None,
     }
+    if gateway is None or user_id is None or as_of is None:
+        return payload
+    subscription_id = next(
+        (
+            record_id.split(":", 1)[1]
+            for record_id in last.record_ids
+            if record_id.startswith("subscriptions:")
+        ),
+        None,
+    )
+    if subscription_id is None:
+        return payload
+    report = subscription_report(gateway, user_id, as_of=as_of)
+    item = next(
+        (row for row in report.insights if row.subscription_id == subscription_id),
+        None,
+    )
+    if item is None:
+        return payload
+    try:
+        subscription = gateway.subscription(subscription_id).payload
+    except GatewayNotFoundError:
+        return payload
+    cancelled_on = (
+        subscription.cancelled_on.isoformat() if subscription.cancelled_on else None
+    )
+    payload.update({
+        "cancelled_on": cancelled_on,
+        "last_charge_on": (
+            item.last_charged_on.isoformat() if item.last_charged_on else None
+        ),
+        "last_charge_cents": item.amount_cents if item.last_charged_on else None,
+        "post_cancel_charges": [
+            {
+                "booked_on": charge.booked_on.isoformat(),
+                "amount_cents": charge.amount_cents,
+                "merchant_label": charge.merchant_label,
+            }
+            for charge in item.post_cancel_charges
+        ],
+        "sms_receipt": {
+            "mode": "demo",
+            "message": (
+                f"【演示】您尾号 {item.card_tail or '----'} 的卡已关闭对"
+                f"{item.merchant}的扣款协议，解约日期 "
+                f"{cancelled_on or as_of.isoformat()}。"
+                "关闭后本行不再向该商户放款。"
+            ),
+        },
+    })
+    return payload
 
 
-def _execution_payload(view: ExecutionView) -> dict[str, object]:
+def _execution_payload(
+    view: ExecutionView,
+    gateway: FactGateway | None = None,
+    user_id: str | None = None,
+    as_of: date | None = None,
+) -> dict[str, object]:
     card = _card_payload(view.card, view.plan)
     if card is not None and view.quota is not None:
         card = {
@@ -3341,7 +4044,9 @@ def _execution_payload(view: ExecutionView) -> dict[str, object]:
             }
             for result in view.exec_results
         ],
-        "subscription_cancel": _subscription_cancel_payload(view),
+        "subscription_cancel": _subscription_cancel_payload(
+            view, gateway, user_id, as_of
+        ),
     }
 
 
@@ -3470,9 +4175,9 @@ def _empty_progress() -> dict[str, object]:
 
 
 _LIFE_STEP_LABELS = {
-    "funds.freeze": "冻结预算",
-    "funds.release": "解冻剩余",
-    "merchant.order": "商户下单",
+    "funds.freeze": "锁定预算（资金预留）",
+    "funds.release": "释放剩余",
+    "merchant.order": "向商户下单",
     "transfer.create": "转账",
     "transfer.book": "登记转账",
     "transfer.schedule": "定期转出",
@@ -3483,8 +4188,8 @@ _LIFE_STEP_LABELS = {
     "card.unlock": "解锁卡片",
     "bills.monthly": "月度账单",
     "bills.yearly": "年度账单",
-    "subscription.list": "订阅查询",
-    "subscription.cancel": "取消订阅",
+    "subscription.list": "代扣协议查询",
+    "subscription.cancel": "关闭扣款协议",
     "account.balance": "余额查询",
     "account.transactions": "交易查询",
     "card.list": "卡片查询",
@@ -3494,27 +4199,47 @@ _LIFE_STEP_LABELS = {
 
 
 def _step_payload(
-    index: int, action: str, params: Mapping[str, object],
+    index: int,
+    action: str,
+    params: Mapping[str, object],
+    *,
+    node_id: str = "",
+    depends_on: Sequence[str] = (),
 ) -> dict[str, object]:
-    """单个步骤的只读摘要：动作中文名 + 金额 + 日期。"""
+    """单个步骤的只读摘要：动作中文名 + 金额 + 日期 + 依赖 + 场景域。"""
     date_value = params.get("order_on") or params.get("booked_on") or params.get("executed_on")
     return {
         "index": index,
+        "node_id": node_id,
         "action": action,
         "label": _LIFE_STEP_LABELS.get(action, action),
+        "domain": action.split(".", 1)[0] if action else "",
+        "depends_on": list(depends_on),
         "amount_cents": params.get("amount_cents"),
         "date": str(date_value) if date_value is not None else None,
+        # 内部引用：只用于接口层查名册 / 账户，出卡前会被 `_enrich_life_steps` 换成可读标签
+        "payee_id": params.get("payee_id"),
     }
 
 
 def _life_plan_steps(plan: object) -> tuple[dict[str, object], ...]:
-    """计划步骤的只读摘要：动作中文名 + 金额 + 日期，供生活页记录抽屉回放。"""
+    """计划步骤的只读摘要：动作中文名 + 金额 + 日期 + 依赖，供生活页画任务图。"""
 
     nodes = getattr(plan, "nodes", ())
     steps: list[dict[str, object]] = []
     for index, node in enumerate(nodes, start=1):
-        params = node.params if isinstance(node.params, dict) else {}
-        steps.append(_step_payload(index, str(node.action), params))
+        params: Mapping[str, object] = (
+            node.params if isinstance(node.params, Mapping) else {}
+        )
+        steps.append(
+            _step_payload(
+                index,
+                str(node.action),
+                params,
+                node_id=str(getattr(node, "node_id", "") or ""),
+                depends_on=tuple(str(dep) for dep in getattr(node, "depends_on", ())),
+            )
+        )
     return tuple(steps)
 
 
@@ -3528,24 +4253,137 @@ def _steps_from_nodes(nodes: Sequence[Mapping[str, object]]) -> tuple[dict[str, 
     steps: list[dict[str, object]] = []
     for index, node in enumerate(nodes, start=1):
         action = node.get("action")
-        params = node.get("params")
+        deps = node.get("depends_on")
+        raw_params = node.get("params")
+        params: Mapping[str, object] = raw_params if isinstance(raw_params, Mapping) else {}
         steps.append(
             _step_payload(
                 index,
                 action if isinstance(action, str) else "",
-                params if isinstance(params, Mapping) else {},
+                params,
+                node_id=str(node.get("node_id") or ""),
+                depends_on=tuple(str(dep) for dep in deps) if isinstance(deps, list) else (),
             )
         )
     return tuple(steps)
 
 
-def _life_plan_due_on(plan: object) -> str | None:
+_LIFE_EVENT_KEYWORDS = ("生日", "纪念日", "寿宴", "过节", "搬家", "开学", "婚礼")
+"""同一场合的关键词：只用来发现「同一件事出现两个用钱日」，不做事件合并。"""
+
+
+def _life_date_conflicts(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """同名场合出现多个用钱日 → 提示用户确认，不替用户改期。
+
+    典型：一条记录说生日 11-04 下单，另一条把理财到期日 11-30 当作下单日。
+    这里只做**确定性归组 + 日期比对**，不猜语义、不合并记录。
+    """
+
+    groups: dict[str, list[tuple[str, str]]] = {}
+    for record in records:
+        text = f"{record.get('event_title', '')} {record.get('utterance', '')}"
+        schedule = record.get("schedule")
+        due_on = ""
+        if isinstance(schedule, Mapping):
+            due_on = str(schedule.get("due_on") or "")[:10]
+        if not due_on:
+            due_on = str(record.get("due_on") or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_on):
+            continue
+        for keyword in _LIFE_EVENT_KEYWORDS:
+            if keyword in text:
+                groups.setdefault(keyword, []).append((due_on, str(
+                    record.get("event_title") or record.get("event_id") or ""
+                )))
+    conflicts: list[dict[str, object]] = []
+    for keyword, items in groups.items():
+        dates = sorted({day for day, _title in items})
+        if len(dates) < 2:
+            continue
+        conflicts.append({
+            "keyword": keyword,
+            "dates": dates,
+            "titles": sorted({title for _day, title in items if title}),
+        })
+    return conflicts
+
+
+def _enrich_life_steps(
+    gateway: FactGateway, steps: Sequence[object]
+) -> list[dict[str, object]]:
+    """把步骤里的内部引用换成可读标签；换不掉的内部键直接丢弃。"""
+
+    enriched: list[dict[str, object]] = []
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        item = dict(step)
+        payee_id = item.pop("payee_id", None)
+        if isinstance(payee_id, str) and payee_id:
+            try:
+                payee = gateway.payee(payee_id).payload
+            except Exception:
+                payee = None
+            if payee is not None:
+                item["payee_label"] = f"{payee.full_name}（尾号 {payee.account_tail}）"
+        enriched.append(item)
+    return enriched
+
+
+def _life_plan_amount(plan: object) -> int | None:
+    """事件金额：优先资金预留额，其次赎回额，最后下单额；都没有返回 `None`。"""
+
+    by_action: dict[str, int] = {}
+    for node in getattr(plan, "nodes", ()):
+        params = node.params if isinstance(node.params, dict) else {}
+        cents = params.get("amount_cents")
+        if isinstance(cents, int) and not isinstance(cents, bool) and cents > 0:
+            by_action.setdefault(str(node.action), cents)
+    for action in ("funds.freeze", "wealth.redeem", "merchant.order"):
+        if action in by_action:
+            return by_action[action]
+    return None
+
+
+def _life_plan_refs(plan: object) -> tuple[str | None, str | None]:
+    """计划里的「本事件自己的」冻结记录与下单幂等键；没有就 `None`（不猜）。"""
+
+    hold_ref: str | None = None
+    occasion_ref: str | None = None
+    for node in getattr(plan, "nodes", ()):
+        params = node.params if isinstance(node.params, dict) else {}
+        if hold_ref is None:
+            value = params.get("budget_hold_id") or params.get("hold_id")
+            if isinstance(value, str) and value:
+                hold_ref = value
+        if occasion_ref is None:
+            value = params.get("occasion_id")
+            if isinstance(value, str) and value:
+                occasion_ref = value
+    return hold_ref, occasion_ref
+
+
+def _life_plan_trigger_day(plan: object) -> date | None:
+    """计划里的触发日（下单日 / 记账日）；没有则 `None`。"""
+
     for node in getattr(plan, "nodes", ()):
         params = node.params if isinstance(node.params, dict) else {}
         value = params.get("order_on") or params.get("booked_on")
-        if value is not None:
-            return str(value)
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                continue
     return None
+
+
+def _life_plan_due_on(plan: object) -> str | None:
+    day = _life_plan_trigger_day(plan)
+    return None if day is None else day.isoformat()
 
 
 _MATURITY_EVENT_ID = "maturity"
@@ -3607,47 +4445,107 @@ def _life_event_title(text: str, *, fallback: str = "") -> str:
     return cleaned or fallback
 
 
-def _life_budget_progress(gateway: FactGateway, user_id: str) -> dict[str, object] | None:
-    """L1 预算链进度：三段状态都来自真实事实，缺数据返回 `None`（前端画空态，不造 0）。
+def _life_budget_progress(
+    gateway: FactGateway, user_id: str, hold_ref: str | None, occasion_ref: str | None = None
+) -> dict[str, object] | None:
+    """**本条事件自己的**预留进度；没有 `hold_ref` 或找不到记录返回 `None`。
 
-    - 冻结：`holds` 里存在 `life:L1:` 记录即已冻结（`amount_cents` 为当前冻结余额）；
-    - 下单：`merchant_occasion_completed` 命中下单回执（与 `_build_l1` 的 occasion 同口径）；
-    - 释放：冻结记录 `status == 'released'`。
-
-    `holds` 不记录会话，故取最新一条 `life:L1:` 记录（同一账户同一日只有一个，
-    hold_id 末尾即下单日）；该配对只用于展示，不参与任何资金判断。
+    以前这里按用户取「最新一条 `life:L1:`」，导致四张不同金额的卡片显示同一个
+    「冻结余额 ¥701.00」。现在只认记录自己的 `hold_ref`：
+    - 预留：该 hold 存在（`amount_cents` 是**剩余**预留额，不是事件总额）；
+    - 下单：`occasion_ref` 命中下单回执；
+    - 释放：该 hold `status == 'released'`。
     """
-    candidates = [
+
+    if not hold_ref:
+        return None
+    holds = [
         record.payload
         for account in gateway.accounts_of(user_id)
         for record in gateway.holds_of(account.payload.account_id)
-        if record.payload.hold_id.startswith("life:L1:")
+        if record.payload.hold_id == hold_ref
     ]
-    if not candidates:
+    if not holds:
         return None
-    hold = max(candidates, key=lambda item: item.hold_id)
-    order_day = hold.hold_id.rsplit(":", 1)[-1]
+    hold = holds[0]
     return {
         "hold_id": hold.hold_id,
         "amount_cents": hold.amount.cents,
         "state": hold.status,
-        "order_on": order_day,
+        "order_on": hold_ref.rsplit(":", 1)[-1] if ":" in hold_ref else None,
         "steps": {
-            "freeze": True,
-            "order": gateway.merchant_occasion_completed(user_id, f"life:L1:{order_day}"),
+            "reserve": True,
+            "order": bool(occasion_ref)
+            and gateway.merchant_occasion_completed(user_id, str(occasion_ref)),
             "release": hold.status == "released",
         },
     }
 
 
+def _life_orders(gateway: FactGateway, record: LifeEventRecord) -> list[dict[str, object]]:
+    """执行回执里的订单实体（商户 / 订单号 / 金额 / 下单日）；没有就不编。"""
+
+    orders: list[dict[str, object]] = []
+    for item in record.results:
+        if item.get("action") != "merchant.order":
+            continue
+        record_ids = item.get("record_ids")
+        if not isinstance(record_ids, list):
+            continue
+        for raw in record_ids:
+            if not isinstance(raw, str) or not raw.startswith("merchant_orders:"):
+                continue
+            order_id = raw.split(":", 1)[1]
+            try:
+                order = gateway.merchant_order(order_id).payload
+            except Exception:
+                continue
+            orders.append({
+                "order_id": order.order_id,
+                "merchant": order.merchant,
+                "amount_cents": order.amount_cents,
+                "order_on": order.order_on,
+                "status": order.status,
+            })
+    return orders
+
+
+def _life_funding_for(
+    gateway: FactGateway,
+    user_id: str,
+    *,
+    amount_cents: int | None,
+    trigger_on: date | None,
+    today: date,
+    record: LifeEventRecord,
+) -> dict[str, object] | None:
+    """资金核查：已执行、或资金来自自身赎回的事件不查（钱已经花了 / 不必查）。"""
+
+    if record.status == STATUS_EXECUTED:
+        return None
+    if any(
+        isinstance(step, Mapping) and step.get("action") == "wealth.redeem"
+        for step in record.steps
+    ):
+        return None
+    result = life_funding.check(
+        gateway,
+        user_id,
+        amount_cents=amount_cents,
+        trigger_on=trigger_on,
+        today=today,
+    )
+    return None if result.status == life_funding.STATUS_UNKNOWN else result.to_dict()
+
+
 def _life_maturities(
     gateway: FactGateway, user_id: str, today: date
 ) -> list[dict[str, object]]:
-    """本人理财持仓的到期推算（起息日 + 产品期限），按到期日升序。
+    """本人理财持仓的到期日（按产品条款：起息日 + 期限），按到期日升序。
 
-    无期限产品（`term_days <= 0`，如活期）**不列出**——推不出到期日就不编一个。
-    `basis` 随行返回，页面必须原样展示「推算，非官方到期公告」。
-    `status` / `days_left` 只是把推算值与「今天」作比较，**不代表官方到期公告**。
+    起息日与期限都来自持仓 / 产品系统的官方字段，到期日由条款确定性得出，**不是从流水反推**。
+    无期限产品（`term_days <= 0`，如活期）不列出——没有到期日就不编一个。
+    兑付到账仍以银行回单为准（演示环境不接真实清算），`basis` 随行返回供页面原样展示。
     """
     products = {
         record.payload.product_id: record.payload for record in gateway.wealth_products()
@@ -3670,7 +4568,7 @@ def _life_maturities(
             "maturity_on": maturity.isoformat(),
             "status": "expired" if maturity < today else "upcoming",
             "days_left": (maturity - today).days,
-            "basis": "按起息日 + 产品期限推算，非官方到期公告",
+            "basis": "按产品条款确定（起息日 + 期限）；兑付到账以银行回单为准",
         })
     rows.sort(key=lambda row: (str(row["maturity_on"]), str(row["product_id"])))
     return rows

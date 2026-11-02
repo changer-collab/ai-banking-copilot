@@ -90,6 +90,22 @@ def test_recurring_transfer_is_a_capability_boundary(deps: AppDeps) -> None:
     assert session._last_utterance is not None
 
 
+def test_monthly_contribution_asks_for_day_of_month(deps: AppDeps) -> None:
+    """「每月给爸妈生活费」必须追问每月几号，不能默认记在当天，也不顺带查订阅。"""
+    session = Session(deps)
+    view = session.submit("每月给爸妈 2000 元生活费")
+
+    assert view.state is SessionState.NEEDS_CLARIFICATION
+    assert {"payee", "monthly_day"} <= {ask.slot for ask in view.clarifications}
+
+    view = session.clarify({"payee": "李娜", "monthly_day": "每月5号"})
+    assert view.state is SessionState.AWAITING_CONFIRM
+    assert view.plan is not None
+    assert [node.action for node in view.plan.nodes] == ["transfer.schedule"]
+    # 基准日 2026-10-31 → 下一次「每月 5 号」是 2026-11-05
+    assert view.plan.nodes[0].params["booked_on"] == "2026-11-05"
+
+
 def test_conditional_transfer_is_a_capability_boundary(deps: AppDeps) -> None:
     session = Session(deps)
     view = session.submit("发工资第二天转 5000 去理财")

@@ -149,7 +149,10 @@ def test_subscription_precedence_changes_are_frozen() -> None:
 
 
 def test_bare_verbs_keep_write_semantics() -> None:
-    for utterance in ("取消订阅", "退订", "取消代扣", "关掉自动续费"):
+    for utterance in (
+        "取消订阅", "退订", "取消代扣", "关掉自动续费",
+        "关闭扣款协议", "关闭视频会员的扣款协议", "解约代扣",
+    ):
         actions = _actions(utterance)
         assert actions and actions[0] == "subscription.cancel", utterance
 
@@ -171,6 +174,8 @@ def test_new_list_rules_reachable() -> None:
         "卡片列表": "card.list",
         "有哪些卡": "card.list",
         "订阅管理": "subscription.list",
+        "查一下我的代扣协议": "subscription.list",
+        "代扣协议列表": "subscription.list",
         "交易记录": "account.transactions",
         "异常交易": "account.transactions",
     }

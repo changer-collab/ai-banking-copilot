@@ -24,6 +24,7 @@ from ai_banking_copilot.gateway.customer_profile_store import (
 )
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.merchant_store import init_merchant_schema, seed_user_profiles
+from ai_banking_copilot.gateway.payee_store import PayeeWriter
 from ai_banking_copilot.gateway.receipt_store import StoreReceiptReader
 from ai_banking_copilot.gateway.risk_store import (
     StoreRiskAssessmentSource,
@@ -33,7 +34,10 @@ from ai_banking_copilot.gateway.risk_store import (
 )
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID, seed_database, seed_secondary_user
 from ai_banking_copilot.gateway.store import Store, StoreMode, init_schema
-from ai_banking_copilot.gateway.transfer_store import init_transfer_schema
+from ai_banking_copilot.gateway.transfer_store import (
+    ScheduledTransferWriter,
+    init_transfer_schema,
+)
 from ai_banking_copilot.gateway.wealth_disclosure_store import (
     init_wealth_disclosure_schema,
     seed_wealth_disclosures,
@@ -83,6 +87,7 @@ from ai_banking_copilot.web.app import (
     AppDeps,
 )
 from ai_banking_copilot.web.auth import DEMO_ACCOUNTS, AuthService, init_auth_schema
+from ai_banking_copilot.web.bill_analysis_store import SQLiteBillAnalysisStore
 from ai_banking_copilot.web.bill_narrative import LlmBillNarrator
 from ai_banking_copilot.web.channels.feishu import FeishuAdapter, FeishuConfig
 from ai_banking_copilot.web.channels.identity import init_channel_schema
@@ -381,6 +386,11 @@ def build_deps(
     insight_metadata = SQLiteInsightMetadataStore(insight_path)
     if resources is not None:
         resources.callback(insight_metadata.close)
+    bill_analysis_metadata = SQLiteBillAnalysisStore(
+        db_path.with_name(f"{db_path.stem}-bill-analysis.db")
+    )
+    if resources is not None:
+        resources.callback(bill_analysis_metadata.close)
 
     @contextmanager
     def read_gateway_factory() -> Iterator[FactGateway]:
@@ -407,12 +417,15 @@ def build_deps(
         user_id=DEMO_USER_ID,
         risk=StoreRiskAssessmentSource(read_store),
         risk_writer=StoreRiskAssessmentWriter(risk_store),
+        payee_writer=PayeeWriter(core_store),
+        transfer_schedules=ScheduledTransferWriter(core_store),
         wealth_trades=StoreWealthTradeWriter(wealth_trade_store),
         reversal=ReversalService(core_bank),
         operator_token=build_operator_token(env),
         reviewer=build_reviewer(env, config=model_config, observer=model_observations),
         reviewer_required=reviewer_required(env),
         insights=InsightService(read_gateway_factory, insight_metadata),
+        bill_analysis=bill_analysis_metadata,
         verification_provider=verification_provider,
         verification_key=verification_key,
         verification_strict=verification_strict,

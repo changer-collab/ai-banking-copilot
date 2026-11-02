@@ -44,14 +44,14 @@ _ACTION_LABELS: dict[str, str] = {
     "bills.yearly": "年度账单汇总",
     "wealth.list": "理财查询",
     "card.list": "卡片查询",
-    "subscription.list": "订阅查询",
+    "subscription.list": "代扣协议查询",
     "transfer.create": "转账",
     "transfer.schedule": "定时转账（立即扣款，指定记账日）",
     "transfer.book": "登记定时转账（本次不扣款）",
     "transfer.request_collection": "发起 AA 收款",
     "wealth.subscribe": "理财申购",
     "wealth.redeem": "理财赎回",
-    "subscription.cancel": "取消订阅",
+    "subscription.cancel": "关闭扣款协议",
     "subscription.sign": "代扣签约",
     "card.lock": "临时冻结（口头挂失）",
     "card.unlock": "解挂",
@@ -62,9 +62,9 @@ _ACTION_LABELS: dict[str, str] = {
     "card.adjust_credit_limit": "调整信用卡额度",
     "card.set_cycle_limit": "设置账单周期消费限额",
     "password.change": "修改交易密码",
-    "funds.freeze": "冻结资金",
-    "funds.release": "解冻资金",
-    "merchant.order": "向商户下单（从冻结预算结算）",
+    "funds.freeze": "锁定预算（资金预留）",
+    "funds.release": "释放预留资金",
+    "merchant.order": "向商户下单",
 }
 
 _CARD_TYPE_LABELS = {
@@ -185,9 +185,32 @@ def render_plan_card(
 _TRACE_ACTIONS = frozenset({"funds.freeze", "funds.release", "merchant.order", "transfer.create"})
 """余额轨迹覆盖的资金动作：冻结 / 解冻 / 冻结额度内扣款 / 转账。"""
 
+_TRANSFER_METHOD_LABELS: dict[str, str] = {
+    "realtime": "实时到账",
+    "normal": "普通到账",
+    "next_day": "次日到账",
+    "large": "大额通道",
+}
+
+_TRANSFER_ETA_LABELS: dict[str, str] = {
+    "realtime": "7×24 小时，预计秒到（演示即时记账）",
+    "normal": "预计 2 小时内到账（演示即时记账）",
+    "next_day": "次日 00:00 后发出，到账前可撤销",
+    "large": "工作日大额通道处理，周末与节假日顺延（演示环境按强验证处理）",
+}
+
+_TRANSFER_PURPOSE_LABELS: dict[str, str] = {
+    "rent": "房租",
+    "salary": "工资",
+    "reimburse": "报销",
+    "other": "其他",
+}
+
+_TRANSFER_ACTIONS = frozenset({"transfer.create", "transfer.schedule", "transfer.book"})
+
 _TRACE_LABELS: dict[str, str] = {
-    "funds.freeze": "冻结",
-    "funds.release": "解冻",
+    "funds.freeze": "预留",
+    "funds.release": "释放",
     "merchant.order": "扣款",
     "transfer.create": "转账",
 }
@@ -221,7 +244,7 @@ def _balance_trace(plan: Plan, gateway: FactGateway) -> tuple[str, ...]:
             available += cents
         elif node.action == "transfer.create":
             available -= cents
-        note = "（从冻结预算结算）" if node.action == "merchant.order" else ""
+        note = "（从预留额度结算）" if node.action == "merchant.order" else ""
         trace.append(
             f"{_TRACE_LABELS[node.action]} {Money(cents).yuan} 元{note}"
             f" → 可用 {Money(available).yuan} 元"
@@ -287,6 +310,8 @@ def plan_summary(plan: Plan, gateway: FactGateway) -> tuple[PlanLine, ...]:
             )
             for index, (node, triple) in enumerate(zip(plan.nodes, triples, strict=True), start=1)
         ]
+    if len(plan.nodes) == 1 and plan.nodes[0].action in _TRANSFER_ACTIONS:
+        existing.extend(_transfer_method_lines(plan.nodes[0]))
     seen = [line.value for line in existing]
     extra: list[PlanLine] = []
     for node in plan.nodes:
@@ -302,6 +327,33 @@ def _step_value(node: PlanNode, triple: PlanTriple) -> str:
     amount = _amount_value(node)
     head = f"{triple.object_label} {amount}" if amount else triple.object_label
     return f"{head}（{triple.when_label}）"
+
+
+def _transfer_method_lines(node: PlanNode) -> list[PlanLine]:
+    """转账计划卡的人话事实：方式、到账时间、手续费、用途。数字不在这里生成。"""
+    raw_method = node.params.get("transfer_method")
+    method = raw_method if isinstance(raw_method, str) and raw_method else (
+        "next_day" if node.action in {"transfer.book", "transfer.schedule"} else "realtime"
+    )
+    method_label = _TRANSFER_METHOD_LABELS.get(method, "实时到账")
+    if node.action == "transfer.book":
+        method_label = "次日到账（登记）"
+    if node.action == "transfer.schedule":
+        method_label = "定时转账"
+    eta = (
+        "按约定记账日处理（立即扣款）"
+        if node.action == "transfer.schedule"
+        else _TRANSFER_ETA_LABELS.get(method, "以银行为准")
+    )
+    rows = [
+        PlanLine("转账方式", method_label),
+        PlanLine("到账时间", eta),
+        PlanLine("手续费", "¥0.00（演示免收）"),
+    ]
+    purpose = node.params.get("purpose")
+    if isinstance(purpose, str) and purpose:
+        rows.append(PlanLine("用途", _TRANSFER_PURPOSE_LABELS.get(purpose, purpose)))
+    return rows
 
 
 def polish_plan_card(
@@ -363,13 +415,7 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
     if node.action == "subscription.list":
         user_id = _str_param(node, "user_id")
         if user_id is not None:
-            upcoming = subscriptions.upcoming_charges(gateway, user_id)
-            detected = subscriptions.detected_charges(gateway, user_id)
-            return (
-                f"订阅：{subscriptions.describe_upcoming_charges(upcoming)}"
-                f"；{subscriptions.describe_detected_charges(detected)}"
-                f"；{subscriptions.SUBSCRIPTION_CANCEL_BOUNDARY_SHORT}"
-            )
+            return subscriptions.describe_agreements_facts(gateway, user_id)
     if node.action == "account.transactions":
         account_id = _str_param(node, "account_id")
         start = _str_param(node, "start")
@@ -385,7 +431,8 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
             payee = gateway.payee(payee_id).payload
         except GatewayNotFoundError:
             return f"收款人 {payee_id}"
-        return f"{payee.full_name}（账号尾号 {payee.account_tail}）"
+        bank = f" · {payee.bank_name}" if payee.bank_name else ""
+        return f"{payee.full_name}（账号尾号 {payee.account_tail}{bank}）"
     product_id = _str_param(node, "product_id")
     if product_id is not None:
         try:
@@ -393,6 +440,16 @@ def _object_label(node: PlanNode, gateway: FactGateway) -> str:
         except GatewayNotFoundError:
             return f"理财产品 {product_id}"
         return f"{product.name}（{product.risk_level}）"
+    if node.action == "subscription.cancel":
+        subscription_id = _str_param(node, "subscription_id")
+        if subscription_id is not None:
+            try:
+                subscription = gateway.subscription(subscription_id).payload
+            except GatewayNotFoundError:
+                return f"代扣协议 {subscription_id}"
+            return subscriptions.describe_agreement_facts(
+                gateway, subscription.user_id, subscription_id
+            )
     subscription_id = _str_param(node, "subscription_id")
     if subscription_id is not None:
         try:

@@ -120,8 +120,28 @@ Planner 只产出 `IntentProposal`，经可信补槽和场景构造形成实际 
 | 原型 | 状态 | 落点 |
 |---|---|---|
 | L1 预算锁定 | **已实现** | `scenarios/cross.py::birthday_plan`（提前 2 天、锁 1000、下单 299、释放 701） |
-| L2–L7 | **已设计，未装配** | 依赖的动作均已存在（见 11.2），缺的是原型装配函数与用例 |
+| L2–L7 | **已实现（第 7 入口）** | `scenarios/life_events.py` 七类原型 + `web/life_event_store.py` 流水 / 预约 / 私密隔离；生活页 = 日历 + 已登记预约 + 组合任务台 |
+
+> 11-01 起 L2–L7 不再停留在「已设计未装配」：未来日期只登记预约（`scheduled → consumed / cancelled / failed`，重试上限 3），到期由 `/api/due` 重新提案并二次确认；失败统一释放预留并给结构化回执。**L1–L7 是七类形状，不是「任意生活事件都懂」**。
+
+### 11.6 2026-11-02 增量：事实自洽与资金核查
+
+1. **原话与任务图**：`life_event_records` 增 `utterance` / `hold_ref` / `occasion_ref` / `results_json`；卡片展示原话、三节点链路（预留 → 下单 → 释放）与各自状态，一条 record 对应一条 schedule，不再重复渲染。
+2. **资金来源确定性核查**（`web/life_funding.py`）：`available` = 活期可用余额；`inflow` = 触发日（含）前到期持仓本金；状态 `ok / later / short / unknown`。只在页面与对话追加提示，不阻塞、不改计划、不改授权。
+3. **定时解析**：`merchant.order.order_on` 从原话相对日期解析；解析不出但含时间词 → 追问送达日，不默认今天；未来日期只登记预约。
+4. **口径修正**：`funds.freeze` 用户文案改「资金预留」；理财到期日按「起息日 + 产品期限」确定，删除「推算 / 非官方公告」措辞；兑付以银行回单为准（演示不接真实清算）。
+
+### 11.7 2026-11-02 五场景事实模型增量
+
+| 场景 | 算法 / 事实模型变化 | 落点 |
+|---|---|---|
+| 卡片 | 状态机拆为 `active → locked（临时冻结，到期自动解挂）` 与 `active → lost（正式挂失，吸收态）→ replaced`；`allowed_actions` 由服务端按状态算出；借记卡四通道限额与信用卡固定 / 临时 / 周期限额分开 | `scenarios/cards.py` · `web/app.py::/api/cards` |
+| 理财 | 适当性前置：65+ 延长考虑时间、R4+ 双录提示；申购 / 赎回统一进确认弹窗（四件套阅读、风险抄录、二次确认）；赎回由金额改为**份额 × 最新模拟净值** | `scenarios/wealth.py` · `web/assets/wealth_trade.js` · `gateway/wealth_trade_store.py` |
+| 账单 | 唯一消费口径：`direction=out` 且剔除转账 / 还款 / 理财；分类、趋势、预算共用同一集合；线索按交易聚合 + 置信度分层 + 落库回写；用户分类修正只影响本地视图 | `scenarios/bill_categories.py` · `bill_findings.py` |
+| 代扣 | 由订阅派生 `DebitAgreement` 只读视图：协议号 / 类型 / 签约日 / 累计扣款 / 涨价历史 / 解约后扣款；解约只终止本行侧授权 | `scenarios/subscriptions.py` |
+| 转账 | 收款人增开户行；流水增转账方式 / 手续费 / 用途 / 附言 / 状态；记录页可对账；新收款人 `identity_confirmed=0` | `gateway/resolvers.py` · `gateway/transfer_store.py` |
 
 ---
 
-*2026-10-01 建立 · 2026-10-27 补充 §11 生活链路参数化装配*
+*2026-10-01 建立 · 2026-10-27 补充 §11 生活链路参数化装配 · 2026-11-01 更新 L2–L7 落地状态 · 2026-11-02 补 §11.6 / §11.7 五场景事实模型增量*
+

@@ -102,7 +102,7 @@ _PROMPTS: Mapping[str, str] = {
     "account": "请选择要操作的账户。",
     "payee": "请确认收款人（需要全名 / 账号尾号 / 手机尾号）。",
     "payer": "请确认付款人（需要全名 / 账号尾号 / 手机尾号）。",
-    "amount": "请给出金额（必须带单位，例如 500 元）。",
+    "amount": "请给出金额（单位：元，例如 500）。",
     "when": "请给出执行时间（例如 明天 / 2026-12-25）。",
     "product": "请选择理财产品。",
     "subscription": "请选择要处理的订阅。",
@@ -127,6 +127,8 @@ _PROMPTS: Mapping[str, str] = {
     "horizon": "请给出资金闲置的时间（例如 半年 / 6 个月 / 90 天）。",
     "max_amount": "请给出打算投入的金额（例如 5 万元）。",
     "shares": "请给出赎回份额（份）。",
+    "transfer_method": "请选择到账方式：实时 / 普通 / 次日 / 大额。",
+    "purpose": "这笔钱用于什么？（房租 / 工资 / 报销 / 其他）",
 }
 
 _PERIOD_ALIASES = {"monthly": "monthly", "yearly": "yearly", "每月": "monthly", "每年": "yearly"}
@@ -434,6 +436,12 @@ def _resolve_slot(
     bare_selected: bool = False,
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     notes: list[str] = []
+    # 卡类型词是原文明说的对象限定，优先于默认 / 页面选中的卡：
+    # 否则「申请信用卡临时额度」会被默认借记卡顶替，误判为「只有信用卡支持…」。
+    if slot == "card" and inputs.cards and sum(
+        1 for _, pattern in _CARD_KIND_ALIASES if pattern.search(inputs.text)
+    ) == 1:
+        return _resolve_card(inputs, notes)
     # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径，落到解析器 / 追问，
     # 不能因为多了一个空键就改口径（见 2026-10-27 验收记录 §5 缺陷 8）。
     if inputs.selected.get(slot) is not None:
@@ -478,6 +486,11 @@ def _resolve_slot(
     if slot == "card":
         return _resolve_card(inputs, notes)
     if slot == "when":
+        # 「24 小时延时 / 次日到账」没给具体日期：落到明天（登记不扣款，可撤销）。
+        if action in {"transfer.book", "transfer.schedule"} and re.search(
+            r"24\s*小时|二十四小时|次日|延时|延迟", inputs.text
+        ):
+            return (inputs.today + timedelta(days=1)).isoformat(), None, tuple(notes)
         return _resolve_when(inputs, notes)
     if slot == "horizon":
         return _resolve_horizon(inputs, notes)
@@ -491,6 +504,29 @@ def _resolve_slot(
         }
         if len(periods) == 1:
             return periods.pop(), None, tuple(notes)
+    if slot == "transfer_method":
+        text = inputs.text
+        if re.search(r"次日|明天到账|24\s*小时|二十四小时|延时|延迟", text):
+            return "next_day", None, tuple(notes)
+        if re.search(r"普通|2\s*小时|两小时", text):
+            return "normal", None, tuple(notes)
+        if re.search(r"实时|秒到", text):
+            return "realtime", None, tuple(notes)
+        if re.search(r"大额", text):
+            return "large", None, tuple(notes)
+        # 没提方式就按动作给默认值：登记未来转账默认次日，其余默认实时。
+        return ("next_day" if action in {"transfer.book", "transfer.schedule"} else "realtime",
+                None, tuple(notes))
+    if slot == "purpose":
+        labelled = re.search(
+            r"(?:用途|用于|用来)(?:是|为)?\s*[:：]?\s*(房租|工资|报销|其他)", inputs.text
+        )
+        if labelled is not None:
+            return _CHOICE_ALIASES["purpose"][labelled.group(1)], None, tuple(notes)
+        for alias, canonical in _CHOICE_ALIASES["purpose"].items():
+            if alias in inputs.text:
+                return canonical, None, tuple(notes)
+        return None, None, tuple(notes)
     if slot == "merchant":
         # 只取明确的「给某商户开通」原文，商户缺失或修改指令仍需澄清。
         match = re.search(r"给(?P<merchant>[^，,。；;]{1,30}?)开通", inputs.text)
@@ -578,6 +614,19 @@ _CHOICE_ALIASES: Mapping[str, Mapping[str, str]] = {
         "express": "express", "加急": "express",
     },
     "replace": {"yes": "yes", "是": "yes", "no": "no", "否": "no"},
+    "transfer_method": {
+        "realtime": "realtime", "实时": "realtime", "实时到账": "realtime", "秒到": "realtime",
+        "normal": "normal", "普通": "normal", "普通到账": "normal",
+        "next_day": "next_day", "次日": "next_day", "次日到账": "next_day",
+        "延时": "next_day", "延迟": "next_day", "24小时": "next_day",
+        "large": "large", "大额": "large", "大额通道": "large",
+    },
+    "purpose": {
+        "rent": "rent", "房租": "rent",
+        "salary": "salary", "工资": "salary",
+        "reimburse": "reimburse", "报销": "reimburse",
+        "other": "other", "其他": "other",
+    },
 }
 
 

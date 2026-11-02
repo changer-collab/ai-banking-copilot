@@ -1,7 +1,7 @@
 from datetime import date
 
 from ai_banking_copilot.contracts.taint import SlotKind, Trust, Value
-from ai_banking_copilot.gateway.models import Money, Payee, WealthProduct
+from ai_banking_copilot.gateway.models import Money, Payee, WealthHolding, WealthProduct
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.llm import ACTION_KINDS
 from ai_banking_copilot.planning.slots import (
@@ -37,6 +37,7 @@ def test_transfer_slots_are_filled_from_deterministic_resolvers(payees: tuple[Pa
         "payee": "p_lina",
         "amount": 50000,
         "when": "2026-10-01",
+        "transfer_method": "realtime",
     }
 
 
@@ -350,3 +351,43 @@ def test_missing_product_lists_the_catalog_instead_of_a_dead_end() -> None:
     assert question.slot == "product"
     assert "活期理财篮子（R1）" in question.prompt
     assert "成长精选 C（R4）" in question.prompt
+
+
+_HOLDINGS = (
+    WealthHolding("wp_bond", DEMO_USER_ID, Money(300_000), date(2026, 3, 18)),
+    WealthHolding("wp_cash", DEMO_USER_ID, Money(50_000), date(2026, 6, 10)),
+    WealthHolding("wp_short", DEMO_USER_ID, Money(200_000), date(2026, 10, 31)),
+)
+_REDEEM_PRODUCTS = (
+    *_PRODUCTS,
+    WealthProduct("wp_short", "稳盈短期 A", "R2", 30, 280, Money(1_000)),
+)
+
+
+def _redeem_inputs(text: str) -> SlotInputs:
+    return SlotInputs(
+        text=text,
+        today=TODAY,
+        selected={"user_id": DEMO_USER_ID, "account": "acc_savings"},
+        products=_REDEEM_PRODUCTS,
+        holdings=_HOLDINGS,
+        holdings_known=True,
+    )
+
+
+def test_redeem_picks_the_upcoming_holding_and_defaults_to_full_amount() -> None:
+    """「到期赎回」不拿在售目录选产品：取最近到期的那笔持仓，金额默认全部。"""
+    fill = fill_control_slots("wealth.redeem", _redeem_inputs("到期赎回"))
+    assert fill.complete is True
+    assert fill.slots["product"] == "wp_short"
+    assert fill.slots["amount"] == 200_000
+
+
+def test_redeem_choices_only_come_from_holdings() -> None:
+    """没点名产品时只列**本人持仓**——在售但没持有的产品不能出现在赎回清单里。"""
+    fill = fill_control_slots("wealth.redeem", _redeem_inputs("赎回理财"))
+    (question,) = fill.questions
+    assert question.slot == "product"
+    values = {value for _, value in question.choices}
+    assert values == {holding.product_id for holding in _HOLDINGS}
+    assert "成长精选 C" not in question.prompt

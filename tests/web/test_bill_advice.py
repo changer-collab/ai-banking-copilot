@@ -37,7 +37,7 @@ def test_monthly_bill_returns_sourced_advice_without_business_writes(deps: AppDe
     share = next(item for item in advice if item["kind"] == "category-share")
     assert share["period"] == "2026-09"
     assert "8260.00" in share["evidence"]
-    assert "51.24%" in share["evidence"]
+    assert "51.43%" in share["evidence"]
     assert "净支出" in share["evidence"]
     assert any(item["kind"] == "subscription-review" for item in advice)
     assert all(item["source_refs"] for item in advice)

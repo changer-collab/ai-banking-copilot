@@ -63,6 +63,9 @@ class Payee:
     否则两个不同号码只要后四位相同就会指向同一个人。
     """
 
+    bank_name: str | None = None
+    """收款开户行（可空 = 未登记）。跨行转账必须核对开户行；NULL 不得猜成本行。"""
+
 
 @dataclass(frozen=True)
 class Card:
@@ -119,6 +122,13 @@ class Transaction:
     """消费发生地城市（可空）。「异地」判据的唯一地点来源。"""
     card_tail: str | None = None
     """付款卡尾号（可空）；缺失时不得从账户或商户推断。"""
+    payee_id: str | None = None
+    transfer_method: str | None = None
+    transfer_fee_cents: int | None = None
+    transfer_purpose: str | None = None
+    transfer_remark: str | None = None
+    transfer_status: str | None = None
+    """转账元数据（可空）：旧种子流水没有这些列，读取层按“历史记录”处理。"""
 
 
 @dataclass(frozen=True)
@@ -254,6 +264,8 @@ class Subscription:
     status: str
     card_id: str | None = None
     """代扣绑定的卡（可空 = 关系未知；不得据此推断"不限卡"）。"""
+    cancelled_on: date | None = None
+    """解约业务日；`status=cancelled` 时用于对账，`None` = 解约日期未知。"""
 
 
 @dataclass(frozen=True)

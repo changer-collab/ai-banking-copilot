@@ -105,8 +105,8 @@
   <text x="1078" y="209" class="side-title">官方六场景 × 25 项点名能力</text>
   <text x="1078" y="240" class="side-body">① 智能转账　按人名 / 手机号 / 备注 / 定时 / AA 收款</text>
   <text x="1078" y="260" class="side-body">② 账单分析　分类统计 / 异常(7 类) / 月报 / 年报</text>
-  <text x="1078" y="280" class="side-body">③ 理财操作　推荐(只读硬筛) / 对比 / 测评(5 题) / 申购 / 赎回</text>
-  <text x="1078" y="300" class="side-body">④ 卡片管理　申请 / 额度 / 限制 / 解锁 / 挂失</text>
+  <text x="1078" y="280" class="side-body">③ 理财操作　推荐(只读硬筛) / 对比 / 测评(5 题) / 申购 / 份额赎回 · 适当性弹窗</text>
+  <text x="1078" y="300" class="side-body">④ 卡片管理　临时冻结 / 正式挂失 / 补卡 / 调额 / 分卡限额 / 周期限额</text>
   <text x="1078" y="320" class="side-body">⑤ 订阅代扣　自动识别扣费 / 续费提醒 / 一键取消</text>
   <text x="1078" y="340" class="side-body">⑥ 跨场景　生日 → 锁定 1000 → 前 2 天下单 → 释放 701</text>
   <text x="1078" y="362" class="note">25 有 · 0 半有 · 0 无　（逐条对照见 official-requirements.md）</text>
@@ -142,7 +142,7 @@
   <text x="1078" y="783" class="side-title">评测与验收（可复现）</text>
   <text x="1078" y="814" class="side-body">四个数字：拦截率 · 误拒率 · 任务成功率 · 数字可回溯率</text>
   <text x="1078" y="834" class="side-body">数据集：web-smoke-v2(21) · evidence_dev_v1(93) · heldout_v1(40)</text>
-  <text x="1078" y="854" class="side-body">门禁：ruff · mypy · pytest（2144）· CI</text>
+  <text x="1078" y="854" class="side-body">门禁：ruff · mypy · pytest（2193）· CI</text>
   <text x="1078" y="874" class="side-body">端到端 7 项：触发 → 追问 → DAG → 计划卡 → 三色 → 审计 → 可恢复</text>
   <text x="1078" y="896" class="note">口径冻结在 RESULTS.md：改定义必须同时改代码与文档</text>
   <text x="1078" y="914" class="note">七项缺一不算完成；生活链路与业务场景用同一套验收</text>

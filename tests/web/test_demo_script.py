@@ -13,8 +13,8 @@ from ai_banking_copilot.web.session import Session, SessionState
 
 SUCCESS_CASES = (
     ("转账成功", "转给李娜 500 元", None, False),
-    ("理财赎回成功", "赎回 1000 元理财", {"account": "acc_savings", "product": "wp_bond"}, False),
-    ("订阅取消成功", "取消订阅", {"subscription": "sub_video"}, False),
+    ("理财赎回成功", "赎回 1000 元理财", {"account": "acc_savings", "product": "wp_bond"}, True),
+    ("订阅取消成功", "取消订阅", {"subscription": "sub_video"}, True),
     ("挂失成功（强验证后）", "挂失", {"card": "card_debit"}, True),
 )
 

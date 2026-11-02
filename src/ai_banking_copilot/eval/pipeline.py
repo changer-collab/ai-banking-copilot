@@ -35,7 +35,7 @@ from ai_banking_copilot.gateway.core_bank import (
 )
 from ai_banking_copilot.gateway.errors import GatewayError, SandboxError
 from ai_banking_copilot.gateway.facts import FactGateway
-from ai_banking_copilot.gateway.models import Money, Payee
+from ai_banking_copilot.gateway.models import Card, Money, Payee
 from ai_banking_copilot.gateway.risk_store import (
     RiskAssessmentSource,
     StoreRiskAssessmentSource,
@@ -226,6 +226,7 @@ class EvalPipeline:
         context: dict[str, object] = {
             "today": DEFAULT_BOOKING_DATE,
             "payees": tuple(record.payload for record in gateway.payees_of(DEMO_USER_ID)),
+            "cards": tuple(record.payload for record in gateway.cards_of(DEMO_USER_ID)),
             "selected": dict(_DEFAULT_SELECTED),
         }
         kernel = Kernel(TemplateIntentModel(), self._registry)
@@ -440,6 +441,7 @@ def _scenario_intent(intent: Intent, context: Mapping[str, object]) -> Intent:
             text=text,
             today=_context_today(context),
             payees=_context_payees(context),
+            cards=_context_cards(context),
             selected=_context_selected(context),
         ),
     )
@@ -537,6 +539,13 @@ def _context_payees(context: Mapping[str, object]) -> tuple[Payee, ...]:
     value = context.get("payees")
     if isinstance(value, Sequence):
         return tuple(item for item in value if isinstance(item, Payee))
+    return ()
+
+
+def _context_cards(context: Mapping[str, object]) -> tuple[Card, ...]:
+    value = context.get("cards")
+    if isinstance(value, Sequence):
+        return tuple(item for item in value if isinstance(item, Card))
     return ()
 
 

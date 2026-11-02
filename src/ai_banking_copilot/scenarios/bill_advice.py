@@ -8,6 +8,8 @@ from decimal import Decimal
 from ai_banking_copilot.gateway.facts import FactGateway, Record
 from ai_banking_copilot.gateway.models import BillSummary, Money
 from ai_banking_copilot.gateway.operators import run_operator
+from ai_banking_copilot.scenarios.bill_categories import is_consumption_category
+from ai_banking_copilot.scenarios.bill_findings import consumption_totals
 
 # 仅作为产品提醒规则，不据此判断消费是否必要。
 _ADJUSTABLE_CATEGORIES = frozenset({"购物", "餐饮", "娱乐"})
@@ -31,20 +33,27 @@ def build_bill_advice(
 ) -> tuple[BillAdvice, ...]:
     """返回至多三条可回读的提醒；不写预算、订阅或银行业务事实。"""
     current = gateway.monthly_bill(user_id, year, month)
-    if current.payload.total_expense.cents <= 0:
+    consumption, _income, _transfer, _transfer_count = consumption_totals(
+        gateway, user_id, year, month
+    )
+    if consumption <= 0:
         return ()
 
     period = f"{year:04d}-{month:02d}"
     current_sources = _bill_sources(gateway, current)
     expenses = _net_expenses(current.payload)
     results: list[BillAdvice] = []
-    category, cents = max(expenses.items(), key=lambda item: (item[1], item[0]))
+    category, cents = (
+        max(expenses.items(), key=lambda item: (item[1], item[0]))
+        if expenses
+        else ("", 0)
+    )
     if category in _ADJUSTABLE_CATEGORIES:
         share = run_operator(
             "ratio",
             (
                 (current.record_id, Decimal(cents)),
-                (current.record_id, Decimal(current.payload.total_expense.cents)),
+                (current.record_id, Decimal(consumption)),
             ),
         )
         if share.value >= _SHARE_THRESHOLD:
@@ -55,8 +64,8 @@ def build_bill_advice(
                     title=f"复核{category}支出安排",
                     evidence=(
                         f"{period} {category}净支出 {Money(cents).yuan} 元，"
-                        f"占当期净支出 {current.payload.total_expense.yuan} 元的 "
-                        f"{share.value:.2%}。"
+                        f"占当期消费 {Money(consumption).yuan} 元的 "
+                        f"{share.value:.2%}（转账/还款等不计入消费）。"
                     ),
                     suggestion=(
                         f"先核对{category}中的大额或一次性购买，再考虑设置{category}额度，"
@@ -107,9 +116,11 @@ def build_bill_advice(
 
 
 def _net_expenses(summary: BillSummary) -> dict[str, int]:
-    """沿用 monthly_bill 的分类净额：退款先在同分类抵扣，仅取负净额。"""
+    """分类净额：退款先在同分类抵扣，仅取负净额；转账/还款等不计入消费。"""
     return {
-        item.category: -item.total.cents for item in summary.by_category if item.total.cents < 0
+        item.category: -item.total.cents
+        for item in summary.by_category
+        if item.total.cents < 0 and is_consumption_category(item.category)
     }
 
 

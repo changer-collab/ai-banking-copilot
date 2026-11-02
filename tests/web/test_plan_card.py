@@ -260,9 +260,9 @@ def test_balance_trace_walks_freeze_order_and_release(gateway: FactGateway) -> N
     card = render_plan_card(_freeze_plan(), _decision(Level.RED), gateway)
     assert card.balance_trace == (
         "执行前可用余额 128430.00 元",
-        "冻结 1000.00 元 → 可用 127430.00 元",
-        "扣款 299.00 元（从冻结预算结算） → 可用 127430.00 元",
-        "解冻 701.00 元 → 可用 128131.00 元",
+        "预留 1000.00 元 → 可用 127430.00 元",
+        "扣款 299.00 元（从预留额度结算） → 可用 127430.00 元",
+        "释放 701.00 元 → 可用 128131.00 元",
     )
 
 

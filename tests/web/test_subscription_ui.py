@@ -9,17 +9,20 @@ def _script(deps: AppDeps) -> str:
     return TestClient(create_app(deps)).get("/assets/app.js").text
 
 
-def test_subscription_cards_expose_price_tristate_and_next_charge(deps: AppDeps) -> None:
+def test_subscription_cards_expose_agreement_facts_and_close_action(deps: AppDeps) -> None:
     script = _script(deps)
-    assert "item.price_increased_12m === true" in script
-    assert "item.price_increased_12m === false" in script
-    for label in ("近 12 个月涨价", "近 12 个月未涨价", "样本不足", "下次扣款日"):
+    assert "item.price_change" in script
+    assert "agreementPriceHtml(item)" in script
+    for label in (
+        "关闭扣款协议", "协议详情 · 扣款记录", "已解约",
+        "未发现近 12 个月涨价", "累计扣款数据不足",
+    ):
         assert label in script
-    assert "yuan(item.price_change_12m_from_cents)" in script
-    assert "yuan(item.price_change_12m_to_cents)" in script
+    assert "yuan(item.price_change.from_cents)" in script
+    assert "yuan(item.price_change.to_cents)" in script
     assert ': "未提供"' in script
     assert 'data-sub-cancel=' in script
-    assert '<span class="chip">已取消</span>' in script
+    assert '<span class="chip">已解约</span>' in script
     assert 'active: "已确认订阅"' not in script
 
 
@@ -57,7 +60,7 @@ def test_audit_uses_recorded_channel_and_correlates_digest(deps: AppDeps) -> Non
 def test_subscription_records_and_health_have_human_states(deps: AppDeps) -> None:
     script = _script(deps)
     for text in (
-        "正在读取订阅识别结果…", "未识别到订阅。", "订阅数据暂不可用，请稍后重试。",
+        "正在读取代扣协议…", "未识别到代扣协议。", "代扣协议数据暂不可用，请稍后重试。",
         "扣款记录", "正在读取${esc(spec.label)}…", "${esc(spec.label)} · 暂无记录",
         "${spec.label}读取失败，请稍后重试。",
     ):

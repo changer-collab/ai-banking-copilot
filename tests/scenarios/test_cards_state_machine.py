@@ -49,9 +49,11 @@ def test_report_lost_temporary_builds_a_freeze_node(gateway: FactGateway) -> Non
     assert plan.nodes[0].params["duration_days"] == 7
 
 
-def test_unlock_requires_a_locked_card(gateway: FactGateway) -> None:
-    with pytest.raises(ScenarioRefused, match="临时冻结"):
-        CardsHandler().build([_intent("card.unlock")], gateway)
+def test_unlock_of_a_healthy_card_builds_an_unlock_node(gateway: FactGateway) -> None:
+    """口径 2026-11-02 变更：只有已挂失（lost）的卡不可解锁，见 test_card_lost_unlock.py。"""
+    plan = CardsHandler().build([_intent("card.unlock")], gateway)
+    assert plan.nodes[0].action == "card.unlock"
+    assert plan.nodes[0].params["card_id"] == "card_debit"
 
 
 def test_replace_requires_address_and_mail_method(gateway: FactGateway) -> None:

@@ -21,7 +21,7 @@ from ai_banking_copilot.contracts.plan import (
     PlanNode,
     validate_plan,
 )
-from ai_banking_copilot.gateway.core_bank import WriteReceipt
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE, WriteReceipt
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Money, Subscription
@@ -49,7 +49,7 @@ from ai_banking_copilot.scenarios.base import (
     require_trusted,
     trusted_slot,
 )
-from ai_banking_copilot.scenarios.bill_findings import display_merchant, normalize_merchant
+from ai_banking_copilot.scenarios.bill_categories import display_merchant, normalize_merchant
 
 SUBSCRIPTION_ACTIONS = frozenset({"subscription.list", "subscription.cancel", "subscription.sign"})
 """订阅域动作（README 规范动作表 #7 / #12 / #13）。"""
@@ -224,13 +224,14 @@ CANCEL_STATE_LABELS = {
 }
 
 SUBSCRIPTION_CANCEL_BOUNDARY = (
-    "本应用尚未接入任何商户的取消接口：取消操作只更新本应用内的订阅状态，"
-    "不会通知商户，也不代表商户侧已停止扣费。"
+    "本页关闭的是这张卡对该商户的扣款授权：关闭后银行不再放款；"
+    "商户是否继续提供服务、是否停止计费，由商户决定。"
+    "本应用尚未接入任何商户的取消接口，商户侧状态需到商户 App 关闭。"
 )
 """能力边界，必须随取消结果一起展示。"""
 
 SUBSCRIPTION_CANCEL_BOUNDARY_SHORT = (
-    "本地取消只改本应用状态，商户侧是否停扣以商户回执为准。"
+    "关闭后银行卡侧不再放款；商户是否继续服务由商户决定。"
 )
 """计划卡对象行用的短口径（长口径见 `SUBSCRIPTION_CANCEL_BOUNDARY`）。"""
 
@@ -303,6 +304,32 @@ class SubscriptionNotice:
     message: str
 
 
+AGREEMENT_ACTIVE = "active"
+AGREEMENT_CANCELLED = "cancelled"
+AGREEMENT_SUSPECTED = "suspected"
+
+AGREEMENT_TYPE_LABELS = {
+    "unionpay": "银联代扣",
+    "netlink": "网联代扣",
+    "collection_e": "代收e授权",
+    "unknown": "类型未知",
+}
+
+
+@dataclass(frozen=True)
+class PricePoint:
+    amount_cents: int
+    effective_on: date
+
+
+@dataclass(frozen=True)
+class PriceChange:
+    from_cents: int
+    to_cents: int
+    effective_on: date
+    percent: Decimal
+
+
 @dataclass(frozen=True)
 class SubscriptionInsight:
     """一条订阅识别结果（已登记订阅或流水推断的疑似订阅）。"""
@@ -336,6 +363,21 @@ class SubscriptionInsight:
     price_increased_12m: bool | None
     price_change_12m_from_cents: int | None
     price_change_12m_to_cents: int | None
+    agreement_no: str
+    agreement_type: str
+    agreement_type_label: str
+    agreement_status: str
+    signed_on: date | None
+    cancelled_on: date | None
+    charged_total_cents: int | None
+    month_charged_cents: int
+    price_history: tuple[PricePoint, ...]
+    price_change: PriceChange | None
+    next_charge_state: str
+    overdue_days: int | None
+    card_id: str | None
+    card_tail: str | None
+    post_cancel_charges: tuple[SubscriptionEvidence, ...]
 
 
 @dataclass(frozen=True)
@@ -369,6 +411,10 @@ def subscription_report(
         for record in gateway.subscriptions_of(user_id)
         if record.payload.user_id == user_id
     )
+    cards = {
+        record.payload.card_id: record.payload
+        for record in gateway.cards_of(user_id)
+    }
 
     matched: dict[str, tuple[_Outflow, ...]] = {}
     for subscription in subscriptions:
@@ -387,8 +433,11 @@ def subscription_report(
             if renamed_from is not None:
                 items = tuple(grouped[renamed_from])
                 pending.discard(renamed_from)
+        card = cards.get(subscription.card_id) if subscription.card_id else None
         insights.append(_registered_insight(
             subscription, items, renamed_from=renamed_from, as_of=as_of,
+            card_type=card.card_type if card else None,
+            card_tail=card.last4 if card else None,
         ))
 
     notes: list[str] = [
@@ -464,28 +513,149 @@ def insights_payload(report: SubscriptionReport) -> dict[str, object]:
                     for notice in item.notices
                 ],
                 "evidence": [
-                    {
-                        "txn_id": evidence.txn_id,
-                        "record_id": evidence.record_id,
-                        "content_hash": evidence.content_hash,
-                        "booked_on": evidence.booked_on.isoformat(),
-                        "booked_at": evidence.booked_at,
-                        "card_tail": evidence.card_tail,
-                        "amount_cents": evidence.amount_cents,
-                        "merchant_label": evidence.merchant_label,
-                        "channel": evidence.channel,
-                        "account_id": evidence.account_id,
-                    }
-                    for evidence in item.evidence
+                    _evidence_payload(evidence) for evidence in item.evidence
+                ],
+                "post_cancel_charges": [
+                    _evidence_payload(evidence)
+                    for evidence in item.post_cancel_charges
                 ],
                 "suggestion": item.suggestion,
                 "cancel_action": item.cancel_action,
                 "cancel_path": item.cancel_path,
                 "external_cancel_status": item.external_cancel_status,
+                "agreement_id": item.insight_id,
+                "agreement_no": item.agreement_no,
+                "agreement_type": item.agreement_type,
+                "agreement_type_label": item.agreement_type_label,
+                "agreement_status": item.agreement_status,
+                "card_id": item.card_id,
+                "card_tail": item.card_tail,
+                "signed_on": item.signed_on.isoformat() if item.signed_on else None,
+                "cancelled_on": (
+                    item.cancelled_on.isoformat() if item.cancelled_on else None
+                ),
+                "charged_total_cents": item.charged_total_cents,
+                "month_charged_cents": item.month_charged_cents,
+                "price_history": [
+                    {
+                        "amount_cents": point.amount_cents,
+                        "effective_on": point.effective_on.isoformat(),
+                    }
+                    for point in item.price_history
+                ],
+                "price_change": (
+                    {
+                        "from_cents": item.price_change.from_cents,
+                        "to_cents": item.price_change.to_cents,
+                        "effective_on": item.price_change.effective_on.isoformat(),
+                        "percent": str(item.price_change.percent),
+                    }
+                    if item.price_change else None
+                ),
+                "next_charge_state": item.next_charge_state,
+                "overdue_days": item.overdue_days,
             }
             for item in report.insights
         ],
+        "summary": _agreement_summary(report),
         "notes": list(report.notes),
+    }
+
+
+def describe_agreements_facts(gateway: FactGateway, user_id: str) -> str:
+    report = subscription_report(gateway, user_id, as_of=DEFAULT_BOOKING_DATE)
+    active = [
+        item for item in report.insights if item.agreement_status == AGREEMENT_ACTIVE
+    ]
+    if not active:
+        return "暂无在签代扣协议；" + SUBSCRIPTION_CANCEL_BOUNDARY_SHORT
+    rows = "；".join(
+        "".join(
+            (
+                f"{item.merchant}（{item.agreement_type_label}，协议 {item.agreement_no}"
+                "（演示派生），"
+                f"已扣 {item.charge_count} 期",
+                f" {Money(item.charged_total_cents).yuan} 元"
+                if item.charged_total_cents is not None
+                else "",
+                f"，下次 {item.next_charge_on.isoformat() if item.next_charge_on else '未知'}）",
+            )
+        )
+        for item in active[:3]
+    )
+    more = f" 等 {len(active)} 项" if len(active) > 3 else ""
+    return f"代扣协议：{rows}{more}；{SUBSCRIPTION_CANCEL_BOUNDARY_SHORT}"
+
+
+def describe_agreement_facts(
+    gateway: FactGateway, user_id: str, subscription_id: str
+) -> str:
+    report = subscription_report(gateway, user_id, as_of=DEFAULT_BOOKING_DATE)
+    item = next(
+        (row for row in report.insights if row.subscription_id == subscription_id),
+        None,
+    )
+    if item is None:
+        return f"代扣协议 {subscription_id}"
+    total = (
+        f"已扣 {item.charge_count} 期 {Money(item.charged_total_cents).yuan} 元"
+        if item.charged_total_cents is not None
+        else "历史扣款数据不足"
+    )
+    signed = item.signed_on.isoformat() if item.signed_on else "签约时间未知"
+    return (
+        f"{item.merchant} · {item.agreement_type_label} · 协议 {item.agreement_no}"
+        "（演示派生） · "
+        f"{signed} 签约 · {total}；{SUBSCRIPTION_CANCEL_BOUNDARY_SHORT}"
+    )
+
+
+def _evidence_payload(evidence: SubscriptionEvidence) -> dict[str, object]:
+    return {
+        "txn_id": evidence.txn_id,
+        "record_id": evidence.record_id,
+        "content_hash": evidence.content_hash,
+        "booked_on": evidence.booked_on.isoformat(),
+        "booked_at": evidence.booked_at,
+        "card_tail": evidence.card_tail,
+        "amount_cents": evidence.amount_cents,
+        "merchant_label": evidence.merchant_label,
+        "channel": evidence.channel,
+        "account_id": evidence.account_id,
+    }
+
+
+def _agreement_summary(report: SubscriptionReport) -> dict[str, object]:
+    as_of = report.as_of
+    month_start = as_of.replace(day=1)
+    month_end = as_of.replace(
+        day=monthrange(as_of.year, as_of.month)[1]
+    )
+    active = [item for item in report.insights if item.agreement_status == AGREEMENT_ACTIVE]
+    due = [
+        item for item in active
+        if item.next_charge_on is not None
+        and as_of <= item.next_charge_on <= month_end
+    ]
+    next_30 = [
+        item for item in active
+        if item.next_charge_on is not None
+        and as_of <= item.next_charge_on <= as_of + timedelta(days=30)
+    ]
+    return {
+        "month_label": as_of.strftime("%Y-%m"),
+        # 本月已扣包含已解约与疑似项（真实已发生的扣款）；待扣/30 天只算 active，口径不同是有意的。
+        "month_charged_cents": sum(item.month_charged_cents for item in report.insights),
+        "month_due_cents": sum(item.amount_cents for item in due),
+        "next_30d_cents": sum(item.amount_cents for item in next_30),
+        "active_count": len(active),
+        "suspected_count": sum(
+            1 for item in report.insights if item.agreement_status == AGREEMENT_SUSPECTED
+        ),
+        "cancelled_count": sum(
+            1 for item in report.insights if item.agreement_status == AGREEMENT_CANCELLED
+        ),
+        "month_start": month_start.isoformat(),
     }
 
 
@@ -513,6 +683,8 @@ def _registered_insight(
     *,
     renamed_from: str | None,
     as_of: date,
+    card_type: str | None,
+    card_tail: str | None,
 ) -> SubscriptionInsight:
     """已登记订阅：状态恒为 `confirmed`，但流水与登记不一致时必须逐条提示。"""
     gaps = _gaps([item.booked_on for item in items])
@@ -570,9 +742,20 @@ def _registered_insight(
                 "扣费周期可能已改变。",
             ))
 
-    next_charge_on, is_prediction, basis = _next_charge(
+    raw_next, is_prediction, basis = _next_charge(
         subscription, items, cycle=cycle, median_gap=median_gap
     )
+    next_charge_on, overdue_days = (
+        _advance_until_future(raw_next, cycle, as_of) if raw_next else (None, None)
+    )
+    if raw_next and next_charge_on != raw_next:
+        was_prediction = is_prediction
+        is_prediction = True
+        basis = basis + (
+            "已按扣费周期顺延到未来日期。"
+            if was_prediction
+            else "登记日期已过，已按扣费周期顺延到未来日期。"
+        )
     active = subscription.status == "active"
     if not active:
         suggestion = "订阅已不在有效状态，无需取消；如仍有扣费请核对流水。"
@@ -585,6 +768,35 @@ def _registered_insight(
     period_label, charged_this_period = _current_period(
         cycle, as_of, items[-1].booked_on if items else None
     )
+    history = _price_history(items)
+    price_change = _latest_price_change(history)
+    charged_total = sum(item.amount_cents for item in items) if items else None
+    month_charged = sum(
+        item.amount_cents for item in items
+        if item.booked_on.strftime("%Y-%m") == as_of.strftime("%Y-%m")
+    )
+    cancelled_on = subscription.cancelled_on
+    post_cancel = tuple(
+        _evidence(item) for item in items
+        if cancelled_on is not None and item.booked_on > cancelled_on
+    )
+    if subscription.status != "active":
+        next_state = "cancelled"
+    elif overdue_days:
+        next_state = "overdue"
+    elif charged_this_period:
+        next_state = "charged"
+    elif next_charge_on == as_of:
+        next_state = "due"
+    elif next_charge_on:
+        next_state = "scheduled"
+    else:
+        next_state = "unknown"
+    agreement_status = (
+        AGREEMENT_ACTIVE if subscription.status == "active" else AGREEMENT_CANCELLED
+    )
+    type_code = agreement_type(card_type, registered=True)
+    type_label = AGREEMENT_TYPE_LABELS[type_code]
     return SubscriptionInsight(
         insight_id=f"subscription:{subscription.subscription_id}",
         merchant=subscription.merchant,
@@ -604,17 +816,32 @@ def _registered_insight(
         charge_count=len(items),
         registered_status=subscription.status,
         notices=tuple(notices),
-        evidence=tuple(_evidence(item) for item in items[-6:]),
+        evidence=tuple(_evidence(item) for item in items[-12:]),
         suggestion=suggestion,
         cancel_action="app_local_cancel" if active else "none",
         cancel_path=(
-            "本应用「订阅管理」→ 取消订阅（当前仅更新本地订阅状态，不通知商户）"
-            if active else "订阅已不在有效状态，无需取消"
+            "本应用「代扣协议管理」→ 关闭扣款协议（关闭银行卡侧授权）"
+            if active else "协议已解约，无需关闭"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
         price_increased_12m=increased,
         price_change_12m_from_cents=price_from,
         price_change_12m_to_cents=price_to,
+        agreement_no=agreement_no(subscription.subscription_id),
+        agreement_type=type_code,
+        agreement_type_label=type_label,
+        agreement_status=agreement_status,
+        signed_on=items[0].booked_on if items else None,
+        cancelled_on=cancelled_on,
+        charged_total_cents=charged_total,
+        month_charged_cents=month_charged,
+        price_history=history,
+        price_change=price_change,
+        next_charge_state=next_state,
+        overdue_days=overdue_days,
+        card_id=subscription.card_id,
+        card_tail=card_tail,
+        post_cancel_charges=post_cancel,
     )
 
 
@@ -646,6 +873,18 @@ def _unregistered_insight(
     latest = items[-1]
     increased, price_from, price_to = _price_change_12m(items, as_of)
     period_label, charged_this_period = _current_period(cycle, as_of, latest.booked_on)
+    history = _price_history(items)
+    price_change = _latest_price_change(history)
+    next_on = (
+        latest.booked_on + timedelta(days=median_gap) if median_gap is not None else None
+    )
+    next_on, overdue_days = (
+        _advance_until_future(next_on, cycle, as_of) if next_on else (None, None)
+    )
+    month_charged = sum(
+        item.amount_cents for item in items
+        if item.booked_on.strftime("%Y-%m") == as_of.strftime("%Y-%m")
+    )
     return SubscriptionInsight(
         insight_id=f"outflow:{key}",
         merchant=latest.merchant_label,
@@ -659,9 +898,7 @@ def _unregistered_insight(
         last_charged_on=latest.booked_on,
         current_period_label=period_label,
         charged_this_period=charged_this_period,
-        next_charge_on=(
-            latest.booked_on + timedelta(days=median_gap) if median_gap is not None else None
-        ),
+        next_charge_on=next_on,
         next_charge_is_prediction=True,
         next_charge_basis=(
             f"按最近 {len(gaps)} 次扣费间隔的中位数 {median_gap} 天推得，仅作预测；"
@@ -670,17 +907,34 @@ def _unregistered_insight(
         charge_count=len(items),
         registered_status=None,
         notices=tuple(notices),
-        evidence=tuple(_evidence(item) for item in items[-6:]),
+        evidence=tuple(_evidence(item) for item in items[-12:]),
         suggestion="核对是否本人开通；如非本人操作或不再使用，请到该商户的自动续费管理中关闭。",
         cancel_action="merchant_self_service",
         cancel_path=(
-            "商户 App/官网 → 自动续费（订阅）管理 → 关闭；"
-            "本应用尚未接入该商户的取消接口"
+            "未匹配到本行代扣协议；请到商户 App/官网的自动续费管理关闭，"
+            "或联系发卡行核对是否来自其他卡"
         ),
         external_cancel_status=EXTERNAL_CANCEL_NOT_INTEGRATED,
         price_increased_12m=increased,
         price_change_12m_from_cents=price_from,
         price_change_12m_to_cents=price_to,
+        agreement_no="",
+        agreement_type="collection_e",
+        agreement_type_label=AGREEMENT_TYPE_LABELS["collection_e"],
+        agreement_status=AGREEMENT_SUSPECTED,
+        signed_on=items[0].booked_on,
+        cancelled_on=None,
+        charged_total_cents=sum(item.amount_cents for item in items),
+        month_charged_cents=month_charged,
+        price_history=history,
+        price_change=price_change,
+        next_charge_state=(
+            "overdue" if overdue_days else "scheduled" if next_on else "unknown"
+        ),
+        overdue_days=overdue_days,
+        card_id=None,
+        card_tail=latest.card_tail,
+        post_cancel_charges=(),
     )
 
 
@@ -728,6 +982,64 @@ def _next_charge(
         False,
         f"取订阅登记中的下次扣费日（{reason}，非预测值）。",
     )
+
+
+def agreement_no(subscription_id: str) -> str:
+    from hashlib import sha256
+
+    return "DD-" + sha256(subscription_id.encode("utf-8")).hexdigest()[:6].upper()
+
+
+def agreement_type(card_type: str | None, *, registered: bool) -> str:
+    if not registered:
+        return "collection_e"
+    if card_type == "debit":
+        return "unionpay"
+    if card_type == "credit":
+        return "netlink"
+    return "unknown"
+
+
+def _price_history(items: Sequence[_Outflow]) -> tuple[PricePoint, ...]:
+    points: list[PricePoint] = []
+    for item in items:
+        if not points or points[-1].amount_cents != item.amount_cents:
+            points.append(PricePoint(item.amount_cents, item.booked_on))
+    return tuple(points)
+
+
+def _latest_price_change(history: tuple[PricePoint, ...]) -> PriceChange | None:
+    if len(history) < 2:
+        return None
+    previous, latest = history[-2], history[-1]
+    if latest.amount_cents <= previous.amount_cents:
+        return None
+    percent = (
+        Decimal(latest.amount_cents - previous.amount_cents) * 100
+        / Decimal(previous.amount_cents)
+    ).quantize(Decimal("0.1"))
+    return PriceChange(previous.amount_cents, latest.amount_cents, latest.effective_on, percent)
+
+
+def _add_cycle(day: date, cycle: str) -> date:
+    if cycle == CYCLE_MONTHLY:
+        year, month = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
+        return date(year, month, min(day.day, monthrange(year, month)[1]))
+    if cycle == CYCLE_YEARLY:
+        year = day.year + 1
+        return date(year, day.month, min(day.day, monthrange(year, day.month)[1]))
+    return day + timedelta(days=30)
+
+
+def _advance_until_future(day: date, cycle: str, as_of: date) -> tuple[date, int | None]:
+    if day >= as_of:
+        return day, None
+    cursor = day
+    guard = 0
+    while cursor < as_of and guard < 120:
+        cursor = _add_cycle(cursor, cycle)
+        guard += 1
+    return cursor, max((as_of - day).days, 0)
 
 
 def _amount_change_notice(amounts: Sequence[int]) -> SubscriptionNotice | None:

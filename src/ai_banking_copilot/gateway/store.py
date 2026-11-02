@@ -17,17 +17,25 @@ from pathlib import Path
 
 from ai_banking_copilot.gateway.errors import ReadOnlyViolation, StoreError
 
-SCHEMA_VERSION = 8
-"""schema 版本：v8 扩展卡片展示 / 分卡限额 / 冻结到期 / 补卡关系列与三张卡片事件表。"""
+SCHEMA_VERSION = 9
+"""schema 版本：v9 补齐转账方式 / 用途 / 手续费等真实转账元数据与收款人开户行，
+并补 `subscriptions.cancelled_on`（解约日期，用于代扣协议对账）。"""
 
 _TRANSACTIONS_OPTIONAL_COLUMNS = (
     ("booked_at", "TEXT"),
     ("city", "TEXT"),
     ("card_tail", "TEXT"),
+    ("payee_id", "TEXT"),
+    ("transfer_method", "TEXT"),
+    ("transfer_fee_cents", "INTEGER"),
+    ("transfer_purpose", "TEXT"),
+    ("transfer_remark", "TEXT"),
+    ("transfer_status", "TEXT"),
 )
-"""`transactions` 的**可空**扩展列（v3）。
+"""`transactions` 的**可空**扩展列（v3 / v9）。
 
 判据层（如账单「深夜 / 异地」）必须能跳过 `NULL`——旧库升级后历史行为 `NULL`。
+v9 的转账元数据同样可空：旧流水缺失时按“历史记录”处理，不猜方式与手续费。
 """
 
 _OPTIONAL_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -53,8 +61,8 @@ _OPTIONAL_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("loss_reason", "TEXT"),
         ("replaced_by_card_id", "TEXT"),
     ),
-    "subscriptions": (("card_id", "TEXT"),),
-    "payees": (("phone", "TEXT"),),
+    "subscriptions": (("card_id", "TEXT"), ("cancelled_on", "TEXT")),
+    "payees": (("phone", "TEXT"), ("bank_name", "TEXT")),
     "wealth_holdings": (
         ("share_bp", "INTEGER NOT NULL DEFAULT 0"),
         ("nav_at_purchase_bp", "INTEGER NOT NULL DEFAULT 0"),
@@ -193,7 +201,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     period          TEXT NOT NULL CHECK (period IN ('monthly', 'yearly')),
     next_charge_on  TEXT NOT NULL,
     status          TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
-    card_id         TEXT REFERENCES cards(card_id)
+    card_id         TEXT REFERENCES cards(card_id),
+    cancelled_on    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS holds (
@@ -234,7 +243,8 @@ def init_schema(store: Store) -> None:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """旧库幂等迁移：按表补可空列（v3 补流水列；v4 补关系列；v5 补完整手机号；v6 补卡尾号）。
+    """旧库幂等迁移：按表补可空列（v3 补流水列；v4 补关系列；v5 补完整手机号；v6 补卡尾号；
+    v9 补转账元数据、收款人开户行与订阅解约日期）。
 
     `CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列，故旧库必须显式 `ALTER TABLE`；
     先查 `PRAGMA table_info` 再补，重复执行零副作用。

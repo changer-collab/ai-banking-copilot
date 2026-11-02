@@ -134,4 +134,20 @@
 
 ---
 
-*2026-10-01 建立 · 2026-10-01 补充 Web / 评测链与分层职责表 · 2026-10-04 补充「分层与可插拔」矩阵（S3） · 2026-10-27 补 L1–L7 生活链路、渠道与沙箱口径、§3.1 三项硬要求落点 · 2026-10-28 渠道口径改为飞书适配器，APP 形态改为响应式 PWA · 2026-11-01 生活链路补落地层（流水 / 到期预约 / 失败补偿 / 私密隔离）*
+### 6.5 2026-11-02 增量（工作区已实现）
+
+| 变化 | 落点 | 对架构的影响 |
+|---|---|---|
+| 动作集 25 → 28 | `tools/catalog.py` 新增 `card.replace` / `card.adjust_credit_limit` / `card.set_cycle_limit` | 仍由 catalog 派生 `ACTION_KINDS` / `REQUIRED_SLOTS` / PEP 分派；未新增授权路径 |
+| 卡片状态机拆分 | `scenarios/cards.py` · `web/app.py::/api/cards` | `allowed_actions` 由服务端按状态算出，前端不再自推；临时冻结可逆、正式挂失为吸收态 |
+| 理财合规链路 | `web/assets/wealth_trade.js` · `gateway/wealth_trade_store.py` · `scenarios/wealth.py` | 决策 / 执行分层：AI 只出草案，交易统一进确认弹窗；仍走 `/api/submit → /api/verify/request → /api/confirm` |
+| 账单事实口径 | `scenarios/bill_categories.py` · `bill_findings.py` | 页面与 AI 问答共用同一消费集合；线索落库、分类修正只影响本地视图 |
+| 代扣协议视图 | `scenarios/subscriptions.py` | 由订阅派生只读 `DebitAgreement`，不新增表、不新增动作 |
+| 生活事件事实自洽 | `web/life_event_store.py` · `web/life_funding.py` | 一条 record + 一条 schedule；资金核查只提示，不改计划与授权 |
+
+> 结论不变：**横向可插拔、纵向刻意封闭**。新增动作只扩 catalog 与场景 handler，PDP / 审计 / 执行门 / 沙箱语义未改。
+
+---
+
+
+*2026-10-01 建立 · 2026-10-01 补充 Web / 评测链与分层职责表 · 2026-10-04 补充「分层与可插拔」矩阵（S3） · 2026-10-27 补 L1–L7 生活链路、渠道与沙箱口径、§3.1 三项硬要求落点 · 2026-10-28 渠道口径改为飞书适配器，APP 形态改为响应式 PWA · 2026-11-01 生活链路补落地层 · 2026-11-02 补 §6.5 五场景增量（动作 28 个）*

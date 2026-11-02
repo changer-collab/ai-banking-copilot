@@ -247,13 +247,18 @@ def test_subscription_cancel_over_http_reports_local_only_execution(deps: AppDep
     client = _client(deps)
     submitted = client.post(
         "/api/submit",
-        json={"utterance": "取消订阅", "selected": {"subscription": "sub_video"}},
+        json={"utterance": "关闭扣款协议", "selected": {"subscription": "sub_video"}},
     ).json()
     card = submitted["card"]
     assert card is not None
+    prompt = client.post("/api/verify/request", json={}).json()
     confirmed = client.post(
         "/api/confirm",
-        json={"card_id": card["card_id"], "frozen_hash": card["frozen_hash"]},
+        json={
+            "card_id": card["card_id"],
+            "frozen_hash": card["frozen_hash"],
+            "verification_code": prompt["code"],
+        },
     ).json()
     assert confirmed["state"] == "completed"
     result = confirmed["results"][0]

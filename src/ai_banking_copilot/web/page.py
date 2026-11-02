@@ -27,7 +27,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 <link rel="icon" href="/assets/icon.svg?v=1" type="image/svg+xml" />
 <link rel="stylesheet" href="/assets/tokens.css?v=2" />
 <link rel="stylesheet" href="/assets/app.css?v=7" />
-<link rel="stylesheet" href="/assets/workspace.css?v=54" />
+<link rel="stylesheet" href="/assets/workspace.css?v=59" />
 </head>
 <body>
 <div class="layout layout--workspace" id="app" data-view-name="chat">
@@ -51,7 +51,7 @@ _PAGE_HTML = """<!DOCTYPE html>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="bills">账单</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="wealth">理财</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="cards">卡片</button>
-          <button class="appnav__tile" type="button" data-nav="scene" data-scene="subscriptions">订阅</button>
+          <button class="appnav__tile" type="button" data-nav="scene" data-scene="subscriptions">代扣协议</button>
           <button class="appnav__tile" type="button" data-nav="scene" data-scene="life">生活</button>
         </div>
         <p class="side__label">工具</p>
@@ -118,7 +118,7 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div class="scene-grid">
         <article class="scene-card">
           <p class="scene-card__k">① 转账</p>
-          <p class="scene-card__d">中文数字、完整手机号、日累计限额；大额走强验证。</p>
+          <p class="scene-card__d">选付款账户、核对收款人三要素、选择到账方式。</p>
           <div class="scene-card__row">
             <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="transfer">进入功能页</button>
             <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="转给李娜 500 元">去对话</button>
@@ -126,7 +126,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         </article>
         <article class="scene-card">
           <p class="scene-card__k">② 账单分析</p>
-          <p class="scene-card__d">重复扣款 / 涨价 / 隐藏费用 / 深夜 / 异地；带置信度与免责。</p>
+          <p class="scene-card__d">收支结构、分类修正、商户排行与预算；异常线索高分才有依据。</p>
           <div class="scene-card__row">
             <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="bills">进入功能页</button>
             <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="查一下上月账单">去对话</button>
@@ -149,11 +149,11 @@ _PAGE_HTML = """<!DOCTYPE html>
           </div>
         </article>
         <article class="scene-card">
-          <p class="scene-card__k">⑤ 订阅</p>
-          <p class="scene-card__d">涨价、下次扣款日与扣款记录可查；取消前说清边界。</p>
+          <p class="scene-card__k">⑤ 代扣协议</p>
+          <p class="scene-card__d">关闭银行卡侧扣款授权；签约、累计扣款与解约后对账可查。</p>
           <div class="scene-card__row">
             <button class="btn btn--sm btn--primary" type="button" data-nav="scene" data-scene="subscriptions">进入功能页</button>
-            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="订阅取消">去对话</button>
+            <button class="btn btn--sm" type="button" data-nav="chat" data-prefill="关闭扣款协议">去对话</button>
           </div>
         </article>
         <article class="scene-card">
@@ -225,7 +225,7 @@ _PAGE_HTML = """<!DOCTYPE html>
         <div class="composer-footer">
           <button class="btn btn--ghost" id="btn-due" type="button">检查到期待办</button>
           <span class="muted composer-tip">Enter 发送 · Shift + Enter 换行</span>
-          <p class="muted business-date" id="business-date">正在读取演示业务日期与可选对象…</p>
+          <p class="muted business-date" id="business-date">正在读取演示数据日期与可选对象…</p>
         </div>
       </div>
     </section>
@@ -239,51 +239,131 @@ _PAGE_HTML = """<!DOCTYPE html>
         </div>
         <div class="btn-row">
           <button class="btn btn--sm" type="button" data-nav="home">返回首页</button>
-          <button class="btn btn--sm btn--primary" type="button" id="btn-scene-chat">去对话办这一笔</button>
+          <button class="btn btn--sm btn--primary" type="button" id="btn-scene-chat">去对话补充</button>
         </div>
       </header>
 
       <div class="scene-block" data-scene-block="transfer" hidden>
         <section class="panel" id="quota-panel">
           <div class="scene-head">
-            <p class="panel__title">今日转账额度</p>
+            <p class="panel__title">转账额度</p>
             <span class="muted" id="quota-status">正在读取额度…</span>
           </div>
           <div id="quota-body"></div>
+          <details class="transfer-limit-help">
+            <summary>限额说明与调整方式</summary>
+            <ul class="muted" id="quota-notes"></ul>
+            <button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="cards">去卡片页调整通道限额</button>
+          </details>
         </section>
 
-        <section class="panel">
-          <p class="panel__title">快速转账</p>
-          <p class="muted scene-hint">先出计划卡，确认后才会执行；红色动作本页不代做，会引导去对话做强验证。</p>
-          <div class="scene-form">
+        <section class="panel" id="quick-transfer-panel">
+          <div class="scene-head">
+            <p class="panel__title">转账</p>
+            <span class="muted">带 * 为必填</span>
+          </div>
+          <p class="muted scene-hint">从本人账户转出。提交后会先核对收款人信息，再进入验证环节。</p>
+          <div class="transfer-form">
+            <label class="field">
+              <span class="field__label">付款账户 *</span>
+              <select class="input" id="transfer-account"></select>
+              <span class="field__hint" id="transfer-account-balance">可用余额 —</span>
+            </label>
+
             <div class="field">
-              <span class="field__label">收款人</span>
+              <span class="field__label">收款人姓名 *</span>
               <div class="payee-picker" id="payee-picker">
-                <input class="input" id="quick-payee" type="text" autocomplete="off"
+                <input class="input" id="quick-payee" type="text" autocomplete="off" maxlength="20"
                        aria-label="收款人" placeholder="输入姓名，或从常用收款人里选" aria-autocomplete="list"
                        aria-controls="payee-candidates" aria-expanded="false" />
                 <ul class="payee-candidates" id="payee-candidates" role="listbox" hidden></ul>
               </div>
+              <span class="field__hint" id="payee-picked-hint">从常用收款人选择会自动带出账号与开户行。</span>
             </div>
+
+            <div class="transfer-grid">
+              <label class="field">
+                <span class="field__label">收款账号 *</span>
+                <input class="input" id="quick-payee-account" type="text" inputmode="numeric"
+                       autocomplete="off" maxlength="23" placeholder="填写卡号；演示仅保存后四位" />
+              </label>
+              <label class="field">
+                <span class="field__label">开户行 *</span>
+                <select class="input" id="quick-payee-bank">
+                  <option value="">请选择开户行</option>
+                  <option>招商银行</option>
+                  <option>工商银行</option>
+                  <option>建设银行</option>
+                  <option>农业银行</option>
+                  <option>中国银行</option>
+                  <option>交通银行</option>
+                  <option>其他银行</option>
+                </select>
+              </label>
+            </div>
+
             <label class="field">
-              <span class="field__label">金额（元）</span>
-              <input class="input" id="quick-amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如 500" />
+              <span class="field__label">收款人手机号（选填）</span>
+              <input class="input" id="quick-payee-phone" type="tel" inputmode="numeric"
+                     maxlength="11" autocomplete="off" placeholder="用于到账通知" />
             </label>
+
+            <fieldset class="transfer-methods" id="transfer-methods">
+              <legend>转账方式 *</legend>
+              <label class="method-card">
+                <input type="radio" name="transfer-method" value="realtime" checked />
+                <b>实时到账</b><span>7×24 秒到 · 演示即时记账</span>
+              </label>
+              <label class="method-card">
+                <input type="radio" name="transfer-method" value="normal" />
+                <b>普通到账</b><span>预计 2 小时内 · 演示即时记账</span>
+              </label>
+              <label class="method-card">
+                <input type="radio" name="transfer-method" value="next_day" />
+                <b>次日到账</b><span>次日 00:00 后发出 · 可撤销</span>
+              </label>
+              <label class="method-card">
+                <input type="radio" name="transfer-method" value="large" />
+                <b>大额通道</b><span>5 万以上 · 工作日处理</span>
+              </label>
+            </fieldset>
+            <p class="muted" id="transfer-method-note">实时到账：预计秒到；单笔限额以卡片转账通道为准。</p>
+
+            <label class="field">
+              <span class="field__label">转账金额（元）*</span>
+              <input class="input" id="quick-amount" type="number" min="0.01" step="0.01"
+                     inputmode="decimal" placeholder="例如 1850" />
+              <span class="field__hint" id="quick-amount-hint"></span>
+            </label>
+
+            <div class="transfer-grid">
+              <label class="field">
+                <span class="field__label">用途</span>
+                <select class="input" id="quick-purpose">
+                  <option value="">未选择</option>
+                  <option value="rent">房租</option>
+                  <option value="salary">工资</option>
+                  <option value="reimburse">报销</option>
+                  <option value="other">其他</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">附言（选填）</span>
+                <input class="input" id="quick-remark" type="text" maxlength="50" autocomplete="off"
+                       placeholder="如 十月房租" />
+              </label>
+            </div>
+
+            <p class="muted transfer-fee" id="transfer-fee">手续费 ¥0.00（演示环境免收；真实跨行费用以银行实际为准）</p>
+            <div class="fraud-alert" id="transfer-fraud" hidden></div>
+
+            <div class="btn-row">
+              <button class="btn btn--primary" type="button" id="quick-transfer-submit">确认转账</button>
+              <button class="btn btn--ghost" type="button" id="quick-transfer-chat">用 AI 助理转账</button>
+              <span class="muted" id="quick-transfer-status" role="status" aria-live="polite"></span>
+            </div>
+            <div id="quick-transfer-card"></div>
           </div>
-          <div class="quick-amounts" role="group" aria-label="金额快捷值">
-            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="100">100</button>
-            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="500">500</button>
-            <button class="btn btn--sm btn--ghost" type="button" data-quick-amount="1000">1000</button>
-          </div>
-          <label class="field quick-remark">
-            <span class="field__label">备注（选填）</span>
-            <input class="input" id="quick-remark" type="text" maxlength="50" autocomplete="off" placeholder="如 房租，会写进转账备注" />
-          </label>
-          <div class="btn-row">
-            <button class="btn btn--primary" type="button" id="quick-transfer-submit">确认转账</button>
-            <span class="muted" id="quick-transfer-status" role="status" aria-live="polite"></span>
-          </div>
-          <div id="quick-transfer-card"></div>
         </section>
 
         <section class="panel" id="transfers-panel">
@@ -296,51 +376,72 @@ _PAGE_HTML = """<!DOCTYPE html>
         </section>
 
         <details class="scene-note">
-          <summary>转账规则说明</summary>
+          <summary>转账说明</summary>
           <ul class="muted">
-            <li>绿色 = 纯查询，服务端直接执行；黄色 = 状态变更，需您点确认。</li>
-            <li>红色 = 大额 / 不可逆，需服务端一次性验证码，本页只提示去对话完成。</li>
-            <li>额度条读 <span class="mono">/api/options.quota</span>；已用超过日限额时标红「已超额」。</li>
-            <li>本页与对话共用 <span class="mono">/api/submit</span> → <span class="mono">/api/confirm</span>，不新增后端接口。</li>
+            <li>到账时间以银行实际处理为准；演示环境为即时记账。</li>
+            <li>次日到账登记后不扣款，可在「记录与明细」中撤销。</li>
+            <li>手续费以银行实际收取为准；演示环境免收。</li>
+            <li>大额转账需要完成一次性验证码；演示验证码不是真实短信或人脸。</li>
           </ul>
         </details>
       </div>
 
       <div class="scene-block" data-scene-block="bills" hidden>
         <section class="panel" id="bills-panel">
+          <div class="demo-banner" id="bills-demo-banner" hidden>
+            当前为演示数据，接入真实账单后可用
+          </div>
           <div class="bills-period" id="bills-period" role="group" aria-label="账期">
             <button class="bills-period__item is-active" type="button" data-bills-period="current" aria-pressed="true">本月</button>
             <button class="bills-period__item" type="button" data-bills-period="previous" aria-pressed="false">上月</button>
             <label class="bills-period__pick">选月份
-              <input class="input" id="bills-period-month" type="month" />
+              <select class="input" id="bills-period-month">
+                <option value="">请选择年月</option>
+              </select>
             </label>
             <span class="bills-period__hint muted" id="bills-period-hint"></span>
           </div>
           <p class="panel__title">账单分析</p>
           <p class="muted" id="bills-status">正在读取账单识别结果…</p>
           <div id="bills-summary"></div>
-          <div class="budget-set">
-            <label class="budget-set__label" for="budget-input">本月预算</label>
-            <input class="input input--amount" id="budget-input" type="number" min="0" step="1"
-                   placeholder="如 8000" inputmode="decimal" />
-            <button class="btn btn--sm btn--primary" type="button" data-action="save-budget">保存</button>
-            <span class="muted budget-set__status" id="budget-status">只用于「月预算提醒」洞察，不是转账限额；转账的单笔 / 当日累计限额在计划卡里按服务端口径判定。</span>
-          </div>
-          <details class="bills-more" id="bills-more">
-            <summary>展开完整分析</summary>
-            <div id="bills-profile"></div>
-            <div id="bills-charts"></div>
-            <div id="bills-findings"></div>
-            <p class="muted bills-more__note" id="bills-disclaimer" hidden></p>
+          <div id="bills-budget"></div>
+          <div id="bills-charts"></div>
+          <div id="bills-merchants"></div>
+          <div id="bills-leads"></div>
+          <details class="bills-more" id="bills-subscriptions">
+            <summary>订阅 / 自动续费</summary>
+            <div id="bills-autorenew"></div>
           </details>
           <details class="bills-details" id="bills-details">
-            <summary>账单明细（本期交易）</summary>
+            <summary>账单明细（本期消费）</summary>
             <div id="bills-table"></div>
           </details>
+          <details class="bills-more" id="bills-transfers">
+            <summary>转账 / 还款（不计入消费）</summary>
+            <div id="bills-transfers-table"></div>
+          </details>
           <div class="btn-row">
-            <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="suspicions">看可疑清单</button>
+            <button class="btn btn--sm" type="button" data-bills-export>导出本期账单 CSV</button>
+            <button class="btn btn--sm btn--ghost" type="button" data-nav="records" data-record-tab="suspicions">看可疑清单</button>
           </div>
+          <p class="muted bills-more__note" id="bills-disclaimer" hidden>识别结果供核对，不作最终结论。</p>
         </section>
+        <dialog class="bills-dialog" id="bills-category-dialog">
+          <div class="bills-dialog__head">
+            <p class="panel__title">修正商户分类</p>
+            <button class="btn btn--sm btn--ghost" type="button" data-bills-dialog-close>关闭</button>
+          </div>
+          <p class="muted" id="bills-category-merchant"></p>
+          <label class="field">
+            <span class="field__label">归类到</span>
+            <select class="input" id="bills-category-select"></select>
+          </label>
+          <p class="muted" id="bills-category-hint"></p>
+          <div class="btn-row">
+            <button class="btn btn--sm btn--primary" type="button" data-bills-category-save>保存并记住</button>
+            <button class="btn btn--sm btn--ghost" type="button" data-bills-dialog-close>取消</button>
+          </div>
+        </dialog>
       </div>
 
       <div class="scene-block" data-scene-block="wealth" hidden>
@@ -405,38 +506,42 @@ _PAGE_HTML = """<!DOCTYPE html>
       <div class="scene-block" data-scene-block="subscriptions" hidden>
         <section class="panel" id="subscription-panel">
           <div class="scene-head">
-            <p class="panel__title">订阅管理</p>
-            <span class="muted" id="subscription-status">正在读取订阅识别结果…</span>
+            <p class="panel__title">代扣协议管理</p>
+            <span class="muted" id="subscription-status">正在读取代扣协议…</span>
           </div>
+          <p class="muted" id="subscription-boundary" hidden></p>
+          <p class="muted" id="subscription-focus-note" hidden></p>
           <div id="subscription-summary"></div>
+          <div id="subscription-filters"></div>
           <div id="subscription-timeline"></div>
-          <div id="subscription-list"><p class="muted">尚未读取订阅详情。</p></div>
+          <div id="subscription-list"><p class="muted">尚未读取代扣协议。</p></div>
           <div id="subscription-plan" hidden></div>
           <p class="muted" id="subscription-plan-status" hidden></p>
           <div id="subscription-cancel-result" hidden></div>
           <dialog class="sub-cancel-dialog" id="subscription-cancel-dialog">
             <div class="sub-cancel-dialog__head">
-              <p class="panel__title">取消这个订阅？</p>
+              <p class="panel__title">关闭这个扣款协议？</p>
               <button class="btn btn--sm btn--ghost" type="button" data-sub-cancel-close>返回</button>
             </div>
             <div class="sub-cancel-dialog__body" id="subscription-cancel-body"></div>
             <div class="sub-cancel-dialog__foot">
-              <button class="btn btn--ghost" type="button" data-sub-cancel-close>先不取消</button>
-              <button class="btn btn--danger" type="button" data-sub-cancel-confirm>确认取消</button>
+              <button class="btn btn--ghost" type="button" data-sub-cancel-close>先不关闭</button>
+              <button class="btn btn--danger" type="button" data-sub-cancel-confirm>关闭扣款协议</button>
             </div>
           </dialog>
-          <p class="muted" id="subscription-boundary" hidden></p>
           <details class="scene-note">
-            <summary>取消口径与数据边界</summary>
+            <summary>这些商户是怎么识别出来的</summary>
             <ul>
-              <li>取消只在本地把订阅状态改为「已取消订阅」，商户侧是否停止扣费以商户结果为准，本页不承诺已停扣。</li>
-              <li>「疑似」订阅来自流水推断，需本人核对后再决定是否取消，系统不会自动升级为已确认。</li>
-              <li>下次扣款日标注「预测值」的是按扣费周期推算，不是商户确认的扣款日。</li>
+              <li>已登记的代扣协议来自本行代扣登记；「疑似」来自流水周期推断，需本人核对。</li>
+              <li>协议编号、协议类型与演示历史扣款由内置演示数据派生，不是真实银联/网联协议号。</li>
+              <li>数据来源：内置演示数据；不是真实账单或真实银行协议。</li>
+              <li>标注「推算」的下次扣款日按历史周期计算，实际扣款日以商户为准。</li>
+              <li>本页只展示本行能看到的代扣协议与扣款；其他卡或其他渠道的扣款不在本页范围内。</li>
             </ul>
           </details>
           <div class="btn-row">
             <button class="btn btn--sm" type="button" data-nav="records" data-record-tab="charges">扣款记录</button>
-            <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新订阅数据</button>
+            <button class="btn btn--sm" type="button" data-action="refresh-subscriptions">刷新数据</button>
           </div>
         </section>
       </div>
@@ -447,7 +552,7 @@ _PAGE_HTML = """<!DOCTYPE html>
             <p class="panel__title">生活日历</p>
             <span class="muted" id="life-events-status">正在读取生活事件…</span>
           </div>
-          <p class="scene-hint">按本人生成过的记录落在日期上；不是商户日程，同一天多条只算一个事件点。</p>
+          <p class="scene-hint">按预约触发日 / 计划日期落点；不是商户日程，同一天同类只画一个点，点开看清单。</p>
           <div id="life-calendar"><p class="muted">尚未读取生活日历。</p></div>
           <div class="life-bar">
             <div class="life-bar__text">
@@ -593,7 +698,7 @@ _PAGE_HTML = """<!DOCTYPE html>
 
 <dialog class="sub-detail" id="sub-detail" aria-labelledby="sub-detail-title">
   <div class="sub-detail__head">
-    <p class="panel__title" id="sub-detail-title">订阅详情</p>
+    <p class="panel__title" id="sub-detail-title">协议详情 · 扣款记录</p>
     <button class="btn btn--sm btn--ghost" type="button" data-sub-detail-close>关闭</button>
   </div>
   <div class="sub-detail__body" id="sub-detail-body"></div>
@@ -607,7 +712,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=84"></script>
+<script src="/assets/app.js?v=90"></script>
 <script src="/assets/wealth_trade.js?v=1"></script>
 </body>
 </html>
@@ -696,10 +801,10 @@ LOGIN_HTML = """<!DOCTYPE html>
     <summary>先逛逛：功能预览（只读，不会办理）</summary>
     <div class="preview-grid">
       <span>智能转账</span><span>账单分析</span><span>卡片管理</span>
-      <span>理财</span><span>订阅管理</span><span>生活事件</span>
+      <span>理财</span><span>代扣协议</span><span>生活事件</span>
     </div>
     <ul>
-      <li>AI 先出计划卡，确认后才执行；高风险动作需强验证。</li>
+      <li>AI 先给出办理方案，确认后才执行；高风险动作需要额外验证。</li>
       <li>每一步都有审计 ID，可在「我的 → 审计与溯源」追溯。</li>
       <li>演示环境使用模拟资金，不连接真实银行账户。</li>
     </ul>

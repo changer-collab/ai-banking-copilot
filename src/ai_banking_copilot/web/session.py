@@ -231,8 +231,14 @@ FABRICATION_MARKERS: tuple[str, ...] = (
 
 _RETURN_PROMISE_REFUSAL = "不做投资建议、不承诺收益（H6）：拒绝以收益承诺为前提的请求"
 _FABRICATION_REFUSAL = "不生成事实（H1）：无法提供事实网关之外的数值或预测，安全拒绝"
-_MERCHANT_CANCEL_REFUSAL = "只能报告本地真实订阅状态；商户取消尚未接入，当前没有商户确认回执。"
-_REFUND_GUARANTEE_REFUSAL = "退款与保证商户未来不再扣款均未接入，无法执行或承诺。"
+_MERCHANT_CANCEL_REFUSAL = (
+    "本行能关闭的是银行卡侧的扣款授权；商户侧的订阅状态需要到商户 App 关闭，"
+    "本行拿不到商户的取消确认回执。"
+)
+_REFUND_GUARANTEE_REFUSAL = (
+    "本行可以关闭银行卡侧扣款授权，但退款与保证商户未来不再扣款均未接入，"
+    "无法执行或承诺。"
+)
 
 _NOT_GUARANTEED_REFUSAL = (
     "理财不是保本产品：不保证本金，也可能亏损。我不会承诺保本或收益。"
@@ -4954,7 +4960,7 @@ def _redeem_maturity_fact(
 
 
 def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
-    """**本次联动所选**的那笔持仓到期日已过时，补一句推算口径。"""
+    """**本次联动所选**的那笔持仓到期日已过时，补一句口径。"""
     fact = _redeem_maturity_fact(deps, plan)
     if fact is None:
         return None
@@ -4962,9 +4968,8 @@ def _expired_maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
     if maturity is None or maturity >= deps.today:
         return None
     return (
-        f"说明：{name}（{Money(amount_cents).yuan} 元）该产品已于 "
-        f"{maturity.isoformat()} 到期——这是按起息日 + 产品期限推算的，不是官方到期公告；"
-        "赎回与下单都还没执行，到账以银行回单为准。"
+        f"说明：{name}（{Money(amount_cents).yuan} 元）按产品条款已于 "
+        f"{maturity.isoformat()} 到期；赎回与下单都还没执行，到账以银行回单为准。"
     )
 
 
@@ -4978,8 +4983,8 @@ def _maturity_note(deps: AppDeps, plan: Plan | None) -> str | None:
         return None
     return (
         f"说明：本次赎回的是{name}（持有 {Money(amount_cents).yuan} 元），"
-        f"到期日 {maturity.isoformat()} 按起息日 + 产品期限推算（非官方公告）；"
-        "本演示按持仓金额提交赎回，未模拟份额、开放期与 T+n 到账，到账以银行回单为准。"
+        f"到期日 {maturity.isoformat()} 按产品条款确定（起息日 + 期限）；"
+        "本演示未模拟份额、开放期与 T+n 到账，到账以银行回单为准。"
     )
 
 
@@ -5023,8 +5028,8 @@ def _intent_label(action: str) -> str:
         "card.set_limit": "调整卡片限额",
         "bills.yearly": "年度账单",
         "bills.monthly": "月度账单",
-        "subscription.list": "订阅查询",
-        "subscription.cancel": "取消订阅",
+        "subscription.list": "代扣协议查询",
+        "subscription.cancel": "关闭扣款协议",
         "account.balance": "查询余额",
         "account.transactions": "查询交易",
     }.get(action, action)

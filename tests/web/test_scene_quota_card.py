@@ -51,6 +51,7 @@ def test_page_has_quota_card_and_progress_style(deps: AppDeps) -> None:
 
 def test_records_transfer_tab_has_a_detail_column(deps: AppDeps) -> None:
     app_js = TestClient(create_app(deps)).get("/assets/app.js?v=29").text
-    assert 'transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号", "详情"]' in app_js
+    assert ('transfers: ["记账日", "收款人", "金额", "方式", "状态", "用途", "记录号", "详情"]'
+            in app_js)
     assert 'class="records-detail"' in app_js
-    assert "定时登记（本次不扣款）" in app_js
+    assert "已发出申请·可撤销" in app_js

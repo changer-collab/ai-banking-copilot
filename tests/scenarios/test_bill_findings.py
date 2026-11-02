@@ -182,7 +182,7 @@ def test_single_charge_in_period_reports_insufficient_data(
 
     report = _analyze(gateway)
     assert report.findings == ()
-    assert any("仅有 1 笔支出" in note for note in report.notes)
+    assert any("仅有 1 笔消费" in note for note in report.notes)
     assert any("样本不足" in note for note in report.notes)
 
 
@@ -357,6 +357,7 @@ def test_narrative_accepts_evidence_bound_explanation(
     store, gateway = bill_store
     _txn(store, "fee-aug", "2026-08-09", 3000, "增值服务费")
     _txn(store, "only-fee", "2026-09-09", 3000, "增值服务费")
+    _txn(store, "repeat-fee", "2026-09-10", 3000, "增值服务费")
     _txn(store, "other", "2026-09-10", 4200, "云购物商城")
     report = _analyze(gateway)
     finding = report.findings[0]
@@ -382,6 +383,7 @@ def test_narrative_with_invented_finding_is_rejected(
     store, gateway = bill_store
     _txn(store, "fee-aug", "2026-08-09", 3000, "增值服务费")
     _txn(store, "only-fee", "2026-09-09", 3000, "增值服务费")
+    _txn(store, "repeat-fee", "2026-09-10", 3000, "增值服务费")
     report = _analyze(gateway)
     narrator = _Narrator({
         "summary": "发现异常扣费。",
@@ -415,6 +417,7 @@ def test_narrative_numbers_claims_and_unknown_txns_are_rejected(
     store, gateway = bill_store
     _txn(store, "fee-aug", "2026-08-09", 3000, "增值服务费")
     _txn(store, "only-fee", "2026-09-09", 3000, "增值服务费")
+    _txn(store, "repeat-fee", "2026-09-10", 3000, "增值服务费")
     report = _analyze(gateway)
     finding = report.findings[0]
     payload = {
@@ -437,6 +440,7 @@ def test_narrative_failure_and_absence_degrade_explicitly(
     store, gateway = bill_store
     _txn(store, "fee-aug", "2026-08-09", 3000, "增值服务费")
     _txn(store, "only-fee", "2026-09-09", 3000, "增值服务费")
+    _txn(store, "repeat-fee", "2026-09-10", 3000, "增值服务费")
     report = _analyze(gateway)
 
     absent = narrate_bill_findings(report, None)

@@ -34,6 +34,7 @@ const SLOT_LABELS = {
   account: "账户", card: "卡片", subscription: "订阅", hold: "冻结记录",
   payee: "收款人", payer: "付款人", amount: "金额", amount_cents: "金额",
   daily_limit: "日限额", when: "执行日期", next_charge_on: "下次扣费日期",
+  monthly_day: "每月转账日",
   period: "扣费周期", merchant: "商户名称", product: "理财产品",
   delivery_address: "配送地址", delivery_time: "送达时间",
 };
@@ -105,6 +106,11 @@ const state = {
   billsPeriod: null,
   billsPeriodChoice: "current",
   billsPeriodCounts: {},
+  billsMerchantSort: "amount",
+  billsTrendPeriod: "",
+  billsHighlightTxn: "",
+  pendingBillLead: null,
+  billCategoryTarget: null,
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
 };
@@ -180,9 +186,9 @@ const LIFE_EVENT_STATUS = {
 
 /* 生活事件 DAG 节点展示名：只做「动作 → 中文」的展示映射，动作名仍以原始文本挂 title */
 const LIFE_STEP_LABEL = {
-  "funds.freeze": "冻结预算",
-  "funds.release": "解冻剩余",
-  "merchant.order": "下单结算",
+  "funds.freeze": "锁定预算（资金预留）",
+  "funds.release": "释放剩余",
+  "merchant.order": "向商户下单",
   "transfer.schedule": "按期转出",
   "transfer.create": "转出",
   "transfer.request_collection": "发起分摊",
@@ -197,6 +203,18 @@ const LIFE_STEP_LABEL = {
   "wealth.redeem": "赎回",
   "bills.yearly": "年度账单",
   "bills.monthly": "月度账单",
+};
+
+/* 任务图上的场景标签：动作前缀 → 场景名。只做展示映射，不推断能力。 */
+const LIFE_DOMAIN_LABEL = {
+  funds: "资金",
+  merchant: "商户",
+  transfer: "转账",
+  wealth: "理财",
+  bills: "账单",
+  subscription: "订阅",
+  card: "卡片",
+  account: "账户",
 };
 
 function newRequestId() {
@@ -316,7 +334,10 @@ function renderProgressSteps(payload) {
   list.innerHTML = stages
     .map((stage) => {
       const phaseName = stage.done ? "done" : stage.active ? "active" : "pending";
-      const cost = Number.isFinite(stage.duration_ms) ? ` · ${stage.duration_ms}ms` : "";
+      /* 0ms 不代表「没理解」：模板通道本来就在 1ms 内完成。小于 1ms 如实写 <1ms。 */
+      const cost = Number.isFinite(stage.duration_ms)
+        ? ` · ${stage.duration_ms > 0 ? `${stage.duration_ms}ms` : "<1ms"}`
+        : "";
       return `<li class="run-chain__step run-chain__step--${phaseName}">${esc(stage.label)}${esc(cost)}</li>`;
     })
     .join("");
@@ -466,9 +487,10 @@ async function refreshOptions() {
     if (currentRecordTab === "charges") renderRecordsTab("charges");
     throw error;
   }
-  el("business-date").textContent = `演示业务日期：${state.options.today} · 使用模拟资金和演示商户订单`;
+  el("business-date").textContent = `演示数据日期：${state.options.today} · 使用模拟资金和演示商户订单`;
   renderSubscriptionDetails(state.options);
   renderQuota(state.options.quota);
+  renderTransferAccounts(state.options);
   if (currentRecordTab === "charges") renderRecordsTab("charges");
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const select = el(`select-${slot}`);
@@ -567,7 +589,7 @@ function wealthGradeHtml(assessment) {
         usedUp ? " disabled" : ""}>${esc(retakeText)}</button>
     </div>
     ${demoNote}${limitNote}${expiryNote}
-    <p class="muted wealth-grade__warn">依据《金融机构产品适当性管理办法》第二十九条；演示环境按模拟业务日计数。</p>
+    <p class="muted wealth-grade__warn">依据《金融机构产品适当性管理办法》第二十九条；演示环境按模拟数据日计数。</p>
   </div>`;
 }
 
@@ -1186,7 +1208,7 @@ function renderInsightCards() {
       return `<li class="insight-item">
         ${insightFactsHtml(item)}
         <div class="insight-item__meta-row">
-          <span class="muted insight-item__meta">业务日 ${esc(item.business_day || "—")}</span>
+          <span class="muted insight-item__meta">数据截至 ${esc(item.business_day || "—")}</span>
           ${action}
         </div>
       </li>`;
@@ -1204,6 +1226,8 @@ function renderInsightCards() {
 function syncBudgetInput() {
   const input = el("budget-input");
   if (!input) return;
+  /* 账单页的预算由 /api/bills/analysis 下发，避免被洞察页的旧值覆盖。 */
+  if (state.bills && state.bills.budget) return;
   const status = el("budget-status");
   const budget = state.insights.find((item) => item.rule_id === "monthly-budget");
   const value = budget && budget.value && typeof budget.value === "object" ? budget.value : {};
@@ -1233,16 +1257,30 @@ async function saveBudget() {
     return;
   }
   const cents = Math.round(amount * 100);
+  const categories = {};
+  document.querySelectorAll("[data-budget-category]").forEach((node) => {
+    const raw = String(node.value || "").trim();
+    if (!raw) return;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value >= 0) {
+      categories[node.dataset.budgetCategory] = Math.round(value * 100);
+    }
+  });
+  const month = state.bills && state.bills.period
+    ? state.bills.period
+    : new Date().toISOString().slice(0, 7);
   if (status) status.textContent = "正在保存…";
-  const result = await apiFetch("POST", "/api/insights/budget", { budget_cents: cents });
+  const result = await apiFetch("POST", "/api/insights/budget", {
+    budget_cents: cents,
+    month,
+    categories,
+  });
   if (!result.ok) {
     if (status) status.textContent = (result.data && result.data.detail) || "保存失败，请稍后重试。";
     return;
   }
-  renderInsights(result.data || {});
-  const after = el("budget-status");
-  if (after) after.textContent = `已保存：本月预算 ${yuanText(cents)} · 仅用于提醒，不是转账限额`;
-  timelineAdd(`本月预算已保存：${yuanText(cents)}（仅用于提醒，不影响额度）`, "done");
+  timelineAdd(`本月预算已保存：${yuanText(cents)}（含 ${Object.keys(categories).length} 个分类预算）`, "done");
+  await refreshBills();
 }
 
 /* 事实行：预算规则单独排成「预算 X / 支出 Y」，其余规则按金额、商户顺序排 */
@@ -1287,12 +1325,69 @@ function yuanText(cents) {
   return `¥${(Number(cents) / 100).toFixed(2)}`;
 }
 
+let lastTransfers = [];
+
+function transferStatusClass(status) {
+  const text = String(status || "");
+  if (text.includes("已到账")) return "chip chip--green";
+  if (text.includes("撤销")) return "chip chip--yellow";
+  if (text.includes("处理中") || text.includes("已发出")) return "chip chip--yellow";
+  return "chip";
+}
+
+function transferPayeeText(item) {
+  const tail = item.payee_account_tail ? ` · 尾号 ${item.payee_account_tail}` : "";
+  const bank = item.payee_bank ? ` · ${item.payee_bank}` : "";
+  return `${item.payee || "收款人未知"}${tail}${bank}`;
+}
+
+function repeatAttrs(item) {
+  return [
+    `data-transfer-repeat="1"`,
+    `data-repeat-payee-id="${esc(item.payee_id || "")}"`,
+    `data-repeat-payee="${esc(item.payee || "")}"`,
+    `data-repeat-account-tail="${esc(item.payee_account_tail || "")}"`,
+    `data-repeat-bank="${esc(item.payee_bank || "")}"`,
+    `data-repeat-amount="${esc(String(item.amount_cents || 0))}"`,
+    `data-repeat-method="${esc(item.method || "realtime")}"`,
+    `data-repeat-purpose="${esc(item.purpose || "")}"`,
+    `data-repeat-remark="${esc(item.remark || "")}"`,
+    `data-repeat-booked="${esc(item.booked_on || "")}"`,
+  ].join(" ");
+}
+
+function transferRecordDetail(item) {
+  const source = item.source === "seed" ? "演示历史" : "AI 办理";
+  const fee = yuanText(item.fee_cents || 0);
+  const purpose = item.purpose_label || "—";
+  const remark = item.remark || "—";
+  const channel = recordChannelLabel(item.channel);
+  return `<dl class="record-detail">
+    <div><dt>转账方式</dt><dd>${esc(item.method_label || "—")}</dd></div>
+    <div><dt>到账时间</dt><dd>${esc(item.eta_label || "—")}</dd></div>
+    <div><dt>手续费</dt><dd class="mono">${esc(fee)}</dd></div>
+    <div><dt>用途</dt><dd>${esc(purpose)}</dd></div>
+    <div><dt>附言</dt><dd>${esc(remark)}</dd></div>
+    <div><dt>付款账户</dt><dd>${esc(item.account || "—")}${item.account_tail ? ` · 尾号 ${esc(item.account_tail)}` : ""}</dd></div>
+    ${item.kind === "scheduled" ? `<div><dt>资金状态</dt><dd>${item.status === "已撤销" ? "已撤销，未扣款" : "登记中，未扣款"}</dd></div>` : ""}
+    <div><dt>渠道</dt><dd>${esc(channel)}</dd></div>
+    <div><dt>来源</dt><dd>${esc(source)}</dd></div>
+    <div><dt>记录号</dt><dd class="mono">${esc(item.record_id || "—")}</dd></div>
+  </dl>
+  <div class="btn-row">
+    ${item.can_repeat ? `<button class="btn btn--sm btn--ghost" type="button" ${repeatAttrs(item)}>再转一笔</button>` : ""}
+    ${item.can_repeat ? `<button class="btn btn--sm" type="button" ${repeatAttrs(item)} data-transfer-repeat-chat="1">用 AI 再转一笔</button>` : ""}
+    ${item.can_cancel ? `<button class="btn btn--sm btn--danger" type="button" data-transfer-cancel="${esc(item.record_id)}">撤销这笔申请</button>` : ""}
+  </div>`;
+}
+
 function renderTransfers(payload) {
   const status = el("transfers-status");
   const list = el("transfers-list");
   if (!status || !list) return;
   const items = (payload && payload.items) || [];
-  status.textContent = `最近 ${payload.window_days} 天 · 业务日 ${payload.as_of}${items.length > 5 ? ` · 共 ${items.length} 笔` : ""}`;
+  lastTransfers = items;
+  status.textContent = `最近 ${payload.window_days} 天 · 数据截至 ${payload.as_of}${items.length > 5 ? ` · 共 ${items.length} 笔` : ""}`;
   if (!items.length) {
     list.innerHTML = '<li class="muted">最近没有转账记录。</li>';
     return;
@@ -1303,18 +1398,20 @@ function renderTransfers(payload) {
     ? `<li class="muted">还有 ${items.length - recent.length} 笔，见「记录与明细」。</li>`
     : "";
   list.innerHTML = recent.map((item) => {
-    const kind = item.kind === "scheduled" ? "定时登记" : "即时转账";
-    const remark = item.remark ? esc(item.remark) : "—";
+    const tag = item.source === "seed"
+      ? '<span class="chip chip--muted">演示历史</span>'
+      : '<span class="chip">AI 办理</span>';
+    const scheduled = item.kind === "scheduled" ? '<span class="chip chip--yellow">定时</span>' : "";
     return `<li class="record">
       <details>
         <summary>
-          <b>${esc(item.payee)}</b>
-          <span class="chip">${esc(item.status)}</span>
+          <b>${esc(transferPayeeText(item))}</b>
+          <span class="${transferStatusClass(item.status)}">${esc(item.status)}</span>
+          ${scheduled}${tag}
           <span class="mono">${esc(yuanText(item.amount_cents))}</span>
           <span class="muted">${esc(item.booked_on)}</span>
         </summary>
-        <p class="muted">${esc(kind)} · ${esc(item.account)} · 记账日 ${esc(item.booked_on)}</p>
-        <p class="muted">备注：${remark} <span class="mono">· 记录号 ${esc(item.record_id)}</span></p>
+        ${transferRecordDetail(item)}
       </details>
     </li>`;
   }).join("") + more;
@@ -1325,6 +1422,7 @@ async function refreshTransfers() {
   if (!result.ok) throw new Error("转账记录读取失败");
   renderTransfers(result.data);
   updatePayeeRecent((result.data && result.data.items) || []);
+  updateTransferFormState();
 }
 
 /* ---------------- 场景页「业务面板」公共件 ----------------
@@ -1334,6 +1432,7 @@ async function refreshTransfers() {
 const SCENE_PALETTE = ["#0b4fd8", "#00a6a6", "#f0a71b", "#7a5bd8", "#3f8f4f", "#8b96a8"];
 
 let scenePending = null;
+let sceneVerification = null;
 let sceneLastUtterance = "";
 
 function sceneColor(index) {
@@ -1384,45 +1483,74 @@ function donutChartHtml(rows, options) {
   </div>`;
 }
 
-/* 折线图：手写 SVG；rows = [{label, value}] */
+/* 折线图：手写 SVG；rows = [{label, value, secondary?, period?}]
+   端点标签按首/末锚点对齐，避免长金额被 viewBox 裁切。 */
 function lineChartHtml(rows, options) {
   const spec = options || {};
   const list = rows || [];
   if (!list.length) return `<p class="muted">${esc(spec.empty || "暂无趋势数据")}</p>`;
-  const width = 420;
-  const height = 150;
-  const padL = 12;
-  const padR = 12;
-  const padT = 22;
-  const padB = 26;
+  const hasSecondary = list.some((row) => Number.isFinite(Number(row.secondary)) && Number(row.secondary) > 0);
+  const width = 440;
+  const height = hasSecondary ? 186 : 166;
+  const padL = 20;
+  const padR = 20;
+  const padT = 26;
+  const padB = 30;
   const values = list.map((row) => Number(row.value) || 0);
-  const max = Math.max(...values, 1);
-  const min = Math.min(...values, 0);
+  const secondaryValues = list.map((row) => Number(row.secondary) || 0);
+  const max = Math.max(...values, ...secondaryValues, 1);
+  const min = Math.min(...values, ...secondaryValues, 0);
   const span = max - min || 1;
   const innerW = width - padL - padR;
   const innerH = height - padT - padB;
   const stepX = list.length > 1 ? innerW / (list.length - 1) : 0;
+  const yOf = (value) => padT + innerH * (1 - ((Number(value) || 0) - min) / span);
   const points = list.map((row, index) => ({
     x: padL + stepX * index,
-    y: padT + innerH * (1 - ((Number(row.value) || 0) - min) / span),
+    y: yOf(row.value),
+    secondaryY: yOf(row.secondary),
     label: row.label || "",
+    period: row.period || "",
+    index,
   }));
   const polyline = points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const secondaryLine = hasSecondary
+    ? points.map((point) => `${point.x.toFixed(1)},${point.secondaryY.toFixed(1)}`).join(" ")
+    : "";
   const dots = points.map((point) =>
     `<circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3" fill="#0b4fd8" />`).join("");
+  const secondaryDots = hasSecondary
+    ? points.map((point) =>
+      `<circle cx="${point.x.toFixed(1)}" cy="${point.secondaryY.toFixed(1)}" r="2.5" fill="#00a6a6" />`).join("")
+    : "";
   const labels = points.map((point) =>
     `<text x="${point.x.toFixed(1)}" y="${height - 8}" text-anchor="middle" class="chart-axis">${esc(point.label)}</text>`).join("");
-  /* 点数不多时标出每个点的数值：折线缩放后仍能看清月度差异 */
+  /* 首点左对齐、末点右对齐：长金额（如 ¥18,719.80）不会越过 viewBox 右边界。 */
   const valueLabels = spec.formatValue && list.length <= 8
-    ? points.map((point, index) =>
-      `<text x="${point.x.toFixed(1)}" y="${Math.max(point.y - 8, 11).toFixed(1)}" text-anchor="middle" class="chart-value">${esc(spec.formatValue(values[index]))}</text>`).join("")
+    ? points.map((point, index) => {
+      const anchor = index === 0 ? "start" : index === list.length - 1 ? "end" : "middle";
+      const x = index === 0 ? point.x + 2 : index === list.length - 1 ? point.x - 2 : point.x;
+      return `<text x="${x.toFixed(1)}" y="${Math.max(point.y - 8, 12).toFixed(1)}" text-anchor="${anchor}" class="chart-value">${esc(spec.formatValue(values[index]))}</text>`;
+    }).join("")
+    : "";
+  const hitPoints = points.map((point) => spec.clickable
+    ? `<g class="chart-point" data-chart-period="${esc(point.period)}" tabindex="0" role="button"
+         aria-label="${esc(point.label)}${spec.formatValue ? " " + esc(spec.formatValue(values[point.index])) : ""}">
+         <circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="12" fill="transparent" />
+         <circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3" fill="#0b4fd8" />
+       </g>`
+    : dots).join("");
+  const legend = hasSecondary
+    ? `<p class="chart-line__legend muted"><span><i class="chart-dot" style="background:#0b4fd8"></i>${esc(spec.primaryLabel || "消费")}</span><span><i class="chart-dot" style="background:#00a6a6"></i>${esc(spec.secondaryLabel || "收入")}</span></p>`
     : "";
   return `<div class="chart-line">
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(spec.label || "趋势图")}">
       <line x1="${padL}" y1="${padT + innerH}" x2="${width - padR}" y2="${padT + innerH}" stroke="#e8edf6" stroke-width="1" />
+      ${hasSecondary ? `<polyline points="${secondaryLine}" fill="none" stroke="#00a6a6" stroke-width="1.6" stroke-dasharray="4 3" stroke-linejoin="round" stroke-linecap="round" />${secondaryDots}` : ""}
       <polyline points="${polyline}" fill="none" stroke="#0b4fd8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-      ${dots}${valueLabels}${labels}
+      ${hitPoints}${valueLabels}${labels}
     </svg>
+    ${legend}
     ${spec.note ? `<p class="muted chart-line__note">${esc(spec.note)}</p>` : ""}
   </div>`;
 }
@@ -1473,6 +1601,13 @@ function isWealthCard(card) {
   ));
 }
 
+/* 卡片域写操作：对话里仍可生成计划，但确认与强验证统一收口到卡片弹窗（AI 不代执行）。 */
+function isCardWriteCard(card) {
+  return Boolean(card && (card.nodes || []).some(
+    (node) => String(node.action || "").startsWith("card.")
+      && String(node.action || "") !== "card.list"
+  ));
+}
 
 function sceneCardHtml(card) {
   const rows = (card.summary || []).map((row) =>
@@ -1481,20 +1616,47 @@ function sceneCardHtml(card) {
   const lines = (card.lines || []).map((line) =>
     `<li>${esc(stripNo(line))}</li>`).join("");
   const wealth = isWealthCard(card);
+  const transfer = (card.nodes || []).some(
+    (node) => String(node.action || "").startsWith("transfer.")
+  );
+  const subscriptionCancel = (card.nodes || []).some(
+    (node) => String(node.action || "") === "subscription.cancel"
+  );
+  const inPageVerify = transfer || subscriptionCancel;
   const need = wealth
     ? "交易确认弹窗会收集四件套、份额/金额与验证码；确认后才由服务端执行。"
-    : ({
-      GREEN: "纯查询，服务端已自动执行。",
-      YELLOW: "确认后由服务端执行；这一步不会替您跳过确认。",
-      RED: "红色动作需服务端一次性验证码，本页不代做，请到对话完成强验证。",
-    }[card.level] || "按服务端裁决处理。");
+    : transfer
+      ? (card.level === "RED"
+        ? "大额转账需要一次性验证码；演示验证码不是真实短信、人脸或交易密码。"
+        : "请核对收款人、账号、金额与到账时间；确认后进入验证并执行。")
+      : subscriptionCancel
+        ? "关闭扣款协议需要一次性验证码；演示验证码不是真实短信、人脸或交易密码。"
+        : ({
+          GREEN: "纯查询，服务端已自动执行。",
+          YELLOW: "确认后由服务端执行；这一步不会替您跳过确认。",
+          RED: "这笔操作需要一次性验证码，请在本页完成验证。",
+        }[card.level] || "按服务端裁决处理。");
+  const verifyPanel = sceneVerification
+    ? `<div class="scene-verify">
+        <p class="muted">一次性验证码 ${sceneVerification.mode === "demo"
+          ? `（演示码：<b class="mono">${esc(sceneVerification.code || "—")}</b>）`
+          : `已发到 ${esc(sceneVerification.target || "第二信道")}`}</p>
+        <input class="input" id="scene-vcode" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码" />
+        <button class="btn btn--sm btn--primary" type="button" data-scene-confirm-code data-requires-login>${transfer ? "提交验证码并转账" : "提交验证码并关闭协议"}</button>
+      </div>`
+    : "";
   const actions = wealth
     ? '<button class="btn btn--sm btn--primary" type="button" data-scene-wealth-trade data-requires-login>打开交易确认</button>' +
       '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
     : card.level === "RED"
-      ? '<button class="btn btn--sm" type="button" data-scene-chat>去对话做强验证</button>'
+      ? (inPageVerify
+        ? verifyPanel + (sceneVerification
+          ? '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
+          : '<button class="btn btn--sm btn--primary" type="button" data-scene-verify data-requires-login>获取验证码</button>' +
+            '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>')
+        : '<button class="btn btn--sm" type="button" data-scene-chat>去对话完成验证</button>')
       : card.level === "YELLOW"
-        ? '<button class="btn btn--sm btn--primary" type="button" data-scene-confirm data-requires-login>确认执行</button>' +
+        ? `<button class="btn btn--sm btn--primary" type="button" data-scene-confirm data-requires-login>${transfer ? "确认转账" : "确认执行"}</button>` +
           '<button class="btn btn--sm btn--ghost" type="button" data-scene-dismiss>取消</button>'
         : "";
   return `<article class="scene-plan" data-level="${esc(card.level)}">
@@ -1508,6 +1670,9 @@ function sceneCardHtml(card) {
 }
 
 function renderSceneCard(card, options) {
+  if (!scenePending || !scenePending.card || scenePending.card.card_id !== card.card_id) {
+    sceneVerification = null;
+  }
   scenePending = { card, options };
   const host = el(options.host);
   if (host) host.innerHTML = sceneCardHtml(card);
@@ -1521,6 +1686,7 @@ function clearSceneCard() {
     if (status) status.textContent = "";
   }
   scenePending = null;
+  sceneVerification = null;
 }
 
 async function sceneRefresh(options) {
@@ -1533,7 +1699,21 @@ async function sceneRefresh(options) {
   }
 }
 
-async function confirmSceneCard() {
+async function requestSceneVerification() {
+  if (!scenePending) return;
+  const status = scenePending.options.status ? el(scenePending.options.status) : null;
+  if (status) status.textContent = "正在获取一次性验证码…";
+  const result = await post("/api/verify/request", {});
+  if (result.status !== 200) {
+    if (status) status.textContent = String((result.data && result.data.detail) || "验证码申请失败。");
+    return;
+  }
+  sceneVerification = result.data || {};
+  renderSceneCard(scenePending.card, scenePending.options);
+  if (status) status.textContent = "验证码已下发，请输入后确认。";
+}
+
+async function confirmSceneCard(codeOverride) {
   if (!scenePending || scenePending.busy) return null;
   const { card, options } = scenePending;
   scenePending.busy = true;
@@ -1542,9 +1722,21 @@ async function confirmSceneCard() {
     if (status) status.textContent = text;
   };
   setStatus("正在请求执行，请等待服务端回执…");
+  let code = codeOverride || "";
+  if (!code && sceneVerification) {
+    const codeInput = el("scene-vcode");
+    code = codeInput ? codeInput.value.trim() : "";
+    if (!code) {
+      scenePending.busy = false;
+      setStatus("请输入一次性验证码。");
+      return null;
+    }
+  }
   let result;
   try {
-    result = await post("/api/confirm", { card_id: card.card_id, frozen_hash: card.frozen_hash });
+    const payload = { card_id: card.card_id, frozen_hash: card.frozen_hash };
+    if (code) payload.verification_code = code;
+    result = await post("/api/confirm", payload);
   } catch (error) {
     scenePending.busy = false;
     setStatus(fetchErrorMessage(error, "确认失败，请稍后重试。"));
@@ -1565,6 +1757,7 @@ async function confirmSceneCard() {
       <p class="muted">回执已记录，可在「记录与明细」核对。</p></div>`;
   }
   scenePending = null;
+  sceneVerification = null;
   setStatus("");
   if (typeof options.onSuccess === "function") options.onSuccess(data);
   renderSubscriptionCancel(data.subscription_cancel);
@@ -1630,34 +1823,47 @@ async function sceneRunTask(options) {
 function renderQuota(quota) {
   const status = el("quota-status");
   const body = el("quota-body");
+  const notes = el("quota-notes");
   if (!status || !body) return;
   if (!quota) {
-    status.textContent = "服务端未下发额度数据，请联系组长核对 /api/options。";
+    status.textContent = "额度暂时不可用，请稍后刷新。";
     body.innerHTML = "";
     return;
   }
   const limit = Number(quota.daily_limit_cents);
   const used = Number(quota.daily_accumulated_cents);
-  if (!Number.isFinite(limit) || !Number.isFinite(used)) {
-    status.textContent = "额度字段缺失，按不可用处理（不猜数字）。";
+  const single = Number(quota.single_limit_cents);
+  const monthLimit = Number(quota.monthly_limit_cents);
+  const monthUsed = Number(quota.monthly_accumulated_cents);
+  if (![limit, used, single, monthLimit, monthUsed].every(Number.isFinite)) {
+    status.textContent = "额度暂时不可用，请稍后刷新。";
     body.innerHTML = "";
     return;
   }
   const over = used > limit;
-  const remaining = limit - used;
+  const remaining = Math.max(0, limit - used);
   const pct = limit > 0 ? Math.min(Math.round((used / limit) * 100), 100) : 0;
-  status.textContent = `业务日 ${quota.as_of || "—"} · 数字均读服务端`;
-  body.innerHTML = `<div class="stat-metrics">
-      <div class="stat-metric"><span class="stat-metric__k">本人当日限额</span>
-        <b class="stat-metric__v">${yuanText(limit)}</b></div>
-      <div class="stat-metric"><span class="stat-metric__k">今日已用</span>
-        <b class="stat-metric__v">${yuanText(used)}</b></div>
+  status.textContent = `数据截至 ${quota.as_of || "—"}`;
+  body.innerHTML = `<div class="stat-metrics stat-metrics--quota">
+      <div class="stat-metric"><span class="stat-metric__k">单笔限额</span>
+        <b class="stat-metric__v">${yuanText(single)}</b></div>
+      <div class="stat-metric"><span class="stat-metric__k">今日已用 / 日限额</span>
+        <b class="stat-metric__v">${yuanText(used)} / ${yuanText(limit)}</b></div>
       <div class="stat-metric${over ? " stat-metric--over" : ""}">
-        <span class="stat-metric__k">${over ? "已超额" : "剩余可用"}</span>
-        <b class="stat-metric__v">${yuanText(Math.abs(remaining))}</b></div>
+        <span class="stat-metric__k">${over ? "今日已超额" : "今日剩余可用"}</span>
+        <b class="stat-metric__v">${yuanText(remaining)}</b></div>
+      <div class="stat-metric"><span class="stat-metric__k">本月累计（演示）</span>
+        <b class="stat-metric__v">${yuanText(monthUsed)} / ${yuanText(monthLimit)}</b></div>
     </div>
     <span class="bill__bar-track quota__bar${over ? " quota__bar--over" : ""}" role="img" aria-label="今日转账额度已用 ${pct}%"><i style="width:${pct}%"></i></span>
-    <p class="muted">已用 ${pct}%。${over ? "超出日限额的部分按红色（需强验证）处理；" : ""}这里不在前端计算任何数字。</p>`;
+    <p class="muted">今日已用 ${pct}%。单笔、日累计和账户余额会一起校验。</p>`;
+  if (notes) {
+    const rows = quota.limit_notes || [
+      "单笔限额来自卡片转账通道；日累计限额由演示风控规则固定。",
+      "月累计为演示口径，不构成监管或银行承诺。",
+    ];
+    notes.innerHTML = rows.map((text) => `<li>${esc(text)}</li>`).join("");
+  }
 }
 
 /* ---- 收款人候选（只读）：名册 /api/payees + 最近转账去重合并 ----
@@ -1668,13 +1874,15 @@ let payeeRosterPromise = null;
 let payeeRecentNames = [];
 let payeeMatches = [];
 let payeeActiveIndex = -1;
+let pickedPayee = null;
+let lastTransferAccountId = "";
 
 /* 转账记录里的姓名是脱敏的（`李*` / `王*伟`）：只用来给名册命中排序，绝不当作可选姓名；
    未脱敏且不在名册里的姓名才作为「最近转账」候选补进来。 */
 function payeeMaskMatches(name, masked) {
   const text = String(name || "");
   const mask = String(masked || "");
-  if (!mask || mask === "收款人已隐藏" || mask.length !== text.length) return false;
+  if (!mask || mask === "收款人已隐藏" || mask === "收款人未知" || mask.length !== text.length) return false;
   return mask.split("").every((ch, index) => ch === "*" || ch === text[index]);
 }
 
@@ -1686,7 +1894,10 @@ function payeeOptionList() {
   payeeRecentNames.forEach((name) => {
     if (name.includes("*") || rosterNames.has(name)) return;
     if (roster.some((item) => payeeMaskMatches(item.name, name))) return;
-    options.push({ name, accountTail: "", phoneTail4: "", blocked: false, inRoster: false, recent: true });
+    options.push({
+      payeeId: "", name, accountTail: "", phoneTail4: "", bankName: "",
+      identityConfirmed: false, maskedAccount: "", blocked: false, inRoster: false, recent: true,
+    });
   });
   /* 最近转过的排前面；其余保持名册顺序（sort 稳定） */
   return options.sort((a, b) => Number(b.recent) - Number(a.recent));
@@ -1705,6 +1916,7 @@ function filterPayees(query) {
 function payeeCandidateHtml(item, index) {
   const meta = [];
   if (item.accountTail) meta.push(`账号尾号 ${item.accountTail}`);
+  if (item.bankName) meta.push(item.bankName);
   if (item.phoneTail4) meta.push(`手机 ${item.phoneTail4}`);
   const tag = item.blocked
     ? '<span class="payee-candidates__tag">已停用</span>'
@@ -1712,10 +1924,55 @@ function payeeCandidateHtml(item, index) {
   return `<li class="payee-candidates__item${index === payeeActiveIndex ? " is-active" : ""}` +
     `${item.blocked ? " is-blocked" : ""}" role="option" id="payee-option-${index}"` +
     ` aria-selected="${index === payeeActiveIndex}" aria-disabled="${item.blocked ? "true" : "false"}"` +
-    ` data-payee-name="${esc(item.name)}" data-payee-blocked="${item.blocked ? "1" : "0"}">` +
+    ` data-payee-name="${esc(item.name)}" data-payee-id="${esc(item.payeeId || "")}"` +
+    ` data-payee-blocked="${item.blocked ? "1" : "0"}">` +
     `<span class="payee-candidates__name">${esc(item.name)}</span>` +
     (meta.length ? `<span class="payee-candidates__meta">${esc(meta.join(" · "))}</span>` : "") +
     tag + "</li>";
+}
+
+function findPayeeByName(name) {
+  const text = String(name || "").trim();
+  return (payeeRoster || []).find((item) => item.name === text) || null;
+}
+
+function findPayeeById(payeeId) {
+  const id = String(payeeId || "");
+  if (!id) return null;
+  return (payeeRoster || []).find((item) => String(item.payeeId) === id) || null;
+}
+
+function applyPickedPayee(item) {
+  pickedPayee = item || null;
+  const accountInput = el("quick-payee-account");
+  const bankSelect = el("quick-payee-bank");
+  const hint = el("payee-picked-hint");
+  if (!item) {
+    if (hint) hint.textContent = "新收款人：请填写收款账号与开户行。";
+    return;
+  }
+  if (accountInput) accountInput.value = item.maskedAccount || item.accountTail || "";
+  if (bankSelect && item.bankName) {
+    const matched = Array.from(bankSelect.options).some((option) => option.value === item.bankName
+      || option.textContent === item.bankName);
+    if (matched) bankSelect.value = item.bankName;
+  }
+  if (hint) {
+    const bank = item.bankName ? ` · ${item.bankName}` : "";
+    const verified = item.identityConfirmed ? "已核对" : "未完成账户核验";
+    const last = lastTransfers.find((row) =>
+      String(row.payee_id || "") === String(item.payeeId || ""));
+    const lastText = last
+      ? ` · 上次 ${last.booked_on} 转 ${yuanText(last.amount_cents)}`
+      : "";
+    hint.textContent = `已选择常用收款人 · 尾号 ${item.accountTail || "—"}${bank} · ${verified}${lastText}`;
+  }
+}
+
+function clearPickedPayee() {
+  pickedPayee = null;
+  const hint = el("payee-picked-hint");
+  if (hint) hint.textContent = "新收款人：请填写收款账号与开户行。";
 }
 
 function closePayeeCandidates() {
@@ -1748,10 +2005,13 @@ function renderPayeeCandidates() {
   input.setAttribute("aria-expanded", String(rows.length > 0));
 }
 
-function choosePayee(name) {
+function choosePayee(item) {
+  const picked = typeof item === "object" && item !== null ? item : findPayeeByName(item);
   const input = el("quick-payee");
-  if (input) input.value = String(name || "");
+  if (input) input.value = picked ? String(picked.name || "") : String(item || "");
+  applyPickedPayee(picked);
   closePayeeCandidates();
+  updateTransferFormState();
 }
 
 function movePayeeActive(step) {
@@ -1777,9 +2037,13 @@ async function loadPayeeRoster() {
     payeeRosterPromise = apiFetch("GET", "/api/payees").then((result) => {
       if (!result.ok) throw new Error("收款人名册读取失败");
       payeeRoster = ((result.data && result.data.payees) || []).map((item) => ({
+        payeeId: String(item.payee_id || ""),
         name: String(item.name || ""),
         accountTail: String(item.account_tail || ""),
+        maskedAccount: String(item.masked_account || ""),
+        bankName: String(item.bank_name || ""),
         phoneTail4: String(item.phone_tail4 || ""),
+        identityConfirmed: item.identity_confirmed === true,
         blocked: item.blocked === true,
       }));
       /* 名册晚于输入到达时补渲染：正在输入的用户不该只看到「最近转账」那一份 */
@@ -1810,29 +2074,315 @@ async function openPayeeCandidates() {
   renderPayeeCandidates();
 }
 
-/* 场景①快速转账：把页内表单拼成中文指令，交给与对话相同的 /api/submit */
-async function submitQuickTransfer() {
+/* 场景①转账：付款账户 + 收款人三要素 + 到账方式 + 金额/用途，统一交给 /api/submit。 */
+const TRANSFER_METHOD_LABELS = {
+  realtime: "实时到账",
+  normal: "普通到账",
+  next_day: "次日到账",
+  large: "大额通道",
+};
+
+const TRANSFER_METHOD_NOTES = {
+  realtime: "实时到账：7×24 小时，预计秒到；演示环境即时记账。",
+  normal: "普通到账：预计 2 小时内到账；演示环境即时记账。",
+  next_day: "次日到账：次日 00:00 后发出，登记时不扣款，可在记录中撤销。",
+  large: "大额通道：单笔 5 万以上，仅工作日处理；演示环境按大额强验证处理。",
+};
+
+const SUSPICIOUS_WORDS = /安全账户|刷单|返利|验证码|屏幕共享|洗钱|投资导师|保证金/;
+
+let transferFraudGate = null;
+let transferFraudTimer = null;
+let pendingSceneSelected = {};
+
+function transferAccountList() {
+  return (state.options && state.options.accounts) || [];
+}
+
+function selectedTransferAccount() {
+  const select = el("transfer-account");
+  const id = select ? select.value : "";
+  return transferAccountList().find((item) => String(item.id) === String(id)) || null;
+}
+
+function selectedTransferMethod() {
+  const checked = document.querySelector('input[name="transfer-method"]:checked');
+  return checked ? checked.value : "realtime";
+}
+
+function transferSnapshot() {
+  const account = selectedTransferAccount();
   const payeeInput = el("quick-payee");
+  const accountInput = el("quick-payee-account");
+  const bankSelect = el("quick-payee-bank");
+  const phoneInput = el("quick-payee-phone");
   const amountInput = el("quick-amount");
+  const purposeSelect = el("quick-purpose");
   const remarkInput = el("quick-remark");
+  const payee = payeeInput ? payeeInput.value.trim() : "";
+  const accountDigits = accountInput ? accountInput.value.replace(/\D/g, "") : "";
+  const amountYuan = amountInput ? Number(amountInput.value) : NaN;
+  const amountCents = Number.isFinite(amountYuan) ? Math.round(amountYuan * 100) : 0;
+  return {
+    account,
+    accountId: account ? String(account.id) : "",
+    balanceCents: account ? Number(account.balance_cents) || 0 : 0,
+    payee,
+    payeeId: pickedPayee ? pickedPayee.payeeId : "",
+    picked: pickedPayee,
+    accountDigits,
+    accountTail: accountDigits ? accountDigits.slice(-4) : "",
+    bank: bankSelect ? bankSelect.value : "",
+    phone: phoneInput ? phoneInput.value.replace(/\D/g, "") : "",
+    amountYuan: Number.isFinite(amountYuan) ? amountYuan : 0,
+    amountCents,
+    method: selectedTransferMethod(),
+    purpose: purposeSelect ? purposeSelect.value : "",
+    remark: remarkInput ? remarkInput.value.trim().slice(0, 50) : "",
+  };
+}
+
+function transferHasHistory(snapshot) {
+  if (!snapshot.payeeId) return false;
+  return lastTransfers.some((item) => String(item.payee_id || "") === snapshot.payeeId);
+}
+
+function blockedPayeeByName(name) {
+  const text = String(name || "").trim();
+  if (!text) return null;
+  return (payeeRoster || []).find((item) => item.blocked && item.name === text) || null;
+}
+
+function transferWarnings(snapshot) {
+  const warnings = [];
+  if (snapshot.picked && snapshot.picked.blocked) return warnings;
+  const newPayee = !snapshot.picked || !snapshot.picked.identityConfirmed
+    || !transferHasHistory(snapshot);
+  if (newPayee) warnings.push("首次向该收款人转账，请先通过电话或当面核实姓名与账号，谨防冒充熟人。");
+  if (snapshot.amountCents >= 100000) {
+    warnings.push("本笔金额较大，请确认收款人身份，并预留冷静时间。");
+  }
+  if (SUSPICIOUS_WORDS.test(snapshot.remark)) {
+    warnings.push("附言中出现“安全账户 / 刷单 / 返利 / 验证码”等高风险话术，可能是诈骗，请立即停止并核实。");
+  }
+  return warnings;
+}
+
+function resetTransferFraudGate(key) {
+  transferFraudGate = { key, readyAt: Date.now() + 3000, acknowledged: false };
+  if (transferFraudTimer) window.clearTimeout(transferFraudTimer);
+  transferFraudTimer = window.setTimeout(() => updateTransferFormState(), 3000);
+}
+
+function renderTransferWarnings(snapshot, warnings) {
+  const box = el("transfer-fraud");
+  if (!box) return { needsAck: false, ready: true };
+  if (!warnings.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    transferFraudGate = null;
+    return { needsAck: false, ready: true };
+  }
+  const key = `${snapshot.payee}|${snapshot.accountTail}|${snapshot.bank}|${snapshot.method}`;
+  if (!transferFraudGate || transferFraudGate.key !== key) resetTransferFraudGate(key);
+  const wait = Math.max(0, Math.ceil((transferFraudGate.readyAt - Date.now()) / 1000));
+  const ready = wait <= 0;
+  box.hidden = false;
+  box.innerHTML = `<p class="fraud-alert__title">转账前请确认</p>
+    <ul>${warnings.map((text) => `<li>${esc(text)}</li>`).join("")}</ul>
+    <label class="fraud-alert__ack">
+      <input type="checkbox" id="transfer-fraud-ack" ${transferFraudGate.acknowledged ? "checked" : ""} ${ready ? "" : "disabled"} />
+      <span>${ready ? "我已知晓风险，收款人信息已核实" : `请阅读防诈提示（${wait} 秒后可勾选）`}</span>
+    </label>`;
+  return { needsAck: true, ready };
+}
+
+function validateTransferSnapshot(snapshot) {
+  if (!snapshot.accountId) return "请选择付款账户。";
+  if (!snapshot.payee) return "请填写收款人姓名。";
+  if (snapshot.picked && snapshot.picked.blocked) return "该收款人已停用，无法转账。";
+  if (!snapshot.picked && blockedPayeeByName(snapshot.payee)) return "该收款人已停用，无法转账。";
+  if (!snapshot.picked && snapshot.accountDigits.length < 4) return "请填写收款账号（至少后四位）。";
+  if (!snapshot.picked && !snapshot.bank) return "请选择收款人开户行。";
+  if (!snapshot.amountCents || snapshot.amountCents <= 0) return "请填写大于 0 的转账金额。";
+  const quota = (state.options && state.options.quota) || {};
+  const single = Number(quota.single_limit_cents);
+  if (snapshot.method !== "large" && Number.isFinite(single) && snapshot.amountCents > single) {
+    return `超过单笔限额 ${yuanText(single)}；大额请选择「大额通道」。`;
+  }
+  if (snapshot.amountCents > snapshot.balanceCents) {
+    return `付款账户可用余额不足（可用 ${yuanText(snapshot.balanceCents)}）。`;
+  }
+  return "";
+}
+
+/* 日累计 / 月累计超限不硬拦：服务端会把该笔升为红色强验证。
+   这里如实提示原因，避免用户以为“页面没反应”。 */
+function transferLimitNotices(snapshot) {
+  const notices = [];
+  const quota = (state.options && state.options.quota) || {};
+  const dailyLimit = Number(quota.daily_limit_cents);
+  const dailyUsed = Number(quota.daily_accumulated_cents);
+  const monthLimit = Number(quota.monthly_limit_cents);
+  const monthUsed = Number(quota.monthly_accumulated_cents);
+  if (Number.isFinite(dailyLimit) && Number.isFinite(dailyUsed)) {
+    const remaining = Math.max(0, dailyLimit - dailyUsed);
+    if (snapshot.amountCents > remaining) {
+      notices.push(`超过今日剩余额度 ${yuanText(remaining)}，本笔将进入强验证。`);
+    }
+  }
+  if (Number.isFinite(monthLimit) && Number.isFinite(monthUsed)) {
+    const remaining = Math.max(0, monthLimit - monthUsed);
+    if (snapshot.amountCents > remaining) {
+      notices.push(`超过本月剩余额度 ${yuanText(remaining)}（演示口径）。`);
+    }
+  }
+  if (snapshot.method === "large" && snapshot.amountCents > 0 && snapshot.amountCents < 5000000) {
+    notices.push("大额通道通常用于 5 万元以上；本笔仍按所选方式提交。");
+  }
+  return notices;
+}
+
+function updateTransferFormState() {
+  const submit = el("quick-transfer-submit");
+  const accountHint = el("transfer-account-balance");
+  const methodNote = el("transfer-method-note");
+  const amountHint = el("quick-amount-hint");
+  const feeHint = el("transfer-fee");
+  if (!submit || !el("quick-transfer-panel")) return;
+  const snapshot = transferSnapshot();
+  if (accountHint) {
+    accountHint.textContent = snapshot.account
+      ? `可用余额 ${yuanText(snapshot.balanceCents)}`
+      : "请选择付款账户";
+  }
+  if (methodNote) methodNote.textContent = TRANSFER_METHOD_NOTES[snapshot.method] || "";
+  if (feeHint) {
+    const cross = !snapshot.bank
+      ? "到账行待选择"
+      : (snapshot.bank !== "招商银行" ? "跨行" : "本行");
+    feeHint.textContent = `手续费 ¥0.00（演示免收）· ${cross} · 真实费用以银行实际为准`;
+  }
+  const warnings = transferWarnings(snapshot);
+  const gate = renderTransferWarnings(snapshot, warnings);
+  const error = validateTransferSnapshot(snapshot);
+  const notices = transferLimitNotices(snapshot);
+  const gateOk = !gate.needsAck || (gate.ready && transferFraudGate
+    && transferFraudGate.acknowledged);
+  if (amountHint) {
+    amountHint.textContent = error || (notices.length ? notices[0] : (snapshot.amountCents > 0
+      ? `将转出 ${yuanText(snapshot.amountCents)} · ${TRANSFER_METHOD_LABELS[snapshot.method]}`
+      : ""));
+    amountHint.classList.toggle("field__hint--error", Boolean(error));
+    amountHint.classList.toggle("field__hint--warn", !error && notices.length > 0);
+  }
+  submit.disabled = Boolean(error) || !gateOk;
+  submit.title = error || (gateOk ? "" : "请先阅读并确认防诈提示");
+  return { snapshot, warnings, gate, error };
+}
+
+function renderTransferAccounts(options) {
+  const select = el("transfer-account");
+  if (!select) return;
+  const accounts = (options && options.accounts) || [];
+  let stored = "";
+  try {
+    stored = window.localStorage.getItem("aib.transferAccount") || "";
+  } catch (_) {
+    stored = "";
+  }
+  const remembered = lastTransferAccountId || stored;
+  const current = select.value || remembered;
+  select.innerHTML = '<option value="">请选择付款账户</option>' + accounts.map((item) => {
+    const label = String(item.label || "").split(" · 余额")[0];
+    return `<option value="${esc(item.id)}">${esc(label)}</option>`;
+  }).join("");
+  if (current && accounts.some((item) => String(item.id) === String(current))) {
+    select.value = current;
+  } else if (accounts.length === 1) {
+    select.value = String(accounts[0].id);
+  }
+  lastTransferAccountId = select.value;
+  updateTransferFormState();
+}
+
+function rememberTransferAccount() {
+  const select = el("transfer-account");
+  if (!select || !select.value) return;
+  lastTransferAccountId = select.value;
+  try {
+    window.localStorage.setItem("aib.transferAccount", select.value);
+  } catch (_) {
+    /* 本地记忆失败不影响转账 */
+  }
+}
+
+function buildTransferUtterance(snapshot) {
+  const verb = {
+    realtime: "转给",
+    normal: "普通到账转给",
+    next_day: "24小时延时转账给",
+    large: "大额转账给",
+  }[snapshot.method] || "转给";
+  const remark = snapshot.remark ? `，备注：${snapshot.remark}` : "";
+  return `${verb}${snapshot.payee} ${snapshot.amountYuan} 元${remark}`;
+}
+
+async function ensurePayeeId(snapshot) {
+  if (snapshot.payeeId) return snapshot.payeeId;
+  try {
+    const result = await post("/api/payees", {
+      full_name: snapshot.payee,
+      account_tail: snapshot.accountTail,
+      bank_name: snapshot.bank,
+      phone_tail4: snapshot.phone ? snapshot.phone.slice(-4) : "",
+    });
+    if (result.status !== 200) {
+      throw new Error(String((result.data && result.data.detail) || "收款人登记失败"));
+    }
+    const payee = (result.data && result.data.payee) || {};
+    payeeRoster = null;
+    await loadPayeeRoster().catch(() => {});
+    return String(payee.payee_id || "");
+  } catch (error) {
+    const status = el("quick-transfer-status");
+    if (status) status.textContent = fetchErrorMessage(error, "收款人登记失败，请稍后重试。");
+    return "";
+  }
+}
+
+async function submitQuickTransfer() {
   const status = el("quick-transfer-status");
-  if (!payeeInput || !amountInput) return;
+  const checked = updateTransferFormState();
+  if (!checked) return;
   closePayeeCandidates();
-  const payee = payeeInput.value.trim();
-  const amount = amountInput.value.trim();
-  if (!payee) {
-    payeeInput.focus();
-    if (status) status.textContent = "请先填写收款人。";
+  if (checked.error) {
+    if (status) status.textContent = checked.error;
+    const target = checked.error.includes("金额") ? el("quick-amount") : el("quick-payee");
+    if (target) target.focus();
     return;
   }
-  if (!amount || Number(amount) <= 0) {
-    amountInput.focus();
-    if (status) status.textContent = "请先填写大于 0 的金额。";
+  const { snapshot } = checked;
+  if (checked.gate.needsAck && transferFraudGate && !transferFraudGate.acknowledged) {
+    if (status) status.textContent = "请先阅读并确认防诈提示。";
     return;
   }
-  const remark = remarkInput ? remarkInput.value.trim().slice(0, 50) : "";
+  if (status) status.textContent = "正在核对收款人…";
+  const payeeId = await ensurePayeeId(snapshot);
+  if (!payeeId) return;
+  rememberTransferAccount();
+  const selected = {
+    account: snapshot.accountId,
+    payee: payeeId,
+    amount: `${snapshot.amountYuan} 元`,
+    transfer_method: snapshot.method,
+    purpose: snapshot.purpose || undefined,
+    remark: snapshot.remark || undefined,
+  };
+  if (status) status.textContent = "正在生成转账计划…";
   await sceneRunTask({
-    utterance: remark ? `转给${payee} ${amount} 元，备注：${remark}` : `转给${payee} ${amount} 元`,
+    utterance: buildTransferUtterance(snapshot),
+    selected,
     host: "quick-transfer-card",
     status: "quick-transfer-status",
     refresh: refreshAfterExecution,
@@ -1840,13 +2390,90 @@ async function submitQuickTransfer() {
   });
 }
 
-/* 转账成功后清空金额与备注、保留收款人，便于连转 */
+/* 转账成功后清空金额/用途/附言，保留付款账户与收款人，便于连转 */
 function quickTransferSucceeded() {
+  ["quick-amount", "quick-purpose", "quick-remark"].forEach((id) => {
+    const node = el(id);
+    if (node) node.value = "";
+  });
   const amountInput = el("quick-amount");
-  const remarkInput = el("quick-remark");
-  if (amountInput) amountInput.value = "";
-  if (remarkInput) remarkInput.value = "";
   if (amountInput) amountInput.focus();
+  updateTransferFormState();
+}
+
+/* 记录页「再转一笔」：把上次的全部字段带回表单，不直接提交。 */
+function repeatTransferFromRecord(button, goScene = true) {
+  if (!button) return;
+  const data = button.dataset;
+  const payeeName = data.repeatPayee || "";
+  const payeeInput = el("quick-payee");
+  const roster = findPayeeById(data.repeatPayeeId) || findPayeeByName(payeeName);
+  if (roster) {
+    if (payeeInput) payeeInput.value = roster.name;
+    applyPickedPayee(roster);
+  } else {
+    if (payeeInput) payeeInput.value = payeeName;
+    pickedPayee = null;
+    const accountInput = el("quick-payee-account");
+    if (accountInput) accountInput.value = data.repeatAccountTail || "";
+    const bankSelect = el("quick-payee-bank");
+    if (bankSelect && data.repeatBank) bankSelect.value = data.repeatBank;
+  }
+  const amountInput = el("quick-amount");
+  if (amountInput) amountInput.value = (Number(data.repeatAmount || 0) / 100).toFixed(2);
+  const method = data.repeatMethod || "realtime";
+  const methodRadio = document.querySelector(`input[name="transfer-method"][value="${method}"]`);
+  if (methodRadio) methodRadio.checked = true;
+  const purpose = el("quick-purpose");
+  if (purpose) purpose.value = data.repeatPurpose || "";
+  const remark = el("quick-remark");
+  if (remark) remark.value = data.repeatRemark || "";
+  updateTransferFormState();
+  if (goScene) navigate("scene", { scene: "transfer" });
+  el("quick-transfer-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const status = el("quick-transfer-status");
+  if (status) status.textContent = "已带入上一笔信息，请核对后确认转账。";
+}
+
+async function cancelTransferRecord(recordId) {
+  if (!recordId) return;
+  const status = el("transfers-status");
+  if (status) status.textContent = "正在撤销这笔申请…";
+  const result = await post("/api/transfers/cancel", { schedule_id: recordId });
+  if (result.status !== 200) {
+    if (status) status.textContent = String((result.data && result.data.detail) || "撤销失败，请稍后重试。");
+    return;
+  }
+  await refreshTransfers();
+  await refreshAfterExecution();
+  const recordsView = el("view-records");
+  if (recordsView && !recordsView.hidden) {
+    await renderRecordsTab(currentRecordTab);
+  }
+}
+
+/* 「用 AI 助理转账」：把已填字段带进对话，不空跳。 */
+async function transferToChat() {
+  const snapshot = transferSnapshot();
+  let payeeId = snapshot.payeeId;
+  if (!payeeId && snapshot.payee && snapshot.accountTail.length >= 4 && snapshot.bank) {
+    payeeId = await ensurePayeeId(snapshot);
+  }
+  const input = el("utterance");
+  if (input) {
+    input.value = snapshot.payee && snapshot.amountCents > 0
+      ? buildTransferUtterance(snapshot)
+      : "我要转账";
+  }
+  const selected = {};
+  if (snapshot.accountId) selected.account = snapshot.accountId;
+  if (payeeId) selected.payee = payeeId;
+  if (snapshot.amountCents > 0) selected.amount = `${snapshot.amountYuan} 元`;
+  selected.transfer_method = snapshot.method;
+  if (snapshot.purpose) selected.purpose = snapshot.purpose;
+  if (snapshot.remark) selected.remark = snapshot.remark;
+  pendingSceneSelected = selected;
+  navigate("chat", {});
 }
 
 function confidenceLabel(value) {
@@ -1859,16 +2486,6 @@ function subscriptionNoticesHtml(item) {
   if (!notices.length) return "";
   return `<ul class="muted">${notices.map((notice) =>
     `<li>${esc(notice.message)}</li>`).join("")}</ul>`;
-}
-
-function subscriptionEvidenceHtml(item) {
-  const evidence = item.evidence || [];
-  if (!evidence.length) return '<p class="muted">无可核对流水。</p>';
-  return `<details><summary>对应交易（${evidence.length}）</summary><ul>` +
-    evidence.map((txn) =>
-      `<li><span class="mono">${esc(txn.booked_on)} · ${yuan(Math.abs(txn.amount_cents))}</span>` +
-      ` <span class="tech">${esc(txn.record_id)} · ${esc(txn.content_hash)} · 渠道 ${esc(txn.channel || "—")}</span></li>`
-    ).join("") + "</ul></details>";
 }
 
 /* 只列出真实存在的对外渠道：网页端 + 飞书。
@@ -1902,59 +2519,106 @@ function formatStamp(value) {
     `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-/* 订阅卡（S2）：三行——商户 + 状态角标 / 金额·周期·下次扣款 + 取消订阅 / 核对依据入口。
-   依据不再占卡片版面，点第三行打开详情弹层；金额与日期全部来自服务端。 */
+/* 代扣协议卡（S2）：协议编号 / 签约 / 累计扣款 / 最近扣款 / 涨价 / 逾期 / 解约后对账。
+   金额、日期与协议编号全部来自服务端；已解约卡不再以月费为主信息。 */
+function agreementPriceHtml(item) {
+  const change = item.price_change;
+  if (!change) return "";
+  return `<p class="sub-card__price-up">${yuan(change.from_cents)} → ${yuan(change.to_cents)}，
+    自 ${esc(change.effective_on)} 起（+${esc(change.percent)}%）</p>`;
+}
+
+function agreementReconHtml(item) {
+  const charges = item.post_cancel_charges || [];
+  if (item.agreement_status !== "cancelled") return "";
+  const detail = charges.length
+    ? `<p class="sub-card__recon sub-card__recon--bad">解约后仍有 ${charges.length} 笔扣款：
+        ${charges.map((c) => `${esc(c.booked_on)} ${yuan(Math.abs(c.amount_cents))}`).join("、")}
+       </p>
+       <button class="btn btn--sm btn--danger" type="button"
+         data-prefill="申请追回：${esc(item.merchant)} 解约后仍扣款">申请追回</button>`
+    : '<p class="sub-card__recon">解约后扣款：未发现</p>';
+  return `<p class="muted sub-card__facts">解约日期 ${esc(item.cancelled_on || "未知")} ·
+      最后一笔扣款 ${esc(item.last_charged_on || "未知")}
+      ${item.last_charged_on ? yuan(item.amount_cents) : ""}</p>${detail}`;
+}
+
 function subscriptionCardHtml(item, index) {
-  const cancelled = item.registered_status === "cancelled";
+  const cancelled = item.agreement_status === "cancelled";
+  const suspect = item.agreement_status === "suspected";
   const next = item.next_charge_on
-    ? `${esc(item.next_charge_on)}${item.next_charge_is_prediction ? "（预测）" : ""}`
+    ? `${esc(item.next_charge_on)}${item.next_charge_state === "overdue" ? "（已逾期）" : "（推算）"}`
     : "未提供";
-  const suspect = item.status === "confirmed" ? "" : '<span class="chip chip--yellow">疑似</span>';
-  const raised = !cancelled && item.price_increased_12m === true
-    ? '<span class="sub-card__badge">涨价</span>' : "";
-  const state = cancelled ? '<span class="chip">已取消</span>' : "";
-  const cancelBtn = !cancelled && item.subscription_id
+  const total = item.charged_total_cents == null
+    ? "累计扣款数据不足"
+    : `已扣 ${Number(item.charge_count) || 0} 期 ${yuan(item.charged_total_cents)}`;
+  const typeChip = item.agreement_type_label
+    ? `<span class="chip chip--muted">${esc(item.agreement_type_label)}</span>` : "";
+  const state = cancelled ? '<span class="chip">已解约</span>'
+    : suspect ? '<span class="chip chip--yellow">疑似</span>' : "";
+  const closeBtn = !cancelled && !suspect && item.subscription_id
     ? `<button class="sub-card__cancel" type="button" data-sub-cancel="${esc(item.subscription_id)}"
-        data-sub-merchant="${esc(item.merchant)}" data-sub-amount="${yuan(item.amount_cents)}"
-        data-sub-cycle="${esc(item.cycle_label)}" data-sub-next="${next}"
+        data-sub-merchant="${esc(item.merchant)}" data-sub-no="${esc(item.agreement_no || "")}"
+        data-sub-type="${esc(item.agreement_type_label || "")}"
+        data-sub-signed="${esc(item.signed_on || "")}"
+        data-sub-total="${item.charged_total_cents == null ? "" : item.charged_total_cents}"
+        data-sub-count="${Number(item.charge_count) || 0}"
         data-sub-last="${esc(item.last_charged_on || "")}"
-        data-sub-period="${esc(item.current_period_label || "")}"
-        data-sub-charged="${item.charged_this_period === true ? "1" : item.charged_this_period === false ? "0" : ""}">取消订阅</button>`
-    : "";
-  return `<article class="sub-card${cancelled ? " sub-card--off" : ""}">
+        data-sub-next="${esc(item.next_charge_on || "")}"
+        data-sub-amount="${yuan(item.amount_cents)}"
+        data-sub-cycle="${esc(item.cycle_label || "")}">关闭扣款协议</button>`
+    : suspect
+      ? '<span class="chip chip--yellow">未匹配到本行协议</span>' : "";
+  const overdue = item.next_charge_state === "overdue"
+    ? `<p class="sub-card__overdue">预计 ${esc(item.next_charge_on || "—")} 扣款，
+        已过 ${Number(item.overdue_days) || 0} 天未见扣款记录；按周期顺延。</p>` : "";
+  return `<article class="sub-card${cancelled ? " sub-card--off" : ""}"
+      data-merchant-key="${esc(item.merchant)}"
+      data-card-tail="${esc(item.card_tail || "")}">
     <span class="sub-card__bar" aria-hidden="true"
       style="background:${cancelled ? "var(--rule-strong)" : sceneColor(index)}"></span>
     <div class="sub-card__in">
       <div class="sub-card__top">
-        <span class="sub-card__merchant">${esc(item.merchant)}</span>${state}${suspect}${raised}
+        <span class="sub-card__merchant">${esc(item.merchant)}</span>${typeChip}${state}
       </div>
-      <div class="sub-card__line">
-        <p class="sub-card__amount">${yuan(item.amount_cents)}<span class="sub-card__meta"> / ${esc(item.cycle_label)} · 下次 ${next}</span></p>
-        ${cancelBtn}
-      </div>
+      ${cancelled ? "" : `<div class="sub-card__line">
+        <p class="sub-card__amount">${yuan(item.amount_cents)}
+          <span class="sub-card__meta"> / ${esc(item.cycle_label || "周期未知")} · 下次 ${next}</span></p>
+        ${closeBtn}
+      </div>`}
+      <p class="muted sub-card__facts">协议 ${esc(item.agreement_no || "未匹配")} ·
+        ${esc(item.signed_on || "签约时间未知")} 签约 · ${total}</p>
+      <p class="muted sub-card__facts">最近扣款 ${esc(item.last_charged_on || "未知")}</p>
+      ${cancelled ? "" : agreementPriceHtml(item)}${cancelled ? "" : overdue}${agreementReconHtml(item)}
       <button class="sub-card__more" type="button" data-sub-detail="${esc(item.insight_id)}"
-        aria-haspopup="dialog">核对依据 · 取消口径<span class="sub-card__chev" aria-hidden="true">›</span></button>
+        aria-haspopup="dialog">协议详情 · 扣款记录<span class="sub-card__chev" aria-hidden="true">›</span></button>
     </div>
   </article>`;
 }
 
-/* 核对依据（原卡片折叠区）：只在详情弹层里渲染这一份，卡片不再重复。
-   金额 / 日期 / 置信度全部来自服务端，不新增结论。 */
+/* 协议详情（原卡片折叠区）：协议字段 + 最近 12 笔扣款 + 关闭影响，只在弹层渲染这一份。 */
 function subscriptionBasisHtml(item) {
-  const price = item.price_increased_12m === true
-    ? `近 12 个月涨价：${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}`
-    : item.price_increased_12m === false ? "近 12 个月未涨价" : "样本不足";
-  const external = item.external_cancel_status === "not_integrated"
-    ? "未接入（仅本地模拟或商户自助）" : esc(item.external_cancel_status || "—");
-  return `<p class="sub-detail__lead">${esc(item.merchant)} · ${yuan(item.amount_cents)} / ${esc(item.cycle_label)}</p>
+  const price = item.price_change
+    ? `涨价：${yuan(item.price_change.from_cents)} → ${yuan(item.price_change.to_cents)}，
+       自 ${esc(item.price_change.effective_on)} 起（+${esc(item.price_change.percent)}%）`
+    : "未发现近 12 个月涨价";
+  const total = item.charged_total_cents == null
+    ? "累计扣款数据不足"
+    : `累计 ${Number(item.charge_count) || 0} 期 ${yuan(item.charged_total_cents)}`;
+  const charges = (item.evidence || []).slice(0, 12).map((txn) =>
+    `<li><span class="mono">${esc(txn.booked_on)} · ${yuan(Math.abs(txn.amount_cents))}</span>
+      <span class="tech">渠道 ${esc(txn.channel || "—")} · 卡尾号 ${esc(txn.card_tail || "—")} ·
+      ${esc(txn.record_id)}</span></li>`).join("");
+  return `<p class="sub-detail__lead">${esc(item.merchant)} ·
+      ${esc(item.agreement_type_label || "类型未知")} · 协议 ${esc(item.agreement_no || "未匹配")}</p>
+    <p>签约 ${esc(item.signed_on || "未知")} · ${total} · 最近扣款 ${esc(item.last_charged_on || "未知")}</p>
     <p>${price}</p>
-    <p class="muted">最近扣费 ${esc(item.last_charged_on || "—")} · 币种 ${esc(item.currency)} · 置信度 ${esc(confidenceLabel(item.confidence))}</p>
-    <p class="muted">估算依据：${esc(item.next_charge_basis || "—")}</p>
+    <p class="muted">下次扣款 ${esc(item.next_charge_on || "未知")}
+      ${item.next_charge_on ? "（推算）" : ""} · 置信度 ${esc(confidenceLabel(item.confidence))}</p>
+    ${item.agreement_status === "cancelled" ? agreementReconHtml(item) : ""}
+    <p><span class="muted">关闭影响：</span>关闭后银行卡侧不再放款；商户是否继续服务由商户决定。</p>
     ${subscriptionNoticesHtml(item)}
-    <p><span class="muted">管理建议：</span>${esc(item.suggestion)}</p>
-    <p><span class="muted">取消路径：</span>${esc(item.cancel_path)}</p>
-    <p class="muted">外部取消接口：${external}</p>
-    ${subscriptionEvidenceHtml(item)}`;
+    ${charges ? `<details open><summary>扣款记录（最近 ${item.evidence.length} 笔）</summary><ul>${charges}</ul></details>` : ""}`;
 }
 
 /* 订阅详情弹层：卡片第三行触发，正文复用 subscriptionBasisHtml（单一来源）。
@@ -1975,56 +2639,158 @@ function closeSubDetail() {
   closeDialog(el("sub-detail"));
 }
 
-/* S1 概览行：本月待扣金额 + 在订项数 + 疑似待核对；涨价单独用提示条顶出来。 */
-function subscriptionAlertsHtml(insights) {
-  return insights
-    .filter((item) => item.registered_status !== "cancelled" && item.price_increased_12m === true)
-    .map((item) => `<p class="sub-alert">
-      ${esc(item.merchant)} ${yuan(item.price_change_12m_from_cents)} → ${yuan(item.price_change_12m_to_cents)}（近 12 个月涨价）</p>`)
-    .join("");
-}
-
-/* 顶部概览：在订数 / 本月待扣 / 疑似待核对。
-   「本月待扣」= 下次扣款日落在业务月内的在订订阅，金额取最近一期扣费（年度订阅不折月）。 */
-function subscriptionSummaryHtml(insights, asOf) {
-  const month = String(asOf || "").slice(0, 7);
-  const active = insights.filter((item) => item.registered_status !== "cancelled");
-  const dueItems = active.filter((item) => month && String(item.next_charge_on || "").slice(0, 7) === month);
-  const due = dueItems.reduce((sum, item) => sum + (Number(item.amount_cents) || 0), 0);
-  const suspects = active.filter((item) => item.status !== "confirmed").length;
+/* 顶部概览：本月已扣 / 本月待扣 / 未来 30 天预计 + 在签/疑似/已解约计数。
+   三个数字口径不同是有意为之，说明文字固定在下面。 */
+function subscriptionSummaryHtml(details) {
+  const summary = details.summary || {};
+  const month = summary.month_label || String(details.as_of || "").slice(0, 7);
   return `<div class="sub-overview">
       <div class="sub-overview__main">
-        <span class="sub-overview__k">本月待扣（${esc(month || "业务月")}）</span>
-        <b class="sub-overview__v">${yuan(due)}</b>
+        <span class="sub-overview__k">本月已扣（${esc(month)}）</span>
+        <b class="sub-overview__v">${yuan(summary.month_charged_cents || 0)}</b>
+      </div>
+      <div class="sub-overview__main">
+        <span class="sub-overview__k">本月待扣（截至今天）</span>
+        <b class="sub-overview__v">${yuan(summary.month_due_cents || 0)}</b>
+      </div>
+      <div class="sub-overview__main">
+        <span class="sub-overview__k">未来 30 天预计</span>
+        <b class="sub-overview__v">${yuan(summary.next_30d_cents || 0)}</b>
       </div>
       <div class="sub-overview__chips">
-        <span class="chip">在订 ${active.length} 项</span>
-        <span class="chip${suspects ? " chip--yellow" : ""}">疑似待核对 ${suspects} 项</span>
+        <span class="chip">在签 ${Number(summary.active_count) || 0} 项</span>
+        <span class="chip${summary.suspected_count ? " chip--yellow" : ""}">疑似待核对 ${Number(summary.suspected_count) || 0} 项</span>
+        <span class="chip">已解约 ${Number(summary.cancelled_count) || 0} 项</span>
       </div>
     </div>
-    ${subscriptionAlertsHtml(insights)}
-    <p class="muted scene-hint">本月待扣 = 下次扣款日在 ${esc(month || "业务月")} 内的在订订阅金额之和；
-      金额取最近一期扣费，年度订阅未折算到月。</p>`;
+    <p class="muted scene-hint">本月已扣 = 本月已记账的协议扣款（年付只在扣款当月计入）；
+      本月待扣 = 今天到月底尚未到期的扣款；未来 30 天预计按推算扣款日计入，年付不摊到每月。</p>`;
 }
 
-/* 未来扣款时间轴（S1）：按下一次扣款日升序，标注「预测」，最多 6 条 */
+/* 筛选：按协议 / 按商户 / 按周期 + 扣款卡。卡选项只列真实出现在协议里的尾号。 */
+function agreementFiltersHtml(insights) {
+  const cards = Array.from(new Map(
+    insights.filter((item) => item.card_tail)
+      .map((item) => [item.card_tail, item.card_tail])
+  ).keys());
+  const view = state.subView || "agreement";
+  const card = state.subCard || "all";
+  return `<div class="sub-filters">
+    <div class="sub-filters__group" role="group" aria-label="查看方式">
+      ${[["agreement", "按协议"], ["merchant", "按商户"], ["cycle", "按周期"]]
+        .map(([key, label]) => `<button class="sub-seg${view === key ? " is-active" : ""}"
+          type="button" data-sub-view="${key}">${label}</button>`).join("")}
+    </div>
+    <div class="sub-filters__group" role="group" aria-label="扣款卡">
+      <button class="sub-seg${card === "all" ? " is-active" : ""}"
+        type="button" data-sub-card="all">全部卡</button>
+      ${cards.map((tail) => `<button class="sub-seg${card === tail ? " is-active" : ""}"
+        type="button" data-sub-card="${esc(tail)}">尾号 ${esc(tail)}</button>`).join("")}
+    </div>
+    ${card === "all" ? "" : '<span class="muted sub-filters__hint">已按该卡筛选，以下全部为这张卡的代扣协议</span>'}
+  </div>`;
+}
+
+/* 列表分组：按协议（在签 / 已解约）/ 按商户 / 按周期。 */
+function agreementListHtml(insights) {
+  const view = state.subView || "agreement";
+  const card = state.subCard || "all";
+  const visible = card === "all"
+    ? insights
+    : insights.filter((item) => item.card_tail === card);
+  if (view === "merchant") {
+    const groups = new Map();
+    visible.forEach((item) => {
+      const key = item.merchant;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    return `<p class="panel__title panel__title--sub">按商户查看</p>` +
+      Array.from(groups.entries()).map(([merchant, items]) => {
+        const total = items.reduce((sum, item) => sum + (Number(item.charged_total_cents) || 0), 0);
+        return `<p class="muted sub-group__head">${esc(merchant)} ·
+          ${items.length} 个协议 · 累计 ${yuan(total)}</p>
+          <div class="sub-wall">${items.map((item) =>
+            subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`;
+      }).join("");
+  }
+  if (view === "cycle") {
+    const cycles = [["monthly", "月度"], ["yearly", "年度"], ["unknown", "周期未知"]];
+    return `<p class="panel__title panel__title--sub">按周期查看</p>` +
+      cycles.map(([cycle, label]) => {
+        const items = visible.filter((item) =>
+          (cycle === "unknown" ? !["monthly", "yearly"].includes(item.cycle) : item.cycle === cycle));
+        return items.length
+          ? `<p class="muted sub-group__head">${label} · ${items.length} 项</p>
+             <div class="sub-wall">${items.map((item) =>
+               subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
+          : "";
+      }).join("");
+  }
+  const active = visible.filter((item) => item.agreement_status === "active");
+  const suspected = visible.filter((item) => item.agreement_status === "suspected");
+  const cancelled = visible.filter((item) => item.agreement_status === "cancelled");
+  const activeHtml = active.length
+    ? `<p class="panel__title panel__title--sub">在签协议 <span class="tech">${active.length} 项</span></p>
+      <div class="sub-wall">${active.map((item) =>
+        subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
+    : '<p class="panel__title panel__title--sub">在签协议</p><p class="muted">当前没有在签协议。</p>';
+  const suspectedHtml = suspected.length
+    ? `<p class="panel__title panel__title--sub">疑似流水 <span class="tech">${suspected.length} 项 · 未匹配本行协议</span></p>
+      <div class="sub-wall">${suspected.map((item) =>
+        subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
+    : "";
+  const cancelledHtml = cancelled.length
+    ? `<p class="panel__title panel__title--sub">已解约 <span class="tech">${cancelled.length} 项</span></p>
+      <div class="sub-wall">${cancelled.map((item) =>
+        subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
+    : "";
+  return activeHtml + suspectedHtml + cancelledHtml;
+}
+
+/* 账单线索深链：定位到商户卡；找不到时说明原因，不做无依据的跳转。 */
+function applyAgreementFocus() {
+  const key = state.pendingAgreementFocus;
+  if (!key) return;
+  state.pendingAgreementFocus = "";
+  const cards = Array.from(document.querySelectorAll("#subscription-list .sub-card"));
+  const target = cards.find((card) =>
+    (card.dataset.merchantKey || "").includes(key) || key.includes(card.dataset.merchantKey || ""));
+  const note = el("subscription-focus-note");
+  if (!target) {
+    if (note) {
+      note.hidden = false;
+      note.textContent = `没有找到「${key}」的本行代扣协议：可能是其他卡或其他渠道扣款。`;
+    }
+    return;
+  }
+  if (note) note.hidden = true;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("sub-card--focus");
+  window.setTimeout(() => target.classList.remove("sub-card--focus"), 3200);
+  const detail = target.querySelector("[data-sub-detail]");
+  if (detail) openSubDetail(detail.dataset.subDetail || "");
+}
+
+/* 未来扣款只列尚未扣的项：状态在签、下次扣款日不早于数据日，按日期升序最多 6 条。 */
 function subscriptionTimelineHtml(insights) {
   const rows = insights
-    .filter((item) => item.registered_status !== "cancelled" && item.next_charge_on)
+    .filter((item) => item.agreement_status === "active" && item.next_charge_on)
+    .filter((item) => String(item.next_charge_on) >= (state.options.subscription_details.as_of || ""))
     .sort((a, b) => String(a.next_charge_on).localeCompare(String(b.next_charge_on)))
     .slice(0, 6);
-  const head = '<p class="panel__title panel__title--sub">未来扣款 <span class="tech">按下次扣款日排序</span></p>';
+  const head = '<p class="panel__title panel__title--sub">接下来要扣的</p>';
   if (!rows.length) {
-    return head + '<p class="muted">暂无可排期的未来扣款（订阅未提供下次扣款日）。</p>';
+    return head + '<p class="muted">暂无可排期的未来扣款。</p>';
   }
-  const items = rows.map((item) => `<li class="sub-ev${item.price_increased_12m === true ? " is-hot" : ""}">
+  const items = rows.map((item) => `<li class="sub-ev${item.next_charge_state === "overdue" ? " is-hot" : ""}">
       <span class="sub-ev__date">${esc(item.next_charge_on)}</span>
-      <span class="sub-ev__name">${esc(item.merchant)}${
-        item.next_charge_is_prediction ? ' <span class="sub-ev__tag">预测</span>' : ""}</span>
+      <span class="sub-ev__name">${esc(item.merchant)}
+        <span class="sub-ev__tag">推算</span></span>
       <span class="sub-ev__amt">${yuan(item.amount_cents)}</span>
     </li>`).join("");
   return head + `<ol class="sub-ev-list">${items}</ol>
-    <p class="muted scene-hint">标注「预测」的是按流水周期推算，不是商户确认的扣款日。</p>`;
+    <p class="muted scene-hint">「推算」按历史扣费周期计算，实际扣款日以商户为准。</p>`;
 }
 
 function renderSubscriptionDetails(options) {
@@ -2043,50 +2809,46 @@ function renderSubscriptionDetails(options) {
     if (timeline) timeline.innerHTML = "";
     list.innerHTML = "";
     boundary.hidden = true;
+    const filters = el("subscription-filters");
+    if (filters) filters.innerHTML = "";
+    const note = el("subscription-focus-note");
+    if (note) {
+      note.hidden = true;
+      note.textContent = "";
+    }
   };
   if (state.optionsStatus !== "ready") {
     reset(state.optionsStatus === "error"
-      ? "订阅数据暂不可用，请稍后重试。" : "正在读取订阅识别结果…");
+      ? "代扣协议数据暂不可用，请稍后重试。" : "正在读取代扣协议…");
     return;
   }
   if (!details) {
-    reset("订阅识别服务尚未接入。");
+    reset("代扣协议服务尚未接入。");
     return;
   }
-  status.textContent = `订阅识别结果已更新 · 业务日 ${details.as_of}`;
+  status.textContent = `数据截至 ${details.as_of} · 识别结果已同步`;
   if (caps && caps.boundary) {
     boundary.hidden = false;
-    boundary.textContent = `能力边界：${caps.boundary}`;
+    boundary.textContent = caps.boundary;
   }
   const insights = details.insights || [];
+  const filters = el("subscription-filters");
+  if (filters) {
+    filters.innerHTML = insights.length ? agreementFiltersHtml(insights) : "";
+  }
   if (!insights.length) {
     if (summary) summary.innerHTML = "";
     if (timeline) timeline.innerHTML = "";
-    list.innerHTML = '<p class="muted">未识别到订阅。</p>';
+    list.innerHTML = '<p class="muted">未识别到代扣协议。</p>';
   } else {
-    if (summary) summary.innerHTML = subscriptionSummaryHtml(insights, details.as_of);
+    if (summary) summary.innerHTML = subscriptionSummaryHtml(details);
     if (timeline) timeline.innerHTML = subscriptionTimelineHtml(insights);
-    const active = insights.filter((item) => item.registered_status !== "cancelled");
-    const cancelled = insights.filter((item) => item.registered_status === "cancelled");
-    const activeHtml = active.length
-      ? `<p class="panel__title panel__title--sub">在订 <span class="tech">${active.length} 项</span></p>
-        <div class="sub-wall">${active.map((item) =>
-          subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
-      : '<p class="panel__title panel__title--sub">在订</p><p class="muted">当前没有在订订阅。</p>';
-    const cancelledHtml = cancelled.length
-      ? `<p class="panel__title panel__title--sub">已取消 <span class="tech">${cancelled.length} 项</span></p>
-        <div class="sub-wall">${cancelled.map((item) =>
-          subscriptionCardHtml(item, insights.indexOf(item))).join("")}</div>`
-      : "";
-    list.innerHTML = activeHtml + cancelledHtml;
-  }
-  const notes = details.notes || [];
-  if (notes.length) {
-    list.innerHTML += `<details class="scene-note"><summary>识别说明（${notes.length}）</summary><ul>${
-      notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul></details>`;
+    list.innerHTML = agreementListHtml(insights);
+    applyAgreementFocus();
   }
 }
 
+/* 解约回执：解约日期 / 最后一笔 / 解约后扣款对账 / 演示短信 / 追回入口。 */
 function renderSubscriptionCancel(cancel) {
   const box = el("subscription-cancel-result");
   if (!box) return;
@@ -2096,13 +2858,23 @@ function renderSubscriptionCancel(cancel) {
     return;
   }
   box.hidden = false;
-  const previous = cancel.previous_status
-    ? ` · 操作前状态 ${esc(cancel.previous_status)}` : "";
-  const confirmed = cancel.external_confirmed ? "商户已确认" : "商户未确认";
+  const post = (cancel.post_cancel_charges || []);
+  const recon = post.length
+    ? `<p class="sub-card__recon sub-card__recon--bad">解约后仍有 ${post.length} 笔扣款：
+        ${post.map((c) => `${esc(c.booked_on)} ${yuan(Math.abs(c.amount_cents))}`).join("、")}</p>
+       <button class="btn btn--sm btn--danger" type="button"
+         data-prefill="申请追回：${esc(post[0].merchant_label || "")} 解约后仍扣款">申请追回</button>`
+    : '<p class="sub-card__recon">解约后扣款：未发现</p>';
   box.innerHTML = `<div class="takeover">
-    <p><b>取消操作状态：${esc(cancel.label)}</b></p>
-    <p class="muted">外部状态：${esc(cancel.external_status)} · ${confirmed}${previous}</p>
+    <p><b>${esc(cancel.label)}</b></p>
+    <p class="muted">解约日期 ${esc(cancel.cancelled_on || "未知")} ·
+      最后一笔扣款 ${esc(cancel.last_charge_on || "未知")}
+      ${cancel.last_charge_cents != null ? yuan(Math.abs(cancel.last_charge_cents)) : ""}</p>
+    ${recon}
     <p class="muted">${esc(cancel.boundary)}</p>
+    ${cancel.sms_receipt
+      ? `<p class="muted">短信回执（演示，不发送真实短信）：${esc(cancel.sms_receipt.message)}</p>`
+      : ""}
   </div>`;
 }
 
@@ -2119,55 +2891,103 @@ async function refreshInsights() {
 
 /* ---------------- 卡片面板（④ 场景） ---------------- */
 
-const CARD_ACTION_UTTERANCE = {
-  lock: "锁卡",
-  unlock: "解锁卡片",
-  lost: "挂失卡片",
+/* 卡面：脱敏卡号 / 卡组织 / 有效期 / 分卡限额 / 按状态允许的动作。
+   按钮一律由服务端 `allowed_actions` 驱动；前端不按状态自行扩展或隐藏。 */
+const CARD_ACTION_META = {
+  temp_lock: { label: "临时冻结", cls: "btn--warn", group: "common" },
+  unlock: { label: "解挂", cls: "btn--danger", group: "risk" },
+  report_lost: { label: "正式挂失", cls: "btn--danger", group: "risk" },
+  replace: { label: "申请补卡", cls: "btn--danger", group: "risk" },
+  adjust_debit_limit: { label: "调整通道限额", cls: "", group: "common" },
+  adjust_credit_limit: { label: "调整信用额度", cls: "", group: "common" },
+  set_cycle_limit: { label: "账单周期限额", cls: "", group: "common" },
+  apply_virtual: { label: "申请虚拟卡", cls: "btn--ghost", group: "common" },
+  view_lock_detail: { label: "查看冻结详情", cls: "btn--ghost", group: "common" },
+  view_lost_detail: { label: "查看挂失详情", cls: "btn--ghost", group: "common" },
 };
 
-/* 卡面：类型 / 状态 / 卡号 + 日限额 / 横向对比条 / 常用与风险两组动作。
-   进度条只表示「相对最高日限额」的横向对比——流水未记录卡号，服务端没有按卡的当日已用，绝不编造。
-   动作按风险分两组仅调整呈现与顺序，指令拼装与计划卡流程完全复用 cardPanelTask。 */
-function cardFaceHtml(card, maxLimit) {
+function cardLimitSummary(limits) {
+  if (!limits) return "限额未知";
+  if (limits.kind === "credit") {
+    const parts = [
+      `固定额度 ${limits.credit_limit_cents == null ? "未配置" : yuan(limits.credit_limit_cents)}`,
+    ];
+    if (limits.temp_credit_limit_cents != null) {
+      parts.push(
+        `临时额度 ${yuan(limits.temp_credit_limit_cents)}`
+        + (limits.temp_credit_until ? `（至 ${esc(limits.temp_credit_until)}）` : ""),
+      );
+    }
+    parts.push(
+      `账单周期限额 ${limits.cycle_limit_cents == null ? "未配置" : yuan(limits.cycle_limit_cents)}`,
+    );
+    return parts.join(" · ");
+  }
+  return [
+    ["ATM 取现", limits.atm_limit_cents],
+    ["转账", limits.transfer_limit_cents],
+    ["消费", limits.purchase_limit_cents],
+    ["境外", limits.overseas_limit_cents],
+  ]
+    .map(([label, value]) => `${label} ${value == null ? "未配置" : yuan(value)}`)
+    .join(" · ");
+}
+
+function cardStatusNote(card) {
+  const lock = card.temp_lock;
+  if (card.status === "locked" && lock) {
+    if (lock.expired) return `临时冻结已于 ${esc(lock.until)} 到期，自动解挂；刷新后按正常状态处理。`;
+    return `临时冻结剩余 ${Number(lock.days_left) || 0} 天（至 ${esc(lock.until)} 自动解挂）`
+      + ` · 原因：${esc(lock.reason_label || "未说明")}`;
+  }
+  if (card.status === "lost") {
+    const lost = card.lost || {};
+    if (card.replacement && !lost.at) {
+      return `已补卡（旧卡作废）· 新卡尾号 ${esc(card.replacement.new_card_tail || "未知")}`;
+    }
+    const replaced = card.replacement
+      ? ` · 已补卡，新卡尾号 ${esc(card.replacement.new_card_tail || "未知")}`
+      : "";
+    return `已正式挂失（${esc(lost.at || "日期未知")}，${esc(lost.reason_label || "原因未说明")}）`
+      + ` · 不可解挂${replaced}`;
+  }
+  return "";
+}
+
+function cardFaceHtml(card) {
   const id = esc(card.card_id);
-  const limit = Number(card.daily_limit_cents) || 0;
-  const pct = maxLimit > 0 ? Math.round((limit / maxLimit) * 100) : 0;
-  const off = card.status !== "active";
-  const commonKeys = [
-    off
-      ? `<button class="btn btn--sm" type="button" data-card-action="unlock" data-card-id="${id}">解锁</button>`
-      : `<button class="btn btn--sm" type="button" data-card-action="lock" data-card-id="${id}">锁卡</button>`,
-    `<button class="btn btn--sm" type="button" data-card-action="limit" data-card-id="${id}">调整日限额</button>`,
-  ].join("");
-  const riskKeys = [
-    `<button class="btn btn--sm btn--danger" type="button" data-card-action="lost" data-card-id="${id}">挂失</button>`,
-    `<button class="btn btn--sm btn--ghost" type="button" data-card-action="virtual" data-card-id="${id}">申请虚拟卡</button>`,
-  ].join("");
-  const limitInput = off
-    ? ""
-    : `<label class="card-face__limit-in"><span class="muted">额度（元）</span>
-        <input class="input" type="number" inputmode="decimal" min="1" step="100"
-          placeholder="调额 / 补卡金额" data-card-limit="${id}" /></label>`;
-  return `<article class="card-face${off ? " card-face--off" : ""}">
+  const actions = Array.isArray(card.allowed_actions) ? card.allowed_actions : [];
+  const actionable = actions.filter((key) => CARD_ACTION_META[key]);
+  const button = (key) => {
+    const meta = CARD_ACTION_META[key];
+    return `<button class="btn btn--sm ${meta.cls}" type="button"
+      data-card-action="${key}" data-card-id="${id}">${meta.label}</button>`;
+  };
+  const common = actionable.filter((key) => CARD_ACTION_META[key].group === "common");
+  const risk = actionable.filter((key) => CARD_ACTION_META[key].group === "risk");
+  const rows = [];
+  if (common.length) {
+    rows.push(`<div class="card-face__keys-row"><span class="card-face__keys-k">常用</span>${common.map(button).join("")}</div>`);
+  }
+  if (risk.length) {
+    rows.push(`<div class="card-face__keys-row card-face__keys-row--risk"><span class="card-face__keys-k">风险操作</span>${risk.map(button).join("")}</div>`);
+  }
+  const note = cardStatusNote(card);
+  const stateKey = card.effective_status || card.status;
+  return `<article class="card-face card-face--${esc(stateKey)}">
     <div class="card-face__top">
-      <span class="card-face__type">${esc(card.type_label)}</span>
-      <span class="card-state card-state--${esc(card.status)}">${esc(card.status_label)}</span>
+      <span class="card-face__type">${esc(card.type_label)}
+        <span class="muted">${esc(card.brand_label || "卡组织未知")}</span></span>
+      <span class="card-state card-state--${esc(stateKey)}">${esc(card.status_label)}</span>
     </div>
     <p class="card-face__meta">
-      <span class="card-face__no mono">${id}</span>
-      <span class="card-face__limit"><span class="muted">日限额</span> <b>${yuan(limit)}</b></span>
+      <span class="card-face__no mono">${esc(card.masked_no || "卡号未知")}</span>
+      <span class="muted">${card.expiry ? `有效期 ${esc(card.expiry)}` : "有效期未知"}</span>
     </p>
-    <span class="bill__bar-track card-face__bar" role="img"
-      aria-label="相对最高日限额 ${pct}%"><i style="width:${pct}%"></i></span>
-    ${limitInput}
-    <div class="card-face__keys">
-      <div class="card-face__keys-row">
-        <span class="card-face__keys-k">常用</span>${commonKeys}
-      </div>
-      <div class="card-face__keys-row card-face__keys-row--risk">
-        <span class="card-face__keys-k">风险操作</span>${riskKeys}
-      </div>
-    </div>
+    ${card.account_class ? `<p class="muted card-face__class">${esc(card.account_class)} 类户</p>` : ""}
+    <p class="card-face__limits">${esc(cardLimitSummary(card.limits))}</p>
+    ${note ? `<p class="card-face__note">${note}</p>` : ""}
+    <div class="card-face__keys">${rows.join("")}</div>
   </article>`;
 }
 
@@ -2179,35 +2999,36 @@ function cardsHtml(payload) {
       <p class="muted">当前账户下没有可用卡片；补卡后可在这里看到状态与额度。</p>
     </article>`;
   }
-  const maxLimit = Math.max(...cards.map((card) => Number(card.daily_limit_cents) || 0), 1);
-  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card, maxLimit)).join("")}</div>`
-    + `<p class="muted cards-hint">挂失 / 解锁 / 调整日限额需强验证：计划卡确认时输入演示验证码。挂失不可逆——已挂失的卡不能再解锁，要继续用卡只能申请虚拟卡补卡。</p>`;
+  return `<div class="card-wall">${cards.map((card) => cardFaceHtml(card)).join("")}</div>`
+    + `<p class="muted cards-hint">临时冻结可解、到期自动解挂；正式挂失不可逆，需补卡换新卡号。`
+    + `所有红色动作在弹窗内完成一次性验证码与二次确认（演示验证码，非真实人脸 / 短信 / U 盾）。</p>`;
 }
 
-/* 额度饼图：各卡日限额占全部卡片合计的比例（真实数字，仅用于横向对比） */
-function cardsVisualHtml(cards) {
+/* 卡片使用概览：只做状态与限额的文字汇总，不画无决策价值的占比饼图，
+   也不编造「近 30 天消费」——流水没有稳定卡号，服务端没有按卡聚合的事实。 */
+function cardsOverviewHtml(cards) {
   if (!cards.length) return "";
-  const rows = cards.map((card) => ({
-    label: card.type_label || card.card_id,
-    value: Number(card.daily_limit_cents) || 0,
-    note: yuan(Number(card.daily_limit_cents) || 0),
-  }));
   const counts = [
     ["active", "正常"],
-    ["locked", "已锁定"],
-    ["lost", "已挂失"],
-    ["cancelled", "已取消"],
+    ["locked", "临时冻结"],
+    ["lost", "已正式挂失"],
   ]
     .map(([key, label]) => {
-      const count = cards.filter((card) => card.status === key).length;
+      const count = cards.filter((card) => (card.effective_status || card.status) === key).length;
       return count ? `${label} ${count} 张` : "";
     })
     .filter(Boolean)
     .join(" · ");
-  return `<div class="cards-visual">
-    <p class="panel__title panel__title--sub">日限额分布</p>
-    ${donutChartHtml(rows, { label: "各卡日限额占比", size: 140, stroke: 16, empty: "卡片日限额均为 0，暂无可绘制占比。" })}
-    <p class="muted scene-hint">状态：${esc(counts || "无")} · 数字读 /api/cards</p>
+  const rows = cards.map((card) => `<li>
+    <b>${esc(card.type_label)} · ${esc(card.masked_no || "卡号未知")}</b>
+    <span>${esc(card.status_label)}</span>
+    <span class="muted">${esc(card.brand_label || "卡组织未知")}${card.account_class ? ` · ${esc(card.account_class)} 类户` : ""}</span>
+    <span class="muted">${esc(cardLimitSummary(card.limits))}</span>
+  </li>`).join("");
+  return `<div class="cards-overview">
+    <p class="panel__title panel__title--sub">卡片使用概览</p>
+    <ul class="cards-overview__list">${rows}</ul>
+    <p class="muted scene-hint">状态：${esc(counts || "无")} · 卡状态实时同步 · 数字读 /api/cards</p>
   </div>`;
 }
 
@@ -2228,67 +3049,855 @@ async function refreshCards() {
   }
   const payload = result.data;
   state.cards = payload.cards || [];
-  el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 数据截至 ${payload.as_of || "—"}`;
+  state.cardPayload = payload;
+  const synced = payload.synced_at ? new Date(payload.synced_at) : null;
+  const syncedText = synced && !Number.isNaN(synced.getTime())
+    ? ` · 卡状态实时同步（${String(synced.getHours()).padStart(2, "0")}:${String(synced.getMinutes()).padStart(2, "0")}）`
+    : " · 卡状态实时同步";
+  el("cards-status").textContent = `共 ${state.cards.length} 张卡 · 数据截至 ${payload.as_of || "—"}${syncedText}`;
   el("cards-list").innerHTML = cardsHtml(payload);
   const visual = el("cards-visual");
-  if (visual) visual.innerHTML = cardsVisualHtml(state.cards);
+  if (visual) visual.innerHTML = cardsOverviewHtml(state.cards);
 }
 
-function cardLimitCents(cardId) {
-  const input = document.querySelector(`[data-card-limit="${cardId}"]`);
-  const value = input ? Number(input.value) : NaN;
+/* ---------------- 卡片操作弹窗（卡片页与对话共用） ----------------
+   弹窗内完成「信息收集 → 后果明示 → 服务端计划 → 一次性验证码 → 二次确认」，
+   不把红色动作甩到对话。对话里的卡片计划卡也打开同一个弹窗。 */
+const CARD_FLOW_BY_ACTION = {
+  temp_lock: "freeze",
+  unlock: "unlock",
+  report_lost: "report",
+  replace: "replace",
+  adjust_debit_limit: "debit_limit",
+  adjust_credit_limit: "credit_limit",
+  set_cycle_limit: "cycle",
+  apply_virtual: "virtual",
+};
+
+const CARD_FLOW_TITLES = {
+  freeze: "临时冻结（口头挂失）",
+  report: "正式挂失",
+  replace: "申请补卡",
+  unlock: "解挂",
+  debit_limit: "调整借记卡通道限额",
+  credit_limit: "调整信用卡额度",
+  cycle: "设置账单周期消费限额",
+  virtual: "申请虚拟卡",
+  lock_detail: "冻结详情",
+  lost_detail: "挂失详情",
+};
+
+const CARD_FLOW_STEPS = {
+  freeze: ["类型与原因", "后果确认", "验证与确认"],
+  report: ["挂失类型与原因", "后果与补卡", "验证与确认"],
+  replace: ["补卡方式", "寄送信息", "验证与确认"],
+  unlock: ["解挂确认", "后果确认", "验证与确认"],
+  debit_limit: ["选择通道与额度", "生效说明", "验证与确认"],
+  credit_limit: ["选择额度类型", "生效说明", "验证与确认"],
+  cycle: ["设置限额", "生效说明", "验证与确认"],
+  virtual: ["设置额度", "生效说明", "确认执行"],
+  lock_detail: ["冻结详情"],
+  lost_detail: ["挂失详情"],
+};
+
+const CARD_LIMIT_KIND_LABELS = {
+  atm: "ATM 取现",
+  transfer: "转账",
+  purchase: "消费",
+  overseas: "境外",
+};
+
+const cardFlowState = {
+  open: false, mode: "page", flow: "", card: null, plan: null,
+  step: 1, form: {}, challenge: null, result: null, busy: false,
+};
+
+function cardFlowError(message) {
+  const node = el("card-flow-error");
+  if (!node) return;
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+function cardFlowYuanToCents(text) {
+  const value = Number(text);
   if (!Number.isFinite(value) || value <= 0) return null;
   return Math.round(value * 100);
 }
 
-/* 卡片四键：页内拼中文指令 → /api/submit → 页内计划卡。
-   绿色自动执行；黄色等确认；红色（挂失 / 解锁 / 调额）只给「去对话做强验证」。 */
-async function cardPanelTask(kind, cardId) {
-  const options = { host: "cards-plan", status: "cards-plan-status", refresh: refreshCards };
-  const planHost = el("cards-plan");
-  if (planHost) planHost.hidden = false;
-  const planStatus = el("cards-plan-status");
-  if (planStatus) planStatus.hidden = false;
-  if (kind === "limit" || kind === "virtual") {
-    const cents = cardLimitCents(cardId);
-    if (cents === null) {
-      if (planStatus) planStatus.textContent = "请先填写额度（元，正整数），再点「调额 / 补虚拟卡」。";
-      return;
-    }
-    const utterance = kind === "limit"
-      ? `把这张卡额度调到 ${cents / 100} 元`
-      : `申请虚拟卡，额度 ${cents / 100} 元`;
-    await sceneRunTask(Object.assign({
-      utterance,
-      selected: kind === "limit" ? { card: cardId, daily_limit: cents } : { daily_limit: cents },
-    }, options));
-    return;
-  }
-  await sceneRunTask(Object.assign({
-    utterance: CARD_ACTION_UTTERANCE[kind] || "",
-    selected: { card: cardId },
-  }, options));
+function cardFlowDialogOpen() {
+  const dialog = el("card-flow-dialog");
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
 }
 
-/* 订阅取消：卡片上的「取消」只开确认弹窗，确认后才发起计划。
-   弹窗内容与卡片一致（商户 / 金额 / 周期 / 下次扣款），并明确写出**本期是否已扣**，
-   避免用户在「下次扣款」是预测值时误以为本期没扣或已扣。 */
+function openCardFlow(kind, cardId) {
+  const card = (state.cards || []).find((item) => item.card_id === cardId);
+  if (!card) return;
+  if (kind === "view_lock_detail" || kind === "view_lost_detail") {
+    openCardDetail(card, kind);
+    return;
+  }
+  const flow = CARD_FLOW_BY_ACTION[kind];
+  if (!flow) return;
+  cardFlowState.open = true;
+  cardFlowState.mode = "page";
+  cardFlowState.flow = flow;
+  cardFlowState.card = card;
+  cardFlowState.plan = null;
+  cardFlowState.challenge = null;
+  cardFlowState.result = null;
+  cardFlowState.step = 1;
+  cardFlowState.busy = false;
+  cardFlowState.form = {
+    days: 7,
+    lockReason: "cant_find",
+    lossReason: "lost",
+    withReplace: card.status === "lost" ? "yes" : "no",
+    address: (state.cardPayload && state.cardPayload.default_shipping_address) || "",
+    mailMethod: "standard",
+    limitKind: "atm",
+    amountYuan: "",
+    creditMode: "temporary",
+    months: 1,
+  };
+  renderCardFlow();
+  cardFlowDialogOpen();
+}
+
+function openCardDetail(card, kind) {
+  cardFlowState.open = true;
+  cardFlowState.mode = "detail";
+  cardFlowState.flow = kind === "view_lock_detail" ? "lock_detail" : "lost_detail";
+  cardFlowState.card = card;
+  cardFlowState.plan = null;
+  cardFlowState.challenge = null;
+  cardFlowState.result = null;
+  cardFlowState.step = 1;
+  cardFlowState.busy = false;
+  renderCardFlow();
+  cardFlowDialogOpen();
+}
+
+/* 对话里的卡片计划卡：沿用已冻结的计划，直接进入「验证与确认」一步。 */
+async function openCardFlowFromPlan(plan) {
+  const node = (plan.nodes || []).find((item) => String(item.action || "").startsWith("card."));
+  const cardId = node && node.params ? node.params.card_id : "";
+  let card = (state.cards || []).find((item) => item.card_id === cardId) || null;
+  if (!card && cardId) {
+    try {
+      const payload = await apiFetch("GET", "/api/cards");
+      state.cards = (payload.data && payload.data.cards) || [];
+      card = state.cards.find((item) => item.card_id === cardId) || null;
+    } catch (_) {
+      card = null;
+    }
+  }
+  if (!card) return;
+  const action = node ? String(node.action || "") : "";
+  const flow = {
+    "card.lock": "freeze",
+    "card.report_lost": "report",
+    "card.unlock": "unlock",
+    "card.replace": "replace",
+    "card.adjust_credit_limit": "credit_limit",
+    "card.set_cycle_limit": "cycle",
+    "card.set_limit": "debit_limit",
+    "card.apply_virtual": "virtual",
+  }[action] || "";
+  cardFlowState.open = true;
+  cardFlowState.mode = "plan";
+  cardFlowState.flow = flow;
+  cardFlowState.card = card;
+  cardFlowState.plan = plan;
+  cardFlowState.challenge = null;
+  cardFlowState.result = null;
+  cardFlowState.step = flow ? cardFlowTotalSteps() : 1;
+  cardFlowState.busy = false;
+  cardFlowState.form = {};
+  renderCardFlow();
+  cardFlowDialogOpen();
+}
+
+function closeCardFlow() {
+  const dialog = el("card-flow-dialog");
+  if (dialog) {
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+  cardFlowState.open = false;
+  cardFlowState.plan = null;
+  cardFlowState.challenge = null;
+  cardFlowState.result = null;
+  cardFlowState.busy = false;
+  cardFlowError("");
+}
+
+function cardFlowTotalSteps() {
+  const steps = CARD_FLOW_STEPS[cardFlowState.flow];
+  return Array.isArray(steps) ? steps.length : 1;
+}
+
+function cardFlowRadio(field, options, current) {
+  return `<div class="card-flow__choices">${options
+    .map(([key, label, desc]) => `<label class="card-flow__choice${current === key ? " is-active" : ""}">
+      <input type="radio" name="${esc(field)}" value="${key}" data-card-flow-field="${esc(field)}"
+        ${current === key ? "checked" : ""} />
+      <span><b>${label}</b>${desc ? `<small>${desc}</small>` : ""}</span>
+    </label>`)
+    .join("")}</div>`;
+}
+
+function cardFlowAmountField(label, placeholder) {
+  return `<label class="field card-flow__amount"><span class="field__label">${label}</span>
+    <input class="input" type="number" min="1" step="100" inputmode="decimal"
+      value="${esc(cardFlowState.form.amountYuan || "")}" placeholder="${placeholder}"
+      data-card-flow-field="amountYuan" data-card-flow-live="1" /></label>`;
+}
+
+function cardFlowConsequences() {
+  const flow = cardFlowState.flow;
+  const card = cardFlowState.card;
+  const items = {
+    freeze: [
+      "功能冻结：消费、取现、转账、代扣全部暂停。",
+      "费用：免费。",
+      "解挂：有效期内可线上解挂，到期自动解挂。",
+      "不换卡号：找回卡后可直接恢复使用。",
+    ],
+    report: [
+      "功能冻结：消费、取现、转账、代扣全部停止。",
+      "费用：挂失费 ¥20（演示口径：只登记应收，不实际扣款）。",
+      "解挂：不可线上解挂，只能本人带证件到柜台处理。",
+      "换卡号：继续用卡必须补卡，新卡号、旧卡作废。",
+    ],
+    replace: [
+      "新卡号：补卡会生成新卡号，旧卡立即作废。",
+      "费用：普通邮寄 ¥10 / 加急 ¥20（演示口径：只登记应收，不实际扣款）。",
+      "到卡时间：普通 3–5 个工作日 / 加急 1–2 个工作日（演示推算）。",
+      "寄送：按您填写的地址寄出；演示环境不实际制卡或邮寄。",
+    ],
+    unlock: [
+      "恢复范围：消费、取现、转账、代扣立即恢复。",
+      "费用：解挂免费。",
+      "风险提示：解挂会解除当前保护，请确认卡片在您本人手中。",
+    ],
+    debit_limit: [
+      "生效范围：只调整所选通道，其余通道限额不变。",
+      "生效时间：提交后立即生效。",
+      "监管上限：Ⅱ / Ⅲ 类户仍受账户类别监管上限约束。",
+    ],
+    credit_limit: [
+      "临时额度：立即生效，到期自动恢复；本演示默认 1 个月。",
+      "固定额度：只登记审批，预计 3–5 个工作日；审批期间额度不变。",
+      "额度用途：提高可用额度，不改变已出账单金额。",
+    ],
+    cycle: [
+      "生效范围：只影响本账单周期的消费上限。",
+      "生效时间：提交后立即生效。",
+      "不是信用额度：不会提高或降低固定额度。",
+    ],
+    virtual: [
+      "新卡：生成一张独立虚拟卡，不影响实体卡。",
+      "额度：按您填写的日限额生效。",
+    ],
+  }[flow] || [];
+  return `<ul class="card-flow__list">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+    + (flow === "report" || flow === "replace"
+      ? `<p class="muted card-flow__note">卡片：${esc(card.type_label)} · ${esc(card.masked_no)}</p>`
+      : "");
+}
+
+function cardFlowAddressFields() {
+  const form = cardFlowState.form;
+  return `<div class="card-flow__grid">
+    <label class="field"><span class="field__label">寄送地址（可修改）</span>
+      <input class="input" type="text" maxlength="80" value="${esc(form.address || "")}"
+        data-card-flow-field="address" data-card-flow-live="1" /></label>
+    <label class="field"><span class="field__label">邮寄方式</span>
+      <select class="input" data-card-flow-field="mailMethod">
+        <option value="standard" ${form.mailMethod === "standard" ? "selected" : ""}>普通邮寄 · ¥10 · 预计 3–5 个工作日</option>
+        <option value="express" ${form.mailMethod === "express" ? "selected" : ""}>加急 · ¥20 · 预计 1–2 个工作日</option>
+      </select></label>
+  </div>
+  <p class="muted card-flow__note">演示口径：只登记补卡请求与费用，不实际制卡、不实际邮寄。</p>`;
+}
+
+function cardFlowStepOne() {
+  const flow = cardFlowState.flow;
+  const form = cardFlowState.form;
+  const card = cardFlowState.card;
+  if (flow === "freeze" || flow === "report") {
+    const type = flow === "freeze" ? "temporary" : "formal";
+    return `<p class="card-flow__q">先确认挂失类型：</p>
+      ${cardFlowRadio("__type", [
+        ["temporary", "临时冻结（口头挂失）", "可解、免费、5–15 天、到期自动解挂"],
+        ["formal", "正式挂失", "不可逆、可能收费、必须补卡换新卡号"],
+      ], type)}
+      ${flow === "freeze"
+        ? `<div class="card-flow__grid">
+            <label class="field"><span class="field__label">冻结时长</span>
+              <select class="input" data-card-flow-field="days">
+                ${[5, 7, 10, 15].map((day) => `<option value="${day}" ${Number(form.days) === day ? "selected" : ""}>${day} 天</option>`).join("")}
+              </select></label>
+          </div>
+          <p class="card-flow__q">冻结原因：</p>
+          ${cardFlowRadio("lockReason", [
+            ["cant_find", "找不到卡", "先冻住，找到后可线上解挂"],
+            ["suspected_risk", "疑似风险", "担心被人使用"],
+            ["other", "其他", "稍后可在详情里补充"],
+          ], form.lockReason)}`
+        : `<p class="card-flow__q">挂失原因：</p>
+          ${cardFlowRadio("lossReason", [
+            ["lost", "遗失", "卡片丢失，未发现盗刷"],
+            ["stolen", "被盗", "将登记防盗刷处置（演示：只登记风险标记）"],
+            ["other", "其他", "其他原因"],
+          ], form.lossReason)}
+          ${form.lossReason === "stolen" ? '<p class="card-flow__warn">被盗会追加防盗刷提示；演示环境不接真实风控系统。</p>' : ""}`}`;
+  }
+  if (flow === "replace") {
+    return `<p class="card-flow__q">补卡方式：</p>
+      ${card.status === "lost"
+        ? `<p class="card-flow__note">该卡已正式挂失，补卡将换新卡号，旧卡作废。</p>`
+        : cardFlowRadio("withReplace", [
+          ["no", "仅补卡（卡损坏）", "不挂失，直接换一张新卡"],
+          ["yes", "挂失并补卡", "同时正式挂失并换新卡号"],
+        ], form.withReplace)}`;
+  }
+  if (flow === "unlock") {
+    const lock = card.temp_lock || {};
+    return `<div class="card-flow__summary">
+      <p><b>当前状态：</b>${esc(card.status_label)}</p>
+      <p><b>冻结原因：</b>${esc(lock.reason_label || "未说明")}</p>
+      <p><b>到期日：</b>${esc(lock.until || "未提供")}</p>
+      <p class="muted">解挂后消费、取现、转账、代扣立即恢复。</p>
+    </div>
+    <p class="card-flow__q">确认要解挂这张卡吗？</p>`;
+  }
+  if (flow === "debit_limit") {
+    return `<p class="card-flow__q">选择要调整的通道：</p>
+      ${cardFlowRadio("limitKind", [
+        ["atm", "ATM 取现", "现金取款"],
+        ["transfer", "转账", "转出到其他账户"],
+        ["purchase", "消费", "刷卡 / 扫码消费"],
+        ["overseas", "境外", "境外交易"],
+      ], form.limitKind)}
+      ${cardFlowAmountField("新限额（元）", "例如 5000")}`;
+  }
+  if (flow === "credit_limit") {
+    return `<p class="card-flow__q">选择额度类型：</p>
+      ${cardFlowRadio("creditMode", [
+        ["temporary", "临时额度", "立即生效，默认 1 个月后自动恢复"],
+        ["permanent", "固定额度", "需审批 3–5 个工作日，审批期间额度不变"],
+      ], form.creditMode)}
+      ${cardFlowAmountField("申请额度（元）", "例如 10000")}
+      ${form.creditMode === "temporary"
+        ? `<label class="field"><span class="field__label">生效月数</span>
+            <select class="input" data-card-flow-field="months">
+              ${[1, 2, 3].map((month) => `<option value="${month}" ${Number(form.months) === month ? "selected" : ""}>${month} 个月</option>`).join("")}
+            </select></label>`
+        : ""}`;
+  }
+  if (flow === "cycle") {
+    return `<p class="card-flow__q">设置本账单周期的消费限额：</p>
+      ${cardFlowAmountField("账单周期消费限额（元）", "例如 8000")}`;
+  }
+  if (flow === "virtual") {
+    return `<p class="card-flow__q">设置虚拟卡日限额：</p>
+      ${cardFlowAmountField("日限额（元）", "例如 2000")}
+      <p class="muted card-flow__note">虚拟卡与实体卡相互独立；与「补卡」不是同一件事。</p>`;
+  }
+  return "";
+}
+
+function cardFlowStepTwo() {
+  const flow = cardFlowState.flow;
+  const form = cardFlowState.form;
+  if (flow === "replace") return cardFlowAddressFields();
+  if (flow === "report") {
+    return `${cardFlowConsequences()}
+      <p class="card-flow__q">是否同时补卡？</p>
+      ${cardFlowRadio("withReplace", [
+        ["no", "只挂失，暂不补卡", "之后可在卡片上点「申请补卡」"],
+        ["yes", "挂失并补卡", "换新卡号，旧卡作废"],
+      ], form.withReplace)}
+      ${form.withReplace === "yes" ? cardFlowAddressFields() : ""}`;
+  }
+  return cardFlowConsequences();
+}
+
+function cardFlowClientSummary() {
+  const flow = cardFlowState.flow;
+  const form = cardFlowState.form;
+  const card = cardFlowState.card;
+  const cents = cardFlowYuanToCents(form.amountYuan);
+  const rows = [["卡片", `${card.type_label} · ${card.masked_no}`]];
+  if (flow === "freeze") {
+    rows.push(["类型", "临时冻结（口头挂失）"], ["时长", `${form.days} 天`], ["原因", form.lockReason]);
+  } else if (flow === "report") {
+    rows.push(["类型", "正式挂失"], ["原因", form.lossReason], ["是否补卡", form.withReplace === "yes" ? "是" : "否"]);
+    if (form.withReplace === "yes") {
+      rows.push(["地址", form.address], ["邮寄", form.mailMethod === "express" ? "加急 ¥20" : "普通 ¥10"]);
+    }
+  } else if (flow === "replace") {
+    rows.push(["新卡号", "提交后生成"], ["地址", form.address], ["邮寄", form.mailMethod === "express" ? "加急 ¥20" : "普通 ¥10"]);
+  } else if (flow === "unlock") {
+    rows.push(["操作", "解挂"]);
+  } else if (flow === "debit_limit") {
+    rows.push(["通道", CARD_LIMIT_KIND_LABELS[form.limitKind] || form.limitKind], ["新限额", cents == null ? "未填写" : yuan(cents)]);
+  } else if (flow === "credit_limit") {
+    rows.push(["类型", form.creditMode === "temporary" ? `临时额度（${form.months} 个月）` : "固定额度（审批 3–5 个工作日）"], ["金额", cents == null ? "未填写" : yuan(cents)]);
+  } else if (flow === "cycle") {
+    rows.push(["账单周期消费限额", cents == null ? "未填写" : yuan(cents)]);
+  } else if (flow === "virtual") {
+    rows.push(["虚拟卡日限额", cents == null ? "未填写" : yuan(cents)]);
+  }
+  return `<dl class="card-flow__summary">${rows
+    .map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>
+    <p class="muted card-flow__note">点「生成确认单」后由服务端生成计划；红色动作会在本弹窗内下发一次性验证码。</p>`;
+}
+
+function cardFlowServerCard() {
+  const plan = cardFlowState.plan;
+  const rows = (plan.summary || [])
+    .map((row) => `<div><dt>${esc(row.label)}</dt><dd>${esc(row.value)}</dd></div>`).join("");
+  const lines = (plan.lines || []).map((line) => `<li>${esc(stripNo(line))}</li>`).join("");
+  return `<div class="card-flow__plan">
+    <div class="card-flow__plan-head">${sceneLevelChip(plan.level)}
+      <span class="mono tech">cfhash ${esc(String(plan.frozen_hash || "").slice(0, 12))}</span></div>
+    ${rows ? `<dl class="card-flow__summary">${rows}</dl>` : ""}
+    ${lines ? `<ul class="card-flow__list">${lines}</ul>` : ""}
+    <p class="muted card-flow__note">计划已冻结；确认后才会执行。</p>
+    ${cardFlowBranchSwitch()}
+  </div>`;
+}
+
+/* 对话生成的正式挂失计划：在操作上下文里给一次「改选临时冻结」的回退入口。 */
+function cardFlowBranchSwitch() {
+  const plan = cardFlowState.plan;
+  const nodes = (plan && plan.nodes) || [];
+  const action = nodes.length ? String(nodes[0].action || "") : "";
+  const cardId = cardFlowState.card ? cardFlowState.card.card_id : "";
+  if (!cardId) return "";
+  if (action === "card.report_lost") {
+    return `<p class="card-flow__note">如果只是暂时找不到卡，可改选临时冻结（可解、免费、到期自动解挂）。</p>
+      <div class="btn-row"><button class="btn btn--sm btn--warn" type="button"
+        data-card-flow-switch="temp_lock" data-card-id="${esc(cardId)}">改选临时冻结</button></div>`;
+  }
+  if (action === "card.lock") {
+    return `<p class="card-flow__note">如果卡片确认找不回，可改选正式挂失（不可逆，需补卡）。</p>
+      <div class="btn-row"><button class="btn btn--sm btn--danger" type="button"
+        data-card-flow-switch="report_lost" data-card-id="${esc(cardId)}">改选正式挂失</button></div>`;
+  }
+  return "";
+}
+
+function cardFlowChallenge() {
+  const challenge = cardFlowState.challenge;
+  if (!challenge) {
+    return `<div class="card-flow__verify">
+      <p><b>需要强验证</b>：红色动作必须在本弹窗内完成一次性验证码。</p>
+      <p class="muted">演示验证码，非真实人脸 / 短信 / U 盾。</p>
+    </div>`;
+  }
+  return `<div class="card-flow__verify">
+    <p><b>验证码已下发</b> · 通道 ${esc(challenge.channel || "—")} → ${esc(challenge.target || "—")}</p>
+    <p class="muted">有效期 ${esc(String(challenge.expires_in_s || "—"))} 秒${challenge.code ? ` · 演示码 ${esc(challenge.code)}` : ""}</p>
+    <label class="field"><span class="field__label">输入一次性验证码</span>
+      <input class="input" id="card-flow-code" type="text" inputmode="numeric" autocomplete="one-time-code" /></label>
+  </div>`;
+}
+
+function renderCardFlow() {
+  const dialog = el("card-flow-dialog");
+  if (!dialog) return;
+  const flow = cardFlowState.flow;
+  const total = cardFlowTotalSteps();
+  const step = Math.min(Math.max(cardFlowState.step, 1), total);
+  cardFlowState.step = step;
+  const title = el("card-flow-title");
+  const sub = el("card-flow-sub");
+  if (title) title.textContent = CARD_FLOW_TITLES[flow] || "卡片操作";
+  if (sub) {
+    sub.textContent = cardFlowState.card
+      ? `${cardFlowState.card.type_label} · ${cardFlowState.card.masked_no || "卡号未知"} · ${cardFlowState.card.status_label}`
+      : "";
+  }
+  const stepsNode = el("card-flow-steps");
+  if (stepsNode) {
+    stepsNode.innerHTML = (CARD_FLOW_STEPS[flow] || []).map((label, index) => {
+      const no = index + 1;
+      const cls = no === step ? "is-active" : no < step ? "is-done" : "";
+      return `<li class="${cls}"><span>${no}</span>${esc(label)}</li>`;
+    }).join("");
+  }
+  const body = el("card-flow-body");
+  if (body) {
+    if (cardFlowState.result) {
+      body.innerHTML = `<div class="card-flow__result" role="status">
+        <p><b>${esc(cardFlowState.result.message || "操作已完成")}</b></p>
+        ${(cardFlowState.result.items || []).length
+          ? `<ul class="card-flow__list">${cardFlowState.result.items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+          : ""}
+        <p class="muted">回执已记录；卡状态已刷新。</p></div>`;
+    } else if (cardFlowState.mode === "detail") {
+      body.innerHTML = cardFlowDetailHtml();
+    } else if (cardFlowState.mode === "plan" || cardFlowState.plan) {
+      body.innerHTML = cardFlowServerCard()
+        + (cardFlowState.plan.level === "RED" ? cardFlowChallenge() : "");
+    } else if (step === 1) {
+      body.innerHTML = cardFlowStepOne();
+    } else if (step === 2) {
+      body.innerHTML = cardFlowStepTwo();
+    } else {
+      body.innerHTML = cardFlowClientSummary();
+    }
+  }
+  const back = el("card-flow-back");
+  const next = el("card-flow-next");
+  if (back) {
+    back.textContent = step > 1 && cardFlowState.mode !== "plan" && !cardFlowState.result ? "上一步" : "关闭";
+    back.hidden = false;
+  }
+  if (next) {
+    next.hidden = Boolean(cardFlowState.result) || cardFlowState.mode === "detail";
+    next.disabled = cardFlowState.busy;
+    if (cardFlowState.mode === "plan" || cardFlowState.plan) {
+      const red = cardFlowState.plan && cardFlowState.plan.level === "RED";
+      next.textContent = red && !cardFlowState.challenge
+        ? "获取验证码"
+        : cardFlowConfirmLabel();
+    } else if (step < total) {
+      next.textContent = "下一步";
+    } else {
+      next.textContent = "生成确认单";
+    }
+  }
+  cardFlowError("");
+}
+
+function cardFlowDetailHtml() {
+  const card = cardFlowState.card;
+  const lock = card.temp_lock || {};
+  const lost = card.lost || {};
+  const replacement = card.replacement || null;
+  if (cardFlowState.flow === "lock_detail") {
+    return `<dl class="card-flow__summary">
+      <div><dt>状态</dt><dd>${esc(card.status_label)}</dd></div>
+      <div><dt>冻结原因</dt><dd>${esc(lock.reason_label || "未说明")}</dd></div>
+      <div><dt>到期日</dt><dd>${esc(lock.until || "未提供")}</dd></div>
+      <div><dt>剩余天数</dt><dd>${esc(String(lock.days_left == null ? "—" : lock.days_left))} 天</dd></div>
+      <div><dt>解挂</dt><dd>有效期内容可线上解挂；到期自动解挂</dd></div>
+    </dl>`;
+  }
+  return `<dl class="card-flow__summary">
+    <div><dt>状态</dt><dd>${esc(card.status_label)}</dd></div>
+    <div><dt>挂失日期</dt><dd>${esc(lost.at || "未提供")}</dd></div>
+    <div><dt>挂失原因</dt><dd>${esc(lost.reason_label || "未说明")}</dd></div>
+    <div><dt>是否补卡</dt><dd>${replacement ? `已补卡，新卡尾号 ${esc(replacement.new_card_tail || "未知")}` : "尚未补卡"}</dd></div>
+    <div><dt>解挂</dt><dd>${replacement && !lost.at ? "旧卡已停用，新卡可直接使用" : "不可线上解挂；继续用卡请申请补卡"}</dd></div>
+  </dl>`;
+}
+
+function cardFlowConfirmLabel() {
+  const flow = cardFlowState.flow;
+  if (flow === "freeze") return "确认冻结";
+  if (flow === "report") return cardFlowState.form.withReplace === "yes" ? "确认挂失并补卡" : "确认挂失";
+  if (flow === "replace") return "确认补卡";
+  if (flow === "unlock") return "确认解挂";
+  if (flow === "credit_limit") return "确认调整额度";
+  if (flow === "cycle") return "确认设置限额";
+  if (flow === "debit_limit") return "确认调整限额";
+  if (flow === "virtual") return "确认申请";
+  return "确认";
+}
+
+function cardFlowSubmission() {
+  const flow = cardFlowState.flow;
+  const form = cardFlowState.form;
+  const card = cardFlowState.card;
+  const cardId = card.card_id;
+  if (flow === "freeze") {
+    return {
+      utterance: `临时冻结这张卡 ${form.days} 天`,
+      selected: { card: cardId, lock_days: Number(form.days), lock_reason: form.lockReason },
+    };
+  }
+  if (flow === "report") {
+    if (form.withReplace === "yes") {
+      return {
+        utterance: "申请补卡，同时正式挂失",
+        selected: {
+          card: cardId, address: form.address, mail_method: form.mailMethod,
+          replace: "yes", loss_reason: form.lossReason,
+        },
+      };
+    }
+    return {
+      utterance: "正式挂失这张卡",
+      selected: { card: cardId, loss_type: "formal", loss_reason: form.lossReason },
+    };
+  }
+  if (flow === "replace") {
+    return {
+      utterance: "申请补卡",
+      selected: {
+        card: cardId, address: form.address, mail_method: form.mailMethod,
+        replace: form.withReplace, loss_reason: form.lossReason,
+      },
+    };
+  }
+  if (flow === "unlock") {
+    return { utterance: "解挂这张卡", selected: { card: cardId } };
+  }
+  const cents = cardFlowYuanToCents(form.amountYuan);
+  if (cents == null) return { error: "请填写正整数额度（元）" };
+  if (flow === "debit_limit") {
+    return {
+      utterance: `把借记卡${CARD_LIMIT_KIND_LABELS[form.limitKind] || "消费"}限额调到 ${form.amountYuan} 元`,
+      selected: { card: cardId, limit_kind: form.limitKind, daily_limit: cents },
+    };
+  }
+  if (flow === "credit_limit") {
+    return {
+      utterance: form.creditMode === "temporary"
+        ? `申请信用卡临时额度 ${form.amountYuan} 元`
+        : `申请提高信用卡固定额度 ${form.amountYuan} 元`,
+      selected: {
+        card: cardId, credit_mode: form.creditMode, amount: cents,
+        duration_months: Number(form.months),
+      },
+    };
+  }
+  if (flow === "cycle") {
+    return {
+      utterance: `把信用卡账单周期消费限额设为 ${form.amountYuan} 元`,
+      selected: { card: cardId, amount: cents },
+    };
+  }
+  if (flow === "virtual") {
+    return { utterance: `申请虚拟卡，额度 ${form.amountYuan} 元`, selected: { daily_limit: cents } };
+  }
+  return { error: "未识别的操作" };
+}
+
+async function submitCardFlow() {
+  const submission = cardFlowSubmission();
+  if (submission.error) {
+    cardFlowError(submission.error);
+    return;
+  }
+  cardFlowState.busy = true;
+  renderCardFlow();
+  let result;
+  try {
+    result = await post("/api/submit", {
+      utterance: submission.utterance, selected: submission.selected,
+    });
+  } catch (error) {
+    cardFlowState.busy = false;
+    renderCardFlow();
+    cardFlowError(fetchErrorMessage(error, "提交失败，请稍后重试。"));
+    return;
+  }
+  cardFlowState.busy = false;
+  if (result.status !== 200) {
+    renderCardFlow();
+    cardFlowError(String((result.data && result.data.detail) || "服务端拒绝了这次请求"));
+    return;
+  }
+  const data = result.data || {};
+  if (data.state !== "awaiting_confirm" || !data.card) {
+    renderCardFlow();
+    cardFlowError(data.message || "这次操作没有生成可执行计划，请检查填写内容。");
+    return;
+  }
+  cardFlowState.plan = data.card;
+  cardFlowState.step = cardFlowTotalSteps();
+  renderCardFlow();
+  if (data.card.level === "GREEN") await confirmCardFlow();
+}
+
+async function requestCardVerification() {
+  cardFlowState.busy = true;
+  renderCardFlow();
+  let result;
+  try {
+    result = await post("/api/verify/request", {});
+  } catch (error) {
+    cardFlowState.busy = false;
+    renderCardFlow();
+    cardFlowError(fetchErrorMessage(error, "验证码申请失败。"));
+    return;
+  }
+  cardFlowState.busy = false;
+  if (result.status !== 200) {
+    renderCardFlow();
+    cardFlowError(String((result.data && result.data.detail) || "验证码申请被拒绝"));
+    return;
+  }
+  cardFlowState.challenge = result.data;
+  renderCardFlow();
+}
+
+async function confirmCardFlow() {
+  const plan = cardFlowState.plan;
+  if (!plan) return;
+  const codeEl = el("card-flow-code");
+  const code = codeEl ? codeEl.value.trim() : "";
+  if (plan.level === "RED" && !code) {
+    cardFlowError("请输入一次性验证码");
+    return;
+  }
+  cardFlowState.busy = true;
+  renderCardFlow();
+  let result;
+  try {
+    result = await post("/api/confirm", {
+      card_id: plan.card_id,
+      frozen_hash: plan.frozen_hash,
+      verification_code: code || undefined,
+    });
+  } catch (error) {
+    cardFlowState.busy = false;
+    renderCardFlow();
+    cardFlowError(fetchErrorMessage(error, "确认失败，请稍后重试。"));
+    return;
+  }
+  cardFlowState.busy = false;
+  if (result.status !== 200) {
+    renderCardFlow();
+    cardFlowError(String((result.data && result.data.detail) || "确认被拒绝"));
+    return;
+  }
+  const data = result.data || {};
+  const fromChat = cardFlowState.mode === "plan";
+  cardFlowState.result = {
+    message: data.message || "操作已完成",
+    items: (data.results || []).map((item) => resultMessage(item)),
+  };
+  cardFlowState.plan = null;
+  cardFlowState.challenge = null;
+  renderCardFlow();
+  await refreshCards();
+  if (fromChat) {
+    /* 对话里打开的计划卡：把执行回执同步回对话流，避免那边仍显示「待确认」。 */
+    applyExecution(data);
+    await refreshAfterExecution();
+  }
+  if (typeof refreshHomeBalance === "function") refreshHomeBalance().catch(() => {});
+}
+
+async function cardFlowNext() {
+  if (cardFlowState.busy) return;
+  const total = cardFlowTotalSteps();
+  if (cardFlowState.plan) {
+    if (cardFlowState.plan.level === "RED" && !cardFlowState.challenge) {
+      await requestCardVerification();
+      return;
+    }
+    await confirmCardFlow();
+    return;
+  }
+  if (cardFlowState.step < total) {
+    if (cardFlowState.step === 1) {
+      const submission = cardFlowSubmission();
+      if (submission.error) {
+        cardFlowError(submission.error);
+        return;
+      }
+    }
+    cardFlowState.step += 1;
+    renderCardFlow();
+    return;
+  }
+  await submitCardFlow();
+}
+
+function cardFlowBack() {
+  if (cardFlowState.result) {
+    closeCardFlow();
+    return;
+  }
+  if (cardFlowState.step > 1 && cardFlowState.mode !== "plan") {
+    cardFlowState.step -= 1;
+    renderCardFlow();
+    return;
+  }
+  closeCardFlow();
+}
+
+(function bindCardFlow() {
+  const dialog = el("card-flow-dialog");
+  if (!dialog) return;
+  dialog.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest("[data-card-flow-close]")) {
+      closeCardFlow();
+      return;
+    }
+    if (target.closest("#card-flow-back")) {
+      cardFlowBack();
+      return;
+    }
+    if (target.closest("#card-flow-next")) {
+      action(cardFlowNext)();
+      return;
+    }
+    const switchButton = target.closest("[data-card-flow-switch]");
+    if (switchButton) {
+      const kind = switchButton.dataset.cardFlowSwitch;
+      const cardId = switchButton.dataset.cardId;
+      closeCardFlow();
+      if (kind && cardId) openCardFlow(kind, cardId);
+    }
+  });
+  dialog.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
+    const field = target.dataset.cardFlowField;
+    if (!field) return;
+    if (target instanceof HTMLInputElement && target.type === "radio" && !target.checked) return;
+    if (field === "__type") {
+      cardFlowState.flow = target.value === "formal" ? "report" : "freeze";
+      cardFlowState.step = 1;
+      renderCardFlow();
+      return;
+    }
+    cardFlowState.form[field] = target.value;
+    renderCardFlow();
+  });
+  dialog.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (!target.dataset.cardFlowLive) return;
+    cardFlowState.form[target.dataset.cardFlowField] = target.value;
+  });
+})();
+
+/* 关闭扣款协议：卡片按钮 → 确认弹窗 → 页内红色计划卡 → 一次性验证码 →
+   服务端写解约日期并返回对账回执。 */
 function openSubCancelDialog(button) {
   const dialog = el("subscription-cancel-dialog");
   if (!dialog || !button) return;
   const data = button.dataset;
   dialog.dataset.subId = data.subCancel || "";
   const body = el("subscription-cancel-body");
+  const total = data.subTotal
+    ? `已扣 ${esc(data.subCount || "0")} 期 ${yuan(Number(data.subTotal))}`
+    : "累计扣款数据不足";
   if (body) {
-    const period = data.subPeriod ? `本期（${esc(data.subPeriod)}）` : "本期";
-    const periodState = data.subCharged === "1"
-      ? "已扣款" : data.subCharged === "0" ? "尚未扣款" : "扣款状态未知";
-    const last = data.subLast ? ` · 上次扣费 ${esc(data.subLast)}` : "";
-    body.innerHTML = `<p class="sub-cancel-dialog__merchant">${esc(data.subMerchant || "该订阅")}</p>
-      <p class="sub-cancel-dialog__amount">${esc(data.subAmount || "—")}</p>
-      <p class="sub-cancel-dialog__period">${period}${periodState}${last}</p>
-      <p class="muted sub-cancel-dialog__meta">${esc(data.subCycle || "")}扣费 · 下次扣款 ${esc(data.subNext || "未提供")}</p>
-      <p class="muted sub-cancel-dialog__note">取消只在本地把状态改为「已取消订阅」；商户侧是否停止扣费以商户回执为准，本页不承诺已停扣。</p>`;
+    body.innerHTML = `<p class="sub-cancel-dialog__merchant">${esc(data.subMerchant || "该代扣协议")}</p>
+      <p class="sub-cancel-dialog__amount">${esc(data.subAmount || "—")} / ${esc(data.subCycle || "周期未知")}</p>
+      <p class="muted sub-cancel-dialog__meta">${esc(data.subType || "类型未知")} ·
+        协议 ${esc(data.subNo || "未匹配")} · ${esc(data.subSigned || "签约时间未知")} 签约</p>
+      <p class="muted sub-cancel-dialog__meta">${total} · 最近扣款 ${esc(data.subLast || "未知")}
+        · 下次扣款 ${esc(data.subNext || "未知")}（推算）</p>
+      <p class="muted sub-cancel-dialog__note">关闭后这张卡不再向该商户放款；
+        商户是否继续服务、是否停止计费由商户决定。已产生的扣款不会自动退回；
+        关闭后如仍被扣款，可在本页核对并发起追回申请。</p>`;
   }
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
@@ -2305,15 +3914,15 @@ async function confirmSubCancel() {
   if (subscriptionId) await subscriptionPanelTask(subscriptionId);
 }
 
-/* 订阅取消：卡片上的「取消订阅」→ 中文指令 + 订阅 id 控制槽 → 页内计划卡。
-   取消只落本地状态；商户侧是否停扣以回执里的外部状态为准，页内不承诺。 */
+/* 关闭扣款协议：卡片按钮 → 中文指令 + 协议 id 控制槽 → 页内红色计划卡。
+   服务端写解约日期；回执与解约后对账由 /api/confirm 返回。 */
 async function subscriptionPanelTask(subscriptionId) {
   const planHost = el("subscription-plan");
   if (planHost) planHost.hidden = false;
   const planStatus = el("subscription-plan-status");
   if (planStatus) planStatus.hidden = false;
   await sceneRunTask({
-    utterance: "取消这个订阅",
+    utterance: "关闭扣款协议",
     selected: { subscription: subscriptionId },
     host: "subscription-plan",
     status: "subscription-plan-status",
@@ -2326,13 +3935,25 @@ async function subscriptionPanelTask(subscriptionId) {
 const FINDING_LABELS = {
   "duplicate-charge": "疑似重复扣款",
   "price-change": "价格上涨",
-  "hidden-fee": "疑似隐藏费用",
+  "auto-renewal": "自动续费",
   "recurring-subscription": "周期订阅",
   "abnormal-spend": "异常大额",
   "late-night": "深夜交易",
   "remote-city": "异地交易",
 };
 const FINDING_STATUS = { confirmed: "已确认", suspected: "疑似", normal: "正常" };
+const LEAD_STATE_LABELS = { normal: "确认正常", abnormal: "标记异常", ignored: "已忽略" };
+const LEAD_STATE_ACTION_LABELS = { normal: "确认正常", abnormal: "标记异常", ignored: "忽略" };
+
+function confidencePct(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return `${Math.round(number * 100)}%`;
+}
+
+function billTierLabel(tier) {
+  return { key: "高置信", more: "可继续核对", resolved: "已核对", hidden: "未展示" }[tier] || tier;
+}
 
 function findingEvidenceHtml(item) {
   const rows = (item.evidence || []).map((evidence) => {
@@ -2342,99 +3963,299 @@ function findingEvidenceHtml(item) {
   return rows ? `<ul class="evidence">${rows}</ul>` : "";
 }
 
-/* 全部识别线索：挂在「展开完整分析」里；每条只留「结论 + 建议」，判断依据与证据再折叠一层 */
-function billsFindingsHtml(payload) {
-  const findings = payload.findings || [];
-  const source = payload.data_source
-    ? `<p class="muted finding__source">数据来源：${esc(payload.data_source)}</p>`
+function leadBasisHtml(lead) {
+  const rows = (lead.basis || []).map((basis) => `<li>
+    <p><b>${esc(FINDING_LABELS[basis.kind] || basis.label || basis.kind)}</b>
+      <span class="muted">置信度 ${confidencePct(basis.confidence)}</span></p>
+    <p class="muted">规则：${esc(basis.rule || "—")}</p>
+    <p class="muted">阈值：${esc(basis.threshold || "—")}</p>
+    <p>${esc(basis.detail || "")}</p>
+    <p class="muted">${esc(basis.assumption || "")}</p>
+  </li>`).join("");
+  return rows ? `<ul class="lead-basis">${rows}</ul>` : "";
+}
+
+function leadActionsHtml(lead) {
+  const id = esc(lead.lead_id || "");
+  const period = esc(lead.period || "");
+  const txn = esc((lead.txn_ids || [])[0] || "");
+  const states = Object.keys(LEAD_STATE_ACTION_LABELS)
+    .map((state) => `<button class="btn btn--sm btn--ghost" type="button"
+      data-lead-state="${state}" data-lead-id="${id}" data-lead-period="${period}">${LEAD_STATE_ACTION_LABELS[state]}</button>`)
+    .join("");
+  const evidence = lead.evidence || [];
+  const merchant = evidence.length ? evidence[evidence.length - 1].merchant_label : "";
+  const canJump = merchant && (lead.kinds || []).some((kind) =>
+    ["hidden-fee", "auto-renewal", "recurring-subscription"].includes(kind));
+  const jump = canJump
+    ? `<button class="btn btn--sm btn--ghost" type="button" dir="auto"
+      data-nav="scene" data-scene="subscriptions"
+      data-sub-focus="${esc(merchant)}">查看代扣协议</button>`
     : "";
-  if (!findings.length) {
-    return `<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>${source}`;
-  }
-  const rows = findings.map((item) => {
-    const impact = Number(item.impact_cents) || 0;
-    const meta = [
-      impact > 0 ? yuan(impact) : "仅提醒",
-      `置信度 ${confidenceLabel(item.confidence)}`,
-      FINDING_STATUS[item.status] || item.status,
-    ].join(" · ");
-    return `<details class="finding">
-      <summary>
-        <strong>${esc(FINDING_LABELS[item.kind] || item.kind)}</strong>
-        <span class="muted">${esc(meta)}</span>
-      </summary>
-      <p>${esc(item.detail || "")}</p>
-      <p class="muted finding__suggestion">建议：${esc(item.suggestion || "请核对交易明细后自行决定。")}</p>
-      <details class="finding__basis">
-        <summary>判断依据</summary>
-        <p class="muted">${esc(item.assumption || "—")}</p>
-        ${findingEvidenceHtml(item)}
-      </details>
-    </details>`;
-  }).join("");
-  return `<p class="panel__title panel__title--sub">全部识别线索（${findings.length}）</p>
-    ${rows}${source}`;
+  return `<div class="btn-row lead__actions">
+    ${states}
+    <button class="btn btn--sm btn--ghost" type="button" data-lead-txn="${txn}">查看交易详情</button>
+    ${jump}
+    <button class="btn btn--sm" type="button" data-lead-ask="${id}">问 AI</button>
+  </div>`;
+}
+
+function leadHtml(lead) {
+  const labels = (lead.labels || []).map((label) => `<span class="bills-chip bills-chip--tag">${esc(label)}</span>`).join(" ");
+  const state = lead.state ? ` · ${esc(lead.state_label || LEAD_STATE_LABELS[lead.state] || lead.state)}` : "";
+  return `<details class="lead lead--${esc(lead.tier || "more")}">
+    <summary>
+      <span class="lead__labels">${labels}</span>
+      <span class="lead__amt">${yuan(Number(lead.impact_cents) || 0)}</span>
+      <span class="bills-chip bills-chip--${esc(lead.status || "suspected")}">${confidencePct(lead.confidence)}${state}</span>
+    </summary>
+    <p class="muted lead__meta">${esc(billTierLabel(lead.tier))}</p>
+    ${leadBasisHtml(lead)}
+    ${findingEvidenceHtml(lead)}
+    <p class="muted finding__suggestion">建议：${esc(lead.suggestion || "请核对交易明细后自行决定。")}</p>
+    ${leadActionsHtml(lead)}
+  </details>`;
+}
+
+/* 识别线索：按交易去重后分层展示；<50% 不在这里出现。 */
+function billsFindingsHtml(payload) {
+  const leads = payload.leads || [];
+  const key = leads.filter((lead) => lead.tier === "key");
+  const more = leads.filter((lead) => lead.tier === "more");
+  const resolved = leads.filter((lead) => lead.tier === "resolved");
+  const empty = !key.length && !more.length
+    ? '<p class="muted">本期没有高置信待核对线索。识别结果仅供核对，不作最终结论。</p>'
+    : "";
+  return `<section class="bills-leads-block">
+    <div class="scene-head">
+      <p class="panel__title panel__title--sub">重点核对（${key.length}）</p>
+      <span class="muted">置信度 ≥70% 才进入这里</span>
+    </div>
+    ${key.length ? key.map(leadHtml).join("") : empty}
+    ${more.length ? `<details class="bills-more bills-more--inline">
+      <summary>更多线索（${more.length} 条 · 50%–70%）</summary>
+      ${more.map(leadHtml).join("")}
+    </details>` : ""}
+    ${resolved.length ? `<p class="muted bills-resolved">已核对 ${resolved.length} 条，不再重复提示。</p>` : ""}
+  </section>`;
 }
 
 function billsTableHtml(payload) {
   const rows = (payload.transactions || []).map((item) => {
     const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
-    return `<tr><td>${esc(item.booked_on)}${moment ? " " + esc(moment) : ""}</td><td>${esc(item.merchant_label)}</td><td>${esc(item.category)}</td><td>${esc(item.city || "—")}</td><td>${yuan(item.amount_cents)}</td></tr>`;
+    const highlight = state.billsHighlightTxn && item.txn_id === state.billsHighlightTxn
+      ? ' class="is-highlight"'
+      : "";
+    return `<tr${highlight}><td>${esc(item.booked_on)}${moment ? " " + esc(moment) : ""}</td><td>${esc(item.merchant_label)}</td><td>${esc(item.category_l2 || item.category)} <span class="muted">${esc(item.category)}</span></td><td>${esc(item.mcc || "—")}</td><td>${esc(item.city || "—")}</td><td>${yuan(item.amount_cents)}</td></tr>`;
   }).join("");
-  return `<table class="mini-table"><thead><tr><th>时间</th><th>商户</th><th>分类</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows || '<tr><td colspan="5">本期无支出流水</td></tr>'}</tbody></table>`;
+  return `<table class="mini-table"><thead><tr><th>时间</th><th>商户</th><th>二级分类</th><th>MCC</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows || '<tr><td colspan="6">本期无消费流水</td></tr>'}</tbody></table>`;
 }
 
-/* 本期概览：三个数字全部来自 /api/bills/analysis.summary */
+/* 转账 / 还款单列：不进入消费画像，但仍可回读。 */
+function billsTransfersHtml(payload) {
+  const rows = (payload.transfers || []).map((item) => {
+    const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
+    return `<tr><td>${esc(item.booked_on)}${moment ? " " + esc(moment) : ""}</td><td>${esc(item.merchant_label)}</td><td>${esc(item.category)}</td><td>${esc(item.city || "—")}</td><td>${yuan(Math.abs(Number(item.amount_cents) || 0))}</td></tr>`;
+  }).join("");
+  if (!rows) return '<p class="muted">本期没有转账 / 还款等非消费资金流出。</p>';
+  return `<table class="mini-table"><thead><tr><th>时间</th><th>对方 / 商户</th><th>类型</th><th>地点</th><th>金额</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+/* 本期概览：消费 / 收入 / 净现金流 / 待核对，全部来自 /api/bills/analysis.summary */
 function billsMetricsHtml(summary) {
   const item = summary || {};
-  const pending = (Number(item.confirmed_count) || 0) + (Number(item.suspected_count) || 0);
-  return `<div class="stat-metrics">
-    <div class="stat-metric"><span class="stat-metric__k">本期支出</span>
-      <b class="stat-metric__v">${yuan(item.expense_total_cents || 0)}</b></div>
-    <div class="stat-metric"><span class="stat-metric__k">支出笔数</span>
-      <b class="stat-metric__v">${Number(item.transaction_count || 0)} 笔</b></div>
+  const consumption = Number(item.consumption_cents ?? item.expense_total_cents) || 0;
+  const income = Number(item.income_cents) || 0;
+  const net = Number(item.net_cashflow_cents) || 0;
+  const pending = Number(item.lead_count) || 0;
+  const key = Number(item.key_lead_count) || 0;
+  const transfer = Number(item.transfer_count) || 0;
+  const note = transfer
+    ? `<p class="muted bills-metrics__note">另有 ${transfer} 笔转账 / 还款等 ${yuan(item.transfer_out_cents || 0)}，不计入消费。</p>`
+    : "";
+  return `<div class="stat-metrics stat-metrics--4">
+    <div class="stat-metric"><span class="stat-metric__k">本期消费</span>
+      <b class="stat-metric__v">${yuan(consumption)}</b>
+      <span class="muted">${Number(item.consumption_count) || 0} 笔</span></div>
+    <div class="stat-metric"><span class="stat-metric__k">本期收入</span>
+      <b class="stat-metric__v">${yuan(income)}</b></div>
+    <div class="stat-metric${net < 0 ? " stat-metric--over" : ""}"><span class="stat-metric__k">净现金流</span>
+      <b class="stat-metric__v">${yuan(net)}</b></div>
     <div class="stat-metric${pending ? " stat-metric--warn" : ""}">
       <span class="stat-metric__k">待核对</span>
-      <b class="stat-metric__v">${pending} 项</b></div>
+      <b class="stat-metric__v">${pending} 条</b>
+      <span class="muted">其中高置信 ${key} 条</span></div>
+  </div>${note}`;
+}
+
+function billsBudgetHtml(payload) {
+  const budget = payload.budget || {};
+  const options = payload.category_options || [];
+  const l1 = Array.from(new Set(options.map((item) => item.category_l1)));
+  const categoryBudgets = {};
+  (budget.categories || []).forEach((item) => {
+    categoryBudgets[item.category] = Number(item.budget_cents) || 0;
+  });
+  const form = `<details class="budget-set budget-set--block" ${budget.needs_setup ? "open" : ""}>
+    <summary>本月预算${budget.needs_setup ? " · 尚未设置" : ""}</summary>
+    <div class="budget-set__row">
+      <label class="budget-set__label" for="budget-input">总额（元）</label>
+      <input class="input input--amount" id="budget-input" type="number" min="0" step="1"
+             placeholder="如 8000" inputmode="decimal"
+             value="${budget.total_cents ? esc(String(budget.total_cents / 100)) : ""}" />
+      <button class="btn btn--sm btn--primary" type="button" data-action="save-budget">保存</button>
+      <span class="muted budget-set__status" id="budget-status">仅用于提醒，不是转账限额。</span>
+    </div>
+    <div class="budget-cats">
+      ${l1.map((category) => `<label class="budget-cat">
+        <span>${esc(category)}</span>
+        <input class="input input--amount" type="number" min="0" step="1" inputmode="decimal"
+               data-budget-category="${esc(category)}"
+               placeholder="不设"
+               value="${categoryBudgets[category] ? esc(String(categoryBudgets[category] / 100)) : ""}" />
+      </label>`).join("")}
+    </div>
+    <p class="muted budget-set__hint">分类预算可选；超支时对应分类会高亮。</p>
+  </details>`;
+  if (budget.needs_setup || budget.total_cents == null) {
+    return `<section class="budget-panel">${form}</section>`;
+  }
+  const total = Number(budget.total_cents) || 0;
+  const spent = Number(budget.spent_cents) || 0;
+  const pct = total > 0 ? Math.min(Math.round((spent / total) * 100), 100) : 0;
+  const over = Boolean(budget.over_budget);
+  const remaining = Number(budget.remaining_cents) || 0;
+  const daily = budget.daily_available_cents;
+  const catRows = (budget.categories || []).map((item) => {
+    const catPct = item.budget_cents > 0
+      ? Math.min(Math.round((item.spent_cents / item.budget_cents) * 100), 100)
+      : 0;
+    return `<li class="budget-cat-row${item.over ? " is-over" : ""}">
+      <span class="budget-cat-row__k">${esc(item.category)}</span>
+      <span class="bill__bar-track budget-cat-row__bar"><i style="width:${catPct}%"></i></span>
+      <span class="budget-cat-row__v">${yuan(item.spent_cents)} / ${yuan(item.budget_cents)}</span>
+      <span class="budget-cat-row__left">${item.over ? `超 ${yuan(Math.abs(item.remaining_cents))}` : `剩 ${yuan(item.remaining_cents)}`}</span>
+    </li>`;
+  }).join("");
+  return `<section class="budget-panel">
+    <div class="scene-head">
+      <p class="panel__title panel__title--sub">本月预算</p>
+      <span class="muted">${budget.days_left ? `还剩 ${budget.days_left} 天` : "账期已结束"}</span>
+    </div>
+    <div class="stat-metrics stat-metrics--3">
+      <div class="stat-metric"><span class="stat-metric__k">已花</span><b class="stat-metric__v">${yuan(spent)}</b></div>
+      <div class="stat-metric${over ? " stat-metric--over" : ""}"><span class="stat-metric__k">${over ? "已超支" : "剩余"}</span>
+        <b class="stat-metric__v">${yuan(Math.abs(remaining))}</b></div>
+      <div class="stat-metric"><span class="stat-metric__k">日均可用</span>
+        <b class="stat-metric__v">${typeof daily === "number" ? yuan(daily) : "—"}</b></div>
+    </div>
+    <span class="bill__bar-track budget__bar${over ? " budget__bar--over" : ""}" role="img" aria-label="预算已用 ${pct}%"><i style="width:${pct}%"></i></span>
+    ${catRows ? `<ul class="budget-cat-list">${catRows}</ul>` : ""}
+    ${form}
+  </section>`;
+}
+
+function billsMomHtml(payload, period) {
+  const points = payload.trend || [];
+  const point = points.find((item) => item.period === period);
+  if (!point) return "";
+  if (!point.mom) {
+    return `<div class="bills-mom"><p class="muted">${esc(point.period)} 没有上一账期可比数据。</p></div>`;
+  }
+  const change = Number(point.mom.change_cents) || 0;
+  const pct = point.mom.change_pct === null ? "—" : `${Math.abs(Number(point.mom.change_pct)).toFixed(1)}%`;
+  const direction = change >= 0 ? "增加" : "减少";
+  const contributions = (point.mom.contributions || []).slice(0, 5).map((item) => {
+    const amount = Number(item.change_cents) || 0;
+    return `<li><span>${esc(item.category)}</span><b class="${amount >= 0 ? "is-up" : "is-down"}">${amount >= 0 ? "+" : "-"}${yuan(Math.abs(amount))}</b></li>`;
+  }).join("");
+  return `<div class="bills-mom" data-mom-period="${esc(point.period)}">
+    <p><b>${esc(point.period)}</b> 比 ${esc(point.mom.previous_period)} ${direction}
+      <b class="${change >= 0 ? "is-up" : "is-down"}">${yuan(Math.abs(change))}</b>
+      <span class="muted">（${change >= 0 ? "+" : "-"}${pct}）</span></p>
+    ${contributions ? `<ul class="bills-mom__list">${contributions}</ul>` : '<p class="muted">各分类变化不大。</p>'}
   </div>`;
 }
 
-/* 用户画像：只作概览下面的一行补充，不单独占一张卡（与「本期概览」三指标同屏） */
-function billsProfileHtml(profile) {
-  const item = profile || {};
-  const top = item.top_category
-    ? `${esc(item.top_category)} ${Math.round(Number(item.top_category_share || 0) * 100)}%`
-    : "本期无分类支出";
-  const subscription = `${yuan(item.subscription_monthly_cents || 0)}/月`;
-  const suspicious = `${Number(item.suspicious_count || 0)} 条`;
-  return `<p class="muted scene-hint">消费结构 ${top} · 订阅 ${subscription} · 大额可疑 ${suspicious}</p>`;
-}
-
-/* 两张图：左「分类占比」环形图，右「近 6 月支出趋势」折线；宽屏两栏、窄屏上下（见 .scene-charts） */
 function billsChartsHtml(payload) {
   const share = (payload.category_share || [])
-    .slice(0, 6)
-    .map((item) => ({ label: item.category, value: item.expense_cents || 0 }));
+    .slice(0, 8)
+    .map((item) => ({ label: item.category, value: item.expense_cents || 0, note: item.category_l1 || "" }));
   const trend = (payload.trend || []).map((point) => ({
     label: `${String(point.period || "").slice(5) || "—"}月`,
     value: point.expense_cents || 0,
+    secondary: point.income_cents || 0,
+    period: point.period || "",
   }));
   const last = (payload.trend || [])[(payload.trend || []).length - 1];
-  return `<div class="scene-charts">
+  const selected = state.billsTrendPeriod || (last ? last.period : "");
+  return `<div class="scene-charts scene-charts--bills">
     <section>
-      <p class="panel__title panel__title--sub">分类占比</p>
-      ${donutChartHtml(share, { label: "本期支出分类占比", empty: "本期无分类支出。" })}
-    </section>
-    <section>
-      <p class="panel__title panel__title--sub">近 6 月支出趋势</p>
+      <p class="panel__title panel__title--sub">收支趋势（近 6 月）</p>
       ${lineChartHtml(trend, {
-        label: "近 6 月支出趋势",
+        label: "近 6 月收支趋势",
         empty: "暂无趋势数据。",
         formatValue: (cents) => `¥${Math.round((Number(cents) || 0) / 100).toLocaleString("zh-CN")}`,
-        note: last ? `最近一月 ${yuan(last.expense_cents || 0)}` : "",
+        primaryLabel: "消费",
+        secondaryLabel: "收入",
+        clickable: true,
       })}
+      <p class="muted chart-line__note">点趋势点查看该月分类贡献。</p>
+      ${billsMomHtml(payload, selected)}
+    </section>
+    <section>
+      <p class="panel__title panel__title--sub">分类占比（二级）</p>
+      ${donutChartHtml(share, { label: "本期消费二级分类占比", empty: "本期无消费分类。" })}
     </section>
   </div>`;
+}
+
+function billsMerchantsHtml(payload) {
+  const items = (payload.top_merchants || []).slice();
+  if (!items.length) return '<p class="muted">本期没有可排行的商户消费。</p>';
+  const sort = state.billsMerchantSort === "count" ? "count" : "amount";
+  items.sort((a, b) => sort === "count"
+    ? (Number(b.count) - Number(a.count)) || (Number(b.amount_cents) - Number(a.amount_cents))
+    : (Number(b.amount_cents) - Number(a.amount_cents)) || (Number(b.count) - Number(a.count)));
+  const rows = items.map((item, index) => `<li class="merchant-row">
+    <span class="merchant-row__rank">${index + 1}</span>
+    <span class="merchant-row__name">${esc(item.merchant_label)}
+      <span class="muted">${esc(item.category_l2)} · MCC ${esc(item.mcc)}</span></span>
+    <span class="merchant-row__count">${Number(item.count) || 0} 笔</span>
+    <span class="merchant-row__amt">${yuan(item.amount_cents)}</span>
+    <button class="btn btn--sm btn--ghost" type="button"
+      data-bills-category-edit="${esc(item.merchant_key)}"
+      data-merchant-label="${esc(item.merchant_label)}"
+      data-merchant-category="${esc(item.category_l2)}">改分类</button>
+  </li>`).join("");
+  return `<section class="bills-merchants">
+    <div class="scene-head">
+      <p class="panel__title panel__title--sub">Top 商户</p>
+      <div class="btn-row">
+        <button class="btn btn--sm ${sort === "amount" ? "btn--primary" : "btn--ghost"}" type="button" data-merchant-sort="amount">按金额</button>
+        <button class="btn btn--sm ${sort === "count" ? "btn--primary" : "btn--ghost"}" type="button" data-merchant-sort="count">按笔数</button>
+      </div>
+    </div>
+    <ul class="merchant-list">${rows}</ul>
+  </section>`;
+}
+
+function billsAutoRenewHtml(payload) {
+  const rows = (payload.auto_renewals || []).map((item) => {
+    const label = FINDING_LABELS[item.kind] || item.kind;
+    const amount = Number(item.impact_cents) || 0;
+    const action = item.kind === "auto-renewal"
+      ? '<button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="subscriptions">管理自动续费</button>'
+      : '<button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="subscriptions">查看订阅</button>';
+    return `<li class="autorenew-row">
+      <div><b>${esc(label)}</b> <span class="muted">${esc((item.evidence || [])[0] ? item.evidence[0].merchant_label : "")}</span></div>
+      <p class="muted">${esc(item.detail || "")}</p>
+      <div class="btn-row"><span class="muted">${amount > 0 ? `单期 ${yuan(amount)}` : ""}</span>${action}</div>
+    </li>`;
+  }).join("");
+  return rows
+    ? `<ul class="autorenew-list">${rows}</ul>`
+    : '<p class="muted">本期未识别到未登记的自动续费；已登记订阅可在订阅页查看。</p>';
 }
 
 /* 结论行：优先服务端叙事摘要；`narrative` 缺失或降级（degraded=true）时回退本地确定性结论 */
@@ -2445,37 +4266,12 @@ function billsVerdictText(payload) {
   return billVerdict(payload.summary || {});
 }
 
-/* 首屏「重点核对」：只留影响金额最大的 2 条，一行一条（名称 + 金额 + 状态 chip）；
-   完整清单在「展开完整分析」里，同一份 findings 不重复展开 */
-function billsTopHtml(payload) {
-  const risky = (payload.findings || [])
-    .filter((item) => item.status !== "normal")
-    .sort((a, b) => (Number(b.impact_cents) || 0) - (Number(a.impact_cents) || 0))
-    .slice(0, 2);
-  if (!risky.length) {
-    return '<p class="muted">暂无需要优先核对的可疑项。</p>';
-  }
-  const rows = risky.map((item) => {
-    const amount = Number(item.impact_cents) > 0 ? yuan(item.impact_cents) : "仅提醒";
-    const status = item.status === "confirmed" ? "confirmed" : "suspected";
-    return `<li class="bills-focus">
-      <span class="bills-focus__name">${esc(FINDING_LABELS[item.kind] || item.kind)}</span>
-      <span class="bills-focus__amt">${esc(amount)}</span>
-      <span class="bills-chip bills-chip--${status}">${esc(FINDING_STATUS[item.status] || item.status)}</span>
-    </li>`;
-  }).join("");
-  return `<ul class="bills-focus-list">${rows}</ul>`;
-}
-
-/* 首屏结论卡：结论行 + 3 个指标 + 最多 2 条重点核对（其余都收进折叠区） */
 function billsConclusionHtml(payload) {
   const degraded = payload.narrative && payload.narrative.degraded
     ? '<p class="muted scene-hint">文字说明暂不可用，以下为明细数据。</p>'
     : "";
   return `<p class="bills-verdict">${esc(billsVerdictText(payload))}</p>
     ${billsMetricsHtml(payload.summary || {})}
-    <p class="panel__title panel__title--sub">重点核对</p>
-    ${billsTopHtml(payload)}
     ${degraded}`;
 }
 
@@ -2483,17 +4279,16 @@ function billsLoading() {
   const status = el("bills-status");
   if (status) status.textContent = "正在读取账单识别结果…";
   const skeleton = '<span class="skeleton"></span><span class="skeleton"></span>';
-  ["bills-summary", "bills-profile", "bills-charts", "bills-findings"].forEach((id) => {
+  ["bills-summary", "bills-budget", "bills-charts", "bills-merchants", "bills-leads"].forEach((id) => {
     const node = el(id);
-    if (node) node.innerHTML = id === "bills-profile" ? "" : skeleton;
+    if (node) node.innerHTML = skeleton;
   });
   const table = el("bills-table");
   if (table) table.innerHTML = "";
 }
 
 function billsFailure(message) {
-  /* 失败提示放回首屏（折叠区里的提示默认看不到） */
-  ["bills-profile", "bills-charts", "bills-findings", "bills-table"].forEach((id) => {
+  ["bills-budget", "bills-charts", "bills-merchants", "bills-leads", "bills-autorenew", "bills-table", "bills-transfers-table"].forEach((id) => {
     const node = el(id);
     if (node) node.innerHTML = "";
   });
@@ -2502,14 +4297,17 @@ function billsFailure(message) {
 
 function billsEmpty(payload) {
   const card = `<article class="state-card">
-    <p class="state-card__k">本期无支出流水</p>
-    <p class="muted">${esc(payload.period)} 没有支出交易，暂不生成画像与图表。</p>
+    <p class="state-card__k">本期无消费流水</p>
+    <p class="muted">${esc(payload.period)} 没有消费交易；转账/还款等不计入消费分析。</p>
   </article>`;
   el("bills-summary").innerHTML = card;
-  el("bills-profile").innerHTML = "";
+  el("bills-budget").innerHTML = billsBudgetHtml(payload);
   el("bills-charts").innerHTML = "";
-  el("bills-findings").innerHTML = '<p class="muted">本期未命中识别规则；未发现不等于不存在。</p>';
+  el("bills-merchants").innerHTML = "";
+  el("bills-leads").innerHTML = '<p class="muted">本期没有需要核对的线索。</p>';
+  el("bills-autorenew").innerHTML = "";
   el("bills-table").innerHTML = billsTableHtml(payload);
+  el("bills-transfers-table").innerHTML = billsTransfersHtml(payload);
 }
 
 /* ---------------- 账期切换：本月（服务端当月）/ 上月 / 指定月份 ----------------
@@ -2522,15 +4320,35 @@ function billsPreviousPeriod(ref) {
     : { year: ref.year, month: ref.month - 1 };
 }
 
-/* 服务端「当月」：优先用上次返回的 data_through（当月与今日取小），拿不到才用本地日期 */
+/* 服务端「当月」：优先用返回的 server_month，其次 data_through，最后本地日期 */
 function billsServerMonth() {
   const payload = state.bills;
+  if (payload && typeof payload.server_month === "string") {
+    const matched = /^(\d{4})-(\d{2})$/.exec(payload.server_month);
+    if (matched) return { year: Number(matched[1]), month: Number(matched[2]) };
+  }
   if (payload && payload.period_basis === "current_month" && typeof payload.data_through === "string") {
     const matched = /^(\d{4})-(\d{2})/.exec(payload.data_through);
     if (matched) return { year: Number(matched[1]), month: Number(matched[2]) };
   }
   const now = new Date();
   return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+function billsMonthOptions() {
+  const server = billsServerMonth();
+  let year = server.year;
+  let month = server.month;
+  const options = [];
+  for (let index = 0; index < 24; index += 1) {
+    options.push(`${year}-${String(month).padStart(2, "0")}`);
+    month -= 1;
+    if (month === 0) {
+      month = 12;
+      year -= 1;
+    }
+  }
+  return options;
 }
 
 /* 同一账期共用一个计数键，用来算「含今日新增 N 笔」的差值 */
@@ -2560,13 +4378,23 @@ function syncBillsPeriodControl() {
   });
   const pick = el("bills-period-month");
   if (!pick) return;
+  const current = pick.value;
+  const options = billsMonthOptions();
+  const expected = ["", ...options].join("|");
+  if (pick.dataset.options !== expected) {
+    pick.innerHTML = '<option value="">请选择年月</option>' + options.map((value) => {
+      const [year, month] = value.split("-");
+      return `<option value="${value}">${year} 年 ${Number(month)} 月</option>`;
+    }).join("");
+    pick.dataset.options = expected;
+  }
   pick.value = state.billsPeriodChoice === "explicit" && state.billsPeriod
     ? `${state.billsPeriod.year}-${String(state.billsPeriod.month).padStart(2, "0")}`
     : "";
+  if (pick.value !== current && document.activeElement === pick) pick.blur();
 }
 
-/* 「含今日新增 N 笔」只在 period_basis=current_month 且拿到同账期差值时显示；
-   拿不到差值只写「截至 data_through」，不编造数字。 */
+/* 本月只显示「含今日新增 N 笔」；显式月份才显示截至日，避免同一语义写两遍。 */
 function renderBillsPeriodHint(payload, count, previousCount) {
   const hint = el("bills-period-hint");
   if (!hint) return;
@@ -2577,7 +4405,7 @@ function renderBillsPeriodHint(payload, count, previousCount) {
       && count > previousCount) {
     parts.push(`含今日新增 ${count - previousCount} 笔`);
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(through)) {
+  if (payload.period_basis === "explicit" && /^\d{4}-\d{2}-\d{2}$/.test(through)) {
     parts.push(`截至 ${through.slice(5)}`);
   }
   hint.textContent = parts.join(" · ");
@@ -2618,27 +4446,292 @@ async function refreshBills() {
   const payload = result.data;
   state.bills = payload;
   const summary = payload.summary || {};
-  const count = Number(summary.transaction_count) || 0;
-  const pending = (Number(summary.confirmed_count) || 0) + (Number(summary.suspected_count) || 0);
+  const count = Number(summary.consumption_count ?? summary.transaction_count) || 0;
+  const transfer = Number(summary.transfer_count) || 0;
+  const pending = Number(summary.lead_count) || 0;
   const previousCount = state.billsPeriodCounts[request.key];
   state.billsPeriodCounts[request.key] = count;
-  el("bills-status").textContent = `${payload.period} · ${count} 笔 · ${pending} 项待核对`
-    + (payload.data_source_is_demo ? " · 演示数据" : "");
+  el("bills-status").textContent = [
+    payload.period,
+    `消费 ${count} 笔`,
+    transfer ? `转账 ${transfer} 笔` : "",
+    `待核对 ${pending} 条`,
+  ].filter(Boolean).join(" · ");
   renderBillsPeriodHint(payload, count, previousCount);
+  const demoBanner = el("bills-demo-banner");
+  if (demoBanner) demoBanner.hidden = !payload.data_source_is_demo;
   const disclaimer = el("bills-disclaimer");
-  disclaimer.hidden = false;
-  disclaimer.textContent = payload.data_source_is_demo
-    ? "演示数据 · 识别结果只作核对线索，不当作已确认；未发现不等于不存在。"
-    : "识别结果只作核对线索，不当作已确认；未发现不等于不存在。";
+  if (disclaimer) {
+    disclaimer.hidden = false;
+    disclaimer.textContent = "识别结果供核对，不作最终结论。";
+  }
   if (!(payload.transactions || []).length) {
     billsEmpty(payload);
     return;
   }
+  const trend = payload.trend || [];
+  const periods = trend.map((point) => point.period);
+  if (!periods.includes(state.billsTrendPeriod)) {
+    state.billsTrendPeriod = periods.length ? periods[periods.length - 1] : "";
+  }
   el("bills-summary").innerHTML = billsConclusionHtml(payload);
-  el("bills-profile").innerHTML = billsProfileHtml(payload.profile);
+  el("bills-budget").innerHTML = billsBudgetHtml(payload);
   el("bills-charts").innerHTML = billsChartsHtml(payload);
-  el("bills-findings").innerHTML = billsFindingsHtml(payload);
+  el("bills-merchants").innerHTML = billsMerchantsHtml(payload);
+  el("bills-leads").innerHTML = billsFindingsHtml(payload);
+  el("bills-autorenew").innerHTML = billsAutoRenewHtml(payload);
   el("bills-table").innerHTML = billsTableHtml(payload);
+  el("bills-transfers-table").innerHTML = billsTransfersHtml(payload);
+}
+
+function billsLeadById(leadId) {
+  return (state.bills && state.bills.leads ? state.bills.leads : [])
+    .find((lead) => lead.lead_id === leadId) || null;
+}
+
+async function setBillLeadState(leadId, period, leadState) {
+  const status = el("bills-status");
+  if (status) status.textContent = "正在记录核对结果…";
+  const result = await post(`/api/bills/leads/${encodeURIComponent(leadId)}`, {
+    period,
+    state: leadState,
+  });
+  if (!result.ok) {
+    if (status) status.textContent = (result.data && result.data.detail) || "记录失败，请稍后重试。";
+    return;
+  }
+  await refreshBills();
+}
+
+function askBillLead(leadId) {
+  const lead = billsLeadById(leadId);
+  if (!lead) return;
+  const evidence = (lead.evidence || [])[0] || {};
+  const moment = evidence.booked_at ? String(evidence.booked_at).slice(0, 16).replace("T", " ") : evidence.booked_on || "";
+  const basis = (lead.basis || []).map((item) => item.rule).filter(Boolean).join("；");
+  const amount = yuan(Number(lead.impact_cents) || 0);
+  state.pendingBillLead = {
+    lead_id: lead.lead_id,
+    period: lead.period,
+    merchant: evidence.merchant_label || "",
+    amount_cents: lead.impact_cents,
+    txn_ids: lead.txn_ids || [],
+  };
+  const input = el("utterance");
+  if (input) {
+    input.value = `账单里这条线索：${moment} ${evidence.merchant_label || ""} ${amount}，`
+      + `标签「${(lead.labels || []).join("、")}」。系统依据：${basis || "—"}。`
+      + "这笔为什么可疑？我该怎么核对？";
+  }
+  navigate("chat", {});
+  if (input) window.setTimeout(() => input.focus(), 0);
+}
+
+function openBillCategoryDialog(button) {
+  const dialog = el("bills-category-dialog");
+  const select = el("bills-category-select");
+  if (!dialog || !select) return;
+  const options = (state.bills && state.bills.category_options) || [];
+  const grouped = new Map();
+  options.forEach((item) => {
+    if (!grouped.has(item.category_l1)) grouped.set(item.category_l1, []);
+    grouped.get(item.category_l1).push(item);
+  });
+  select.innerHTML = Array.from(grouped.entries()).map(([l1, rows]) =>
+    `<optgroup label="${esc(l1)}">${rows.map((row) =>
+      `<option value="${esc(row.category_l2)}">${esc(row.category_l2)} · MCC ${esc(row.mcc)}</option>`).join("")}</optgroup>`
+  ).join("");
+  select.value = button.dataset.merchantCategory || "";
+  state.billCategoryTarget = {
+    merchant_key: button.dataset.billsCategoryEdit || "",
+    label: button.dataset.merchantLabel || "",
+  };
+  const name = el("bills-category-merchant");
+  if (name) name.textContent = `商户：${button.dataset.merchantLabel || "—"}`;
+  const hint = el("bills-category-hint");
+  if (hint) hint.textContent = `MCC 建议归类：${button.dataset.merchantCategory || "—"}（演示映射，不含用户占比）。保存后会记住该商户的归类。`;
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeBillCategoryDialog() {
+  const dialog = el("bills-category-dialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function saveBillCategory() {
+  const select = el("bills-category-select");
+  const target = state.billCategoryTarget;
+  if (!select || !target) return;
+  const result = await post("/api/bills/category-override", {
+    merchant_key: target.merchant_key,
+    category: select.value,
+  });
+  if (!result.ok) {
+    const hint = el("bills-category-hint");
+    if (hint) hint.textContent = (result.data && result.data.detail) || "保存失败，请稍后重试。";
+    return;
+  }
+  closeBillCategoryDialog();
+  await refreshBills();
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function exportBillsCsv() {
+  const payload = state.bills;
+  if (!payload) return;
+  const header = ["日期", "时间", "商户", "一级分类", "二级分类", "MCC", "金额(元)", "城市", "类型"];
+  const rows = (payload.transactions || []).map((item) => {
+    const bookedAt = item.booked_at ? String(item.booked_at) : "";
+    return [
+      item.booked_on || "",
+      bookedAt.includes("T") ? bookedAt.slice(11, 16) : "",
+      item.merchant_label || "",
+      item.category || "",
+      item.category_l2 || "",
+      item.mcc || "",
+      ((Number(item.amount_cents) || 0) / 100).toFixed(2),
+      item.city || "",
+      "消费",
+    ];
+  });
+  (payload.transfers || []).forEach((item) => {
+    const bookedAt = item.booked_at ? String(item.booked_at) : "";
+    rows.push([
+      item.booked_on || "",
+      bookedAt.includes("T") ? bookedAt.slice(11, 16) : "",
+      item.merchant_label || "",
+      item.category || "转账",
+      "",
+      "",
+      (Math.abs(Number(item.amount_cents) || 0) / 100).toFixed(2),
+      item.city || "",
+      "转账/还款（不计入消费）",
+    ]);
+  });
+  const csv = "\uFEFF" + [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `账单-${payload.period || "本期"}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/* 「问 AI」的追问：在对话里按识别规则解释这条线索，不进入交易筛选计划。 */
+function billLeadQuestionText(text) {
+  if (!state.pendingBillLead) return false;
+  return /(为什么|怎么|如何|可疑|解释|核对|怎么办|啥意思|原因)/.test(text);
+}
+
+async function submitBillLeadQuestion(text) {
+  const context = state.pendingBillLead;
+  if (!context) return;
+  const lead = billsLeadById(context.lead_id) || {
+    lead_id: context.lead_id,
+    period: context.period,
+    labels: [],
+    confidence: "0",
+    impact_cents: context.amount_cents,
+    basis: [],
+    suggestion: "",
+    txn_ids: context.txn_ids || [],
+  };
+  beginTask(text);
+  state.phase = "idle";
+  el("utterance").value = "";
+  const evidence = (lead.evidence || [])[0] || {};
+  const moment = evidence.booked_at
+    ? String(evidence.booked_at).slice(0, 16).replace("T", " ")
+    : "";
+  state.panel = `<div class="takeover">
+    <p><b>这条线索为什么需要核对</b></p>
+    <p class="muted">${esc(moment)} · ${esc(evidence.merchant_label || context.merchant || "")} · ${yuan(Number(lead.impact_cents) || 0)} · 置信度 ${confidencePct(lead.confidence)}</p>
+    ${leadBasisHtml(lead)}
+    ${findingEvidenceHtml(lead)}
+    <p class="muted">建议：${esc(lead.suggestion || "先核对商户与用途；如非本人操作，再锁卡并联系银行。")}</p>
+    <p class="muted">以上解释来自识别规则与流水事实，不是对交易的最终定性。</p>
+    <div class="btn-row">
+      ${["normal", "abnormal", "ignored"].map((item) => `<button class="btn btn--sm btn--ghost" type="button"
+        data-chat-lead-state="${item}" data-chat-lead-id="${esc(lead.lead_id)}"
+        data-chat-lead-period="${esc(lead.period || context.period)}">${LEAD_STATE_ACTION_LABELS[item]}</button>`).join("")}
+      <button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="bills">回到账单分析</button>
+    </div>
+  </div>`;
+  renderStage();
+  timelineAdd("已按识别规则解释该线索", "done");
+}
+
+async function applyChatLeadState(leadState) {
+  const context = state.pendingBillLead;
+  if (!context || !leadState) return;
+  const result = await post(`/api/bills/leads/${encodeURIComponent(context.lead_id)}`, {
+    period: context.period,
+    state: leadState,
+  });
+  const message = result.ok
+    ? `已把这条线索标记为「${LEAD_STATE_LABELS[leadState] || leadState}」，之后不再重复提示。`
+    : (result.data && result.data.detail) || "记录失败，请稍后重试。";
+  state.panel = `<div class="takeover">
+    <p><b>${result.ok ? "已记录核对结果" : "未能记录"}</b></p>
+    <p class="muted">${esc(message)}</p>
+    <div class="btn-row">
+      <button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="bills">回到账单分析</button>
+    </div>
+  </div>`;
+  renderStage();
+  timelineAdd(message, result.ok ? "done" : "stop");
+  if (result.ok) {
+    state.pendingBillLead = null;
+    refreshBills().catch(() => {});
+  }
+}
+
+/* 用户对线索说「这笔是我转给朋友的」时，走确定性回写，不进入转账计划。 */
+function billLeadResolutionState(text) {
+  if (!state.pendingBillLead) return null;
+  if (/\d+(\.\d+)?\s*(元|块)/.test(text)) return null;
+  if (/(不是我|盗刷|异常|报警|冻结|被骗)/.test(text)) return "abnormal";
+  if (/(忽略|不用管|别管)/.test(text)) return "ignored";
+  if (/(转给|朋友|家人|本人|正常|我买的|我知道|还款)/.test(text)) return "normal";
+  return null;
+}
+
+async function submitBillLeadResolution(text, leadState) {
+  const lead = state.pendingBillLead;
+  if (!lead) return;
+  beginTask(text);
+  state.phase = "idle";
+  el("utterance").value = "";
+  const result = await post("/api/bills/lead-resolution", {
+    lead_id: lead.lead_id,
+    period: lead.period,
+    utterance: text,
+  });
+  const message = result.ok
+    ? (result.data && result.data.message) || "已记录核对结果。"
+    : (result.data && result.data.detail) || "记录失败，请稍后重试。";
+  state.panel = `<div class="takeover">
+    <p><b>${result.ok ? "已记录核对结果" : "未能记录"}</b></p>
+    <p class="muted">${esc(message)}</p>
+    <p class="muted">线索：${esc(lead.merchant || "")} · ${yuan(lead.amount_cents || 0)} · ${esc(lead.period || "")}</p>
+    <div class="btn-row">
+      <button class="btn btn--sm btn--ghost" type="button" data-nav="scene" data-scene="bills">回到账单分析</button>
+    </div>
+  </div>`;
+  renderStage();
+  timelineAdd(result.ok ? `线索已标记为${LEAD_STATE_LABELS[leadState] || leadState}` : message, result.ok ? "done" : "stop");
+  state.pendingBillLead = null;
+  if (result.ok) refreshBills().catch(() => {});
 }
 
 if (el("bills-period")) {
@@ -2667,6 +4760,75 @@ if (el("bills-period")) {
       refreshBills().catch(() => {});
     });
   }
+  const panel = el("bills-panel");
+  if (panel) {
+    panel.addEventListener("click", (event) => {
+      const sort = event.target.closest("[data-merchant-sort]");
+      if (sort) {
+        state.billsMerchantSort = sort.dataset.merchantSort === "count" ? "count" : "amount";
+        if (state.bills) el("bills-merchants").innerHTML = billsMerchantsHtml(state.bills);
+        return;
+      }
+      const edit = event.target.closest("[data-bills-category-edit]");
+      if (edit) {
+        openBillCategoryDialog(edit);
+        return;
+      }
+      const leadState = event.target.closest("[data-lead-state]");
+      if (leadState) {
+        action(() => setBillLeadState(
+          leadState.dataset.leadId || "",
+          leadState.dataset.leadPeriod || "",
+          leadState.dataset.leadState || "",
+        ))();
+        return;
+      }
+      const leadAsk = event.target.closest("[data-lead-ask]");
+      if (leadAsk) {
+        askBillLead(leadAsk.dataset.leadAsk || "");
+        return;
+      }
+      const leadTxn = event.target.closest("[data-lead-txn]");
+      if (leadTxn) {
+        state.billsHighlightTxn = leadTxn.dataset.leadTxn || "";
+        const details = el("bills-details");
+        if (details) details.open = true;
+        if (state.bills) el("bills-table").innerHTML = billsTableHtml(state.bills);
+        const row = el("bills-table")?.querySelector("tr.is-highlight");
+        if (row) row.scrollIntoView({ block: "center", behavior: "smooth" });
+        return;
+      }
+      if (event.target.closest("[data-bills-export]")) {
+        exportBillsCsv();
+        return;
+      }
+      const point = event.target.closest("[data-chart-period]");
+      if (point && state.bills) {
+        state.billsTrendPeriod = point.dataset.chartPeriod || "";
+        el("bills-charts").innerHTML = billsChartsHtml(state.bills);
+      }
+    });
+    panel.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const point = event.target.closest("[data-chart-period]");
+      if (!point || !state.bills) return;
+      event.preventDefault();
+      state.billsTrendPeriod = point.dataset.chartPeriod || "";
+      el("bills-charts").innerHTML = billsChartsHtml(state.bills);
+    });
+  }
+  const dialog = el("bills-category-dialog");
+  if (dialog) {
+    dialog.addEventListener("click", (event) => {
+      if (event.target.closest("[data-bills-dialog-close]")) {
+        closeBillCategoryDialog();
+        return;
+      }
+      if (event.target.closest("[data-bills-category-save]")) {
+        action(() => saveBillCategory())();
+      }
+    });
+  }
 }
 
 if (el("cards-list")) {
@@ -2675,25 +4837,16 @@ if (el("cards-list")) {
     if (!button) return;
     const kind = button.dataset.cardAction;
     const cardId = button.dataset.cardId;
+    /* 所有卡片写操作都进弹窗：类型 / 原因 / 后果 / 补卡 / 验证码 / 二次确认 */
     action(async () => {
-      /* 挂失不可逆：先弹确认，取消则完全不发起计划（计划卡与策略口径不变） */
-      if (kind === "lost") {
-        const proceed = await confirmAppDialog({
-          title: "确认挂失这张卡？",
-          text: "挂失后这张卡不能解锁，只能申请补卡。确定继续？",
-          confirmText: "确认挂失",
-          danger: true,
-        });
-        if (!proceed) return;
-      }
-      await cardPanelTask(kind, cardId);
+      openCardFlow(kind, cardId);
     })();
   });
 }
 
 
 function selectedObjects() {
-  const selected = {};
+  const selected = Object.assign({}, pendingSceneSelected);
   Object.keys(OBJECT_OPTIONS).forEach((slot) => {
     const value = el(`select-${slot}`).value;
     if (value) selected[slot] = value;
@@ -3365,8 +5518,12 @@ function setButtons() {
     ? "计划已过期 · 重新发起"
     : isWealthCard(state.card)
       ? "打开交易确认"
+      : isCardWriteCard(state.card)
+        ? "打开操作确认"
         : strongPhase
-        ? "提交验证码并执行"
+        ? ((state.card && (state.card.nodes || []).some(
+          (node) => String(node.action || "") === "subscription.cancel"
+        )) ? "提交验证码并关闭协议" : "提交验证码并执行")
         : redPending
           ? "获取验证码"
           : "确认并执行";
@@ -3528,7 +5685,7 @@ function baseSlot(slot) {
 
 function clarifyPrompt(ask) {
   const slot = baseSlot(ask.slot);
-  if (MONEY_SLOTS.has(slot)) return `${ask.prompt}（金额单位：元）`;
+  /* 金额槽的单位与示例只在服务端 prompt 里说一次：这里再拼一遍会变成三处口径。 */
   if (slot === "period") return "请选择扣费周期。";
   return ask.prompt;
 }
@@ -3562,8 +5719,8 @@ function clarifyControl(ask) {
     return `<input ${attrs} type="date" />`;
   }
   if (MONEY_SLOTS.has(slot)) {
-    return `<input ${attrs} type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="金额单位：元，例如 25" />` +
-      `<span class="muted">${esc(SLOT_LABELS[slot])}单位为元，例如输入 25 表示 25 元。</span>`;
+    /* 单位与示例只在 prompt 里出现一次；占位符只提示「填数字」，不再换一个示例金额。 */
+    return `<input ${attrs} type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="请输入数字" />`;
   }
   const label = SLOT_LABELS[slot] || "所需信息";
   return `<input ${attrs} type="text" placeholder="请填写${esc(label)}" />`;
@@ -3606,7 +5763,26 @@ async function onSubmit() {
   }
   const text = el("utterance").value.trim();
   if (!text) { el("utterance").focus(); return; }
+  if (billLeadQuestionText(text)) {
+    const explainLead = () => submitBillLeadQuestion(text);
+    if (!requestStart(explainLead)) return;
+    await explainLead();
+    return;
+  }
+  const leadState = billLeadResolutionState(text);
+  if (leadState) {
+    const resolveLead = () => submitBillLeadResolution(text, leadState);
+    if (!requestStart(resolveLead)) return;
+    await resolveLead();
+    return;
+  }
   const selected = selectedObjects();
+  if (!/转账|转给|汇款|打款/.test(text)) {
+    delete selected.payee;
+    delete selected.transfer_method;
+    delete selected.purpose;
+  }
+  pendingSceneSelected = {};
   const start = () => submitTask(text, selected);
   if (!requestStart(start)) return;
   await start();
@@ -3691,6 +5867,12 @@ async function onConfirm() {
     }).catch(() => {});
     return;
   }
+  if (isCardWriteCard(state.card)
+    && (state.phase === "awaiting_confirm" || state.phase === "strong-verify")) {
+    /* 卡片写操作：AI 只生成预填计划；确认与一次性验证码在卡片弹窗内完成。 */
+    openCardFlowFromPlan(state.card).catch(() => {});
+    return;
+  }
   if (state.card.level === "RED" && state.phase !== "strong-verify") {
     await requestVerification();
     return;
@@ -3721,53 +5903,57 @@ const BILL_STATUS_LABELS = {
 };
 
 function billVerdict(summary) {
-  const total = Number(summary.transaction_count) || 0;
-  const confirmed = Number(summary.confirmed_count) || 0;
-  const suspected = Number(summary.suspected_count) || 0;
-  const normal = Number(summary.normal_count) || 0;
-  if (!total) return "本期没有支出流水，无法给出消费结论。";
-  if (!confirmed && !suspected) {
-    return normal
-      ? `本期 ${total} 笔支出，识别到 ${normal} 项正常提醒，未发现已确认或疑似问题；未发现不等于不存在。`
-      : `本期 ${total} 笔支出未命中识别规则；未发现不等于不存在。`;
-  }
-  const parts = [];
-  if (confirmed) parts.push(`${confirmed} 项已确认问题`);
-  if (suspected) parts.push(`${suspected} 项疑似问题`);
-  return `本期共 ${total} 笔支出，发现 ${parts.join("、")}，请按下方证据逐条核对。`;
+  const total = Number(summary.consumption_count ?? summary.transaction_count) || 0;
+  const transfer = Number(summary.transfer_count) || 0;
+  const key = Number(summary.key_lead_count) || 0;
+  const pending = Number(summary.lead_count) || 0;
+  if (!total) return "本期没有消费流水，无法给出消费结论；转账/还款等不计入消费分析。";
+  const parts = [`本期 ${total} 笔消费`];
+  if (transfer) parts.push(`另有 ${transfer} 笔转账/还款等不计入消费`);
+  if (key) parts.push(`${key} 条高置信待核对线索`);
+  if (pending > key) parts.push(`${pending - key} 条可继续核对线索`);
+  if (!pending) parts.push("未命中需优先核对的线索");
+  return `${parts.join("，")}。`;
 }
 
 function billIssueHtml(item) {
   const status = BILL_STATUS_LABELS[item.status] || "未知状态";
+  const basis = Array.isArray(item.basis) ? (item.basis[0] || {}) : (item.basis || {});
+  const label = item.labels && item.labels.length
+    ? item.labels.join(" · ")
+    : FINDING_LABELS[item.kind] || item.kind;
+  const detail = item.detail || basis.detail || "";
   return `<details class="bill__issue">
     <summary>
-      <b>${esc(FINDING_LABELS[item.kind] || item.kind)}</b>
+      <b>${esc(label)}</b>
       <span class="bill__issue-amt">${yuan(Number(item.impact_cents) || 0)}</span>
-      <span class="chip">${esc(status)}</span>
+      <span class="chip">${esc(status)} · ${confidencePct(item.confidence)}</span>
     </summary>
-    <p>${esc(item.detail || "")}</p>
+    <p>${esc(detail)}</p>
+    ${basis.threshold ? `<p class="bill__note">判断依据：${esc(basis.rule || "")}（阈值：${esc(basis.threshold)}）</p>` : ""}
     ${item.suggestion ? `<p class="bill__note">建议：${esc(item.suggestion)}</p>` : ""}
-    <p class="bill__note">影响口径：${esc(item.impact_basis || "未提供")} · 估算假设：${esc(item.assumption || "—")}</p>
   </details>`;
 }
 
-/* 对话里的账单结论只保留「一句话结论 + 三个数字 + 最多三条问题」，
-   图表、完整证据链与全部建议留在账单分析页（同一份事实，不重复占屏）。 */
+/* 对话里的账单结论只保留「一句话结论 + 三个数字 + 最多三条高置信线索」，
+   图表、完整证据链与全部建议留在账单分析页。 */
 function billAnalysisHtml(payload, advice, adviceMessage) {
   if (!payload || !payload.summary) return "";
   const summary = payload.summary;
-  const total = Number(summary.transaction_count) || 0;
-  const expense = Number(summary.expense_total_cents) || 0;
-  const confirmedSaving = Number(payload.confirmed_saving_cents) || 0;
-  const potentialSaving = Number(payload.potential_saving_cents) || 0;
-  const problemCount = (Number(summary.confirmed_count) || 0) + (Number(summary.suspected_count) || 0);
-  const problems = (Array.isArray(payload.findings) ? payload.findings : [])
-    .filter((item) => item.status !== "normal")
-    .sort((a, b) => (Number(b.impact_cents) || 0) - (Number(a.impact_cents) || 0));
+  const total = Number(summary.consumption_count ?? summary.transaction_count) || 0;
+  const expense = Number(summary.consumption_cents ?? summary.expense_total_cents) || 0;
+  const income = Number(summary.income_cents) || 0;
+  const pending = Number(summary.lead_count) || 0;
+  const transfer = Number(summary.transfer_count) || 0;
+  const leads = (Array.isArray(payload.leads) ? payload.leads : [])
+    .filter((item) => item.tier === "key");
+  const fallback = (Array.isArray(payload.findings) ? payload.findings : [])
+    .filter((item) => item.status !== "normal" && Number(item.confidence) >= 0.7);
+  const problems = leads.length ? leads : fallback;
   const top = problems.slice(0, 3);
   const rest = problems.length - top.length;
   const topAdvice = Array.isArray(advice) && advice.length ? advice[0] : null;
-  const value = (text) => (total ? text : "—");
+  const value = (text) => (total || transfer ? text : "—");
   return `<section class="bill bill--compact">
     <div class="bill__head">
       <h3>账单分析结论</h3>
@@ -3776,21 +5962,17 @@ function billAnalysisHtml(payload, advice, adviceMessage) {
     </div>
     <p class="bill__verdict">${esc(billVerdict(summary))}</p>
     <div class="bill__metrics bill__metrics--compact">
-      <div class="bill__metric"><span>本期支出</span><b>${value(yuan(expense))}</b></div>
-      <div class="bill__metric"><span>需核对问题</span><b>${value(`${problemCount} 项`)}</b></div>
-      <div class="bill__metric"><span>可核实节省</span><b>${value(yuan(confirmedSaving))}</b></div>
+      <div class="bill__metric"><span>本期消费</span><b>${value(yuan(expense))}</b></div>
+      <div class="bill__metric"><span>本期收入</span><b>${value(yuan(income))}</b></div>
+      <div class="bill__metric"><span>待核对（高置信）</span><b>${value(`${pending} 条`)}</b></div>
     </div>
+    ${transfer ? `<p class="bill__note">另有 ${transfer} 笔转账/还款等 ${yuan(summary.transfer_out_cents || 0)}，不计入消费分析。</p>` : ""}
     ${top.length
       ? `<div class="bill__issues">${top.map(billIssueHtml).join("")}</div>
-         ${rest > 0 ? `<p class="bill__note">另有 ${rest} 项问题，可在账单分析页查看完整清单。</p>` : ""}`
-      : `<p class="bill__note">${total
-          ? "本期未命中需要优先核对的问题；未发现不等于不存在。"
-          : "本期没有支出流水，无法给出消费结论。"}</p>`}
+         ${rest > 0 ? `<p class="bill__note">另有 ${rest} 条可继续核对线索，可在账单分析页查看。</p>` : ""}`
+      : `<p class="bill__note">${total ? "本期没有高置信待核对线索。" : "本期没有消费流水，无法给出消费结论。"}</p>`}
     ${topAdvice ? `<p class="bill__note">建议：${esc(topAdvice.suggestion)}</p>` : ""}
-    <p class="bill__note">识别结果只作核对线索，不当作已确认；未发现不等于不存在，请照下方证据逐条核对。</p>
-    ${potentialSaving > 0
-      ? `<p class="bill__note">潜在节省 ${yuan(potentialSaving)} 为识别口径下的估算上限，未到账不计入。</p>`
-      : ""}
+    <p class="bill__note">识别结果供核对，不作最终结论。</p>
     <details class="bill__limits">
       <summary>数据来源与分析局限</summary>
       <p>数据来源：${esc(payload.data_source)}${payload.data_source_is_demo ? "（演示数据，非真实账单）" : ""}；分析截至 ${esc(payload.as_of)}。</p>
@@ -4707,9 +6889,9 @@ async function refreshProfileEntry() {
 /* 面板参数：键名与服务端槽位同名，发起后若仍需澄清，用同一份值自动续答 */
 const LIFE_FORMS = {
   L1: [
-    { key: "amount", label: "预算金额（元）", type: "number", placeholder: "800" },
-    { key: "merchant", label: "商户", type: "text", placeholder: "鲜花礼品店" },
-    { key: "account", label: "冻结账户", type: "account" },
+    { key: "amount", label: "预留金额（元）", type: "number", placeholder: "800" },
+    { key: "merchant", label: "商户（演示）", type: "text", placeholder: "鲜花礼品店" },
+    { key: "account", label: "预留账户", type: "account" },
   ],
   L2: [
     { key: "payee", label: "收款人", type: "text", placeholder: "李娜" },
@@ -4768,24 +6950,30 @@ function lifeDagHtml(skeleton) {
 }
 
 const LIFE_BUDGET_STEPS = [
-  ["freeze", "冻结"],
+  ["reserve", "预留"],
   ["order", "下单"],
   ["release", "释放"],
 ];
 
-/* 预算执行进度：三段是否点亮由服务端按 holds / 下单回执算出，无数据即不画 */
-function lifeBudgetHtml(budget) {
-  if (!budget || typeof budget !== "object") return "";
+/* 资金预留进度：三段是否点亮由服务端按**本事件自己的** hold / 下单回执算出；
+   没有 hold 时不再显示「已释放 · 冻结余额」，只说明「尚未执行」。 */
+function lifeBudgetHtml(budget, status) {
+  if (!budget || typeof budget !== "object") {
+    return status === "planned"
+      ? '<p class="muted life-budget__idle">资金预留：尚未执行（确认后才预留与下单）</p>'
+      : "";
+  }
   const steps = budget.steps || {};
   const segments = LIFE_BUDGET_STEPS.map(
     ([key, label]) => `<li class="life-budget__seg${steps[key] ? " is-done" : ""}">${label}</li>`,
   ).join("");
-  const state = budget.state === "released" ? "已释放" : "冻结中";
-  const amount = typeof budget.amount_cents === "number" ? ` · 冻结余额 ${yuan(budget.amount_cents)}` : "";
-  const holdId = budget.hold_id ? ` · 冻结单 <span class="tech">${esc(budget.hold_id)}</span>` : "";
+  const released = budget.state === "released";
+  const amount = typeof budget.amount_cents === "number" ? ` · 剩余 ${yuan(budget.amount_cents)}` : "";
+  const state = released ? "预留已释放" : "剩余预留";
+  const note = released ? "，已退回可用余额" : " · 目标完成或终止后释放";
   return `<div class="life-budget">
-        <ol class="life-budget__bar" aria-label="预算执行进度">${segments}</ol>
-        <p class="muted life-budget__meta">${esc(state)}${esc(amount)}${holdId}</p>
+        <ol class="life-budget__bar" aria-label="资金预留执行进度">${segments}</ol>
+        <p class="muted life-budget__meta">${esc(state)}${esc(amount)}${esc(note)}</p>
       </div>`;
 }
 
@@ -4862,43 +7050,43 @@ function lifeShiftMonth(month, delta) {
 }
 
 /* 三类点各有来源，不在前端猜：
-   - `maturity`：理财到期（服务端按起息日 + 期限推算，`maturity_on` 与当天相同）；
+   - `maturity`：理财到期（到期日按产品条款确定：起息日 + 期限）；
    - `reminder`：记录关联的预约是提醒类（服务端给的 `schedule_kind`）；
-   - `order`：其余下单记录。 */
-function calendarDotKind(record, maturities) {
-  if (maturities.some((item) => item.maturity_on === record.due_on)) return "maturity";
-  if (record.schedule_kind === "reminder") return "reminder";
-  return "order";
-}
-
+   - `order`：其余下单记录。
+   **同一天同类只画一个点**；「N 个事件」按唯一 record_id 计，与点一致。 */
+const LIFE_CAL_KINDS = ["order", "reminder", "maturity"];
 const LIFE_CAL_DOT_TITLE = {
-  order: "下单", reminder: "提醒", maturity: "理财到期（推算）",
-  maturityPast: "理财到期（推算，已到期）",
+  order: "下单", reminder: "提醒", maturity: "理财到期（按产品条款）",
 };
 
-/* 到期点已过推算到期日时追加灰化类名；状态由服务端按「推算到期日 vs 今天」给出。 */
+function lifeRecordScheduleKind(record) {
+  return record && record.schedule_kind === "reminder" ? "reminder" : "order";
+}
+
+/* 到期日已过时追加灰化类名；状态由服务端按「到期日 vs 今天」给出。 */
 function maturityDotClass(item) {
   const past = item.status === "expired" ? " life-cal__dot--maturity-past" : "";
   return `life-cal__dot life-cal__dot--maturity${past}`;
 }
 
 function maturityDotTitle(item) {
-  return item.status === "expired" ? LIFE_CAL_DOT_TITLE.maturityPast : LIFE_CAL_DOT_TITLE.maturity;
+  return item.status === "expired"
+    ? "理财到期（按产品条款，已到期）" : LIFE_CAL_DOT_TITLE.maturity;
 }
 
 /* 日历点开某天时必须能看清「哪只产品到期」：只画点不写名字，等于没告诉用户。 */
 function maturityRowHtml(item) {
   const expired = item.status === "expired";
-  const amount = typeof item.amount_cents === "number" ? `${yuan(item.amount_cents)} 元` : "金额未知";
+  const amount = typeof item.amount_cents === "number" ? yuan(item.amount_cents) : "金额未知";
   const term = typeof item.term_days === "number" ? `期限 ${item.term_days} 天` : "期限未知";
   return `<li class="life-record-step">
       <span class="life-record-step__no"><i class="${maturityDotClass(item)}"
         title="${esc(maturityDotTitle(item))}"></i></span>
       <span class="life-record-step__body">
-        <b>理财到期（推算）：${esc(item.name || item.product_id || "理财产品")}</b>
+        <b>理财到期：${esc(item.name || item.product_id || "理财产品")}</b>
         <span class="muted">${esc(amount)} · ${esc(item.purchased_on || "起息日未知")} 起息
-          · ${esc(term)} · 推算到期 ${esc(item.maturity_on || "—")}${expired ? " · 已到期（推算）" : ""}</span>
-        <span class="muted">${esc(item.basis || "按起息日 + 产品期限推算，非官方到期公告")}</span>
+          · ${esc(term)} · 到期日 ${esc(item.maturity_on || "—")}${expired ? " · 已到期" : ""}</span>
+        <span class="muted">${esc(item.basis || "按产品条款确定（起息日 + 期限）；兑付到账以银行回单为准")}</span>
       </span></li>`;
 }
 
@@ -4912,10 +7100,23 @@ function lifeCalendarHtml(records) {
   const days = new Date(year, mon, 0).getDate();
   const today = lifeDateKey(new Date().toISOString());
   const byDay = {};
+  const seen = new Set();
   records.forEach((record) => {
-    const key = lifeDateKey(record.updated_at || record.created_at);
+    /* 落点优先级：预约触发日 > 计划日期 > 创建日；同一 record_id 只算一次 */
+    const key = lifeDateKey(record.calendar_on || record.updated_at || record.created_at);
+    const recordId = record.record_id || "";
+    if (!key || key.slice(0, 7) !== month || (recordId && seen.has(recordId))) return;
+    if (recordId) seen.add(recordId);
+    const bucket = (byDay[key] = byDay[key] || { kinds: new Set(), records: [], maturities: [] });
+    bucket.records.push(record);
+    bucket.kinds.add(lifeRecordScheduleKind(record));
+  });
+  lifeCal.maturities.forEach((item) => {
+    const key = String(item.maturity_on || "").slice(0, 10);
     if (!key || key.slice(0, 7) !== month) return;
-    (byDay[key] = byDay[key] || []).push(record);
+    const bucket = (byDay[key] = byDay[key] || { kinds: new Set(), records: [], maturities: [] });
+    bucket.maturities.push(item);
+    bucket.kinds.add("maturity");
   });
   const cells = [];
   for (let i = 0; i < lead; i += 1) {
@@ -4923,30 +7124,33 @@ function lifeCalendarHtml(records) {
   }
   for (let day = 1; day <= days; day += 1) {
     const key = `${month}-${String(day).padStart(2, "0")}`;
-    const items = byDay[key] || [];
-    const dayMaturities = lifeCal.maturities.filter((item) => item.maturity_on === key);
+    const bucket = byDay[key];
+    const items = bucket ? bucket.records : [];
+    const dayMaturities = bucket ? bucket.maturities : [];
     const picked = key === lifeCal.day;
-    const dots = items.slice(0, 3).map((record) => {
-      const dotKind = calendarDotKind(record, dayMaturities);
-      return `<i class="life-cal__dot life-cal__dot--${dotKind}" title="${esc(LIFE_CAL_DOT_TITLE[dotKind])}：${esc(record.event_name || record.event_id)}"></i>`;
-    }).join("") + dayMaturities.slice(0, 3).map((item) =>
-      `<i class="${maturityDotClass(item)}" title="${esc(maturityDotTitle(item))}：${esc(item.name || item.product_id)}"></i>`).join("");
-    const maturityLabel = dayMaturities.some((item) => item.status === "expired")
-      ? "理财到期（推算，已到期）" : LIFE_CAL_DOT_TITLE.maturity;
+    const dots = bucket ? LIFE_CAL_KINDS.filter((kind) => bucket.kinds.has(kind)).map((kind) => {
+      const titles = kind === "maturity"
+        ? dayMaturities.map((item) => item.name || item.product_id)
+        : items.filter((record) => lifeRecordScheduleKind(record) === kind)
+          .map((record) => record.event_title || record.event_name || record.event_id);
+      return `<i class="life-cal__dot life-cal__dot--${kind}"
+        title="${esc(LIFE_CAL_DOT_TITLE[kind])}：${esc(titles.join("、"))}"></i>`;
+    }).join("") : "";
     const marked = items.length > 0 || dayMaturities.length > 0;
     const marks = [marked ? "is-marked" : "", key === today ? "is-today" : "", picked ? "is-picked" : ""]
       .filter(Boolean).join(" ");
     cells.push(`<li>
         <button class="life-cal__cell${marks ? ` ${marks}` : ""}" type="button" data-life-day="${key}"
           aria-pressed="${picked ? "true" : "false"}"
-          aria-label="${key}${items.length ? `，${items.length} 条记录` : "，无记录"}${
-            dayMaturities.length ? `，${dayMaturities.length} 笔${maturityLabel}` : ""}">
+          aria-label="${key}${items.length ? `，${items.length} 个事件` : "，无事件"}${
+            dayMaturities.length ? `，${dayMaturities.length} 笔${LIFE_CAL_DOT_TITLE.maturity}` : ""}">
           <span class="life-cal__day">${day}</span><span class="life-cal__dots">${dots}</span>
         </button></li>`);
   }
-  const monthRecords = Object.keys(byDay).sort().reverse().flatMap((key) => byDay[key]);
+  const monthRecords = Object.keys(byDay).sort().reverse()
+    .flatMap((key) => byDay[key].records);
   const other = records.length - monthRecords.length;
-  const dayRecords = lifeCal.day ? (byDay[lifeCal.day] || []) : monthRecords;
+  const dayRecords = lifeCal.day ? (byDay[lifeCal.day] ? byDay[lifeCal.day].records : []) : monthRecords;
   /* 到期日不是「生活事件记录」：单列一块，把产品名 / 金额 / 起息 / 期限写清楚。
      选某天时只看当天；没选时看本月全部。 */
   const scopeMaturities = lifeCal.maturities.filter((item) => (
@@ -4956,20 +7160,20 @@ function lifeCalendarHtml(records) {
   ));
   const maturityBlock = scopeMaturities.length
     ? `<section class="life-cal__maturity">
-        <p class="life-cal__filter"><b>理财到期（推算）</b> · ${scopeMaturities.length} 笔
-          <span class="muted">起息日 + 产品期限推算，非官方到期公告</span></p>
+        <p class="life-cal__filter"><b>理财到期</b> · ${scopeMaturities.length} 笔
+          <span class="muted">到期日按产品条款确定（起息日 + 期限）；兑付到账以银行回单为准</span></p>
         <ul class="life-cal__list">${scopeMaturities.map(maturityRowHtml).join("")}</ul>
       </section>`
     : "";
   const filter = lifeCal.day
-    ? `<p class="life-cal__filter">已选 <b>${esc(lifeCal.day)}</b> · ${dayRecords.length} 条
+    ? `<p class="life-cal__filter">已选 <b>${esc(lifeCal.day)}</b> · ${dayRecords.length} 个事件
         <button class="life-cal__clear" type="button" data-life-day="">显示整月</button></p>`
     : "";
   const rows = dayRecords.length
     ? `<ul class="life-cal__list">${dayRecords.map(lifeRecordRowHtml).join("")}</ul>`
     : `<p class="muted">${lifeCal.day
       ? `${esc(lifeCal.day)} 没有生活事件记录。`
-      : "本月没有生活事件记录。"}${scopeMaturities.length ? "（上方为当天 / 本月到期的理财，推算值）" : ""}</p>`;
+      : "本月没有生活事件记录。"}${scopeMaturities.length ? "（上方为当天 / 本月到期的理财）" : ""}</p>`;
   const otherNote = other > 0
     ? `<p class="muted scene-hint">另有 ${other} 条记录不在本月，见下方最近记录。</p>` : "";
   return `<div class="life-cal">
@@ -4985,8 +7189,8 @@ function lifeCalendarHtml(records) {
       <p class="life-cal__legend">
         <span><i class="life-cal__dot life-cal__dot--order"></i>下单</span>
         <span><i class="life-cal__dot life-cal__dot--reminder"></i>提醒</span>
-        <span><i class="life-cal__dot life-cal__dot--maturity"></i>理财到期：到期日为推算值（起息日 + 产品期限），非官方到期公告</span>
-        <span><i class="life-cal__dot life-cal__dot--maturity-past"></i>已到期（推算，未赎回按今日处理）</span>
+        <span><i class="life-cal__dot life-cal__dot--maturity"></i>理财到期（到期日按产品条款）</span>
+        <span class="muted">同一天同类只画一个点，点开看清单</span>
       </p>
       ${filter}
       ${maturityBlock}
@@ -4995,24 +7199,121 @@ function lifeCalendarHtml(records) {
     </div>`;
 }
 
-/* 记录行：先标「组合律 / 原型」，再写名称——组合律是跨原型的串接，不能混为一类。 */
-function lifeRecordKind(record) {
-  return String((record && record.event_id) || "").includes("->") ? "组合律" : "原型";
-}
-
+/* 日历下方的一行摘要：日期 + 标题 + 状态；不再挂「原型 / 组合律」这类开发标签。 */
 function lifeRecordRowHtml(record) {
-  /* 已登记未到期的记录仍是 `planned`，但对用户来说已经办完「登记」这一步了 */
-  const label = record.schedule_due_on
-    ? "已登记预约"
-    : (LIFE_EVENT_STATUS[record.status] || record.status);
-  const kind = lifeRecordKind(record);
+  const label = lifeStatusLabel(record);
   const title = record.event_title || record.event_name || record.event_id;
   const amount = typeof record.amount_cents === "number" ? ` ${yuan(record.amount_cents)}` : "";
   return `<li data-life-record="${esc(record.record_id || "")}" role="button" tabindex="0"
-    aria-label="查看详情：${esc(title)}"><span class="life-cal__date">${esc(lifeDateKey(record.updated_at || record.created_at).slice(5))}</span>
-    <span class="life-cal__kind">${kind}</span>
+    aria-label="查看详情：${esc(title)}"><span class="life-cal__date">${
+      esc(lifeDateKey(record.calendar_on || record.updated_at || record.created_at).slice(5))
+    }</span>
     <span class="life-cal__name" title="${esc(record.event_name || record.event_id)}">${esc(title)}</span>
     <span class="chip">${esc(label)}</span><span class="muted">${esc(amount)}</span></li>`;
+}
+
+/* ---------------- 生活事件卡片（一条事件一张卡：原话 → 任务图 → 核查 → 状态） ---------------- */
+
+function lifeStatusLabel(record) {
+  if (record && record.schedule) {
+    return record.schedule.kind === "reminder" ? "提醒已登记" : "已登记预约";
+  }
+  return LIFE_EVENT_STATUS[record.status] || record.status;
+}
+
+/* 任务图：节点顺序与依赖都来自服务端步骤快照，前端不拼步骤、不猜动作。 */
+function lifeTaskGraphHtml(steps) {
+  const list = Array.isArray(steps) ? steps.filter((step) => step && step.action) : [];
+  if (!list.length) return "";
+  const nodes = list.map((step, index) => {
+    const amount = typeof step.amount_cents === "number" ? `${yuan(step.amount_cents)}` : "";
+    const dep = Array.isArray(step.depends_on) && step.depends_on.length ? " · 依赖上一步" : "";
+    const tag = LIFE_DOMAIN_LABEL[step.domain] || "场景";
+    return `<span class="life-dag__node" title="${esc(step.action)}">
+      <span class="life-dag__no">${index + 1}</span>
+      <span class="life-dag__body"><b>${esc(step.label || step.action)}</b>
+        <span class="muted">${esc(amount)}${esc(dep)}</span></span>
+      <span class="life-dag__tag">${esc(tag)}</span>
+    </span>`;
+  });
+  return `<div class="life-dag" role="list" aria-label="任务图">${
+    nodes.join('<span class="life-dag__arrow" aria-hidden="true">→</span>')}</div>`;
+}
+
+/* 资金核查：ok 只写一句事实；later / short 才黄条，并给出三条可选路径。 */
+function lifeFundingHtml(funding) {
+  if (!funding || !funding.status || funding.status === "unknown") return "";
+  if (funding.status === "ok") {
+    return `<p class="life-funding is-ok">资金核查：${esc(funding.message || "可用余额可覆盖")}</p>`;
+  }
+  return `<p class="life-funding is-warn" role="status">
+      <b>资金核查</b>：${esc(funding.message || "可用资金不足")}
+      <span class="muted">可选：提前赎回 / 改日期 / 换资金来源</span></p>`;
+}
+
+function lifeOrdersHtml(orders) {
+  if (!Array.isArray(orders) || !orders.length) return "";
+  return orders.map((order) => `<p class="life-order">订单：${esc(order.merchant || "商户")}
+    · 单号 <span class="tech">${esc(order.order_id || "—")}</span>
+    · ${yuan(order.amount_cents || 0)} · 下单日 ${esc(order.order_on || "—")}</p>`).join("");
+}
+
+/* 定期出资：收款人 / 执行日来自计划步骤与名册；终止只对已登记的转账开放。 */
+function lifeScheduleTransferHtml(record) {
+  const step = (record.steps || []).find((item) => item && item.action === "transfer.schedule");
+  if (!step) return "";
+  const ids = (record.results || [])
+    .filter((item) => item && item.action === "transfer.schedule")
+    .flatMap((item) => (Array.isArray(item.record_ids) ? item.record_ids : []))
+    .filter((id) => typeof id === "string" && id.startsWith("scheduled_transfers:"))
+    .map((id) => id.split(":")[1]);
+  const scheduleId = ids[0] || "";
+  const payee = step.payee_label ? `收款人 ${step.payee_label}` : "收款人见计划卡";
+  const when = step.date ? `执行日 ${step.date}` : "执行日未定";
+  const executed = record.status === "executed";
+  const state = executed ? "已转出" : "待转出";
+  const cycle = executed ? "本次已扣款，不自动续期" : "本次仅登记下一笔，不自动续期";
+  return `<p class="muted life-record__l2">定期出资：${esc(payee)} · ${esc(when)}
+      · ${state} · ${cycle}</p>${
+    scheduleId
+      ? `<div class="life-record__actions"><button class="life-send" type="button"
+          data-life-cancel-transfer="${esc(scheduleId)}">终止登记</button></div>`
+      : ""}`;
+}
+
+/* 一条事件一张卡：同一事件的预约折叠在这里，不再在「已登记预约」里重复一份。 */
+function lifeRecordCardHtml(record) {
+  const title = record.event_title || record.event_name || record.event_id;
+  const privacy = record.visibility === "private"
+    ? '<span class="chip chip--yellow">仅本人可见</span>' : "";
+  const utterance = record.utterance
+    ? `<p class="life-record__utterance">原话：「${esc(record.utterance)}」</p>` : "";
+  const trigger = record.schedule && record.schedule.due_on
+    ? `触发日 ${esc(record.schedule.due_on)}`
+    : (record.due_on ? `计划日期 ${esc(record.due_on)}` : "");
+  const amount = typeof record.amount_cents === "number"
+    ? `金额 ${yuan(record.amount_cents)}` : "";
+  const meta = [trigger, amount, `创建于 ${momentLabel(record.created_at)}`]
+    .filter(Boolean).join(" · ");
+  const notify = record.schedule && record.schedule.notify_on
+    ? ` · ${esc(record.schedule.notify_on)} 提前提醒` : "";
+  return `<article class="takeover insight-item life-record" data-life-record="${esc(record.record_id || "")}">
+      <div class="life-record__head">
+        <b>${esc(title)}</b>
+        <span class="chip">${esc(lifeStatusLabel(record))}</span>${privacy}
+      </div>
+      ${utterance}
+      ${lifeTaskGraphHtml(record.steps)}
+      <p class="muted life-record__meta">${esc(meta)}${notify}</p>
+      ${lifeFundingHtml(record.funding)}
+      ${lifeBudgetHtml(record.budget, record.status)}
+      ${lifeOrdersHtml(record.orders)}
+      ${lifeScheduleTransferHtml(record)}
+      <div class="life-record__actions">
+        <button class="life-send" type="button" data-life-open="${esc(record.session_id || "")}"
+          aria-label="打开会话：${esc(title)}">打开会话</button>
+      </div>
+    </article>`;
 }
 
 /* 生活事件记录只读回放：步骤来自计划快照，状态按记录整体状态派生，不重新执行。 */
@@ -5021,10 +7322,12 @@ function openLifeRecord(recordId) {
   const dialog = el("life-record-dialog");
   const body = el("life-record-body");
   if (!record || !dialog || !body) return;
-  const statusLabel = record.schedule_due_on
-    ? `已登记预约（${record.schedule_due_on} 到期）`
+  const statusLabel = record.schedule
+    ? (record.schedule.kind === "reminder"
+      ? `提醒已登记（${record.schedule.due_on}）`
+      : `已登记预约（触发日 ${record.schedule.due_on}）`)
     : (LIFE_EVENT_STATUS[record.status] || record.status);
-  const stepState = record.schedule_due_on ? "已登记"
+  const stepState = record.schedule ? "已登记"
     : record.status === "executed" ? "已执行"
       : record.status === "planned" ? "待确认"
         : record.status === "rejected" ? "已拒绝" : "失败";
@@ -5034,21 +7337,27 @@ function openLifeRecord(recordId) {
     ? steps.map((step, index) => {
       const amount = typeof step.amount_cents === "number" ? yuan(step.amount_cents) : "—";
       const when = step.date ? ` · ${esc(String(step.date))}` : "";
+      const payee = step.payee_label ? ` · 收款人 ${esc(step.payee_label)}` : "";
+      const tag = LIFE_DOMAIN_LABEL[step.domain] || "场景";
       return `<li class="life-record-step">
         <span class="life-record-step__no">${index + 1}</span>
         <span class="life-record-step__body">
           <b>${esc(String(step.label || step.action || "步骤"))}</b>
-          <span class="muted">${amount}${when} · ${stepState}</span>
+          <span class="muted">${amount}${when}${payee} · ${esc(tag)} · ${stepState}</span>
         </span></li>`;
     }).join("")
     : '<li class="muted">这一版没有保存步骤快照（旧版本记录）；已知信息见上方金额与计划日期。</li>';
   const amountNote = typeof record.amount_cents === "number"
-    ? ` · 金额 ${yuan(record.amount_cents)} 元` : "";
+    ? ` · 金额 ${yuan(record.amount_cents)}` : "";
+  const utterance = record.utterance ? `<p class="muted">原话：「${esc(record.utterance)}」</p>` : "";
   body.innerHTML = `<p class="life-record-detail__name">${esc(title)}</p>
-    <p class="muted">${esc(momentLabel(record.updated_at || record.created_at))} · ${esc(statusLabel)}${
+    ${utterance}
+    <p class="muted">${esc(momentLabel(record.created_at))} 创建 · ${esc(statusLabel)}${
       amountNote
     }${record.due_on ? ` · 计划日期 ${esc(record.due_on)}` : ""}</p>
     <ul class="life-record-steps">${stepRows}</ul>
+    ${lifeFundingHtml(record.funding)}
+    ${lifeOrdersHtml(record.orders)}
     ${steps.length ? '<p class="muted">只读回放：展示历史计划的步骤与金额，不会重新执行。</p>' : ""}`;
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
@@ -5066,7 +7375,7 @@ function lifeScheduleRowHtml(item) {
   const title = item.event_title || item.event_id;
   const kind = item.kind === "reminder" ? "提醒" : "到期下单";
   const steps = Array.isArray(item.steps) ? item.steps : [];
-  const due = item.due_on ? `到期 ${esc(item.due_on)}` : "到期日未定";
+  const due = item.due_on ? `触发日 ${esc(item.due_on)}` : "触发日未定";
   const notify = item.notify_on ? ` · ${esc(item.notify_on)} 提前提醒` : "";
   return `<article class="takeover insight-item life-record">
       <div class="life-record__head">
@@ -5116,8 +7425,7 @@ function lifeWorkbenchHtml(prototypes) {
         </div>${cta}</details>`
       : cta;
     detail = `<div class="life-detail" data-life-panel>
-      <div class="life-detail__head"><b>${esc(name)}</b>${steps}
-        <span class="tech mono">${esc(eventId)}</span></div>
+      <div class="life-detail__head"><b>${esc(name)}</b>${steps}</div>
       <p class="life-detail__desc">${esc(description)}</p>
       ${lifeDagHtml(chosen.skeleton)}
       <p class="life-detail__example">示例：${esc(example)}</p>
@@ -5181,60 +7489,86 @@ async function refreshLifeEvents() {
   const payload = result.data || {};
   const prototypes = Array.isArray(payload.prototypes) ? payload.prototypes : [];
   const records = Array.isArray(payload.records) ? payload.records : [];
+  const privateRecords = Array.isArray(payload.private_records) ? payload.private_records : [];
   const schedules = Array.isArray(payload.schedules) ? payload.schedules : [];
+  /* 预约已折叠进记录卡：这里只统计「关联不上记录」的孤儿预约 */
+  const linkedRecords = new Set(
+    [...records, ...privateRecords].map((record) => record.record_id),
+  );
+  const orphanSchedules = schedules.filter(
+    (item) => !item.record_id || !linkedRecords.has(item.record_id),
+  );
   const recordsNote = payload.records_available === false
-    ? " · 本部署未开启记录"
-    : ` · 我的记录 ${records.length} 条`;
-  const scheduleNote = schedules.length ? ` · 已登记预约 ${schedules.length} 条` : "";
-  status.textContent = `原型 ${prototypes.length} 个${recordsNote}${scheduleNote}`;
+    ? "本部署未开启记录"
+    : `我的记录 ${records.length + privateRecords.length} 条`;
+  const scheduleNote = orphanSchedules.length ? ` · 待关联预约 ${orphanSchedules.length} 条` : "";
+  status.textContent = `${recordsNote}${scheduleNote}`;
 
-  lifeCal.records = records;
+  /* 日历是用户自己的：私密事件也落点（只是默认折叠、不进共享推送） */
+  lifeCal.records = [...records, ...privateRecords];
   lifeCal.maturities = Array.isArray(payload.maturities) ? payload.maturities : [];
-  if (calendar) calendar.innerHTML = lifeCalendarHtml(records);
+  if (calendar) calendar.innerHTML = lifeCalendarHtml(lifeCal.records);
   lifeData.prototypes = prototypes;
-  lifeData.records = records;
+  lifeData.records = [...records, ...privateRecords];
   lifeData.schedules = schedules;
   if (!lifePick.event && prototypes.length) {
     lifePick.event = typeof prototypes[0].event_id === "string" ? prototypes[0].event_id : "";
   }
   if (body) renderLifeWorkbench();
 
-  const recordRows = records.length
-    ? records.map((record) => {
-      const label = record.schedule_due_on
-        ? "已登记预约"
-        : (LIFE_EVENT_STATUS[record.status] || record.status);
-      const typeName = record.event_name || record.event_id;
-      const title = record.event_title || typeName;
-      const kind = lifeRecordKind(record);
-      const amount = typeof record.amount_cents === "number" ? ` · ${yuan(record.amount_cents)}` : "";
-      const dueNote = record.schedule_due_on ? ` · 到期 ${record.schedule_due_on}` : "";
-      const metaType = title === typeName ? "" : `${typeName} · `;
-      return `<article class="takeover insight-item life-record" data-life-record="${esc(record.record_id || "")}">
-      <div class="life-record__head">
-        <span class="life-record__kind">${kind}</span>
-        <b>${esc(title)}</b>
-        <span class="chip">${esc(label)}</span>
-      </div>
-      <div class="life-record__meta">
-        <p class="muted">${esc(metaType)}${esc(momentLabel(record.updated_at || record.created_at))}${esc(amount)}${esc(dueNote)}</p>
-        <button class="life-send" type="button" data-life-open="${esc(record.session_id)}"
-                aria-label="打开会话：${esc(title)}">打开会话</button>
-      </div>
-      ${lifeBudgetHtml(record.budget)}
-    </article>`;
-    }).join("")
-    : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
-  /* 已登记预约单独一块：它不在「最近记录」里（记录是已提交的事件），
-     以前只有确认回执里提一句，之后在页面上就找不到了。 */
-  const scheduleBlock = schedules.length
-    ? `<section class="life-block">
-        <div class="life-block__head"><b>已登记预约</b>
-          <span class="muted">到期后重新生成待确认提案，不会自动扣款</span></div>
-        <div class="life-records">${schedules.map(lifeScheduleRowHtml).join("")}</div>
+  const warnings = [...records, ...privateRecords].filter(
+    (record) => record.funding
+      && (record.funding.status === "later" || record.funding.status === "short"),
+  );
+  const conflicts = Array.isArray(payload.date_conflicts) ? payload.date_conflicts : [];
+  const alertItems = [
+    ...warnings.map((record) => `${esc(
+      record.event_title || record.event_name || record.event_id,
+    )}：${esc(record.funding.message || "可用资金不足")}`),
+    ...conflicts.map((item) => `「${esc(item.keyword || "同一场合")}」相关事件出现多个用钱日：
+      ${esc((item.dates || []).join(" / "))}（${esc((item.titles || []).join("、"))}），
+      请确认哪个是实际用钱日`),
+  ];
+  const alertBlock = alertItems.length
+    ? `<section class="life-alert" role="status">
+        <p><b>资金核查：${alertItems.length} 条需要你确认</b>
+          <span class="muted">计划金额 / 日期与可用资金、到期日不匹配</span></p>
+        <ul>${alertItems.map((text) => `<li>${text}</li>`).join("")}</ul>
       </section>`
     : "";
-  list.innerHTML = `${scheduleBlock}<div class="life-records">${recordRows}</div>`;
+  const recordRows = records.length
+    ? records.map(lifeRecordCardHtml).join("")
+    : '<p class="muted">还没有生活事件记录；发起后会出现在这里。</p>';
+  /* 只有关联不上记录的旧预约才单独兜底；正常预约已经折叠进上面的事件卡。 */
+  const scheduleBlock = orphanSchedules.length
+    ? `<section class="life-block">
+        <div class="life-block__head"><b>已登记预约（未关联记录）</b>
+          <span class="muted">到期后重新生成待确认提案，不会自动扣款</span></div>
+        <div class="life-records">${orphanSchedules.map(lifeScheduleRowHtml).join("")}</div>
+      </section>`
+    : "";
+  /* 私密事件默认折叠：不隐藏（用户自己要看得到），但不进共享推送与普通列表。 */
+  const privateBlock = privateRecords.length
+    ? `<details class="life-private">
+        <summary>仅本人可见的事件 ${privateRecords.length} 条（默认折叠，不进共享推送）</summary>
+        <div class="life-records">${privateRecords.map(lifeRecordCardHtml).join("")}</div>
+      </details>`
+    : "";
+  list.innerHTML = `${alertBlock}<div class="life-records">${recordRows}</div>${privateBlock}${scheduleBlock}`;
+}
+
+/* 终止定期出资登记：登记时不扣款，终止只改状态，不动资金（与转账页同一接口）。 */
+async function cancelLifeTransfer(scheduleId) {
+  if (!scheduleId) return;
+  const result = await post("/api/transfers/cancel", { schedule_id: scheduleId });
+  if (result.status !== 200) {
+    timelineAdd(
+      String((result.data && result.data.detail) || "终止失败，请稍后重试。"), "error",
+    );
+    return;
+  }
+  timelineAdd("已终止这笔定期出资登记（登记时不扣款，终止不动资金）", "live");
+  await refreshLifeEvents();
 }
 
 /* 统一关弹窗：showModal 打开的必须 close()，否则保留 open 属性会留下遮罩 */
@@ -5471,6 +7805,16 @@ document.addEventListener("click", async (event) => {
     lifeCal.day = lifeCal.day === key ? "" : key;
     const calendar = el("life-calendar");
     if (calendar) calendar.innerHTML = lifeCalendarHtml(lifeCal.records);
+    return;
+  }
+  const cancelTransfer = target.closest("[data-life-cancel-transfer]");
+  if (cancelTransfer) {
+    cancelTransfer.disabled = true;
+    try {
+      await cancelLifeTransfer(cancelTransfer.dataset.lifeCancelTransfer || "");
+    } finally {
+      cancelTransfer.disabled = false;
+    }
     return;
   }
   const open = target.closest("[data-life-open]");
@@ -5899,14 +8243,14 @@ themeToggle.addEventListener("change", () => {
 const SCENES = {
   transfer: {
     title: "转账",
-    sub: "中文数字、完整手机号、日累计限额；大额与不可逆动作走强验证。",
-    short: "额度、收款人；说一句话去对话",
-    prefill: "转给李娜 500 元",
+    sub: "从本人账户转出，收款人需核对姓名、账号与开户行。",
+    short: "付款账户、收款人三要素与到账方式",
+    prefill: "我要转账",
   },
   bills: {
     title: "账单分析",
-    sub: "重复扣款 / 涨价 / 隐藏费用 / 深夜 / 异地；带置信度与免责说明。",
-    short: "异常打标 + 置信度与免责",
+    sub: "收支结构、分类修正、商户排行与预算；异常线索只是补充，且必须高置信、有依据。",
+    short: "收支、分类、商户与预算",
     prefill: "查一下上月账单",
   },
   wealth: {
@@ -5922,10 +8266,10 @@ const SCENES = {
     prefill: "锁卡",
   },
   subscriptions: {
-    title: "订阅",
-    sub: "涨价、下次扣款日与扣款记录可查；取消前说清本地 / 商户边界。",
-    short: "涨价与下次扣款可查",
-    prefill: "订阅取消",
+    title: "代扣协议",
+    sub: "关闭银行卡侧扣款授权；签约时间、累计扣款与解约后对账可查。",
+    short: "关闭扣款协议与解约对账",
+    prefill: "关闭扣款协议",
   },
   life: {
     title: "生活事件",
@@ -5987,7 +8331,7 @@ async function refreshHomeBalance() {
 void refreshHomeBalance();
 
 const RECORD_TABS = {
-  transfers: { label: "转账记录", hint: "转账完成后，这里显示收款人（脱敏）、金额、状态与业务流水渠道。" },
+  transfers: { label: "转账记录", hint: "每笔含收款人（脱敏）、账号尾号、方式、手续费、状态与用途；可再转一笔。" },
   holdings: { label: "持仓", hint: "理财申购后的持仓（产品 / 金额 / 起息日）；无净值数据时收益标「未知」。" },
   cards: { label: "卡片状态", hint: "锁卡 / 挂失 / 补卡后的最新状态与可执行动作。" },
   suspicions: { label: "可疑清单", hint: "账单异常标记、置信度与「不当作已确认」的免责说明。" },
@@ -6003,7 +8347,7 @@ const RECORD_TAB_LOADERS = {
 };
 
 const RECORD_HEADERS = {
-  transfers: ["记账日", "收款人", "金额", "状态", "渠道", "记录号", "详情"],
+  transfers: ["记账日", "收款人", "金额", "方式", "状态", "用途", "记录号", "详情"],
   holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益"],
   cards: ["卡号", "类型", "状态", "日限额"],
   suspicions: ["可疑类型", "状态", "置信度", "影响金额", "证据商户"],
@@ -6056,16 +8400,14 @@ function recordsRowsFor(key, payload) {
   if (key === "transfers") {
     return (data.items || []).map((item) => recordsRow([
       `<span class="mono">${esc(item.booked_on || "—")}</span>`,
-      esc(item.payee || "—"),
+      esc(transferPayeeText(item)),
       `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
-      esc(item.status || "—"),
-      esc(recordChannelLabel(item.channel)),
+      esc(item.method_label || "—"),
+      `<span class="${transferStatusClass(item.status)}">${esc(item.status || "—")}</span>`,
+      esc(item.purpose_label || item.remark || "—"),
       `<span class="mono">${esc(item.record_id || "—")}</span>`,
       `<details class="records-detail"><summary>详情</summary>
-        <p class="muted">${esc(item.kind === "scheduled" ? "定时登记（本次不扣款）" : "即时转账")}` +
-        ` · 账户 ${esc(item.account || "—")}</p>
-        <p class="muted">备注 ${esc(item.remark || "—")}</p>
-        <p class="muted mono">记录号 ${esc(item.record_id || "—")}</p>
+        ${transferRecordDetail(item)}
       </details>`,
     ]));
   }
@@ -6202,14 +8544,31 @@ async function renderRecordsTab(tab) {
     ? `<p class="muted records-note">识别结果只作核对线索，不当作已确认；渠道列无来源时显示「—」。数据来源：${esc((result.data || {}).data_source || "服务端事实")}。</p>`
     : key === "charges"
       ? '<p class="muted records-note">扣款账户为这笔流水所属账户；余额是账户当前余额，不是扣款时点余额。</p>'
-      : "";
+      : key === "transfers"
+        ? '<p class="muted records-note">「AI 办理」是本次演示中真实执行的转账；「演示历史」是预置流水，用于账单与对账演示。次日到账显示「已发出申请·可撤销」，与「已到账」严格区分。</p>'
+        : "";
+  const summary = key === "transfers" ? payeeSummaryHtml((result.data || {}).payee_summary) : "";
   body.innerHTML = rows.length
-    ? `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
+    ? summary +
+      `<p class="muted records-count">共 ${rows.length} 条 · 数据来自服务端事实</p>` +
       recordsTableHtml(RECORD_HEADERS[key], rows) + note
     : recordsEmptyHtml(spec);
 }
 
-function showScene(key) {
+function payeeSummaryHtml(rows) {
+  const items = rows || [];
+  if (!items.length) return "";
+  return `<details class="records-summary">
+    <summary>按收款人汇总（${items.length}）</summary>
+    <ul>${items.map((item) => {
+      const tail = item.payee_account_tail ? ` · 尾号 ${esc(item.payee_account_tail)}` : "";
+      return `<li><span>${esc(item.payee || "收款人未知")}${tail}</span>` +
+        `<span class="mono">${esc(yuanText(item.total_cents || 0))} · ${esc(String(item.count || 0))} 笔</span></li>`;
+    }).join("")}</ul>
+  </details>`;
+}
+
+function showScene(key, opts) {
   const switching = currentScene !== key;
   currentScene = Object.prototype.hasOwnProperty.call(SCENES, key) ? key : "transfer";
   /* 切场景时丢掉上一页未确认的计划卡：隐藏页里的「确认执行」不该还能被点到 */
@@ -6219,9 +8578,18 @@ function showScene(key) {
   const sub = el("scene-sub");
   if (title) title.textContent = spec.title;
   if (sub) sub.textContent = spec.sub;
+  const chatButton = el("btn-scene-chat");
+  if (chatButton) {
+    chatButton.textContent = currentScene === "bills"
+      ? "问 AI 账单问题"
+      : currentScene === "transfer" ? "用 AI 助理转账" : "去对话补充";
+  }
   document.querySelectorAll("[data-scene-block]").forEach((block) => {
     block.hidden = block.dataset.sceneBlock !== currentScene;
   });
+  if (opts && opts.subFocus) state.pendingAgreementFocus = opts.subFocus;
+  if (currentScene === "subscriptions" && state.pendingAgreementFocus
+    && state.optionsStatus === "ready") applyAgreementFocus();
 }
 
 function showView(name, options) {
@@ -6233,7 +8601,7 @@ function showView(name, options) {
     const node = el(`view-${view}`);
     if (node) node.hidden = view !== next;
   });
-  if (next === "scene") showScene(opts.scene || currentScene);
+  if (next === "scene") showScene(opts.scene || currentScene, opts);
   /* 选中态只写在可见导航容器里（左栏 / 底部标签栏 / 我的）；
      隐藏视图里的「去对话」「进入功能页」等按钮一律清空，避免读屏与观感上都像是「对话被选中」。 */
   document.querySelectorAll("[data-nav]").forEach((button) => button.removeAttribute("aria-current"));
@@ -6272,8 +8640,25 @@ function navigate(name, options) {
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
+  const chatLeadState = target.closest("[data-chat-lead-state]");
+  if (chatLeadState) {
+    action(() => applyChatLeadState(chatLeadState.dataset.chatLeadState || ""))();
+    return;
+  }
   if (target.closest('[data-action="refresh-subscriptions"]')) {
     refreshOptions().catch(() => {});
+    return;
+  }
+  const subView = target.closest("[data-sub-view]");
+  if (subView) {
+    state.subView = subView.dataset.subView || "agreement";
+    renderSubscriptionDetails(state.options);
+    return;
+  }
+  const subCard = target.closest("[data-sub-card]");
+  if (subCard) {
+    state.subCard = subCard.dataset.subCard || "all";
+    renderSubscriptionDetails(state.options);
     return;
   }
   const subDetail = target.closest("[data-sub-detail]");
@@ -6335,6 +8720,7 @@ document.addEventListener("click", (event) => {
     const opts = {};
     if (nav.dataset.scene) opts.scene = nav.dataset.scene;
     if (nav.dataset.recordTab) opts.tab = nav.dataset.recordTab;
+    if (nav.dataset.subFocus) opts.subFocus = nav.dataset.subFocus;
     const prefill = nav.dataset.prefill;
     if (prefill) {
       const input = el("utterance");
@@ -6356,17 +8742,35 @@ document.addEventListener("click", (event) => {
     renderRecordsTab(currentRecordTab);
     return;
   }
-  /* 场景页「页内办事」：快速转账 / 计划卡确认 / 撤销 / 去对话强验证 */
-  if (target.closest("[data-quick-amount]")) {
-    const amountInput = el("quick-amount");
-    if (amountInput) {
-      amountInput.value = target.closest("[data-quick-amount]").dataset.quickAmount || "";
-      amountInput.focus();
-    }
-    return;
-  }
+  /* 场景页「页内办事」：转账 / 计划卡确认 / 撤销 / 去对话验证 */
   if (target.closest("#quick-transfer-submit")) {
     submitQuickTransfer().catch(() => {});
+    return;
+  }
+  if (target.closest("#quick-transfer-chat")) {
+    transferToChat().catch(() => {});
+    return;
+  }
+  if (target.closest("[data-transfer-repeat-chat]")) {
+    repeatTransferFromRecord(target.closest("[data-transfer-repeat-chat]"), false);
+    transferToChat().catch(() => {});
+    return;
+  }
+  if (target.closest("[data-transfer-repeat]")) {
+    repeatTransferFromRecord(target.closest("[data-transfer-repeat]"));
+    return;
+  }
+  if (target.closest("[data-transfer-cancel]")) {
+    cancelTransferRecord(target.closest("[data-transfer-cancel]").dataset.transferCancel || "")
+      .catch(() => {});
+    return;
+  }
+  if (target.closest("[data-scene-verify]")) {
+    requestSceneVerification().catch(() => {});
+    return;
+  }
+  if (target.closest("[data-scene-confirm-code]")) {
+    confirmSceneCard().catch(() => {});
     return;
   }
   if (target.closest("[data-scene-wealth-trade]")) {
@@ -6407,6 +8811,10 @@ window.addEventListener("hashchange", () => {
 });
 
 el("btn-scene-chat")?.addEventListener("click", () => {
+  if (currentScene === "transfer") {
+    transferToChat().catch(() => {});
+    return;
+  }
   const spec = SCENES[currentScene];
   if (spec && spec.prefill) {
     const input = el("utterance");
@@ -6422,7 +8830,13 @@ el("quick-payee")?.addEventListener("focus", () => {
 
 el("quick-payee")?.addEventListener("input", () => {
   payeeActiveIndex = -1;
+  if (pickedPayee && el("quick-payee").value.trim() !== pickedPayee.name) {
+    clearPickedPayee();
+    const accountInput = el("quick-payee-account");
+    if (accountInput) accountInput.value = "";
+  }
   renderPayeeCandidates();
+  updateTransferFormState();
 });
 
 el("quick-payee")?.addEventListener("keydown", (event) => {
@@ -6449,7 +8863,7 @@ el("quick-payee")?.addEventListener("keydown", (event) => {
     /* 只有用方向键明确选中的候选才填入；否则按输入的姓名继续，交给服务端澄清（不猜） */
     if (open && payeeActiveIndex >= 0 && payeeMatches[payeeActiveIndex]
       && !payeeMatches[payeeActiveIndex].blocked) {
-      choosePayee(payeeMatches[payeeActiveIndex].name);
+      choosePayee(payeeMatches[payeeActiveIndex]);
       return;
     }
     closePayeeCandidates();
@@ -6465,7 +8879,10 @@ el("payee-candidates")?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-payee-name]");
   if (!item) return;
   if (item.dataset.payeeBlocked === "1") return;
-  choosePayee(item.dataset.payeeName);
+  const match = payeeMatches.find((row) =>
+    String(row.payeeId || "") === String(item.dataset.payeeId || "")
+    && row.name === item.dataset.payeeName);
+  choosePayee(match || item.dataset.payeeName);
 });
 
 document.addEventListener("click", (event) => {
@@ -6480,6 +8897,44 @@ document.addEventListener("click", (event) => {
       submitQuickTransfer().catch(() => {});
     }
   });
+});
+
+/* 转账表单联动：账户余额、方式说明、金额校验、防诈提示都在同一处刷新。 */
+["transfer-account", "quick-amount", "quick-purpose", "quick-remark",
+  "quick-payee-phone"].forEach((id) => {
+  const node = el(id);
+  if (!node) return;
+  node.addEventListener("input", () => {
+    if (id === "transfer-account") rememberTransferAccount();
+    updateTransferFormState();
+  });
+  node.addEventListener("change", () => {
+    if (id === "transfer-account") rememberTransferAccount();
+    updateTransferFormState();
+  });
+});
+
+document.querySelectorAll('input[name="transfer-method"]').forEach((node) => {
+  node.addEventListener("change", () => updateTransferFormState());
+});
+
+el("quick-payee-account")?.addEventListener("input", () => {
+  if (pickedPayee) clearPickedPayee();
+  updateTransferFormState();
+});
+
+el("quick-payee-bank")?.addEventListener("change", () => {
+  if (pickedPayee && el("quick-payee-bank").value !== pickedPayee.bankName) {
+    clearPickedPayee();
+  }
+  updateTransferFormState();
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target && event.target.id === "transfer-fraud-ack") {
+    if (transferFraudGate) transferFraudGate.acknowledged = Boolean(event.target.checked);
+    updateTransferFormState();
+  }
 });
 
 const initialRoute = parseHash();

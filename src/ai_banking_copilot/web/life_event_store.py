@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS life_event_records (
     updated_at   TEXT NOT NULL,
     steps_json   TEXT NOT NULL DEFAULT '[]',
     due_on       TEXT,
-    visibility   TEXT NOT NULL DEFAULT 'normal'
+    visibility   TEXT NOT NULL DEFAULT 'normal',
+    utterance    TEXT NOT NULL DEFAULT '',
+    hold_ref     TEXT,
+    occasion_ref TEXT,
+    results_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_life_event_user
@@ -100,6 +104,20 @@ _ADDED_COLUMNS = (
 )
 """老库缺的预约列：`PRAGMA table_info` 判断后再 `ALTER TABLE`（幂等迁移）。"""
 
+_RECORD_ADDED_COLUMNS = (
+    ("utterance", "TEXT NOT NULL DEFAULT ''"),
+    ("hold_ref", "TEXT"),
+    ("occasion_ref", "TEXT"),
+    ("results_json", "TEXT NOT NULL DEFAULT '[]'"),
+)
+"""记录表新增列：原话（意图还原）、本事件的冻结 / 下单引用、执行回执摘要。"""
+
+_RECORD_COLUMNS = (
+    "record_id, user_id, session_id, event_id, event_name, event_title, amount_cents,"
+    " status, created_at, updated_at, steps_json, due_on, visibility, utterance,"
+    " hold_ref, occasion_ref, results_json"
+)
+
 _RECORD_STATUS_BY_SCHEDULE = {
     SCHEDULE_CONSUMED: STATUS_EXECUTED,
     SCHEDULE_CANCELLED: STATUS_REJECTED,
@@ -128,6 +146,14 @@ class LifeEventRecord:
     """计划生效 / 送达日期（ISO）；为空表示未指定。"""
     visibility: str = NORMAL_VISIBILITY
     """`normal` / `private`：私密记录不进普通列表与共享推送。"""
+    utterance: str = ""
+    """触发本事件的原话（意图还原区直接展示；旧记录为空）。"""
+    hold_ref: str | None = None
+    """本事件自己的冻结记录（`budget_hold_id`）；不按用户全局取，避免四张卡显示同一笔。"""
+    occasion_ref: str | None = None
+    """本事件自己的下单幂等键（`occasion_id`）。"""
+    results: tuple[dict[str, object], ...] = ()
+    """执行回执摘要：`{action, status, record_ids}`；订单号 / 定期转账 ID 从这里来。"""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -143,6 +169,10 @@ class LifeEventRecord:
             "steps": list(self.steps),
             "due_on": self.due_on,
             "visibility": self.visibility,
+            "utterance": self.utterance,
+            "hold_ref": self.hold_ref,
+            "occasion_ref": self.occasion_ref,
+            "results": list(self.results),
         }
 
 
@@ -191,6 +221,9 @@ class LifeEventStore:
         steps: Sequence[Mapping[str, object]] = (),
         due_on: str | None = None,
         visibility: str = NORMAL_VISIBILITY,
+        utterance: str = "",
+        hold_ref: str | None = None,
+        occasion_ref: str | None = None,
         now: datetime | None = None,
     ) -> LifeEventRecord:
         """登记一次「已提交」；同会话同事件已有 `planned` 行则就地更新。"""
@@ -209,11 +242,11 @@ class LifeEventStore:
                 conn.execute(
                     "UPDATE life_event_records SET event_name = ?, event_title = ?,"
                     " amount_cents = ?, steps_json = ?, due_on = ?, visibility = ?,"
-                    " updated_at = ?"
+                    " utterance = ?, hold_ref = ?, occasion_ref = ?, updated_at = ?"
                     " WHERE record_id = ?",
                     (
                         event_name, event_title, amount_cents, steps_json, due_on, visibility,
-                        moment, record_id,
+                        utterance, hold_ref, occasion_ref, moment, record_id,
                     ),
                 )
         else:
@@ -223,8 +256,8 @@ class LifeEventStore:
                     "INSERT INTO life_event_records"
                     " (record_id, user_id, session_id, event_id, event_name, event_title,"
                     "  amount_cents, status, created_at, updated_at, steps_json, due_on,"
-                    "  visibility)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "  visibility, utterance, hold_ref, occasion_ref)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         record_id,
                         user_id,
@@ -239,6 +272,9 @@ class LifeEventStore:
                         steps_json,
                         due_on,
                         visibility,
+                        utterance,
+                        hold_ref,
+                        occasion_ref,
                     ),
                 )
         return self._get(user_id, record_id)
@@ -281,9 +317,7 @@ class LifeEventStore:
             (user_id, limit) if visibility is None else (user_id, visibility, limit)
         )
         rows = self._store.query(
-            "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
-            " FROM life_event_records"
+            f"SELECT {_RECORD_COLUMNS} FROM life_event_records"
             f" WHERE user_id = ?{condition} ORDER BY created_at DESC, rowid DESC LIMIT ?",
             params,
         )
@@ -323,9 +357,7 @@ class LifeEventStore:
 
     def _get(self, user_id: str, record_id: str) -> LifeEventRecord:
         rows = self._store.query(
-            "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
-            " FROM life_event_records"
+            f"SELECT {_RECORD_COLUMNS} FROM life_event_records"
             " WHERE user_id = ? AND record_id = ?",
             (user_id, record_id),
         )
@@ -334,14 +366,45 @@ class LifeEventStore:
     def latest_planned(self, *, user_id: str, session_id: str) -> LifeEventRecord | None:
         """该会话最近一条 `planned` 记录；没有则 `None`（用于把预约挂到来源记录）。"""
         rows = self._store.query(
-            "SELECT record_id, user_id, session_id, event_id, event_name, event_title,"
-            "  amount_cents, status, created_at, updated_at, steps_json, due_on, visibility"
-            " FROM life_event_records"
+            f"SELECT {_RECORD_COLUMNS} FROM life_event_records"
             " WHERE user_id = ? AND session_id = ? AND status = ?"
             " ORDER BY created_at DESC LIMIT 1",
             (user_id, session_id, STATUS_PLANNED),
         )
         return None if not rows else _record_from_row(rows[0])
+
+    def latest_record(self, *, user_id: str, session_id: str) -> LifeEventRecord | None:
+        """该会话最近一条记录（**不区分状态**）：确认执行后仍要能回写订单号。"""
+
+        rows = self._store.query(
+            f"SELECT {_RECORD_COLUMNS} FROM life_event_records"
+            " WHERE user_id = ? AND session_id = ?"
+            " ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+            (user_id, session_id),
+        )
+        return None if not rows else _record_from_row(rows[0])
+
+    def attach_execution(
+        self,
+        *,
+        user_id: str,
+        record_id: str,
+        results: Sequence[Mapping[str, object]],
+        now: datetime | None = None,
+    ) -> int:
+        """把本次执行回执摘要写回记录（订单号 / 定期转账 ID）；不改状态。"""
+
+        moment = (now if now is not None else self._clock()).isoformat()
+        payload = json.dumps(
+            [dict(item) for item in results], ensure_ascii=False, sort_keys=True, default=str
+        )
+        with self._store.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE life_event_records SET results_json = ?, updated_at = ?"
+                " WHERE user_id = ? AND record_id = ?",
+                (payload, moment, user_id, record_id),
+            )
+            return cursor.rowcount
 
     def schedule(
         self,
@@ -551,6 +614,9 @@ def init_life_event_schema(store: Store) -> None:
                 "ALTER TABLE life_event_records"
                 " ADD COLUMN visibility TEXT NOT NULL DEFAULT 'normal'"
             )
+        for name, ddl in _RECORD_ADDED_COLUMNS:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE life_event_records ADD COLUMN {name} {ddl}")
         schedule_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(life_event_schedules)")
         }
@@ -571,6 +637,17 @@ def _record_from_row(row: sqlite3.Row) -> LifeEventRecord:
     ) if isinstance(parsed, list) else ()
     due_on = row["due_on"] if "due_on" in row.keys() else None
     visibility = row["visibility"] if "visibility" in row.keys() else None
+    utterance = row["utterance"] if "utterance" in row.keys() else ""
+    hold_ref = row["hold_ref"] if "hold_ref" in row.keys() else None
+    occasion_ref = row["occasion_ref"] if "occasion_ref" in row.keys() else None
+    raw_results = row["results_json"] if "results_json" in row.keys() else "[]"
+    try:
+        parsed_results = json.loads(str(raw_results or "[]"))
+    except ValueError:
+        parsed_results = []
+    results = tuple(
+        item for item in parsed_results if isinstance(item, dict)
+    ) if isinstance(parsed_results, list) else ()
     return LifeEventRecord(
         record_id=str(row["record_id"]),
         user_id=str(row["user_id"]),
@@ -585,6 +662,10 @@ def _record_from_row(row: sqlite3.Row) -> LifeEventRecord:
         steps=steps,
         due_on=None if due_on is None else str(due_on),
         visibility=NORMAL_VISIBILITY if visibility is None else str(visibility),
+        utterance=str(utterance or ""),
+        hold_ref=None if hold_ref is None else str(hold_ref),
+        occasion_ref=None if occasion_ref is None else str(occasion_ref),
+        results=results,
     )
 
 

@@ -124,14 +124,14 @@ def test_upcoming_charges_sorted_by_next_charge_on(gateway: FactGateway) -> None
 def test_detected_charges_are_merged_from_transactions(gateway: FactGateway) -> None:
     """自动识别订阅扣费：仅按**商户名精确匹配**归并流出流水，识别不到的不编造。"""
     charges = detected_charges(gateway, DEMO_USER_ID)
-    assert [charge.merchant for charge in charges] == ["视频会员"]
+    assert [charge.merchant for charge in charges] == ["视频会员", "云盘会员", "音乐会员"]
     assert charges[0].subscription_id == "sub_video"
-    # 覆盖区间扩为 2025-01..2026-10 后，该商户每月 1 笔 ⇒ 共 22 笔；
-    # 2025（系数 85）为 -2125 分/笔、2026 为 -2500 分/笔，合计 50500 分（数据覆盖变化，非放宽）。
+    # 覆盖区间扩为 2025-01..2026-10 后，视频会员每月 1 笔 ⇒ 共 22 笔；
+    # 订阅商户为固定价（不参与年度缩放），2025 / 2026 均为 -2500 分/笔，合计 55000 分。
     assert charges[0].txn_count >= 22
-    assert charges[0].total.cents == 50500
+    assert charges[0].total.cents == 55000
     assert charges[0].last_booked_on == date(2026, 10, 18)
-    assert "识别到 1 项订阅扣费" in describe_detected_charges(charges)
+    assert "识别到 3 项订阅扣费" in describe_detected_charges(charges)
 
 
 def test_detected_charges_are_empty_for_an_unknown_user(gateway: FactGateway) -> None:

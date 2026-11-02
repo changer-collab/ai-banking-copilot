@@ -40,8 +40,8 @@ def run(base: str) -> list[str]:
 
     html = _get(base, "/")
     css = _get(base, "/assets/app.css?v=7")
-    workspace_css = _get(base, "/assets/workspace.css?v=54")
-    js = _get(base, "/assets/app.js?v=83")
+    workspace_css = _get(base, "/assets/workspace.css?v=59")
+    js = _get(base, "/assets/app.js?v=90")
 
     checks = {
         "page: 计划卡容器": 'id="stage"' in html and "计划卡" in html,
@@ -70,8 +70,8 @@ def run(base: str) -> list[str]:
         ),
         "page: 资源 ?v": (
             "/assets/app.css?v=7" in html
-            and "/assets/workspace.css?v=54" in html
-            and "/assets/app.js?v=83" in html
+            and "/assets/workspace.css?v=59" in html
+            and "/assets/app.js?v=90" in html
         ),
         "page: PWA 安装与订阅入口": (
             'id="btn-install"' in html
@@ -110,10 +110,11 @@ def run(base: str) -> list[str]:
             ".role-chain {" in workspace_css and ".role-card--red" in workspace_css
         ),
         "js: 订阅价格与下次扣款": (
-            "item.price_increased_12m === true" in js
-            and "item.price_increased_12m === false" in js
-            and "样本不足" in js
-            and "下次扣款日" in js
+            "function subscriptionBasisHtml(item)" in js
+            and "item.price_change" in js
+            and "未发现近 12 个月涨价" in js
+            and "累计扣款数据不足" in js
+            and "下次扣款 ${esc(item.next_charge_on" in js
         ),
         "js: 扣款记录复用通用表格": (
             'if (key === "charges")' in js

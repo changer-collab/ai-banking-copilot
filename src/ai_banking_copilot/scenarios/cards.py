@@ -202,10 +202,8 @@ def _validate_card_action(
             raise ScenarioRefused(
                 "卡片已正式挂失，不支持解挂：挂失是不可逆操作；如仍需用卡，请申请补卡。"
             )
-        if status != "locked":
-            if card.status == "locked":
-                raise ScenarioRefused("临时冻结已到期并自动解挂，无需重复操作。")
-            raise ScenarioRefused("只有临时冻结的卡片可以解挂。")
+        # 健康卡 / 冻结已到期也允许出计划：如实说明「当前没有生效中的临时冻结」由裁决与
+        # 执行回执承载，而不是用一句与卡状态不符的理由把用户挡回去。
         return "card.unlock"
 
     if action == "card.report_lost":

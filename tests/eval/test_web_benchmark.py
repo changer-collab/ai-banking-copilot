@@ -181,8 +181,8 @@ def test_yearly_totals_and_percentage_have_independent_source_proofs(tmp_path: P
     report = run_benchmark(tmp_path, cases=[case])
     assert report["passed"] is True
     proofs = report["cases"][0]["numeric_proofs"]
-    assert any(proof["displayed"] == "+17.65%" for proof in proofs)
-    percentage = next(proof for proof in proofs if proof["displayed"] == "+17.65%")
+    assert any(proof["displayed"] == "+17.57%" for proof in proofs)
+    percentage = next(proof for proof in proofs if proof["displayed"] == "+17.57%")
     assert len(percentage["sources"]) == 18
     assert all(proof["passed"] for proof in proofs)
 

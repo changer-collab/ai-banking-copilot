@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 
 from ai_banking_copilot.contracts.plan import (
     AnchorSource,
@@ -101,16 +101,32 @@ def build_money_node(
     detail = f"资金流出：{intent.evidence or intent.action}"
     anchor_id = grant_anchor(ledger, source, detail)
     account_id = as_str(trusted_slot(intent, ("account", "account_id"), "account"), "account")
+    method_raw = intent.slots.get("transfer_method")
+    method = (
+        as_str(require_trusted(method_raw, "transfer_method"), "transfer_method")
+        if method_raw is not None
+        else ("next_day" if intent.action in {"transfer.book", "transfer.schedule"} else "realtime")
+    )
+    # 次日到账没有显式日期时，默认落到「基准日 + 1 天」：登记不扣款，留出撤销窗口。
+    default_when = (
+        DEFAULT_BOOKING_DATE + timedelta(days=1)
+        if method == "next_day" and intent.action in {"transfer.book", "transfer.schedule"}
+        else DEFAULT_BOOKING_DATE
+    )
     params: dict[str, object] = {
         "account_id": account_id,
         "payee_id": resolve_payee(intent, gateway),
         "amount_cents": resolve_amount_cents(intent, ledger, anchor_id).cents,
         "currency": resolve_currency(intent, gateway, account_id),
-        "booked_on": optional_date(intent, ("when", "booked_on"), DEFAULT_BOOKING_DATE).isoformat(),
+        "booked_on": optional_date(intent, ("when", "booked_on"), default_when).isoformat(),
+        "transfer_method": method,
     }
     remark = intent.slots.get("remark")
     if remark is not None:
         params["remark"] = accept_data(remark)
+    purpose = intent.slots.get("purpose")
+    if purpose is not None:
+        params["purpose"] = accept_data(purpose)
     return PlanNode(
         node_id=node_id,
         action=intent.action,
@@ -309,6 +325,8 @@ def due_transfer_plan(
                     "booked_on": record.payload.booked_on.isoformat(),
                     "schedule_id": record.payload.schedule_id,
                     "executed_on": as_of.isoformat(),
+                    "transfer_method": record.payload.method,
+                    "purpose": record.payload.purpose,
                 },
             )
         )
@@ -320,6 +338,12 @@ def _optional_currency(params: dict[str, object]) -> str | None:
     if "currency" not in params:
         return None
     return require_str(params, "currency")
+
+
+def _optional_str(params: dict[str, object], key: str) -> str | None:
+    """取可选文本参数；缺省返回 `None`，不把空串当成用户明确选择。"""
+    value = params.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _transfer_handler(context: WriteContext) -> WriteReceipt:
@@ -339,6 +363,9 @@ def _transfer_handler(context: WriteContext) -> WriteReceipt:
         executed_on=(
             require_date(context.params, "executed_on") if "executed_on" in context.params else None
         ),
+        transfer_method=_optional_str(context.params, "transfer_method"),
+        transfer_purpose=_optional_str(context.params, "purpose"),
+        transfer_remark=_optional_str(context.params, "remark"),
     )
 
 
@@ -366,6 +393,8 @@ def _book_transfer_handler(context: WriteContext) -> WriteReceipt:
         currency=_optional_currency(context.params),
         booked_on=require_date(context.params, "booked_on"),
         remark="" if remark is None else str(remark),
+        method=_optional_str(context.params, "transfer_method") or "next_day",
+        purpose=_optional_str(context.params, "purpose") or "",
         idempotency_key=context.idempotency_key,
         before_write=context.before_write,
     )

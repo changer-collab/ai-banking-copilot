@@ -47,7 +47,7 @@ def _bills_intent() -> Intent:
 
 def test_category_totals_come_from_fact_gateway(gateway: FactGateway) -> None:
     summary = category_totals(gateway, DEMO_USER_ID, 2026, 9)
-    assert summary.total_expense.cents == 1611980
+    assert summary.total_expense.cents == 1612980
     assert summary.total_income.cents == 1850000
 
 
@@ -139,7 +139,7 @@ def test_bills_rejects_untrusted_control_slots(
 def test_category_share_uses_whitelisted_operator(gateway: FactGateway) -> None:
     share = category_share(gateway, DEMO_USER_ID, 2026, 9, "购物")
     assert share.operator == "ratio"
-    assert share.value == Decimal(826000) / Decimal(1611980)
+    assert share.value == Decimal(826000) / Decimal(1612980)
     assert share.sources
 
 
@@ -255,9 +255,10 @@ def test_yearly_bill_reads_same_period_of_two_years(gateway: FactGateway) -> Non
     assert len(set(result.record_ids)) == 18
     assert "同期同比口径" in result.detail
     assert "2026 年 1–9 月" in result.detail
-    # 种子库含 2025 年同期数据 ⇒ 产出**真实百分比**（2026 支出为 2025 的 100/85 ⇒ +17.65%）。
+    # 种子库含 2025 年同期数据 ⇒ 产出**真实百分比**：
+    # 2026 支出 145366.22 / 2025 同期 123638.22 ⇒ +17.57%。
     assert "同比不可判" not in result.detail
-    assert "+17.65%" in result.detail
+    assert "+17.57%" in result.detail
     assert len(result.sandbox_events) == 4
     assert result.sandbox_events[0]["use"] == "current_year_expense"
     first_result = result.sandbox_events[0]["result"]
@@ -375,7 +376,7 @@ def test_yearly_bill_codegen_receives_only_tasks_and_field_names(
 
     result = _yearly_result(gateway)
 
-    assert "+17.65%" in result.detail
+    assert "+17.57%" in result.detail
     assert calls == [
         (AnalysisTask.SUM, ("facts",)),
         (AnalysisTask.SUM, ("facts",)),

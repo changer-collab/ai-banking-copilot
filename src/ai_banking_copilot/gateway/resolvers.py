@@ -203,7 +203,11 @@ def _is_bare_amount(
         return False
     if num in reserved_digits or (num.lstrip("0") or "0") in reserved_digits:
         return False
-    tail = text[match.end():].lstrip()[:1]
+    tail_text = text[match.end():].lstrip()
+    # 多字时间单位（「24 小时」「30 分钟」「3 个工作日」）不是金额。
+    if re.match(r"^(?:小时|分钟|个?工作日)", tail_text):
+        return False
+    tail = tail_text[:1]
     if tail and tail in _BARE_BLOCKED_SUFFIX:
         return False
     head = text[: match.start()].rstrip()[-1:]

@@ -32,6 +32,7 @@ class TransactionFacts:
             identity_confirmed=bool(row["identity_confirmed"]),
             blocked=bool(row["blocked"]),
             phone=_optional_text(row["phone"]),
+            bank_name=_optional_text(row["bank_name"]),
         )
         return _record("payees", payload.payee_id, payload)
 
@@ -49,6 +50,11 @@ class TransactionFacts:
             period=str(row["period"]),
             next_charge_on=date.fromisoformat(str(row["next_charge_on"])),
             status=str(row["status"]),
+            card_id=_optional_text(row["card_id"]),
+            cancelled_on=(
+                date.fromisoformat(str(row["cancelled_on"]))
+                if row["cancelled_on"] else None
+            ),
         )
         return _record("subscriptions", payload.subscription_id, payload)
 

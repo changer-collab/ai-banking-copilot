@@ -43,11 +43,13 @@ def test_due_plan_filters_owner_status_and_binds_persistent_identity(tmp_path: P
         with writer.transaction() as conn:
             conn.execute("INSERT INTO users VALUES('u_other', '另一用户', 'R2')")
             conn.execute(
-                "INSERT INTO scheduled_transfers VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO scheduled_transfers(schedule_id, user_id, account_id, payee_id,"
+                " amount_cents, booked_on, remark, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                 ("other", "u_other", "acc_savings", "p_lina", 10000, "2026-10-01", "", "scheduled"),
             )
             conn.execute(
-                "INSERT INTO scheduled_transfers VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO scheduled_transfers(schedule_id, user_id, account_id, payee_id,"
+                " amount_cents, booked_on, remark, status) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "done", DEMO_USER_ID, "acc_savings", "p_lina", 10000,
                     "2026-10-01", "", "completed",

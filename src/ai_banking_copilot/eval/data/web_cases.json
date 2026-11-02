@@ -99,8 +99,8 @@
     ],
     "numbers": [
       {"pattern": "金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'transactions:'||txn_id, ABS(amount_cents) FROM transactions WHERE channel='agent' AND category='转账' UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders", "unit": "cents"},
-      {"pattern": "冻结资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders WHERE status='placed'", "unit": "cents", "operation": "sum"},
-      {"pattern": "解冻资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds WHERE status='released'", "unit": "cents"}
+      {"pattern": "锁定预算（资金预留）：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders WHERE status='placed'", "unit": "cents", "operation": "sum"},
+      {"pattern": "释放预留资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds WHERE status='released'", "unit": "cents"}
     ]
   },
   {
@@ -112,8 +112,8 @@
     ],
     "numbers": [
       {"pattern": "金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders", "unit": "cents"},
-      {"pattern": "冻结资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders WHERE status='placed'", "unit": "cents", "operation": "sum"},
-      {"pattern": "解冻资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds WHERE status='released'", "unit": "cents"}
+      {"pattern": "锁定预算（资金预留）：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds UNION ALL SELECT 'merchant_orders:'||order_id, amount_cents FROM merchant_orders WHERE status='placed'", "unit": "cents", "operation": "sum"},
+      {"pattern": "释放预留资金：.*?金额 (?P<value>[\\d.]+) 元", "sql": "SELECT 'holds:'||hold_id, amount_cents FROM holds WHERE status='released'", "unit": "cents"}
     ]
   },
   {

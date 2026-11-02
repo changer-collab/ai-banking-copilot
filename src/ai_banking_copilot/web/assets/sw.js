@@ -1,13 +1,13 @@
-/* 静态壳 v78：金融 API 始终在线读取，绝不进入 Cache Storage。 */
-const CACHE_NAME = "aib-static-shell-v78";
+/* 静态壳 v80：金融 API 始终在线读取，绝不进入 Cache Storage。 */
+const CACHE_NAME = "aib-static-shell-v80";
 const STATIC_ASSETS = [
   "/",
   "/assets/manifest.json?v=1",
   "/assets/icon.svg?v=1",
   "/assets/tokens.css?v=2",
   "/assets/app.css?v=7",
-  "/assets/workspace.css?v=55",
-  "/assets/app.js?v=84",
+  "/assets/workspace.css?v=59",
+  "/assets/app.js?v=90",
   "/assets/wealth_trade.js?v=1",
 ];
 

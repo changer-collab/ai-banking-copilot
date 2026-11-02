@@ -12,7 +12,8 @@ from ai_banking_copilot.scenarios.life_events import (
     detect_maturity_link,
     holding_maturity,
 )
-from ai_banking_copilot.web.app import _life_event_name, _life_maturities
+from ai_banking_copilot.web.app import AppDeps, _life_event_name, _life_maturities
+from ai_banking_copilot.web.session import Session, SessionState
 
 
 def test_holding_maturity_adds_term_days() -> None:
@@ -53,3 +54,22 @@ def test_maturity_link_picks_the_upcoming_holding(gateway: FactGateway) -> None:
     plan = build_maturity_link({}, gateway)
     redeem = next(node for node in plan.nodes if node.action == "wealth.redeem")
     assert redeem.params["product_id"] == "wp_short"
+
+
+def test_birthday_maturity_request_redeems_the_holding_without_a_product_picker(
+    deps: AppDeps,
+) -> None:
+    """「生日那天有笔理财到期，赎回给她买礼物」：赎回对象来自持仓，不再拿在售目录让人挑。"""
+    view = Session(deps).submit("我爱人生日那天有笔理财到期，正好赎回给她买礼物")
+
+    assert view.state is SessionState.AWAITING_CONFIRM
+    assert view.clarifications == ()
+    assert view.plan is not None
+    assert [node.action for node in view.plan.nodes] == ["wealth.redeem", "merchant.order"]
+
+    redeem = view.plan.nodes[0]
+    assert redeem.params["product_id"] == "wp_short"
+    assert redeem.params["amount_cents"] == 200_000
+    # 到期日与「未建模份额 / 开放期 / T+n」的口径必须写在回执里，不能装作已到账。
+    assert "2026-11-30" in view.message
+    assert "未模拟份额" in view.message

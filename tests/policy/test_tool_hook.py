@@ -515,7 +515,7 @@ def test_im_style_subscription_change_cannot_skip_the_hook(
         params={"subscription_id": _trusted("sub_video"), "user_id": _trusted(DEMO_USER_ID)},
     )
     with pytest.raises(ToolHookBlocked) as error:
-        pep.execute(call, _decision(Level.YELLOW), manifest_plan(call), "im-cancel")
+        pep.execute(call, _decision(Level.RED), manifest_plan(call), "im-cancel")
 
     assert error.value.status is HookStatus.CONFIRMATION_REQUIRED
     assert writes.actions == []

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -29,7 +30,7 @@ from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.gateway.errors import GatewayNotFoundError
 from ai_banking_copilot.gateway.facts import FactGateway
 from ai_banking_copilot.gateway.models import Account, Card, WealthHolding, WealthProduct
-from ai_banking_copilot.gateway.resolvers import resolve_payees
+from ai_banking_copilot.gateway.resolvers import parse_temporal, resolve_payees
 from ai_banking_copilot.gateway.seed import DEMO_USER_ID
 from ai_banking_copilot.planning.anchors import AnchorLedger
 from ai_banking_copilot.planning.llm import Intent
@@ -92,12 +93,12 @@ class LifeEventPrototype:
 LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
     LifeEventPrototype(
         event_id="L1",
-        name="预算锁定型",
+        name="资金预留型",
         triggers=("生日", "寿宴", "纪念日", "过节"),
         domains=("funds", "merchant"),
         skeleton=("funds.freeze", "merchant.order", "funds.release"),
         reuse="scenarios.cross.birthday_plan",
-        description="先把预算冻结住，商户下单后自动解冻剩余，超预算直接拒绝。",
+        description="先预留预算，下单从预留额结算，剩余自动释放；每一步都要你确认。",
         example="我妈下个月过生日",
         cases=(
             ("妈妈生日", "我妈下个月过生日"),
@@ -113,7 +114,7 @@ LIFE_EVENT_PROTOTYPES: tuple[LifeEventPrototype, ...] = (
         domains=("transfer", "subscription"),
         skeleton=("transfer.schedule", "subscription.list"),
         reuse="scenarios.transfer + scenarios.subscriptions",
-        description="按期自动转出，可在代扣清单里随时查看与停止。",
+        description="按期转出；只有明确要看订阅 / 代扣时才追加代扣清单查询。",
         example="每月给李娜 500 元生活费",
         cases=(
             ("给父母生活费", "每月给爸妈 2000 元生活费"),
@@ -298,7 +299,7 @@ _COMBO_BY_ID: Mapping[str, LifeEventCombo] = {combo.combo_id: combo for combo in
 
 _PAYEE_ID_PREFIX = "p_"
 _TRANSACTION_WINDOW_DAYS = 30
-_DEFAULT_BUDGET_REASON = "生活事件预算冻结"
+_DEFAULT_BUDGET_REASON = "生活事件资金预留"
 
 _ALIASES: Mapping[str, tuple[str, ...]] = {
     "account": ("account_id", "account"),
@@ -350,7 +351,8 @@ _MATURITY_ORDER_WORDS = ("买", "订", "下单", "送", "花", "礼物", "蛋糕
 def holding_maturity(purchased_on: date, term_days: int) -> date | None:
     """到期日 = 起息日 + 产品期限；`term_days <= 0`（活期 / 期限不明）返回 `None`。
 
-    这是**推算**，不是官方到期公告；调用方必须一并给出推算口径。
+    起息日与产品期限都是持仓 / 产品系统里的**官方字段**，到期日由产品条款确定性得出，
+    不是从流水反推。兑付到账仍以银行回单为准（演示环境不接真实清算）。
     """
     if term_days <= 0:
         return None
@@ -571,7 +573,7 @@ def _account_for_budget(
         return account_id
     account = _savings_account(gateway, needed)
     if account is None:
-        raise ClarificationRequired("account", "没有余额足够的账户，请指定冻结账户")
+        raise ClarificationRequired("account", "没有余额足够的账户，请指定预留账户")
     return account.account_id
 
 
@@ -733,10 +735,42 @@ def build_maturity_link(
     return plan
 
 
+_DATE_HINT = re.compile(
+    r"下周|下下|下个?月|下月|本周|这周|周末|明天|后天|月底|年底|年初"
+    r"|\d{1,2}\s*月|\d{1,2}\s*[号日]"
+)
+"""原话里出现这些词就说明用户给了时间意图；解析不出具体日期时要按确定性默认排期，不能按今天执行。"""
+
+_DEFAULT_PLANNING_LEAD_DAYS = 7
+"""有时间意图但解析不出具体日期时的确定性默认：基准日 + 7 天（给生日 / 送达留出备货时间）。"""
+
+
+def _order_day_from_span(params: Mapping[str, object]) -> date | None:
+    """从意图原文（`span`）解析下单 / 送达日；解析不出返回 `None`。
+
+    这是「下周三订花被当成今天执行」的根因修复：`merchant.order.order_on` 由场景层填充，
+    以前拿不到就直接用基准日。现在先看原话；原文有时间词但解析不出具体日期时按
+    「基准日 + 7 天」的确定性默认排期：既不静默改成今天当场执行，也不把可以排的计划
+    退化成一次无信息量的追问。
+    """
+    raw = _raw(params, "span")
+    if raw is None:
+        return None
+    span = accept_data(raw)
+    if not isinstance(span, str) or not span:
+        return None
+    parsed = parse_temporal(span, REFERENCE_DATE)
+    if parsed.matched and parsed.when is not None:
+        return parsed.when
+    if _DATE_HINT.search(span):
+        return REFERENCE_DATE + timedelta(days=_DEFAULT_PLANNING_LEAD_DAYS)
+    return None
+
+
 def _build_l1(
     params: Mapping[str, object], gateway: FactGateway, ledger: AnchorLedger, prefix: str
 ) -> tuple[PlanNode, ...]:
-    """L1 预算锁定型：冻结预算 → 下单（从冻结额结算）→ 解冻剩余。"""
+    """L1 资金预留型：预留预算 → 下单（从预留额结算）→ 释放剩余。"""
     budget = _opt_cents(params, "budget")
     budget_cents = BIRTHDAY_BUDGET_CENTS if budget is None else budget
     order = _opt_cents(params, "order_amount")
@@ -747,10 +781,12 @@ def _build_l1(
     if budget_cents <= 0:
         raise ScenarioRefused("生活事件预算必须为正")
     if order_cents <= 0 or order_cents > budget_cents:
-        raise ScenarioRefused("下单金额必须为正且不得超过冻结预算")
+        raise ScenarioRefused("下单金额必须为正且不得超过预留预算")
     account_id = _account_for_budget(params, gateway, budget_cents)
     order_on = _opt_day(params, "order_on")
-    order_day = order_on if order_on is not None else REFERENCE_DATE
+    order_day = (
+        order_on if order_on is not None else _order_day_from_span(params) or REFERENCE_DATE
+    )
     merchant = _opt_text(params, "merchant") or BIRTHDAY_MERCHANT
     occasion_id = _opt_text(params, "occasion") or f"life:L1:{order_day.isoformat()}"
     reason = _opt_text(params, "reason") or _DEFAULT_BUDGET_REASON
@@ -766,7 +802,7 @@ def _build_l1(
                 "reason": reason,
                 "budget_hold_id": hold_id,
             },
-            detail="预算冻结",
+            detail="资金预留",
         ),
         _node(
             ledger,
@@ -790,7 +826,7 @@ def _build_l1(
                 "budget_hold_id": hold_id,
                 "amount_cents": budget_cents - order_cents,
             },
-            detail="解冻剩余",
+            detail="释放剩余",
             depends_on=(f"{prefix}1", f"{prefix}2"),
         ),
     )
@@ -799,7 +835,11 @@ def _build_l1(
 def _build_l2(
     params: Mapping[str, object], gateway: FactGateway, ledger: AnchorLedger, prefix: str
 ) -> tuple[PlanNode, ...]:
-    """L2 定期出资型：按期转出 → 代扣清单（可查可停）。"""
+    """L2 定期出资型：按期转出；只有用户明确要看订阅时才追加代扣清单。
+
+    代扣清单不是定期出资的必要步骤：没问订阅却顺手塞一条 `subscription.list`，
+    计划卡会多出用户没要的查询（2026-11-01 实测反馈）。
+    """
     payee_id = _resolve_party(params, "payee", "payee", gateway)
     amount = _cents(params, "amount", "amount")
     if amount <= 0:
@@ -809,7 +849,7 @@ def _build_l2(
         raise ClarificationRequired("account", "未找到可用账户，请指定出资账户")
     booked_on = _opt_day(params, "booked_on")
     booked_day = booked_on if booked_on is not None else DEFAULT_BOOKING_DATE
-    return (
+    nodes = [
         _node(
             ledger,
             f"{prefix}1",
@@ -822,16 +862,29 @@ def _build_l2(
                 "booked_on": booked_day.isoformat(),
             },
             detail="定期出资",
-        ),
-        _node(
-            ledger,
-            f"{prefix}2",
-            "subscription.list",
-            {"user_id": DEMO_USER_ID},
-            detail="代扣清单",
-            depends_on=(f"{prefix}1",),
-        ),
-    )
+        )
+    ]
+    if _wants_subscription_view(params):
+        nodes.append(
+            _node(
+                ledger,
+                f"{prefix}{len(nodes) + 1}",
+                "subscription.list",
+                {"user_id": DEMO_USER_ID},
+                detail="代扣清单",
+                depends_on=(f"{prefix}1",),
+            )
+        )
+    return tuple(nodes)
+
+
+_SUBSCRIPTION_VIEW_WORDS = re.compile(r"订阅|代扣|续费|自动扣费|清单")
+"""用户**明确要看**代扣 / 订阅时的措辞；命中才在 L2 里追加查询节点。"""
+
+
+def _wants_subscription_view(params: Mapping[str, object]) -> bool:
+    span = accept_data(_raw(params, "span") or "")
+    return isinstance(span, str) and _SUBSCRIPTION_VIEW_WORDS.search(span) is not None
 
 
 def _build_l3(

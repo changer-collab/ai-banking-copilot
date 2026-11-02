@@ -137,6 +137,12 @@ class InsightMetadataStore(Protocol):
 
     def set_budget(self, user_id: str, month: str, budget_cents: int | None) -> None: ...
 
+    def get_category_budgets(self, user_id: str, month: str) -> dict[str, int]: ...
+
+    def set_category_budgets(
+        self, user_id: str, month: str, budgets: dict[str, int]
+    ) -> None: ...
+
     def upsert_insight(self, insight: Insight) -> Insight: ...
 
     def list_insights(
@@ -155,6 +161,7 @@ class MemoryInsightMetadataStore:
 
     def __init__(self) -> None:
         self._budgets: dict[tuple[str, str], int] = {}
+        self._category_budgets: dict[tuple[str, str], dict[str, int]] = {}
         self._insights: dict[str, Insight] = {}
         self._scan_states: dict[str, ScanState] = {}
 
@@ -169,6 +176,17 @@ class MemoryInsightMetadataStore:
         if isinstance(budget_cents, bool) or budget_cents < 0:
             raise ValueError("月预算必须是非负整数分")
         self._budgets[key] = budget_cents
+
+    def get_category_budgets(self, user_id: str, month: str) -> dict[str, int]:
+        return dict(self._category_budgets.get((user_id, month), {}))
+
+    def set_category_budgets(
+        self, user_id: str, month: str, budgets: dict[str, int]
+    ) -> None:
+        for category, amount in budgets.items():
+            if not category or isinstance(amount, bool) or amount < 0:
+                raise ValueError("分类预算必须是非负整数分")
+        self._category_budgets[(user_id, month)] = dict(budgets)
 
     def upsert_insight(self, insight: Insight) -> Insight:
         self._insights[insight.key] = insight
@@ -206,6 +224,7 @@ class SQLiteInsightMetadataStore:
         user_id TEXT NOT NULL,
         month TEXT NOT NULL,
         budget_cents INTEGER,
+        category_budgets_json TEXT,
         PRIMARY KEY (user_id, month)
     );
     CREATE TABLE IF NOT EXISTS insights (
@@ -227,6 +246,13 @@ class SQLiteInsightMetadataStore:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(self._DDL)
+        # 旧库迁移：v2 起增加分类预算列；列已存在时忽略。
+        try:
+            self._conn.execute(
+                "ALTER TABLE insight_preferences ADD COLUMN category_budgets_json TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
 
     def get_budget(self, user_id: str, month: str) -> int | None:
@@ -243,6 +269,41 @@ class SQLiteInsightMetadataStore:
             "INSERT INTO insight_preferences(user_id, month, budget_cents) VALUES(?, ?, ?)"
             " ON CONFLICT(user_id, month) DO UPDATE SET budget_cents = excluded.budget_cents",
             (user_id, month, budget_cents),
+        )
+        self._conn.commit()
+
+    def get_category_budgets(self, user_id: str, month: str) -> dict[str, int]:
+        row = self._conn.execute(
+            "SELECT category_budgets_json FROM insight_preferences"
+            " WHERE user_id = ? AND month = ?",
+            (user_id, month),
+        ).fetchone()
+        if row is None or not row[0]:
+            return {}
+        try:
+            raw = json.loads(str(row[0]))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(category): int(amount)
+            for category, amount in raw.items()
+            if isinstance(amount, int) and not isinstance(amount, bool) and amount >= 0
+        }
+
+    def set_category_budgets(
+        self, user_id: str, month: str, budgets: dict[str, int]
+    ) -> None:
+        for category, amount in budgets.items():
+            if not category or isinstance(amount, bool) or amount < 0:
+                raise ValueError("分类预算必须是非负整数分")
+        self._conn.execute(
+            "INSERT INTO insight_preferences(user_id, month, category_budgets_json)"
+            " VALUES(?, ?, ?)"
+            " ON CONFLICT(user_id, month) DO UPDATE SET"
+            " category_budgets_json = excluded.category_budgets_json",
+            (user_id, month, json.dumps(budgets, ensure_ascii=False, sort_keys=True)),
         )
         self._conn.commit()
 
@@ -317,6 +378,24 @@ class InsightService:
         """写入提醒偏好；该值不进入银行事实，也不改变执行授权。"""
 
         self._metadata.set_budget(user_id, month, budget_cents)
+
+    def budgets(self, user_id: str, month: str) -> tuple[int | None, dict[str, int]]:
+        """读取总额与分类预算；未设置时返回 ``(None, {})``。"""
+        return (
+            self._metadata.get_budget(user_id, month),
+            self._metadata.get_category_budgets(user_id, month),
+        )
+
+    def set_budgets(
+        self,
+        user_id: str,
+        month: str,
+        budget_cents: int | None,
+        categories: dict[str, int],
+    ) -> None:
+        """一次写入总额与分类预算；分类为空表示清空分类预算。"""
+        self._metadata.set_budget(user_id, month, budget_cents)
+        self._metadata.set_category_budgets(user_id, month, categories)
 
     def list_inbox(self, user_id: str, *, include_resolved: bool = False) -> tuple[Insight, ...]:
         return self._metadata.list_insights(user_id, include_resolved=include_resolved)

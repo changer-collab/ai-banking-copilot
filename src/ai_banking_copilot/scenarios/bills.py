@@ -61,6 +61,7 @@ from ai_banking_copilot.scenarios.base import (
     require_trusted,
     trusted_slot,
 )
+from ai_banking_copilot.scenarios.bill_findings import consumption_totals
 from ai_banking_copilot.scenarios.scheduling import REFERENCE_DATE
 
 BILLS_ACTIONS = frozenset(
@@ -456,15 +457,22 @@ def _account_transactions(context: QueryContext) -> QueryResult:
 def _monthly_bill(context: QueryContext) -> QueryResult:
     year = require_int(context.params, "year")
     month = require_int(context.params, "month")
-    summary = context.gateway.monthly_bill(
-        require_str(context.params, "user_id"), year, month
+    user_id = require_str(context.params, "user_id")
+    summary = context.gateway.monthly_bill(user_id, year, month)
+    consumption, income, transfer_out, transfer_count = consumption_totals(
+        context.gateway, user_id, year, month
+    )
+    transfer_note = (
+        f"（另有 {transfer_count} 笔转账/还款等 {Money(transfer_out).yuan} 元不计入消费）"
+        if transfer_count
+        else ""
     )
     return QueryResult(
         record_ids=(summary.record_id,),
         provenance=((summary.record_id, summary.content_hash),),
         detail=(
-            f"{year}-{month:02d} 支出 {summary.payload.total_expense.yuan} 元"
-            f" / 收入 {summary.payload.total_income.yuan} 元"
+            f"{year}-{month:02d} 消费 {Money(consumption).yuan} 元"
+            f" / 收入 {Money(income).yuan} 元{transfer_note}"
         ),
     )
 

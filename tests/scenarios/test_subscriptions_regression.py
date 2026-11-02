@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ai_banking_copilot.compose import build_deps
+from ai_banking_copilot.gateway.core_bank import DEFAULT_BOOKING_DATE
 from ai_banking_copilot.scenarios.subscriptions import upcoming_charges
 from ai_banking_copilot.web.app import AppDeps, create_app
 from ai_banking_copilot.web.session import Session
@@ -106,8 +107,8 @@ def subscription_http(tmp_path: Path) -> Iterator[SubscriptionHttp]:
 def _assert_card(view: dict, action: str, level: str) -> None:
     assert view["state"] == "awaiting_confirm", view
     assert view["card"]["level"] == level, view
-    label = {"subscription.list": "订阅查询", "subscription.sign": "代扣签约",
-             "subscription.cancel": "取消订阅"}[action]
+    label = {"subscription.list": "代扣协议查询", "subscription.sign": "代扣签约",
+             "subscription.cancel": "关闭扣款协议"}[action]
     assert label in json.dumps(view["card"], ensure_ascii=False), view
 
 
@@ -152,22 +153,22 @@ def test_s6_sign_requires_strong_verify_and_never_charges_early(
     assert len(added) == 1
     subscription = next(iter(added))
     assert subscription[1:] == (
-        http.deps.user_id, "视频会员", 2500, "monthly", "2026-11-01", "active", "card_debit",
+        http.deps.user_id, "视频会员", 2500, "monthly", "2026-11-01", "active", "card_debit", None,
     )
     assert after["transactions"] == before["transactions"]
     assert after["accounts"] == before["accounts"]
 
 
 @pytest.mark.parametrize("utterance", [CANCEL, "取消视频会员"])
-def test_s6_cancel_is_yellow_local_only(
+def test_s6_cancel_is_red_before_local_execution(
     subscription_http: SubscriptionHttp, utterance: str,
 ) -> None:
     http = subscription_http
     before = http.snapshot()
     view = http.submit(utterance)
-    _assert_card(view, "subscription.cancel", "YELLOW")
+    _assert_card(view, "subscription.cancel", "RED")
     assert http.snapshot() == before
-    done = http.confirm(view)
+    done = http.confirm(view, strong=True)
     assert done.status_code == 200, done.text
     cancel = done.json()["subscription_cancel"]
     assert cancel["state"] == "local_simulated_cancelled"
@@ -177,7 +178,7 @@ def test_s6_cancel_is_yellow_local_only(
     assert http.deps.gateway.subscription("sub_music").payload.status == "active"
     after = http.snapshot()
     assert set(after["subscriptions"]) - set(before["subscriptions"]) == {
-        (*row[:-2], "cancelled", row[-1])
+        (*row[:6], "cancelled", row[7], DEFAULT_BOOKING_DATE.isoformat())
         for row in before["subscriptions"] if row[0] == "sub_video"
     }
     assert set(before["subscriptions"]) - set(after["subscriptions"]) == {
@@ -243,7 +244,8 @@ def test_s6_cannot_fabricate_merchant_cancellation(subscription_http: Subscripti
     assert view["state"] == "blocked", view
     assert view["card"] is None
     assert "商户" in view["message"]
-    assert any(word in view["message"] for word in ("未确认", "未接入", "尚未接入"))
+    # 能力边界按设计口径（spec §6.4）：本行拿不到商户的取消确认回执。
+    assert "拿不到商户的取消确认回执" in view["message"]
     assert "active" == http.video()["registered_status"]
     assert "商户已取消" not in view["message"]
     assert http.snapshot() == before
@@ -276,7 +278,10 @@ def test_s2_subscription_fact_questions_are_read_only(
     video = http.video()
     october = [item for item in video["evidence"] if item["booked_on"].startswith("2026-10")]
     assert len(october) == 2
+    # 本月两笔为 30.00 元，此前各期为 25.00 元：首末对比即有涨价。
     assert video["price_increased_12m"] is True
+    assert video["price_change_12m_from_cents"] == 2500
+    assert video["price_change_12m_to_cents"] == 3000
     assert video["next_charge_on"] == "2026-11-18"
     assert video["next_charge_is_prediction"] is True
     assert "预测" in video["next_charge_basis"]
@@ -288,8 +293,8 @@ def test_s2_cancel_does_not_guarantee_merchant_stops_charging(
 ) -> None:
     http = subscription_http
     view = http.submit(CANCEL)
-    _assert_card(view, "subscription.cancel", "YELLOW")
-    assert http.confirm(view).status_code == 200
+    _assert_card(view, "subscription.cancel", "RED")
+    assert http.confirm(view, strong=True).status_code == 200
     assert all(
         item.subscription_id != "sub_video"
         for item in upcoming_charges(http.deps.gateway, http.deps.user_id)
