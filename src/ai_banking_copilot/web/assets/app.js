@@ -3478,6 +3478,7 @@ function cardFlowServerCard() {
     ${rows ? `<dl class="card-flow__summary">${rows}</dl>` : ""}
     ${lines ? `<ul class="card-flow__list">${lines}</ul>` : ""}
     <p class="muted card-flow__note">计划已冻结；确认后才会执行。</p>
+    <p class="muted card-flow__note">卡片操作不涉及账户资金；账户余额只在转账、理财申赎、冻结/释放等资金动作后变化。</p>
     ${cardFlowBranchSwitch()}
   </div>`;
 }
@@ -3549,7 +3550,8 @@ function renderCardFlow() {
         ${(cardFlowState.result.items || []).length
           ? `<ul class="card-flow__list">${cardFlowState.result.items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
           : ""}
-        <p class="muted">回执已记录；卡状态已刷新。</p></div>`;
+        <p class="muted">回执已记录；卡状态已刷新。</p>
+        <p class="muted">卡片操作不涉及账户资金。</p></div>`;
     } else if (cardFlowState.mode === "detail") {
       body.innerHTML = cardFlowDetailHtml();
     } else if (cardFlowState.mode === "plan" || cardFlowState.plan) {
@@ -4896,6 +4898,10 @@ async function refreshAfterExecution() {
     await refreshBills();
   } catch (_) {
     el("bills-status").textContent = "账单识别刷新失败，请稍后重试。";
+  }
+  /* 转账 / 申赎等资金动作会立即扣款：执行后刷新首页余额卡，避免页面停在旧数字。 */
+  if (typeof refreshHomeBalance === "function") {
+    await refreshHomeBalance().catch(() => {});
   }
 }
 
