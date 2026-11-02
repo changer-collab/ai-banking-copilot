@@ -117,6 +117,33 @@ def test_injected_transport_is_used_without_network() -> None:
     assert len(requests) == 1
 
 
+def test_strict_planner_accepts_constrained_semantic_frames() -> None:
+    def transport(request: str) -> str:
+        return json.dumps({"frames": [{
+            "domain": "transfer", "operation": "create", "mode": "write",
+            "evidence": "pay Li Na 500", "confidence": 0.9,
+            "roles": {"amount": {"value": 50000, "role": "transfer_amount", "evidence": "500"}},
+        }]})
+
+    proposal = LlmIntentModel(transport=transport).propose("pay Li Na 500", {})
+
+    assert proposal.channel == "llm-strict"
+    assert proposal.frames[0].roles["amount"].role == "transfer_amount"
+    assert proposal.intents[0].action == "transfer.create"
+
+
+def test_strict_planner_rejects_frame_with_object_identifier() -> None:
+    def transport(request: str) -> str:
+        return json.dumps({"frames": [{
+            "domain": "transfer", "operation": "create", "mode": "write",
+            "evidence": "pay Li Na 500", "confidence": 0.9,
+            "roles": {"payee_id": {"value": "p_lina", "role": "payee_hint", "evidence": "Li Na"}},
+        }]})
+
+    with pytest.raises(LlmUnavailableError, match="forbidden role"):
+        LlmIntentModel(transport=transport).propose("pay Li Na 500", {})
+
+
 @pytest.mark.parametrize("slots", [None, {}, {"span": 7}, {"span": "转给王五 500 元"}])
 def test_missing_or_unanchored_llm_span_is_rejected(slots) -> None:
     def _transport(request: str) -> str:
@@ -200,11 +227,12 @@ def test_request_explains_catalog_actions_and_requires_separate_source_spans() -
     registry = build_default_registry()
     for action in registry.actions():
         assert f"{action}：{registry.get(action).description}" in prompt
-    assert '"slots":{"span":"原文连续片段"}' in prompt
-    assert "逐字复制的连续片段" in prompt
-    assert "请求词" in prompt and "对应金额或日期" in prompt
-    assert "不得共享整句" in prompt and "不得使用重叠片段" in prompt
-    assert "只登记预约时不要选择会立即扣款的动作" in prompt
+    assert '"frames":[{"domain":"transfer"' in prompt
+    assert "transfer / create / write -> transfer.create" in prompt
+    assert "life_event / birthday_plan / schedule -> merchant.order" in prompt
+    assert "frame" in prompt
+    assert "budget_limit" in prompt and "order_amount" in prompt
+    assert "不得输出工具名" in prompt and "多个可执行帧不得重叠" in prompt
     assert messages[1]["role"] == "user"
     assert f"【用户原话】\n{utterance}\n" in messages[1]["content"]
 
@@ -257,8 +285,8 @@ def test_query_instructions_accept_questions_without_amount_date_or_request_verb
     LlmIntentModel(transport=transport).propose(utterance, {})
     messages = requests[0]["messages"]
     prompt = messages[0]["content"]
-    assert "查询不要求出现请求词、金额或日期" in prompt
-    assert "缺少的控制槽交由服务端补全或澄清" in prompt
-    assert "用户明确给出的对应金额或日期必须保留" in prompt
+    assert "budget_limit" in prompt and "investment_amount" in prompt
+    assert "不得输出工具名" in prompt
+    assert "缺少金额时不得猜测" in prompt
     assert messages[1]["role"] == "user"
     assert f"【用户原话】\n{utterance}\n" in messages[1]["content"]

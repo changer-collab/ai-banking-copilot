@@ -26,6 +26,15 @@ from ai_banking_copilot.planning.model_config import (
     ModelConfig,
     NonBlockingLimiter,
 )
+from ai_banking_copilot.planning.semantic_frame import (
+    FrameError,
+    SemanticFrame,
+    SemanticValue,
+    action_for_frame,
+    frame_options_for_actions,
+    normalize_frame,
+    validate_frame,
+)
 from ai_banking_copilot.tools.catalog import build_default_registry
 from ai_banking_copilot.tools.registry import ActionKind as ActionKind
 from ai_banking_copilot.tools.registry import UnknownActionError
@@ -85,6 +94,7 @@ class IntentProposal:
     intents: tuple[Intent, ...]
     raw: str
     channel: str | None = None
+    frames: tuple[SemanticFrame, ...] = ()
 
 
 @runtime_checkable
@@ -100,7 +110,9 @@ _CLAUSE_SPLIT = re.compile(r"[，,。；;、]|然后|接着|再|并且|同时")
 
 _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
-        re.compile(r"(?:修改|更改|重置|变更|换)(?:一下)?(?:交易|支付|登录)?密码|密码(?:修改|重置|变更)"),
+        re.compile(
+            r"(?:修改|更改|重置|变更|换)(?:一下)?(?:交易|支付|登录)?密码|密码(?:修改|重置|变更)"
+        ),
         "password.change",
         "命中『修改密码』模板",
     ),
@@ -141,9 +153,7 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "命中『口语转账』模板",
     ),
     (
-        re.compile(
-            r"(?:转账|转给|汇款|打款)(?![^，,。；;]*(?:记录|流水|明细|账单))"
-        ),
+        re.compile(r"(?:转账|转给|汇款|打款)(?![^，,。；;]*(?:记录|流水|明细|账单))"),
         "transfer.create",
         "命中『转账』模板",
     ),
@@ -219,9 +229,7 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         # 取消后的**状态 / 后续扣款**查询：口语里「还扣」「还会扣」「还会继续扣费」都要接住，
         # 因此不写死「还扣」二字，用 `还.{0,3}扣` 覆盖中间的「会 / 会继续」等插入语。
-        re.compile(
-            r"取消后商户还扣吗|取消(?:后|以后|之后).*(?:状态|还.{0,3}扣|扣款|扣费)"
-        ),
+        re.compile(r"取消后商户还扣吗|取消(?:后|以后|之后).*(?:状态|还.{0,3}扣|扣款|扣费)"),
         "subscription.list",
         "命中『取消后状态查询』模板",
     ),
@@ -241,7 +249,9 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "命中『关闭代扣协议』模板",
     ),
     (
-        re.compile(r"这个月扣了几次|本月扣了几次|涨价了吗|是否涨价|下次什么时候扣|下个月.*订阅.*扣款"),
+        re.compile(
+            r"这个月扣了几次|本月扣了几次|涨价了吗|是否涨价|下次什么时候扣|下个月.*订阅.*扣款"
+        ),
         "subscription.list",
         "命中『订阅扣费事实查询』模板",
     ),
@@ -261,9 +271,7 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     ),
     (
         # 动宾倒装：「把视频会员自动续费关掉」→ 取消，不是查询。
-        re.compile(
-            r"(?:自动续费|自动扣款|订阅|会员|代扣).{0,6}(?:关掉|关闭|取消|停掉|解约|关停)"
-        ),
+        re.compile(r"(?:自动续费|自动扣款|订阅|会员|代扣).{0,6}(?:关掉|关闭|取消|停掉|解约|关停)"),
         "subscription.cancel",
         "命中『关闭自动续费』模板（动宾倒装）",
     ),
@@ -311,11 +319,13 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
     ),
     (
         re.compile(r"(?:查看|查询)(?:账单)?分类趋势"),
-        "bills.category_trend", "命中『明确分类趋势』模板",
+        "bills.category_trend",
+        "命中『明确分类趋势』模板",
     ),
     (
         re.compile(r"账单|消费分析|花了多少|花哪了|钱花哪|消费明细"),
-        "bills.monthly", "命中『账单分析』模板",
+        "bills.monthly",
+        "命中『账单分析』模板",
     ),
     (
         # 「上周三星巴克 128 元是不是盗刷」：带核实语气的单笔交易核实 = 只读查流水。
@@ -477,8 +487,10 @@ class LlmIntentModel:
         settings = config
         self._transport = transport
         self._api_key = (
-            api_key if api_key is not None
-            else settings.api_key if settings is not None
+            api_key
+            if api_key is not None
+            else settings.api_key
+            if settings is not None
             else os.environ.get("DASHSCOPE_API_KEY")
         )
         self._model = (
@@ -486,7 +498,8 @@ class LlmIntentModel:
         )
         self._endpoint = (
             settings.endpoint
-            if settings is not None and endpoint == DEFAULT_LLM_ENDPOINT else endpoint
+            if settings is not None and endpoint == DEFAULT_LLM_ENDPOINT
+            else endpoint
         )
         self._timeout_s = (
             settings.planner_timeout_s if settings is not None and timeout_s == 20.0 else timeout_s
@@ -573,30 +586,48 @@ def _system_prompt(actions: tuple[str, ...]) -> str:
             description = "未提供动作说明"
         action_lines.append(f"- {action}：{description}")
     action_block = "\n".join(action_lines)
+    frame_lines = []
+    for option in frame_options_for_actions(actions):
+        roles = ", ".join(sorted(option.allowed_roles)) or "no roles"
+        frame_lines.append(
+            f"- {option.domain} / {option.operation} / {option.mode} -> {option.action}"
+            f" (roles: {roles})"
+        )
+    frame_block = "\n".join(frame_lines) or "- no registered semantic frame"
     return (
-        "你是银行智能体的意图解析器，只输出 JSON，不解释。\n"
-        "可选动作仅限于以下白名单；动作说明是当前执行语义，必须据此区分相似动作：\n"
+        "你是银行智能体的语义解析器，只输出 JSON，不解释。\n"
+        "以下动作白名单仅帮助选择语义，绝不能原样输出动作名：\n"
         f"{action_block}\n"
+        "可输出的语义三元组如下；只能从中选择，箭头右侧动作名只供理解、不得输出：\n"
+        f"{frame_block}\n"
         "识别规则：\n"
-        "1. 只依据用户原文识别意图，按原文出现顺序输出；不补造账户、收款人、金额或日期事实。\n"
-        "2. 每个 intent 的 slots.span 必须是用户原文中逐字复制的连续片段；"
-        "无法可靠回指原文时不要猜测该意图。\n"
-        "3. 每个动作片段须包含支持该动作语义的原文依据；查询不要求出现请求词、金额或日期。"
-        "用户明确给出的对应金额或日期必须保留在各自动作片段内，不能裁掉否定、对象限定或条件；"
-        "缺少的控制槽交由服务端补全或澄清，模型不得补造。"
-        "多个动作不得共享整句，也不得使用重叠片段。只登记预约时不要选择会立即扣款的动作。\n"
-        "4. slots 中除 span 外的字段只作未验证线索，不能把模型臆测当成控制事实。\n"
-        "5. 会话上下文只用于理解指代（「那个」「再下单」「换一家」）；"
-        "不得把上下文里的金额、商户或日期写进本次 span，也不得据此补造槽位。\n"
-        '输出格式：{"intents":[{"action":"...","confidence":0.0,"evidence":"原文依据",'
-        '"slots":{"span":"原文连续片段"}}]}。'
+        "1. 只依据用户原文识别语义帧，按原文出现顺序输出；不补造账户、收款人、金额或日期事实。\n"
+        "2. 不得输出工具名、对象 ID、账户 ID、卡 ID、产品 ID、订阅 ID、授权决定或验证结果。\n"
+        "3. 每个 frame 和 role 的 evidence 必须逐字复制用户原文的连续片段；"
+        "无法可靠回指时不要猜测。\n"
+        "4. budget_limit 只表示预算上限，绝不是 order_amount、transfer_amount "
+        "或 investment_amount。"
+        "缺少金额时不得猜测，交由服务端澄清。多个可执行帧不得重叠。\n"
+        "5. 会话上下文只用于理解指代；不得把上下文中的金额、商户或日期写进本次 evidence。\n"
+        "6. transfer / schedule / schedule 表示用户说“定时转账、定转或预约转”，"
+        "会创建按指定时间执行的转账；transfer / book / schedule 仅表示用户明确说“登记预约”。"
+        "只说“定时”绝不能选 book。\n"
+        '输出格式：{"frames":[{"domain":"transfer","operation":"create","mode":"write",'
+        '"evidence":"原文连续片段","confidence":0.0,"roles":{"amount":{"value":50000,'
+        '"role":"transfer_amount","evidence":"500元"}}}]}。'
     )
 
 
 def _load_httpx_transport(
-    *, api_key: str, endpoint: str, timeout_s: float, observer: CallObserver | None = None,
-    limiter: NonBlockingLimiter | None = None, task_id: str | None = None,
-    prompt_version: str | None = None, role: str = "planner",
+    *,
+    api_key: str,
+    endpoint: str,
+    timeout_s: float,
+    observer: CallObserver | None = None,
+    limiter: NonBlockingLimiter | None = None,
+    task_id: str | None = None,
+    prompt_version: str | None = None,
+    role: str = "planner",
     channel: str = "llm-strict",
 ) -> HttpTransport:
     """懒加载可选依赖 httpx；未安装则降级为 `LlmUnavailableError`（H9）。"""
@@ -630,11 +661,17 @@ def _load_httpx_transport(
             raise
         finally:
             emit_http_observation(
-                observer, role=role, started_at=started_at,
-                http_status=status, response_text=response_text, error=error,
+                observer,
+                role=role,
+                started_at=started_at,
+                http_status=status,
+                response_text=response_text,
+                error=error,
                 model=payload.get("model") if isinstance(payload, dict) else None,
-                task_id=task_id, prompt_version=prompt_version,
-                attempt_no=1, channel=channel,
+                task_id=task_id,
+                prompt_version=prompt_version,
+                attempt_no=1,
+                channel=channel,
             )
             if lease is not None:
                 lease.release()
@@ -678,6 +715,9 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
         raise LlmUnavailableError("LLM 响应不是合法 JSON（format_error）") from error
     if not isinstance(payload, dict):
         raise LlmUnavailableError("LLM 响应必须是 JSON 对象")
+    frames_payload = payload.get("frames")
+    if isinstance(frames_payload, list):
+        return _parse_frame_proposal(frames_payload, utterance, allow_actions)
     items = payload.get("intents")
     if not isinstance(items, list):
         raise LlmUnavailableError("LLM 响应缺少 intents 数组")
@@ -695,9 +735,7 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
             slots = {str(key): value for key, value in raw_slots.items()}
         span = slots.get("span")
         if not isinstance(span, str) or not span.strip() or span not in utterance:
-            raise LlmUnavailableError(
-                "LLM intent 缺少可回指原文的 slots.span（span_error）"
-            )
+            raise LlmUnavailableError("LLM intent 缺少可回指原文的 slots.span（span_error）")
         intents.append(
             Intent(
                 action=action,
@@ -707,6 +745,74 @@ def _parse_proposal(raw: str, utterance: str, allow_actions: tuple[str, ...]) ->
             )
         )
     return IntentProposal(intents=tuple(intents), raw=utterance, channel="llm-strict")
+
+
+def _parse_frame_proposal(
+    items: list[object],
+    utterance: str,
+    allow_actions: tuple[str, ...],
+) -> IntentProposal:
+    """Parse semantic-only LLM output and derive legacy action hints safely."""
+    frames: list[SemanticFrame] = []
+    intents: list[Intent] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise LlmUnavailableError("frames 元素必须是 JSON 对象")
+        raw_roles = item.get("roles", {})
+        if not isinstance(raw_roles, dict):
+            raise LlmUnavailableError("frame roles 必须是 JSON 对象")
+        roles: dict[str, SemanticValue] = {}
+        for name, raw_value in raw_roles.items():
+            if not isinstance(raw_value, dict):
+                raise LlmUnavailableError("frame role 必须是 JSON 对象")
+            value = raw_value.get("value")
+            if not isinstance(value, (str, int, bool)) or isinstance(value, float):
+                raise LlmUnavailableError("frame role value 非法")
+            role = raw_value.get("role")
+            evidence = raw_value.get("evidence")
+            if not isinstance(role, str) or not isinstance(evidence, str):
+                raise LlmUnavailableError("frame role 缺少 role 或 evidence")
+            roles[str(name)] = SemanticValue(value=value, role=role, evidence=evidence)  # type: ignore[arg-type]
+        domain = item.get("domain")
+        operation = item.get("operation")
+        mode = item.get("mode")
+        evidence = item.get("evidence")
+        if not all(isinstance(value, str) for value in (domain, operation, mode, evidence)):
+            raise LlmUnavailableError("frame 缺少 domain、operation、mode 或 evidence")
+        try:
+            frame = validate_frame(
+                normalize_frame(
+                    SemanticFrame(
+                        domain=domain,  # type: ignore[arg-type]
+                        operation=cast(str, operation),
+                        mode=mode,  # type: ignore[arg-type]
+                        evidence=cast(str, evidence),
+                        confidence=_confidence(item.get("confidence", 0.0)),
+                        roles=roles,
+                    )
+                ),
+                utterance,
+            )
+        except FrameError as error:
+            raise LlmUnavailableError(str(error)) from error
+        action = action_for_frame(frame)
+        if action is None or action not in allow_actions:
+            continue
+        frames.append(frame)
+        intents.append(
+            Intent(
+                action=action,
+                slots={"span": frame.evidence},
+                confidence=frame.confidence,
+                evidence=frame.evidence,
+            )
+        )
+    return IntentProposal(
+        intents=tuple(intents),
+        raw=utterance,
+        channel="llm-strict",
+        frames=tuple(frames),
+    )
 
 
 def _confidence(value: object) -> float:
@@ -728,7 +834,9 @@ class ArbitratedIntentModel:
     """
 
     def __init__(
-        self, primary: IntentModel, rules: IntentModel | None = None,
+        self,
+        primary: IntentModel,
+        rules: IntentModel | None = None,
     ) -> None:
         self._primary = primary
         self._rules = rules if rules is not None else TemplateIntentModel()
@@ -748,9 +856,7 @@ class ArbitratedIntentModel:
             return IntentProposal(rule.intents, rule.raw, channel="template_fallback")
         self._degraded = False
         covered = [
-            str(intent.slots.get("span", ""))
-            for intent in rule.intents
-            if intent.slots.get("span")
+            str(intent.slots.get("span", "")) for intent in rule.intents if intent.slots.get("span")
         ]
         merged: list[Intent] = list(rule.intents)
         for intent in llm.intents:
@@ -758,15 +864,19 @@ class ArbitratedIntentModel:
             if span and any(_spans_overlap(span, other) for other in covered):
                 continue
             if any(
-                item.action == intent.action
-                and str(item.slots.get("span", "")) == span
+                item.action == intent.action and str(item.slots.get("span", "")) == span
                 for item in merged
             ):
                 continue
             merged.append(intent)
         if not merged:
             merged = list(llm.intents)
-        return IntentProposal(tuple(merged), llm.raw or rule.raw, channel="llm+rules")
+        return IntentProposal(
+            tuple(merged),
+            llm.raw or rule.raw,
+            channel="llm+rules",
+            frames=llm.frames,
+        )
 
 
 def _spans_overlap(left: str, right: str) -> bool:

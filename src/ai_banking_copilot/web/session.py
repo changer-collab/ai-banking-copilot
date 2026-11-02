@@ -56,6 +56,7 @@ from ai_banking_copilot.planning.anaphora import (
     resolve_reference,
 )
 from ai_banking_copilot.planning.kernel import CONFIDENCE_THRESHOLD
+from ai_banking_copilot.planning.life_event_frames import constraints_for_frame
 from ai_banking_copilot.planning.llm import ACTION_KINDS, ActionKind, Intent
 from ai_banking_copilot.planning.review_context import (
     bills_review_context,
@@ -75,6 +76,7 @@ from ai_banking_copilot.planning.reviewer import (
     StrictPlanReviewer,
     TemplatePlanReviewer,
 )
+from ai_banking_copilot.planning.semantic_frame import SemanticFrame, action_for_frame
 from ai_banking_copilot.planning.slots import (
     REQUIRED_SLOTS,
     SLOT_PARAMS,
@@ -185,6 +187,7 @@ from ai_banking_copilot.web.plan_card import (
 from ai_banking_copilot.web.session_manager import PROCESS_SESSION_LOCK
 from ai_banking_copilot.web.session_repository import SessionPersistenceError
 from ai_banking_copilot.web.session_snapshot import SESSION_SNAPSHOT_VERSION, SessionSnapshot
+from ai_banking_copilot.web.transaction_drafts import editable_fields_for_plan
 from ai_banking_copilot.web.triage import TriageSuggestion, TriageVerdict, triage
 from ai_banking_copilot.web.wording import polish
 
@@ -457,6 +460,9 @@ class SubmissionView:
     answer_note: str | None = None
     """查询的确定性答复（如「未查询到该笔交易」）：只展示网关事实，不进计划 / 审计。"""
 
+    draft_origin_hash: str | None = None
+    """草稿编辑前的冻结哈希；只用于提示前端旧确认凭证已失效。"""
+
 
 @dataclass(frozen=True)
 class NodeProgress:
@@ -553,7 +559,7 @@ class Session:
         "message", "pending", "confirmation", "confirmation_history", "takeover",
         "audit_ids", "exec_results", "completed_node_ids", "pending_node_ids", "challenge",
         "unverified_results", "quota", "risky_at", "policy_rejections", "reversed_records",
-        "last_utterance", "last_selected", "review_intents", "clarification_keys",
+        "last_utterance", "last_selected", "memory", "review_intents", "clarification_keys",
         "review_report", "in_flight", "recovery_blocked",
         "planner_channel", "model_calls",
     )
@@ -661,11 +667,14 @@ class Session:
         if snapshot.user_id != deps.user_id:
             raise SessionStateError("会话身份不匹配")
         session = cls(deps, session_id=snapshot.session_id, shared_lock=shared_lock)
-        if set(snapshot.payload) != {*cls._SNAPSHOT_FIELDS, "session_breaker"}:
+        expected_fields = {*cls._SNAPSHOT_FIELDS, "session_breaker"}
+        legacy_fields = expected_fields - {"memory"}
+        if set(snapshot.payload) not in (expected_fields, legacy_fields):
             raise SessionStateError("会话快照字段不完整")
         # 字段白名单固定，codec 已检查类型、taint、哈希及检查点绑定。
         for name in cls._SNAPSHOT_FIELDS:
-            setattr(session, f"_{name}", snapshot.payload[name])
+            if name in snapshot.payload:
+                setattr(session, f"_{name}", snapshot.payload[name])
         session._revision = snapshot.revision
         session._execution_id = snapshot.execution_id
         session._state = SessionState(snapshot.state)
@@ -787,6 +796,8 @@ class Session:
         return {
             "planner_channel": self._planner_channel,
             "reviewer_channel": self._review_report.channel if self._review_report else None,
+            "review_status": self._review_report.status.value if self._review_report else None,
+            "real_planner_required": self._deps.real_planner_required,
             "http_attempts": len(self._model_calls), "usage": usage,
         }
 
@@ -851,8 +862,50 @@ class Session:
         return replace(
             view,
             message=f"{view.message}；{note}" if view.message else note,
+            answer_note=note,
             visibility=self._visibility,
         )
+
+    @_serialized
+    def edit_draft(self, draft_id: str, changes: Mapping[str, str]) -> SubmissionView:
+        """Patch a server-derived draft and regenerate the complete frozen plan.
+
+        The draft id is the current plan card id, not a client-generated token.
+        Values are fed back into the existing trusted selected-slot path; internal
+        ids, policy fields, and any field absent from this plan's edit policy are
+        rejected before a new plan can be constructed.
+        """
+        pending = self._pending
+        if pending is None or self._state is not SessionState.AWAITING_CONFIRM:
+            raise SessionStateError("no editable transaction draft")
+        if draft_id != pending.card.card_id:
+            raise ConfirmationMismatchError("draft does not match the current frozen plan")
+        allowed = editable_fields_for_plan(pending.plan)
+        if not changes:
+            raise ValueError("draft changes cannot be empty")
+        unknown = sorted(set(changes) - allowed)
+        if unknown:
+            raise ValueError("draft field is not editable: " + ", ".join(unknown))
+        if self._last_utterance is None:
+            raise SessionStateError("the original intent is unavailable")
+        prior_hash = pending.card.frozen_hash
+        selected = dict(self._last_selected or {})
+        for key, value in changes.items():
+            if not isinstance(value, str) or len(value) > 200:
+                raise ValueError("draft values must be short strings")
+            normalized = value.strip()
+            if key == "order_amount":
+                selected["amount"] = normalized
+            else:
+                selected[key] = normalized
+        view = self._submit(
+            self._last_utterance,
+            selected=selected,
+            execution_id=secrets.token_hex(16),
+            allow_freeform_clarification=False,
+            new_intent=True,
+        )
+        return replace(view, draft_origin_hash=prior_hash, visibility=self._visibility)
 
     def _undo_last(self) -> SubmissionView:
         """「刚才那笔取消」：走会话级冲正，**不产生新的业务动作**。"""
@@ -1419,6 +1472,18 @@ class Session:
         )
         self._pending = pending
         self._quota = quota
+        real_planner_enforced = (
+            self._deps.real_planner_required and not plan_is_pure_query(plan)
+        )
+        if real_planner_enforced and self._planner_channel not in {"llm+rules", "llm-strict"}:
+            self._enter_takeover("真实模型规划通道不可用，写操作已转人工核对。", pending)
+            self._audit(KIND_DECISION, {
+                "execution_id": self._execution_id,
+                "frozen_hash": card.frozen_hash,
+                "planner_channel": self._planner_channel,
+                "planner_failure": "real_planner_required",
+            })
+            return SubmissionView(self._state, self._message, card, decision, plan, ())
         review_error: str | None = None
         reviewer_enforced = self._deps.reviewer_required and not plan_is_pure_query(plan)
         if self._deps.reviewer is not None:
@@ -1776,7 +1841,12 @@ class Session:
             and key not in {"action", "intent_spans", "monthly_day"}
             and not key.startswith("intent_")
         }
-        remark = extract_remark(utterance)
+        selected_remark = chosen.get("remark")
+        remark = (
+            selected_remark.strip()
+            if isinstance(selected_remark, str)
+            else extract_remark(utterance)
+        )
         intents: list[Intent] = []
         asks: list[ClarificationAsk] = []
         dropped: list[str] = []
@@ -1997,11 +2067,18 @@ class Session:
                 continue
             scenario_asks: tuple[ClarificationAsk, ...] = ()
             monthly_ask: ClarificationAsk | None = None
+            semantic_frame = _frame_for_intent(proposal.frames, intent, span)
             if maturity_link and intent.action == "merchant.order":
                 # 到期联动：商户与下单金额由场景层按事实 / 演示档位补，追问只会挡住出卡。
                 fill = _maturity_fill(fill)
             elif life_event_id == "L1" and intent.action == "merchant.order":
-                fill, scenario_asks = _l1_fill(fill, span, self._deps.today)
+                fill, scenario_asks = _l1_fill(
+                    fill,
+                    span,
+                    self._deps.today,
+                    semantic_frame=semantic_frame,
+                    budget_override_cents=_draft_money_cents(slot_selected.get("budget_limit")),
+                )
             elif (
                 life_event_id == "L2"
                 and intent.action in _TRANSFER_ACTIONS
@@ -4982,6 +5059,7 @@ def wants_private_visibility(utterance: str) -> bool:
 _ANSWER_LABELS: tuple[tuple[str, str], ...] = (
     ("商户名称", "merchant"), ("商户名", "merchant"), ("商户", "merchant"),
     ("花束档位", "amount"), ("金额", "amount"), ("档位", "amount"), ("花束", "amount"),
+    ("订花日期", "order_on"), ("下单日期", "order_on"), ("什么时候订花", "order_on"),
     ("配送地址", "delivery_address"), ("送达地址", "delivery_address"),
     ("送达时间", "delivery_time"), ("送达日期", "delivery_time"),
     ("送到", "delivery_address"), ("地址", "delivery_address"),
@@ -5032,6 +5110,10 @@ def _life_budget_cents(text: str) -> int | None:
 
 _REMINDER_LEAD = re.compile(r"(?:提前|前)\s*(\d{1,2})\s*天(?:前)?\s*(?:提醒|通知|告诉我)?")
 
+_LIFE_ORDER_AMOUNT = re.compile(
+    r"(?:订|买|下单|购买|安排)\s*(?:一(?:束|个))?\s*(\d+(?:\.\d+)?)\s*(?:元|块)"
+)
+
 
 def _l1_slot_reminder(text: str) -> int | None:
     """『生日前 2 天提醒我』→ 2；读不到返回 None（不猜）。"""
@@ -5042,23 +5124,61 @@ def _l1_slot_reminder(text: str) -> int | None:
     return lead if 0 < lead <= 30 else None
 
 
-def _l1_fill(
-    fill: SlotFill, text: str, today: date,
-) -> tuple[SlotFill, tuple[ClarificationAsk, ...]]:
-    """L1 预算锁定：把通用「商户 + 金额」追问换成**一个**花束档位问题。
+def _life_order_cents(text: str) -> int | None:
+    """Read only an amount syntactically attached to an order verb, never a budget."""
+    match = _LIFE_ORDER_AMOUNT.search(text)
+    if match is None:
+        return None
+    parsed = parse_amount(match.group(0), bare_amounts=True)
+    return parsed.value.cents if parsed.value is not None and parsed.value.cents > 0 else None
 
-    商户由系统按距离推荐（演示白名单），不再让用户填「视频会员」；预算只作上限，
-    花束档位只列预算内的选项。地址与时间不参与执行计划，故不再追问。
+
+def _frame_for_intent(
+    frames: Sequence[SemanticFrame], intent: Intent, span: str,
+) -> SemanticFrame | None:
+    """Find a validated frame without letting it choose an action or object."""
+    return next(
+        (
+            frame for frame in frames
+            if action_for_frame(frame) == intent.action and frame.evidence == span
+        ),
+        None,
+    )
+
+
+def _l1_fill(
+    fill: SlotFill,
+    text: str,
+    today: date,
+    *,
+    semantic_frame: SemanticFrame | None = None,
+    budget_override_cents: int | None = None,
+) -> tuple[SlotFill, tuple[ClarificationAsk, ...]]:
+    """L1 预算锁定：先确认花店与订花日期，再选择预算内花束档位。
+
+    系统只提供演示白名单候选，不能把距离最近的花店或默认日期视为用户已确认。
+    预算只作上限，花束档位只列已选门店预算内的选项。
     """
-    budget = _life_budget_cents(text) or 100000
+    semantic = constraints_for_frame(semantic_frame)
+    budget = budget_override_cents or semantic.budget_cents or _life_budget_cents(text) or 100000
+    explicit_order_cents = semantic.order_cents or _life_order_cents(text)
     offers = flower_offers(budget) or flower_offers()
-    nearest = offers[0]
-    bundle_label, bundle_price = nearest.bundles[0] if nearest.bundles else ("花束", 29900)
     slots = dict(fill.slots)
-    # 用户自己在原话里点过名的商户 / 档位不再重复问；系统推荐值仍要请用户确认一次。
-    known = {slot for slot in ("merchant", "amount") if slot in slots}
+    # 「预算 800 元」是价格上限，不是用户选定的花束档位。不能把预算自动变成订单金额。
+    has_explicit_budget = (
+        budget_override_cents is not None
+        or semantic.budget_cents is not None
+        or _life_budget_cents(text) is not None
+    )
+    if has_explicit_budget and slots.get("amount") == budget:
+        slots.pop("amount", None)
+    if explicit_order_cents is not None:
+        slots["amount"] = explicit_order_cents
     slots.setdefault("budget_cents", budget)
-    slots.setdefault("merchant", nearest.merchant)
+    merchant = slots.get("merchant")
+    if not isinstance(merchant, str) or merchant not in {offer.merchant for offer in offers}:
+        slots.pop("merchant", None)
+        merchant = None
     # 用户选过花束档位（`amount`）时以它为准；`amount_cents` 是 L1 场景读取的别名，
     # 两者必须同值，否则场景层会先读到默认档位而忽略用户选择。
     chosen_amount = slots.get("amount")
@@ -5078,23 +5198,59 @@ def _l1_fill(
         slots.setdefault("occasion", f"birthday:{occasion_year}:flowers")
     questions = tuple(
         question for question in fill.questions
-        if question.slot not in {"merchant", "amount", "amount_cents"}
+        if question.slot not in {"merchant", "amount", "amount_cents", "order_on"}
+    )
+    merchant_options = tuple(
+        ClarificationChoice(
+            label=f"{offer.merchant} · 距离 {offer.distance_km:g} km",
+            value=offer.merchant,
+        )
+        for offer in offers
+    )
+    selected_offer = next((offer for offer in offers if offer.merchant == merchant), None)
+    if selected_offer is None:
+        selected_offer = offers[0]
+    bundle_label, bundle_price = (
+        selected_offer.bundles[0] if selected_offer.bundles else ("花束", 29900)
     )
     amount_options = tuple(
         ClarificationChoice(label=f"{label} · {price // 100} 元", value=f"{price // 100} 元")
-        for label, price in nearest.bundles
+        for label, price in selected_offer.bundles
     ) or (ClarificationChoice(label=f"{bundle_label} · {bundle_price // 100} 元",
                               value=f"{bundle_price // 100} 元"),)
-    asks: tuple[ClarificationAsk, ...] = ()
-    if "amount" not in known:
-        asks = (
+    asks: list[ClarificationAsk] = []
+    if merchant is None:
+        asks.append(
+            ClarificationAsk(
+                slot="merchant",
+                prompt="请选择要在哪家花店订花。",
+                options=merchant_options,
+            )
+        )
+    if not isinstance(slots.get("order_on"), str) or not slots["order_on"].strip():
+        asks.append(
+            ClarificationAsk(
+                slot="order_on",
+                prompt="请选择什么时候订花。",
+            )
+        )
+    if not asks and "amount" not in slots:
+        asks.append(
             ClarificationAsk(
                 slot="amount",
-                prompt="选一个花束档位（都不超过你的预算；蛋糕需另行下单）。",
+                prompt="请选择花束档位（只展示该门店预算内选项；蛋糕需另行下单）。",
                 options=amount_options,
-            ),
+            )
         )
-    return replace(fill, slots=slots, questions=questions), asks
+    return replace(fill, slots=slots, questions=questions), tuple(asks)
+
+
+def _draft_money_cents(value: object) -> int | None:
+    """Parse an editable draft money value as yuan without trusting client cents."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = parse_amount(value.strip(), bare_amounts=True)
+    return parsed.value.cents if parsed.value is not None and parsed.value.cents > 0 else None
 
 
 def _maturity_fill(fill: SlotFill) -> SlotFill:

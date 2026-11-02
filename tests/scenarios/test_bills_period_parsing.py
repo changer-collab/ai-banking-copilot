@@ -44,8 +44,8 @@ def test_stated_period_reaches_the_plan(
 
 
 def test_missing_period_keeps_the_previous_month_default(gateway: FactGateway) -> None:
-    assert _plan_for("这个月账单按分类给我看看", gateway).nodes[0].params["year"] == 2026
-    assert _plan_for("这个月账单按分类给我看看", gateway).nodes[0].params["month"] == 9
+    assert _plan_for("账单按分类给我看看", gateway).nodes[0].params["year"] == 2026
+    assert _plan_for("账单按分类给我看看", gateway).nodes[0].params["month"] == 9
 
 
 @pytest.mark.parametrize("utterance", ["查 2019 年 13 月账单", "查 1999 年 1 月账单"])

@@ -35,6 +35,7 @@ from ai_banking_copilot.web.session_snapshot import SessionSnapshot, SessionSnap
 
 def _constructors() -> dict[str, Callable[..., object]]:
     # 静态白名单延迟导入，避免 Session 在导入 codec 时形成循环。
+    from ai_banking_copilot.planning.anaphora import DialogueMemory
     from ai_banking_copilot.planning.reviewer import ReviewReport
     from ai_banking_copilot.policy.pep import ExecResult
     from ai_banking_copilot.policy.session_recovery import InFlightNode
@@ -54,7 +55,7 @@ def _constructors() -> dict[str, Callable[..., object]]:
         "ChallengeRecord": ChallengeRecord, "VerificationBinding": VerificationBinding,
         "_Pending": _Pending, "ExecResult": ExecResult,
         "ReviewReport": ReviewReport, "BreakerSnapshot": BreakerSnapshot,
-        "InFlightNode": InFlightNode,
+        "InFlightNode": InFlightNode, "DialogueMemory": DialogueMemory,
     }
 
 
@@ -238,6 +239,14 @@ def _validate_record(kind: str, data: dict[str, object]) -> None:
                  and all(isinstance(item, BreakerTrigger) for item in triggers))
     elif kind == "DailyQuota":
         valid = _count(data["limit_cents"]) and _count(data["accumulated_cents"])
+    elif kind == "DialogueMemory":
+        valid = (
+            data["action"] == "transfer.create"
+            and (data["payee_id"] is None or _text(data["payee_id"]))
+            and (data["account_id"] is None or _text(data["account_id"]))
+            and (data["card_id"] is None or _text(data["card_id"]))
+            and (data["amount_cents"] is None or _count(data["amount_cents"]))
+        )
     if not valid:
         raise SessionSnapshotError(f"invalid_snapshot_record:{kind}")
 

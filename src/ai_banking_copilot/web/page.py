@@ -717,7 +717,7 @@ _PAGE_HTML = """<!DOCTYPE html>
   <div class="sub-detail__body" id="audit-body"></div>
 </dialog>
 
-<script src="/assets/app.js?v=99"></script>
+<script src="/assets/app.js?v=100"></script>
 <script src="/assets/wealth_trade.js?v=3"></script>
 </body>
 </html>

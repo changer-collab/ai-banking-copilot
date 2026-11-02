@@ -105,7 +105,7 @@ from ai_banking_copilot.web.life_event_store import LifeEventStore, init_life_ev
 from ai_banking_copilot.web.session_repository import SQLiteSessionRepository, init_session_schema
 
 DISABLE_LLM_ENV = "AIB_DISABLE_LLM"
-"""置为真值时强制**只用模板通道**（现场演示保稳的可选开关）。"""
+"""置为真值时强制**只用模板通道**（仅离线回归 / 显式降级演示）。"""
 
 _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -144,10 +144,14 @@ def build_reviewer(
     env: Mapping[str, str] | None = None, *, config: ModelConfig | None = None,
     observer: CallObserver | None = None,
 ) -> Reviewer:
-    """装配计划后置审查；默认是明确标注的旁路模板诊断。"""
+    """装配计划后置审查；真实运行默认使用严格 Reviewer。
+
+    正常启动的写操作必须拿到真实审查的绑定结果才能进入确认态。模板旁路只在
+    ``AIB_DISABLE_LLM=1`` 的显式离线模式启用，不能被误当成真实模型审查。
+    """
     source = os.environ if env is None else env
     settings = config if config is not None else ModelConfig.from_env(source)
-    mode = source.get(REVIEW_CHANNEL_ENV, ReviewChannel.BYPASS.value).strip().lower()
+    mode = source.get(REVIEW_CHANNEL_ENV, ReviewChannel.LLM_STRICT.value).strip().lower()
     if settings.disable_llm:
         mode = ReviewChannel.BYPASS.value
     if mode == ReviewChannel.LLM_STRICT.value and config is not None:
@@ -167,9 +171,16 @@ def reviewer_required(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
     if source.get(DISABLE_LLM_ENV, "").strip().lower() in _DISABLED_VALUES:
         return False
-    if source.get(REVIEW_CHANNEL_ENV, "").strip().lower() == ReviewChannel.LLM_STRICT.value:
+    mode = source.get(REVIEW_CHANNEL_ENV, ReviewChannel.LLM_STRICT.value).strip().lower()
+    if mode == ReviewChannel.LLM_STRICT.value:
         return True
     return source.get(REVIEW_REQUIRED_ENV, "").strip().lower() in _DISABLED_VALUES
+
+
+def real_planner_required(env: Mapping[str, str] | None = None) -> bool:
+    """真实模式的写操作不接受模板规划回退。"""
+    source = os.environ if env is None else env
+    return source.get(DISABLE_LLM_ENV, "").strip().lower() not in _DISABLED_VALUES
 
 
 AUDIT_KEY_ENV = "AIB_AUDIT_KEY"
@@ -431,6 +442,7 @@ def build_deps(
         operator_token=build_operator_token(env),
         reviewer=build_reviewer(env, config=model_config, observer=model_observations),
         reviewer_required=reviewer_required(env),
+        real_planner_required=real_planner_required(env),
         insights=InsightService(read_gateway_factory, insight_metadata),
         bill_analysis=bill_analysis_metadata,
         verification_provider=verification_provider,

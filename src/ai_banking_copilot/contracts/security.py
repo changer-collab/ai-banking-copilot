@@ -20,6 +20,7 @@ INJECTION_MARKERS: tuple[str, ...] = (
     "disregard",
     "新指令",
     "忽略指令",
+    "忽略规则",
     "无视",
     "绕过",
     "突破限额",

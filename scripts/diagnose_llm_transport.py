@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ai_banking_copilot.__main__ import load_env_file
 from ai_banking_copilot.contracts.plan import AnchorSource, IntentRef, Plan, PlanNode, cfhash
 from ai_banking_copilot.planning.llm import (
     LlmIntentModel,
@@ -226,30 +227,42 @@ def run_diagnostics(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="诊断 Planner 与 Reviewer 真实模型通道")
-    parser.add_argument("--json-out", metavar="PATH", help="将公开报告写入工作区 runtime/ 下")
-    args = parser.parse_args(argv)
-    if args.json_out:
-        root = Path(__file__).resolve().parents[1]
-        runtime = root / "runtime"
-        target = Path(args.json_out)
-        target = (target if target.is_absolute() else root / target).resolve()
-        if not target.is_relative_to(runtime.resolve()):
-            print("--json-out 必须位于工作区 runtime/ 下", file=sys.stderr)
-            return 2
+    # Standalone diagnostics must have the same configuration loading behavior
+    # as ``python -m ai_banking_copilot``; environment variables still win.
+    # Restore the parent process afterwards so an embedded invocation cannot
+    # leak values from ``.env`` into another command or test.
+    original_environment = dict(os.environ)
+    load_env_file()
+    try:
+        parser = argparse.ArgumentParser(description="诊断 Planner 与 Reviewer 真实模型通道")
+        parser.add_argument("--json-out", metavar="PATH", help="将公开报告写入工作区 runtime/ 下")
+        args = parser.parse_args(argv)
+        if args.json_out:
+            root = Path(__file__).resolve().parents[1]
+            runtime = root / "runtime"
+            target = Path(args.json_out)
+            target = (target if target.is_absolute() else root / target).resolve()
+            if not target.is_relative_to(runtime.resolve()):
+                print("--json-out 必须位于工作区 runtime/ 下", file=sys.stderr)
+                return 2
 
-    report = run_diagnostics()
-    if args.json_out:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    planner = report["planner"]
-    reviewer = report["reviewer"]
-    assert isinstance(planner, dict) and isinstance(reviewer, dict)
-    print(
-        f"Planner：{planner['classification']}；Reviewer：{reviewer['classification']}；"
-        f"可继续冒烟测试：{'是' if report['ready_for_smoke'] else '否'}"
-    )
-    return 0
+        report = run_diagnostics()
+        if args.json_out:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        planner = report["planner"]
+        reviewer = report["reviewer"]
+        assert isinstance(planner, dict) and isinstance(reviewer, dict)
+        print(
+            f"Planner：{planner['classification']}；Reviewer：{reviewer['classification']}；"
+            f"可继续冒烟测试：{'是' if report['ready_for_smoke'] else '否'}"
+        )
+        return 0
+    finally:
+        os.environ.clear()
+        os.environ.update(original_environment)
 
 
 if __name__ == "__main__":

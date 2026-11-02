@@ -49,6 +49,7 @@ def test_privacy_request_is_acknowledged_and_not_a_bill_intent(deps: AppDeps) ->
     # 也不能在澄清轮沉默
     assert view.visibility == "private"
     assert "不会出现这一笔" in view.message
+    assert [ask.slot for ask in view.clarifications] == ["merchant", "order_on"]
 
 
 def test_form_answers_are_all_consumed(deps: AppDeps) -> None:
@@ -77,6 +78,7 @@ def test_freeform_answer_without_unit_still_works(deps: AppDeps) -> None:
 
     assert view.state is SessionState.NEEDS_CLARIFICATION
     assert all(ask.slot != "merchant" for ask in view.clarifications)
+    assert [ask.slot for ask in view.clarifications] == ["order_on"]
 
 
 def test_recurring_transfer_is_a_capability_boundary(deps: AppDeps) -> None:

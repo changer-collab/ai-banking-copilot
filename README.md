@@ -113,13 +113,22 @@ python -m ai_banking_copilot
 
 浏览器打开 `http://127.0.0.1:8000`。
 
-**演示模式（确定性模板通道，现场求稳）**：
+**正式演示模式（真实 Planner + 严格 Reviewer）**：
+
+```bash
+AIB_AUTH_MODE=demo AIB_REVIEW_CHANNEL=llm-strict python -m ai_banking_copilot
+```
+
+需在 `.env` 配置 `AI_API_KEY`（兼容 `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY`）、`AI_BASE_URL` 和 `AI_MODEL`。
+写操作只有同时获得真实 Planner 提案与严格 Reviewer 绑定结论后才可进入确认；模型不可用或 Planner 回退模板时，写操作转人工。
+
+**离线回归 / 故障备用（不作为 AI 能力演示）**：
 
 ```bash
 AIB_DISABLE_LLM=1 AIB_AUTH_MODE=demo python -m ai_banking_copilot
 ```
 
-演示口令：`aib-demo-1027`。
+该模式只运行确定性模板与旁路诊断，界面会明确显示降级通道；不能把它录制或表述为真实模型规划与审查。演示口令：`aib-demo-1027`。
 
 **Docker**：
 
@@ -142,7 +151,7 @@ python scripts/e2e_check.py
 python scripts/check_design_sync.py
 ```
 
-**2026-11-02 当前用例收集数：2212 条**（`pytest --collect-only -q`）。
+**2026-11-02 当前工作区用例收集数：2221 条**（`pytest --collect-only -q`；收集数不等于通过数）。
 
 评测复跑：
 
@@ -157,6 +166,8 @@ python scripts/run_benchmark.py --output runtime/evidence-dev-v1 --repeat 1 --da
 |---|---|---|---|
 | 5/5 = 100% | 0/14 = 0% | 14/14 = 100% | 26/26 = 100% |
 | 31/31 = 100% | 0/49 = 0% | 49/49 = 100% | 74/74 = 100% |
+
+以上数字来自历史自建回归产物，不是本次 `pytest` 收集数，也不是第三方盲测或真实模型泛化成绩；复跑前需核对提交号、数据集哈希和工作树状态。
 
 数据集为自建回归集；逐例结果与口径见 [`docs/RESULTS.md`](docs/RESULTS.md)。
 
@@ -185,7 +196,7 @@ src/ai_banking_copilot/
 ├── gateway/       事实网关（TCB）、模拟核心银行、沙箱、算子
 ├── contracts/     计划、授权、taint 纯契约
 └── web/           Web / PWA / 飞书渠道、计划卡、会话
-tests/             2212 条自动化用例
+tests/             2221 条当前收集项（不是通过数）
 docs/              架构、算法、安全设计、安全自评、评测结果
 deploy/            部署说明与 Docker 编排
 ```

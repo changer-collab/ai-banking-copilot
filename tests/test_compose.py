@@ -15,6 +15,7 @@ from ai_banking_copilot.compose import (
     build_deps,
     build_intent_model,
     build_reviewer,
+    real_planner_required,
     reviewer_required,
 )
 from ai_banking_copilot.gateway.store import Store, StoreMode
@@ -24,7 +25,7 @@ from ai_banking_copilot.planning.llm import (
     ArbitratedIntentModel,
     TemplateIntentModel,
 )
-from ai_banking_copilot.planning.reviewer import BypassPlanReviewer, Reviewer
+from ai_banking_copilot.planning.reviewer import BypassPlanReviewer, Reviewer, StrictPlanReviewer
 from ai_banking_copilot.policy.audit import KIND_EXECUTION, AuditEvent, ChainBrokenError
 from ai_banking_copilot.policy.verification import (
     DEFAULT_MAX_FAILURES,
@@ -107,14 +108,17 @@ def test_disabled_llm_forces_reviewer_bypass_even_when_strict_requested() -> Non
     assert isinstance(reviewer, BypassPlanReviewer)
 
 
-def test_default_reviewer_remains_bypass() -> None:
-    assert isinstance(build_reviewer({}), BypassPlanReviewer)
+def test_default_reviewer_is_strict_and_required() -> None:
+    assert isinstance(build_reviewer({}), StrictPlanReviewer)
+    assert reviewer_required({}) is True
+    assert real_planner_required({}) is True
 
 
 def test_strict_channel_always_requires_review_unless_llm_is_disabled() -> None:
     assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict"}) is True
     assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", "AIB_REVIEW_REQUIRED": "0"})
     assert reviewer_required({"AIB_REVIEW_CHANNEL": "llm-strict", DISABLE_LLM_ENV: "1"}) is False
+    assert real_planner_required({DISABLE_LLM_ENV: "1"}) is False
 
 
 def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
@@ -129,6 +133,7 @@ def test_composed_roles_share_config_budget(tmp_path: Path) -> None:
     assert deps.intent_model._primary._prompt_version == "planner-v2"
     assert deps.reviewer._timeout_s == 90
     assert deps.reviewer_required is True
+    assert deps.real_planner_required is True
 
 
 def test_build_deps_wires_fallback_intent_model(tmp_path: Path) -> None:

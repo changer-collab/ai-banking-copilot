@@ -191,13 +191,13 @@ Web 端通过「检查到期待办」读取服务端业务日期，把到期登�
 - 页面提供同源可安装 PWA 和只读主动洞察（订阅续费、大额待核对、月预算）；金融 API 不进缓存，离线不排队或重发写操作，洞察点击后仍需重新提交并确认。
 - 评测使用真实 FastAPI 路由、固定演示种子和每例独立 SQLite；结果明确标注为自建回归，**不是盲测或真实模型泛化成绩**。
 
-## 大模型通道（可选增强）
+## 大模型通道（正式主链）
 
-- 服务入口默认装配 **真模型优先 + 失败自动降级模板**：设置 `AI_API_KEY`（兼容 `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY`）时走真实 LLM 意图解析；
-  未设置 Key / 未安装 `httpx` / 调用失败时，自动回落**确定性模板通道**（能力子集，非等价实现，H9）。
-- `AIB_DISABLE_LLM=1` 可**强制只用模板通道**（现场演示求稳时使用）。
+- 服务入口默认装配 **真实 Planner + 严格 Reviewer**：设置 `AI_API_KEY`（兼容 `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY`）时，Planner 提出意图，Reviewer 对每个非纯查询计划作独立绑定审查。
+- 正式模式下，Planner 不可用、返回格式异常或回退模板时，**非纯查询一律转人工**；不能将模板结果作为真实 AI 成功。纯查询可如实走确定性事实回答。
+- `AIB_DISABLE_LLM=1` 可**强制只用模板通道**，但此时 Reviewer 为旁路诊断，仅用于离线回归、故障备用与确定性 UI 自检，不能用作 AI 赛道主演示证据。
 - Key 只从环境变量读取；**不写入仓库、不写日志**。
-- Reviewer 默认 `AIB_REVIEW_CHANNEL=bypass`，只作模板旁路诊断；显式设置 `llm-strict` 即强制真实审查通过，不能用 `AIB_REVIEW_REQUIRED=0` 绕过。`AIB_DISABLE_LLM=1` 强制模板与旁路诊断。
+- Reviewer 默认 `AIB_REVIEW_CHANNEL=llm-strict`，非纯查询默认强制真实审查；`AIB_REVIEW_REQUIRED` 只用于显式非默认装配，不能削弱严格通道。`AIB_DISABLE_LLM=1` 才强制模板与旁路诊断。
 - 配置统一由 `ModelConfig` 解析。Planner/Reviewer 默认超时分别为 20/180 秒，可用 `AI_TIMEOUT_S` 和 `AI_PLANNER_TIMEOUT_S` / `AI_REVIEWER_TIMEOUT_S` 覆盖；模型可分别用 `AI_PLANNER_MODEL` / `AI_REVIEWER_MODEL` 指定。每次提案每角色一次尝试、不自动重试，共享 `AI_MAX_CONCURRENCY` 非阻塞预算。任务视图显示实际通道、模板回退、HTTP 次数和供应商 usage。
 
 ### 强验证与会话恢复
@@ -257,7 +257,9 @@ python scripts/run_benchmark.py --output runtime/evidence-strict --repeat 3 --ch
 审查拦截率：现有全部评测产物均为模板通道，`reviewer_*_rate` 的分母为 0、值全为 **null**；需 `--channel llm-strict --arm reviewer` 且具备真实凭据重跑，**不以 0 或估算值代替**。
 逐例证据：[`docs/results/web-smoke-v2-cases.csv`](docs/results/web-smoke-v2-cases.csv)、[`docs/results/evidence-dev-v1-cases.csv`](docs/results/evidence-dev-v1-cases.csv)（由 `python scripts/export_cases_csv.py --input <run 目录> --output <csv>` 从 `results.json` 扁平化生成，不重跑评测；`evidence_dev_v1` 93 条同样四个数字全满：31/31、0/49、49/49、74/74）。
 
-最近一次门禁记录（2026-11-01）：`pytest` **2144 条 / 2143 通过**；唯一失败为飞书 30 连发限流边界的高负载时序抖动，**单跑通过**（见 `docs/RESULTS.md` §17）。**2026-11-02 工作区用例收集数 2193**，新增卡片 / 理财 / 账单 / 代扣用例尚未重跑全量，提交时以实际执行结果为准。`ruff` / `mypy` / `scripts/check_served_page.py` / `scripts/e2e_check.py` / `scripts/check_design_sync.py` 本轮未复跑，提交前需补跑。
+最近一次完整门禁记录（2026-11-01）：`pytest` **2144 条 / 2143 通过**；唯一失败为飞书 30 连发限流边界的高负载时序抖动，**单跑通过**（见 `docs/RESULTS.md` §17）。本轮当前工作区 `pytest --collect-only -q` 收集 **2221 项**，新增卡片 / 理财 / 账单 / 代扣用例尚未完成全量执行，因此不能把 2221 写成通过数。`ruff` / `mypy` / `scripts/check_served_page.py` / `scripts/e2e_check.py` / `scripts/check_design_sync.py` 的本轮结果仍需单独复跑。
+
+证据分级与未接入边界见 `docs/2026-11-02/证据盘点-2026-11-02.md`；真实模型目前只完成一条转账请求的单次验收。
 
 ```
 python scripts/run_benchmark.py --output runtime/benchmark/web-smoke-v2-fix2 --repeat 2

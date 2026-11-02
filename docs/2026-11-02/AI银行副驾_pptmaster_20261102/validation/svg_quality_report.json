@@ -1,0 +1,1184 @@
+{
+  "schema": "ppt-master.svg-quality-report.v1",
+  "stage": "final",
+  "target": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102",
+  "source_fingerprint": {
+    "algorithm": "sha256",
+    "digest": "5ed4c6e1ad8a611339fe5f57bc93dbea6d4779130297a09c103c91469e79dddc",
+    "file_count": 14,
+    "files": [
+      {
+        "file": "01.svg",
+        "sha256": "6940ea3e5b51f7f700bba00573a042277f572b0bc0b5bcad6a7150dfe052e01b"
+      },
+      {
+        "file": "02.svg",
+        "sha256": "4e3bef8928e5c7c22886df5520a06033dee600c2cd79085fba41f685d96c2aec"
+      },
+      {
+        "file": "03.svg",
+        "sha256": "934bbab335bb0e26668d881ecbab46c371336330dae0807ea4fd4247b3063fb6"
+      },
+      {
+        "file": "04.svg",
+        "sha256": "27d118a1c875a9b41955d56f5ca8d9b9fd7cadb01736efb063e9a8ea89337459"
+      },
+      {
+        "file": "05.svg",
+        "sha256": "a77499be8f44134e7dc7a3073c333e32618086f939f94d1eb991e5f7941491ed"
+      },
+      {
+        "file": "06.svg",
+        "sha256": "2c8ea67b759a43ba16d6396f22870511dbcacf1b1705c35159db35b35a6e4940"
+      },
+      {
+        "file": "07.svg",
+        "sha256": "8adcd48f629bca59401767a8b00fd00de84d0023bebdf671242ce5725a26e773"
+      },
+      {
+        "file": "08.svg",
+        "sha256": "d0235cf287ba8c17eee6ca65eb59cfc51a9182477336cab716b5513df3eb6ac9"
+      },
+      {
+        "file": "09.svg",
+        "sha256": "183b1544e568238b0ac23079741153d0186a961b48fc7ded634bfbfd60fffe37"
+      },
+      {
+        "file": "10.svg",
+        "sha256": "93ae71511b41803ae8fe5b40913dec4761e02f051bf0ec7293aa814a5ab81344"
+      },
+      {
+        "file": "11.svg",
+        "sha256": "b36e09b87f56e0939e9f27a815cc073507cdf967576e8cf3768ede41d4073425"
+      },
+      {
+        "file": "12.svg",
+        "sha256": "dc4fb483799eed459a07c29090d0ef9c6aa5bf0eee2a8758933d09b56e44bbe3"
+      },
+      {
+        "file": "13.svg",
+        "sha256": "1edf822b5031a03de3a32e871c78465d66e3d3386ba99c81d1a1cccd748862c9"
+      },
+      {
+        "file": "14.svg",
+        "sha256": "020d19e2e3af5f6df17477519c3602dadab2d0b9b106abc9b2178a3ea9d317c7"
+      }
+    ]
+  },
+  "summary": {
+    "total": 14,
+    "passed": 0,
+    "warnings": 14,
+    "errors": 0
+  },
+  "issue_types": {},
+  "categories": {
+    "blocking": {
+      "count": 0,
+      "issues": []
+    },
+    "introduced": {
+      "count": 42,
+      "issues": [
+        {
+          "file": "01.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "01.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "01.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "02.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "02.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "02.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "03.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "03.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "03.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "04.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "04.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "04.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "05.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "05.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "05.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "06.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "06.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "06.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "07.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "07.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "07.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "08.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "08.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "08.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "09.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "09.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "09.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "10.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "10.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "10.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "11.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "11.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "11.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "12.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "12.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "12.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "13.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "13.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "13.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        },
+        {
+          "file": "14.svg",
+          "message": "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export."
+        },
+        {
+          "file": "14.svg",
+          "message": "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\""
+        },
+        {
+          "file": "14.svg",
+          "message": "page SVG is missing root data-pptx-page-role"
+        }
+      ]
+    },
+    "inherited": {
+      "count": 0,
+      "issues": []
+    },
+    "source-import": {
+      "count": 0,
+      "summary": {
+        "warning_count": 0,
+        "by_code": {}
+      }
+    }
+  },
+  "drift": {
+    "colors": {},
+    "fonts": {},
+    "sizes": {}
+  },
+  "carrier_receipt": {
+    "scope": "informational-not-a-quota",
+    "pages": 14,
+    "totals": {
+      "text_elements": 0,
+      "image_placements": 14,
+      "icons": 0,
+      "svg_geometry_elements": 0,
+      "preset_shapes": 0,
+      "page_frame_elements": 0,
+      "marker_uses": 0,
+      "inline_emphasis_runs": 0,
+      "gradient_uses": 0,
+      "filter_uses": 0,
+      "text_effects": 0
+    },
+    "pages_with": {
+      "images": 14,
+      "icons": 0,
+      "presets": 0,
+      "charts": 0,
+      "tables": 0,
+      "formulas": 0,
+      "inline_emphasis_runs": 0,
+      "gradient_uses": 0,
+      "filter_uses": 0,
+      "text_effects": 0
+    },
+    "relationship_pages": null,
+    "geometry_elements": {
+      "circle": 0,
+      "ellipse": 0,
+      "line": 0,
+      "path": 0,
+      "polygon": 0,
+      "polyline": 0,
+      "rect": 0
+    },
+    "preset_names": {},
+    "native_objects": {
+      "chart": 0,
+      "formula_block": 0,
+      "formula_inline": 0,
+      "other": 0,
+      "table": 0
+    },
+    "image_page_max_frame_share_range": [
+      1.0,
+      1.0
+    ]
+  },
+  "project_issues": {
+    "template": [],
+    "animation": [],
+    "illustration": [],
+    "communication_trace": [],
+    "pptx_structure": []
+  },
+  "files": [
+    {
+      "file": "01.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\01.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-01.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "6940ea3e5b51f7f700bba00573a042277f572b0bc0b5bcad6a7150dfe052e01b"
+    },
+    {
+      "file": "02.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\02.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-02.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "4e3bef8928e5c7c22886df5520a06033dee600c2cd79085fba41f685d96c2aec"
+    },
+    {
+      "file": "03.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\03.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-03.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "934bbab335bb0e26668d881ecbab46c371336330dae0807ea4fd4247b3063fb6"
+    },
+    {
+      "file": "04.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\04.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-04.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "27d118a1c875a9b41955d56f5ca8d9b9fd7cadb01736efb063e9a8ea89337459"
+    },
+    {
+      "file": "05.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\05.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-05.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "a77499be8f44134e7dc7a3073c333e32618086f939f94d1eb991e5f7941491ed"
+    },
+    {
+      "file": "06.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\06.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-06.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "2c8ea67b759a43ba16d6396f22870511dbcacf1b1705c35159db35b35a6e4940"
+    },
+    {
+      "file": "07.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\07.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-07.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "8adcd48f629bca59401767a8b00fd00de84d0023bebdf671242ce5725a26e773"
+    },
+    {
+      "file": "08.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\08.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-08.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "d0235cf287ba8c17eee6ca65eb59cfc51a9182477336cab716b5513df3eb6ac9"
+    },
+    {
+      "file": "09.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\09.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-09.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "183b1544e568238b0ac23079741153d0186a961b48fc7ded634bfbfd60fffe37"
+    },
+    {
+      "file": "10.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\10.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-10.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "93ae71511b41803ae8fe5b40913dec4761e02f051bf0ec7293aa814a5ab81344"
+    },
+    {
+      "file": "11.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\11.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-11.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "b36e09b87f56e0939e9f27a815cc073507cdf967576e8cf3768ede41d4073425"
+    },
+    {
+      "file": "12.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\12.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-12.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "dc4fb483799eed459a07c29090d0ef9c6aa5bf0eee2a8758933d09b56e44bbe3"
+    },
+    {
+      "file": "13.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\13.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-13.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "1edf822b5031a03de3a32e871c78465d66e3d3386ba99c81d1a1cccd748862c9"
+    },
+    {
+      "file": "14.svg",
+      "path": "D:\\ai-banking\\ai-banking-copilot\\docs\\2026-11-02\\AI银行副驾_pptmaster_20261102\\svg_output\\14.svg",
+      "exists": true,
+      "errors": [],
+      "warnings": [
+        "Recommendation: legacy xlink:href is supported on 1 reference(s) (<image>); generated SVG should prefer href. No change is required for export.",
+        "1 ungrouped top-level Slide-local element(s) in svg_output (<image> #1); group only logical content units in a top-level <g id=\"...\">. Keep genuine static page framing as a root primitive and declare a supported data-pptx-role such as \"background\" or \"decoration\"",
+        "page SVG is missing root data-pptx-page-role"
+      ],
+      "info": {
+        "viewbox": "0 0 1280 720",
+        "carrier_receipt": {
+          "text_elements": 0,
+          "images": {
+            "placements": 1,
+            "files": [
+              "render-14.png"
+            ],
+            "max_frame_share": 1.0
+          },
+          "icons": 0,
+          "effects": {
+            "inline_emphasis_runs": 0,
+            "gradient_uses": 0,
+            "filter_uses": 0,
+            "text_effects": 0
+          },
+          "geometry": {
+            "svg_elements": {
+              "rect": 0,
+              "circle": 0,
+              "ellipse": 0,
+              "line": 0,
+              "polyline": 0,
+              "polygon": 0,
+              "path": 0
+            },
+            "preset_shapes": 0,
+            "preset_names": {},
+            "page_frame_elements": 0,
+            "marker_uses": {
+              "start": 0,
+              "mid": 0,
+              "end": 0
+            }
+          },
+          "native_objects": {
+            "chart": 0,
+            "table": 0,
+            "formula_block": 0,
+            "formula_inline": 0,
+            "other": 0
+          }
+        },
+        "text_elements": 0,
+        "tspan_elements": 0
+      },
+      "passed": true,
+      "source_sha256": "020d19e2e3af5f6df17477519c3602dadab2d0b9b106abc9b2178a3ea9d317c7"
+    }
+  ]
+}

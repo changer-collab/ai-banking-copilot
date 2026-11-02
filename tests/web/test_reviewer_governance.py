@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from ai_banking_copilot.planning.llm import FallbackIntentModel, LlmIntentModel
 from ai_banking_copilot.planning.reviewer import ReviewReport, ReviewRequest, ReviewStatus
 from ai_banking_copilot.web.session import Session, SessionState
 
@@ -12,6 +13,18 @@ def test_required_missing_reviewer_never_authorizes_write(deps, rw_store):
     session = Session(replace(deps, reviewer=None, reviewer_required=True))
     view = session.submit("转给李娜 500 元")
     assert view.state is SessionState.TAKEN_OVER
+    assert not rw_store.query("SELECT * FROM transactions WHERE channel='agent'")
+
+
+def test_live_mode_template_fallback_never_authorizes_write(deps, rw_store):
+    configured = replace(
+        deps,
+        intent_model=FallbackIntentModel(LlmIntentModel(api_key="")),
+        real_planner_required=True,
+    )
+    view = Session(configured).submit("转给李娜 500 元")
+    assert view.state is SessionState.TAKEN_OVER
+    assert "真实模型规划" in view.message
     assert not rw_store.query("SELECT * FROM transactions WHERE channel='agent'")
 
 

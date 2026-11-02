@@ -383,6 +383,23 @@ def test_json_out_must_stay_under_runtime() -> None:
     assert main(["--json-out", "outside-diagnostic-report.json"]) != 0
 
 
+def test_main_loads_dotenv_before_running_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[bool] = []
+    monkeypatch.setitem(main.__globals__, "load_env_file", lambda: loaded.append(True))
+    monkeypatch.setitem(
+        main.__globals__,
+        "run_diagnostics",
+        lambda: {
+            "planner": {"classification": "ok"},
+            "reviewer": {"classification": "ok"},
+            "ready_for_smoke": True,
+        },
+    )
+
+    assert main([]) == 0
+    assert loaded == [True]
+
+
 def test_planner_bad_text_then_valid_uses_two_total_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

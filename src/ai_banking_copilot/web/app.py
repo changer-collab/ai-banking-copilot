@@ -214,6 +214,7 @@ from ai_banking_copilot.web.session import (
 from ai_banking_copilot.web.session_manager import SessionManager
 from ai_banking_copilot.web.session_repository import SessionPersistenceError, SessionRepository
 from ai_banking_copilot.web.session_snapshot import SessionSnapshotError
+from ai_banking_copilot.web.transaction_drafts import draft_for_plan
 
 AUTH_MODE_ENV = "AIB_AUTH_MODE"
 AUTH_MODE_OFF = "off"
@@ -355,6 +356,8 @@ class AppDeps:
     """计划后置审查器；默认空值保持旧版测试装配，组合根可注入旁路或严格通道。"""
     reviewer_required: bool = False
     """是否把 Reviewer 结果接入执行前状态机；旁路模式只审计诊断。"""
+    real_planner_required: bool = False
+    """真实模式写操作必须由真实 Planner 提案；模板回退一律转人工。"""
     insights: InsightService | None = None
     """只读主动洞察服务；元数据存储与银行事实连接由组合根隔离装配。"""
     bill_analysis: BillAnalysisStore | None = None
@@ -440,6 +443,12 @@ class _SubmitRequest(BaseModel):
     """阶段进度标识：前端生成，仅用于 `GET /api/progress` 拉取处理阶段，不参与业务判定。"""
     new_intent: bool = False
     """表单类提交（卡片弹窗/场景页）置 `true`，强制开启新意图，不并入旧澄清。"""
+
+
+class _DraftPatchRequest(BaseModel):
+    """Only customer-facing text values are accepted; the Session owns IDs and policy."""
+
+    changes: dict[str, str] = Field(min_length=1, max_length=8)
 
 
 class _LoginRequest(BaseModel):
@@ -2124,6 +2133,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                         ),
                         "amount_cents": -txn.amount.cents,
                         "booked_on": txn.booked_on.isoformat(),
+                        "booked_at": txn.booked_at,
                         "status": _transfer_record_status(
                             method, txn.booked_on, deps.today
                         ),
@@ -2174,6 +2184,7 @@ def create_app(deps: AppDeps) -> FastAPI:
                     ),
                     "amount_cents": booking.amount.cents,
                     "booked_on": booking.booked_on.isoformat(),
+                    "booked_at": None,
                     "status": _scheduled_transfer_status(
                         method,
                         booking.booked_on,
@@ -2196,8 +2207,17 @@ def create_app(deps: AppDeps) -> FastAPI:
                     "can_cancel": booking.status == "scheduled",
                 }
             )
-        items.sort(key=lambda item: str(item["booked_on"]), reverse=True)
-        items.sort(key=lambda item: item["status"] == "已到账")
+        # 统一按「业务办理时间」倒序（最新在前）：booked_at 精确到时分秒，缺失时退化为记账日；
+        # 同一时刻优先本次真实办理（live），再按记录号。不得再按状态分组——那会把
+        # 待到账 / 已发出申请整批提到最前，打乱业务时间顺序。
+        items.sort(
+            key=lambda item: (
+                str(item.get("booked_at") or f"{item['booked_on']}T00:00:00"),
+                1 if item.get("source") != "seed" else 0,
+                str(item["record_id"]),
+            ),
+            reverse=True,
+        )
         summary: dict[str, dict[str, object]] = {}
         for item in items:
             key = str(item["payee_id"] or item["payee"])
@@ -2435,6 +2455,27 @@ def create_app(deps: AppDeps) -> FastAPI:
         _record_answer(user_id, request.session_id, view)
         return _response(
             request.session_id,
+            user_id,
+            _submission_payload(view, gateway=deps.gateway, user_id=user_id, deps=deps),
+        )
+
+    @app.patch("/api/drafts/{draft_id}")
+    def patch_draft(
+        draft_id: str,
+        request: _DraftPatchRequest,
+        session_id: str = DEFAULT_SESSION_ID,
+        user_id: str = Depends(current_user),
+    ) -> dict[str, object]:
+        """Edit one approved draft field, then create a new frozen plan server-side."""
+        try:
+            view = _session_for(session_id, user_id).edit_draft(draft_id, request.changes)
+        except (SessionStateError, ConfirmationMismatchError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        _record_answer(user_id, session_id, view)
+        return _response(
+            session_id,
             user_id,
             _submission_payload(view, gateway=deps.gateway, user_id=user_id, deps=deps),
         )
@@ -4232,10 +4273,16 @@ def _submission_payload(
             "daily_limit_cents": view.quota.limit_cents,
             "daily_accumulated_cents": view.quota.accumulated_cents,
         }
+    awaiting_confirmation = view.state.value == "awaiting_confirm"
     review = (
         _transfer_review_payload(view, gateway, user_id)
-        if gateway is not None and user_id is not None
+        if awaiting_confirmation and gateway is not None and user_id is not None
         else None
+    )
+    draft = draft_for_plan(
+        view.plan if awaiting_confirmation else None,
+        view.card if awaiting_confirmation else None,
+        origin_plan_hash=view.draft_origin_hash,
     )
     return {
         "state": view.state.value,
@@ -4243,7 +4290,8 @@ def _submission_payload(
         # 渠道层（IM）没有核对单，仍用 Session 的「计划卡已生成」文案。
         "message": (
             "转账核对单已生成，请先核对信息；确认后展示计划卡。"
-            if review is not None
+            + (f"；{view.answer_note}" if view.answer_note else "")
+            if awaiting_confirmation and review is not None
             else view.message
         ),
         "questions": list(view.questions),
@@ -4263,6 +4311,8 @@ def _submission_payload(
             for ask in view.clarifications
         ],
         "card": card,
+        "draft": None if draft is None else draft.payload(),
+        "workflow": _workflow_payload(view),
         "review": review,
         "triage": None if view.triage is None else {
             "kind": view.triage.kind,
@@ -4283,6 +4333,54 @@ def _submission_payload(
             else None
         ),
         "answer_note": view.answer_note,
+    }
+
+
+def _workflow_payload(view: SubmissionView) -> dict[str, object] | None:
+    """Expose the customer-facing banking stage without changing execution authority."""
+    if view.card is None or view.plan is None:
+        return None
+    actions = {node.action for node in view.plan.nodes}
+    kind: str | None = None
+    disclosures: list[str] = []
+    if any(action.startswith("transfer.") for action in actions):
+        kind = "transfer"
+        disclosures = [
+            "收款人、金额和到账方式以冻结计划为准。",
+            "修改信息后必须重新核对并确认。",
+        ]
+    elif any(action.startswith("wealth.") for action in actions):
+        kind = "wealth"
+        disclosures = [
+            "产品收益不保证，申购前须完成适当性与风险揭示。",
+            "申购属于红色操作，确认后仍需服务端强验证。",
+        ]
+    elif "subscription.cancel" in actions:
+        kind = "subscription"
+        disclosures = [
+            "本操作仅终止本行侧扣款授权。",
+            "商户会员或服务是否取消，以商户侧处理结果为准。",
+        ]
+    elif any(action.startswith("card.") for action in actions):
+        kind = "card"
+        disclosures = [
+            "挂失、补卡和额度调整按冻结计划办理。",
+            "补卡寄送与费用为演示数据，不代表真实制卡或邮寄承诺。",
+        ]
+    elif "merchant.order" in actions or "funds.freeze" in actions:
+        kind = "life_event"
+        disclosures = [
+            "预算上限与订单金额分别展示，预算不会自动成为订单金额。",
+            "商户下单为演示模拟，不代表真实商户订单。",
+        ]
+    if kind is None:
+        return None
+    return {
+        "kind": kind,
+        "stage": "review" if view.state.value == "awaiting_confirm" else "planned",
+        "disclosures": disclosures,
+        "risk_level": view.card.level.value,
+        "plan_hash": view.card.frozen_hash,
     }
 
 

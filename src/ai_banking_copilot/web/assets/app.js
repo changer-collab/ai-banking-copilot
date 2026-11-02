@@ -37,7 +37,7 @@ const SLOT_LABELS = {
   daily_limit: "日限额", when: "执行日期", next_charge_on: "下次扣费日期",
   monthly_day: "每月转账日",
   period: "扣费周期", merchant: "商户名称", product: "理财产品",
-  delivery_address: "配送地址", delivery_time: "送达时间",
+  delivery_address: "配送地址", delivery_time: "送达时间", order_on: "订花日期",
   loss_type: "挂失类型",
 };
 const MONEY_SLOTS = new Set(["amount", "amount_cents", "daily_limit"]);
@@ -122,6 +122,10 @@ const state = {
   answerNote: "",
   offline: typeof navigator !== "undefined" && navigator.onLine === false,
   model: null,
+  workflow: null,
+  draft: null,
+  draftEditing: false,
+  draftError: "",
 };
 
 function el(id) {
@@ -309,6 +313,20 @@ async function post(path, body) {
     /* 请求结束后清掉「正在请求…」文案：否则计划卡下方会一直挂着上一句状态 */
     state.requestLabel = "";
     refreshConversations().catch(() => {});
+  }
+}
+
+async function patchDraft(draftId, changes) {
+  state.requestLabel = "正在重新核对并冻结计划…";
+  showRequestStatus();
+  try {
+    return await apiFetch(
+      "PATCH",
+      `/api/drafts/${encodeURIComponent(draftId)}?session_id=${encodeURIComponent(SESSION_ID)}`,
+      { changes },
+    );
+  } finally {
+    state.requestLabel = "";
   }
 }
 
@@ -5375,6 +5393,39 @@ function reviewHtml() {
   </article>`;
 }
 
+function transactionDraftHtml(draft) {
+  if (!draft) return "";
+  const editing = state.draftEditing === true;
+  const fields = Array.isArray(draft.fields) ? draft.fields : [];
+  const editable = new Set(Array.isArray(draft.editable_fields) ? draft.editable_fields : []);
+  const rows = fields.map((field) => {
+    const key = String(field.key || "");
+    const canEdit = editable.has(key) && field.editable !== false;
+    const label = `<label class="draft-row__label" for="draft-${esc(key)}">${esc(field.label || key)}</label>`;
+    if (editing && canEdit) {
+      const money = /(?:amount|limit)/.test(key);
+      return `<div class="draft-row draft-row--edit">${label}
+        <input class="input" id="draft-${esc(key)}" data-draft-field="${esc(key)}"
+          ${money ? 'type="number" min="0.01" step="0.01" inputmode="decimal"' : 'type="text"'}
+          value="${esc(field.value || "")}" /></div>`;
+    }
+    return `<div class="draft-row">${label}<span class="draft-row__value">${esc(field.display || field.value || "未填写")}</span></div>`;
+  }).join("");
+  const actions = editing
+    ? `<button class="btn btn--primary" type="button" data-draft-action="save">保存并重新冻结</button>
+       <button class="btn" type="button" data-draft-action="cancel">取消</button>`
+    : `<button class="btn btn--sm" type="button" data-draft-action="edit">修改信息</button>`;
+  return `<section class="transaction-draft" aria-label="交易草稿">
+    <div class="transaction-draft__head"><div><p class="transaction-draft__eyebrow">交易草稿</p>
+      <h3>${esc({ transfer: "转账核对", wealth: "理财办理", subscription: "代扣解约", card: "卡片办理", life_event: "生活计划" }[draft.kind] || "业务核对")}</h3></div>
+      <span class="chip">${esc(draft.risk_level || "")}</span></div>
+    <div class="transaction-draft__rows">${rows}</div>
+    <div class="transaction-draft__disclosures">${(draft.disclosures || []).map((line) => `<p>${esc(line)}</p>`).join("")}</div>
+    ${state.draftError ? `<p class="review-error">${esc(state.draftError)}</p>` : ""}
+    <div class="btn-row">${actions}</div>
+  </section>`;
+}
+
 function voucherHtml(card = state.card, decision = state.decision, options = {}) {
   if (!card) return "";
   const opts = options || {};
@@ -5515,10 +5566,12 @@ function renderStage() {
   const inReview = Boolean(state.review)
     && (state.phase === "review" || state.phase === "review-edit");
   const note = answerNoteHtml(state.answerNote);
+  const workflow = workflowHtml(state.workflow);
+  const draft = transactionDraftHtml(state.draft);
   state.response.innerHTML = inReview
-    ? reviewHtml() + state.notice
+    ? workflow + reviewHtml() + state.notice
     : state.card
-      ? note + voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
+      ? draft + note + workflow + voucherHtml() + (state.phase === "strong-verify" ? verifyHtml() : "") + state.notice
       : note + (state.panel || "") + state.notice;
   if (runChain) {
     /* 三分类 / 澄清回合没有可执行计划：运行链路里的「已拒绝 · 未执行」只会让人误以为被风控拦了 */
@@ -5530,6 +5583,19 @@ function renderStage() {
   if (el("vcode")) el("vcode").value = code;
   if (state.task) state.task.appendChild(el("task-actions"));
   showRequestStatus();
+}
+
+function workflowHtml(workflow) {
+  if (!workflow || !Array.isArray(workflow.disclosures)) return "";
+  const labels = {
+    transfer: "转账核对", wealth: "理财办理", subscription: "代扣解约",
+    card: "卡片办理", life_event: "生活计划",
+  };
+  const title = labels[workflow.kind] || "业务核对";
+  return `<section class="workflow-note" aria-label="${esc(title)}">
+    <div class="workflow-note__head"><span>${esc(title)}</span><span class="chip">${esc(workflow.stage || "review")}</span></div>
+    ${workflow.disclosures.map((line) => `<p>${esc(line)}</p>`).join("")}
+  </section>`;
 }
 
 /* 每条回复在收尾时把自己那一段时间线快照进消息里：
@@ -5585,12 +5651,14 @@ function roleChainHtml() {
   const reasons = decision && Array.isArray(decision.reasons) ? decision.reasons : [];
   const tone = { GREEN: "green", YELLOW: "yellow", RED: "red" }[level] || "";
   const reviewer = metadata.reviewer_channel;
+  const reviewStatus = metadata.review_status;
+  const reviewNames = { allow: "通过", clarify: "需澄清", reject: "拒绝", manual: "转人工" };
   const reviewerNote = reviewer
-    ? (reviewer === "bypass" ? "旁路诊断通道：未逐条审查计划" : "逐条核对计划是否越权")
+    ? (reviewer === "bypass" ? "旁路诊断通道：未逐条审查计划" : `逐条核对计划是否越权${reviewStatus ? ` · ${reviewNames[reviewStatus] || reviewStatus}` : ""}`)
     : "当前通道旁路审查，不冒充已审查";
   /* 每次回答只留一行摘要，展开才看三格：避免占掉对话正文的位置 */
   return `<details class="role-chain-fold" aria-label="AI 三角色链路">
-    <summary>AI 链路 · 规划 ${esc(name(metadata.planner_channel))} · 审查 ${esc(reviewer ? name(reviewer) : "未启用")} · 裁决 ${esc(level || "待裁决")}</summary>
+    <summary>AI 链路 · 规划 ${esc(name(metadata.planner_channel))} · 审查 ${esc(reviewer ? name(reviewer) : "未启用")}${reviewStatus ? `（${esc(reviewNames[reviewStatus] || reviewStatus)}）` : ""} · 裁决 ${esc(level || "待裁决")}</summary>
     <section class="role-chain">
       <div class="role-card">
         <span class="role-card__step">① 规划器</span>
@@ -5904,6 +5972,10 @@ function renderPresets() {
 /* 把一次提交（/api/submit 或 /api/clarify）的结果落到界面：两条路径共用同一处理 */
 async function applySubmission(data) {
   showModelMetadata(data.model);
+  state.workflow = data.workflow || null;
+  state.draft = data.draft || null;
+  state.draftEditing = false;
+  state.draftError = "";
   markRunOutcome(data.state);
   /* 查询答复（如「未查询到该笔交易」）：服务端确定性给出，挂在卡/回执上方一起展示 */
   state.answerNote = String(data.answer_note || "");
@@ -6089,7 +6161,7 @@ function clarifyControl(ask) {
       `<option value="temporary">临时冻结（可解，5–15 天，免费）</option>` +
       `<option value="formal">正式挂失（不可逆，需要补卡）</option></select>`;
   }
-  if (slot === "when" || slot === "next_charge_on" || slot === "delivery_time") {
+  if (slot === "when" || slot === "next_charge_on" || slot === "delivery_time" || slot === "order_on") {
     return `<input ${attrs} type="date" />`;
   }
   if (MONEY_SLOTS.has(slot)) {
@@ -6338,6 +6410,52 @@ async function runReviewSave() {
   }
 }
 
+function openDraftEdit() {
+  if (!state.draft) return;
+  state.draftEditing = true;
+  state.draftError = "";
+  renderStage();
+  setButtons();
+}
+
+function cancelDraftEdit() {
+  state.draftEditing = false;
+  state.draftError = "";
+  renderStage();
+  setButtons();
+}
+
+async function saveDraftEdit() {
+  const draft = state.draft;
+  if (!draft || !state.response) return;
+  const changes = {};
+  const fields = Array.isArray(draft.fields) ? draft.fields : [];
+  const editable = new Set(Array.isArray(draft.editable_fields) ? draft.editable_fields : []);
+  fields.forEach((field) => {
+    const key = String(field.key || "");
+    if (!editable.has(key)) return;
+    const input = state.response.querySelector(`[data-draft-field="${key}"]`);
+    if (!input) return;
+    const raw = String(input.value || "").trim();
+    const original = String(field.value || "").trim();
+    if (raw !== original) {
+      changes[key] = /(?:amount|limit)/.test(key) && raw ? `${raw} 元` : raw;
+    }
+  });
+  if (!Object.keys(changes).length) {
+    cancelDraftEdit();
+    return;
+  }
+  const result = await patchDraft(draft.draft_id, changes);
+  if (!result.ok) {
+    state.draftError = String((result.data && result.data.detail) || "草稿修改未被接受。");
+    renderStage();
+    return;
+  }
+  await applySubmission(result.data);
+  timelineAdd("交易草稿已修改，原确认凭证已失效", "live");
+}
+
 async function onConfirm() {
   if (!state.card) return;
   state.historyRestored = false;
@@ -6574,6 +6692,10 @@ function applyExecution(data) {
     state.card = data.card;
   }
   if (data.decision) state.decision = data.decision;
+  if (data.state === "completed" || data.state === "reversed") {
+    state.draft = null;
+    state.draftEditing = false;
+  }
   if (data.state === "awaiting_confirm") state.verification = null;
   renderSubscriptionCancel(data.subscription_cancel);
   const progress = Array.isArray(data.node_progress) ? data.node_progress : [];
@@ -6702,6 +6824,8 @@ async function onReject() {
     return;
   }
   state.card = null;
+  state.draft = null;
+  state.draftEditing = false;
   state.decision = null;
   state.stepStates = [];
   state.nodeStatus = {};
@@ -8599,6 +8723,14 @@ el("btn-close-trace").addEventListener("click", () => {
 /* 澄清表单是动态渲染的，故用事件委托 */
 el("stage").addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  const draftTrigger = target ? target.closest("[data-draft-action]") : null;
+  if (draftTrigger) {
+    const draftAction = draftTrigger.dataset.draftAction;
+    if (draftAction === "edit") action(openDraftEdit)();
+    else if (draftAction === "cancel") action(cancelDraftEdit)();
+    else if (draftAction === "save") action(saveDraftEdit)();
+    return;
+  }
   const reviewTrigger = target ? target.closest("[data-review-action]") : null;
   if (reviewTrigger) {
     const reviewAction = reviewTrigger.dataset.reviewAction;
@@ -8953,7 +9085,7 @@ const RECORD_TAB_LOADERS = {
 
 const RECORD_HEADERS = {
   bills: ["时间", "商户", "分类", "MCC", "地点", "金额"],
-  transfers: ["记账日", "收款人", "金额", "方式", "状态", "用途", "记录号", "详情"],
+  transfers: ["办理时间", "收款人", "金额", "方式", "状态", "用途", "记录号", "详情"],
   holdings: ["产品", "风险等级", "持仓金额", "起息日", "当前收益"],
   cards: ["卡号", "类型", "状态", "日限额"],
   suspicions: [],
@@ -9001,11 +9133,27 @@ function recordsErrorHtml(message) {
   </article>`;
 }
 
+/* 业务办理时间：优先 booked_at（精确到时分秒），缺失时退化为记账日 00:00:00。
+   记录页统一用它排序，避免同日多笔只按日期并列、看起来「没按时间排」。 */
+function recordBusinessTime(item) {
+  const at = item && item.booked_at ? String(item.booked_at) : "";
+  if (at) return at;
+  const on = item && item.booked_on ? String(item.booked_on) : "";
+  return on ? `${on}T00:00:00` : "";
+}
+
+function sortByBusinessTimeNewestFirst(items, tieBreak) {
+  return [...(items || [])].sort((a, b) =>
+    recordBusinessTime(b).localeCompare(recordBusinessTime(a))
+    || String(tieBreak ? tieBreak(a) : "").localeCompare(String(tieBreak ? tieBreak(b) : ""))
+  );
+}
+
 function recordsRowsFor(key, payload) {
   const data = payload || {};
   if (key === "bills") {
     /* 与账单分析页 `billsTableHtml` 同一份 payload.transactions，不另算一份。 */
-    return (data.transactions || []).map((item) => {
+    return sortByBusinessTimeNewestFirst(data.transactions, (item) => item.txn_id).map((item) => {
       const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
       return recordsRow([
         `<span class="mono">${esc(item.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
@@ -9018,21 +9166,33 @@ function recordsRowsFor(key, payload) {
     });
   }
   if (key === "transfers") {
-    return (data.items || []).map((item) => recordsRow([
-      `<span class="mono">${esc(item.booked_on || "—")}</span>`,
-      esc(transferPayeeText(item)),
-      `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
-      esc(item.method_label || "—"),
-      `<span class="${transferStatusClass(transferDisplayStatus(item))}">${esc(transferDisplayStatus(item) || "—")}</span>`,
-      esc(item.purpose_label || item.remark || "—"),
-      `<span class="mono">${esc(item.record_id || "—")}</span>`,
-      `<details class="records-detail"><summary>详情</summary>
+    /* 同日并列时优先本次真实办理（live），历史种子在后；再按记录号稳定排序。 */
+    const items = [...(data.items || [])].sort((a, b) =>
+      recordBusinessTime(b).localeCompare(recordBusinessTime(a))
+      || (a.source === "seed" ? 1 : 0) - (b.source === "seed" ? 1 : 0)
+      || String(b.record_id || "").localeCompare(String(a.record_id || ""))
+    );
+    return items.map((item) => {
+      const moment = item.booked_at ? String(item.booked_at).slice(11, 16) : "";
+      return recordsRow([
+        `<span class="mono">${esc(item.booked_on || "—")}${moment ? " " + esc(moment) : ""}</span>`,
+        esc(transferPayeeText(item)),
+        `<span class="mono">${yuanText(item.amount_cents || 0)}</span>`,
+        esc(item.method_label || "—"),
+        `<span class="${transferStatusClass(transferDisplayStatus(item))}">${esc(transferDisplayStatus(item) || "—")}</span>`,
+        esc(item.purpose_label || item.remark || "—"),
+        `<span class="mono">${esc(item.record_id || "—")}</span>`,
+        `<details class="records-detail"><summary>详情</summary>
         ${transferRecordDetail(item)}
       </details>`,
-    ]));
+      ]);
+    });
   }
   if (key === "holdings") {
-    return (data.holdings || []).map((item) => {
+    return [...(data.holdings || [])].sort((a, b) =>
+      String(b.purchased_on || "").localeCompare(String(a.purchased_on || ""))
+      || String(a.name || "").localeCompare(String(b.name || ""))
+    ).map((item) => {
       const income = String(item.current_income || "");
       /* 收益列只给短标；完整口径（含「模拟净值」）放进 title，不占列宽 */
       const incomeCell = incomeUnknown(item)

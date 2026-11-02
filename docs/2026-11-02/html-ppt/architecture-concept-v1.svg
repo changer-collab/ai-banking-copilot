@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071a33"/><stop offset="1" stop-color="#0b315b"/></linearGradient>
+ <linearGradient id="ai" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b4dba"/><stop offset="1" stop-color="#176fcb"/></linearGradient>
+ <linearGradient id="safe" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#086d79"/><stop offset="1" stop-color="#0ab6a4"/></linearGradient>
+ <filter id="shadow"><feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#000" flood-opacity=".23"/></filter>
+ <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7fd9e2"/></marker>
+ <style>text{font-family:Arial,"Microsoft YaHei",sans-serif} .label{fill:#b8cfe7;font-size:18px}.small{fill:#b8cfe7;font-size:15px}.title{fill:#fff;font-size:30px;font-weight:700}.h{fill:#fff;font-size:22px;font-weight:700}.darkh{fill:#10243d;font-size:22px;font-weight:700}.darksmall{fill:#60728a;font-size:15px}.mono{fill:#8fe4ec;font-size:14px;font-family:Consolas,monospace}.line{stroke:#7fd9e2;stroke-width:3;fill:none;marker-end:url(#arrow)}.dashed{stroke:#7fd9e2;stroke-width:2;stroke-dasharray:8 8;fill:none}</style>
+</defs>
+<rect width="1600" height="900" fill="url(#bg)"/>
+<path d="M70 110H1530" stroke="#6aa8d8" stroke-opacity=".25"/>
+<text x="80" y="72" class="label" letter-spacing="4">AI BANKING COPILOT / SYSTEM BLUEPRINT</text>
+<text x="80" y="155" class="title">模型负责理解与规划，确定性内核负责裁决与执行</text>
+<text x="80" y="192" class="label">从自然语言入口到可审计业务回执，所有写操作都必须穿过安全闸门</text>
+
+<!-- channel band -->
+<rect x="80" y="250" width="210" height="430" rx="18" fill="#0d294b" stroke="#3f78aa" stroke-width="2" filter="url(#shadow)"/>
+<text x="110" y="295" class="h">多渠道入口</text><text x="110" y="326" class="small">同一套会话与权限语义</text>
+<rect x="110" y="370" width="150" height="62" rx="10" fill="#fff" fill-opacity=".11" stroke="#74b4e3"/><text x="185" y="408" text-anchor="middle" class="h" font-size="18">WEB</text>
+<rect x="110" y="455" width="150" height="62" rx="10" fill="#fff" fill-opacity=".11" stroke="#74b4e3"/><text x="185" y="493" text-anchor="middle" class="h" font-size="18">PWA</text>
+<rect x="110" y="540" width="150" height="62" rx="10" fill="#fff" fill-opacity=".11" stroke="#74b4e3"/><text x="185" y="578" text-anchor="middle" class="h" font-size="18">飞书 IM</text>
+<text x="110" y="640" class="mono">adapter / identity / session</text>
+
+<!-- agent -->
+<rect x="350" y="250" width="330" height="430" rx="18" fill="url(#ai)" stroke="#90c8ff" stroke-width="2" filter="url(#shadow)"/>
+<text x="385" y="295" class="h">AI Agent 规划层</text><text x="385" y="326" class="small">把对话变成可治理的任务对象</text>
+<rect x="385" y="370" width="260" height="64" rx="10" fill="#061b38" fill-opacity=".45"/><text x="405" y="397" class="h" font-size="18">Semantic Frame</text><text x="405" y="420" class="mono">intent · slots · entities</text>
+<rect x="385" y="455" width="260" height="64" rx="10" fill="#061b38" fill-opacity=".45"/><text x="405" y="482" class="h" font-size="18">Planner / DAG</text><text x="405" y="505" class="mono">nodes · deps · anchors</text>
+<rect x="385" y="540" width="260" height="64" rx="10" fill="#061b38" fill-opacity=".45"/><text x="405" y="567" class="h" font-size="18">Clarify / Review</text><text x="405" y="590" class="mono">ask · bind · freeze</text>
+
+<!-- governance -->
+<rect x="740" y="230" width="400" height="470" rx="18" fill="url(#safe)" stroke="#9af3e3" stroke-width="2" filter="url(#shadow)"/>
+<text x="775" y="275" class="h">确定性安全治理层</text><text x="775" y="307" class="small">模型不能直接触碰银行执行器</text>
+<rect x="775" y="350" width="330" height="68" rx="10" fill="#052f3d" fill-opacity=".6"/><text x="800" y="379" class="h" font-size="18">Fact Gateway</text><text x="800" y="402" class="mono">facts / balances / records</text>
+<rect x="775" y="440" width="330" height="68" rx="10" fill="#052f3d" fill-opacity=".6"/><text x="800" y="469" class="h" font-size="18">PDP · Risk Decision</text><text x="800" y="492" class="mono">GREEN / YELLOW / RED</text>
+<rect x="775" y="530" width="330" height="68" rx="10" fill="#052f3d" fill-opacity=".6"/><text x="800" y="559" class="h" font-size="18">PEP · Execution Gate</text><text x="800" y="582" class="mono">allowlist / receipt / reversal</text>
+<text x="775" y="650" class="mono">audit · breaker · injection defense</text>
+
+<!-- core -->
+<rect x="1200" y="250" width="320" height="230" rx="18" fill="#fff" filter="url(#shadow)"/>
+<text x="1235" y="300" class="darkh">模拟核心银行</text><text x="1235" y="331" class="darksmall">可验证的业务事实与回执</text>
+<rect x="1235" y="365" width="110" height="58" rx="9" fill="#eaf2ff"/><text x="1290" y="400" text-anchor="middle" fill="#0b4dba" font-size="17" font-weight="700">Accounts</text>
+<rect x="1360" y="365" width="110" height="58" rx="9" fill="#e7f8f6"/><text x="1415" y="400" text-anchor="middle" fill="#08756f" font-size="17" font-weight="700">Ledger</text>
+<text x="1235" y="455" fill="#60728a" class="mono">simulation only · no real funds</text>
+
+<!-- evidence -->
+<rect x="1200" y="520" width="320" height="160" rx="18" fill="#f5f8fc" stroke="#b9cadc" filter="url(#shadow)"/>
+<text x="1235" y="568" class="darkh">证据与恢复</text><text x="1235" y="604" class="darksmall">audit trail · receipt · reversal</text><text x="1235" y="638" fill="#0b4dba" class="mono">每一步可解释、可追踪、可回查</text>
+
+<!-- flows -->
+<path d="M290 465H350" class="line"/><path d="M680 465H740" class="line"/><path d="M1140 425H1200" class="line"/><path d="M1140 600H1200" class="line"/>
+<path d="M1260 480V520" class="dashed"/><path d="M1450 480V520" class="dashed"/>
+<text x="705" y="448" class="mono">proposal</text><text x="1148" y="408" class="mono">approved action</text><text x="1148" y="584" class="mono">evidence</text>
+
+<!-- bottom thesis -->
+<rect x="80" y="750" width="1440" height="76" rx="12" fill="#071a33" stroke="#d7a53b" stroke-width="2"/>
+<text x="800" y="797" text-anchor="middle" fill="#fff" font-size="24" font-weight="700">渠道可以扩展，模型可以替换，但金融执行必须回到事实、权限、执行与审计</text>
+</svg>
