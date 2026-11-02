@@ -2077,7 +2077,11 @@ class Session:
                 )
             )
         self._remember_turn(utterance, intents)
-        return tuple(intents), tuple(asks), _dropped_notes(dropped)
+        notes = _dropped_notes(dropped)
+        limit_note = _card_limit_time_note(utterance, intents, self._deps.today)
+        if limit_note is not None:
+            notes = (*notes, limit_note)
+        return tuple(intents), tuple(asks), notes
 
     def _clarification_choices(
         self, question: SlotQuestion
@@ -3667,6 +3671,16 @@ def _dropped_notes(dropped: list[str]) -> tuple[str, ...]:
     if not dropped:
         return ()
     return (f"另有 {len(dropped)} 条意图置信度不足未采纳：{'、'.join(dropped)}",)
+
+
+def _card_limit_time_note(utterance: str, intents: Sequence[Intent], today: date) -> str | None:
+    """限额调整即时生效：带未来日期时如实说明不能预约，避免「下周三」被误读为生效日。"""
+    if not any(intent.action == "card.set_limit" for intent in intents):
+        return None
+    parsed = parse_temporal(utterance, today)
+    if parsed.matched and parsed.when is not None and parsed.when > today:
+        return "限额调整即时生效，不支持预约到下周三；如需出行期间临时限额，请在出行前再发起。"
+    return None
 
 
 def extract_remark(utterance: str) -> str | None:

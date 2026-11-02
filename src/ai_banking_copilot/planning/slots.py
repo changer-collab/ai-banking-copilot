@@ -441,7 +441,7 @@ def _resolve_slot(
     if slot == "card" and inputs.cards and sum(
         1 for _, pattern in _CARD_KIND_ALIASES if pattern.search(inputs.text)
     ) == 1:
-        return _resolve_card(inputs, notes)
+        return _resolve_card(inputs, notes, action=action)
     # 页面把未选的下拉框以 `null` 提交：显式 null 与「不传」同口径，落到解析器 / 追问，
     # 不能因为多了一个空键就改口径（见 2026-10-27 验收记录 §5 缺陷 8）。
     if inputs.selected.get(slot) is not None:
@@ -484,7 +484,7 @@ def _resolve_slot(
     if slot == "daily_limit":
         return _resolve_daily_limit(inputs, notes)
     if slot == "card":
-        return _resolve_card(inputs, notes)
+        return _resolve_card(inputs, notes, action=action)
     if slot == "when":
         # 「24 小时延时 / 次日到账」没给具体日期：落到明天（登记不扣款，可撤销）。
         if action in {"transfer.book", "transfer.schedule"} and re.search(
@@ -778,6 +778,54 @@ _CARD_KIND_ALIASES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 """卡类型词 → `cards.card_type`。只做词面映射：库内未存卡号 / 尾号，尾号一律不猜。"""
 
+_CARD_TYPE_LABELS: Mapping[str, str] = {
+    "debit": "借记卡", "credit": "信用卡", "virtual": "虚拟卡",
+}
+_CARD_STATUS_LABELS: Mapping[str, str] = {
+    "active": "可用", "locked": "临时冻结", "lost": "已挂失",
+}
+
+
+def _eligible_cards(action: str, cards: Sequence[Card]) -> tuple[Card, ...]:
+    """按动作过滤可操作的卡片：**只增减候选，不替用户选卡**。
+
+    不可用的卡（已挂失 / 已补卡作废）不该出现在下拉里，否则用户只能选到一张
+    注定被场景层拒绝的卡。临时冻结的借记卡仍允许调额（冻结不等于限额失效）。
+    """
+    if action == "card.set_limit":
+        return tuple(
+            card for card in cards
+            if card.card_type == "debit"
+            and card.status != "lost"
+            and card.replaced_by_card_id is None
+        )
+    if action == "card.lock":
+        return tuple(card for card in cards if card.status == "active")
+    if action in {"card.adjust_credit_limit", "card.set_cycle_limit"}:
+        return tuple(
+            card for card in cards
+            if card.card_type == "credit" and card.status != "lost"
+        )
+    if action == "card.unlock":
+        return tuple(card for card in cards if card.status == "locked")
+    if action == "card.replace":
+        return tuple(card for card in cards if card.replaced_by_card_id is None)
+    return tuple(card for card in cards if card.status != "lost")
+
+
+def _card_choices(action: str, cards: Sequence[Card]) -> tuple[tuple[str, str], ...]:
+    """动作可用卡片的可点选项：`(借记卡 · 尾号 4471 · 可用, card_id)`。"""
+    return tuple(
+        (
+            f"{_CARD_TYPE_LABELS.get(card.card_type, card.card_type)} · "
+            f"尾号 {card.last4 or '未知'} · "
+            f"{_CARD_STATUS_LABELS.get(card.status, card.status)}",
+            card.card_id,
+        )
+        for card in _eligible_cards(action, cards)
+    )
+
+
 _CARD_BULK = re.compile(r"都|全部|所有|每张|各张|两张|多张|逐一|一并")
 """批量 / 全量语义（「把可疑的都锁卡」）：一次只能处理一张卡，命中即说明做不到。"""
 
@@ -788,18 +836,19 @@ CARD_BULK_PROMPT = (
 
 
 def _resolve_card(
-    inputs: SlotInputs, notes: list[str]
+    inputs: SlotInputs, notes: list[str], *, action: str = ""
 ) -> tuple[object | None, SlotQuestion | None, tuple[str, ...]]:
     """卡片槽：全量语义先说明边界；卡类型词唯一命中则绑定，否则追问。
 
-    这里的两种「不猜」都是硬约束：
-    - 「都 / 全部」类请求**不挑一张顶替**——那会把批量止损伪装成已完成；
-    - 类型词命中多张（同类型两张）仍追问，不按 id / 顺序取第一张。
+    追问时附带**按动作过滤**的卡片候选（调额只列借记卡，锁卡只列可用卡），
+    但仍不自动选卡——「都 / 全部」类请求与同类型多张卡都不挑一张顶替。
     """
     text = inputs.text
     if _CARD_BULK.search(text):
         notes.append("card:bulk request unsupported")
-        return None, SlotQuestion("card", CARD_BULK_PROMPT), tuple(notes)
+        return None, SlotQuestion(
+            "card", CARD_BULK_PROMPT, choices=_card_choices(action, inputs.cards)
+        ), tuple(notes)
     kinds = {kind for kind, pattern in _CARD_KIND_ALIASES if pattern.search(text)}
     if len(kinds) == 1:
         kind = kinds.pop()
@@ -808,7 +857,9 @@ def _resolve_card(
             notes.append(f"resolved card:{matches[0].card_id}")
             return matches[0].card_id, None, tuple(notes)
         notes.append(f"ambiguous card kind:{kind}")
-    return None, SlotQuestion("card", _PROMPTS["card"]), tuple(notes)
+    return None, SlotQuestion(
+        "card", _PROMPTS["card"], choices=_card_choices(action, inputs.cards)
+    ), tuple(notes)
 
 
 _CN_DIGITS = {

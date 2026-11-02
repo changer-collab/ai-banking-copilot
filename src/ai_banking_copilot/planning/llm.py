@@ -323,7 +323,9 @@ _TEMPLATE_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "transfer.schedule",
         "命中『L2 定期出资』生活事件",
     ),
-    (re.compile(r"出行|出差|旅行|旅游|境外"), "card.set_limit", "命中『L3 出行保障』生活事件"),
+    # 不要在这里把「出差 / 出行」单独映射成 `card.set_limit`：逗号切句后会与
+    # 「把卡片日限额降到 1000 元」各产生一个同动作意图（两组重复表单）。
+    # L3 识别交给 `scenarios.life_events.detect_life_event`。
     (re.compile(r"凑钱|首付|学费|装修款"), "wealth.redeem", "命中『L4 大额凑集』生活事件"),
     (
         re.compile(r"卡丢了|银行卡丢|卡片丢失|手机丢了|钱包被偷|钱包丢了|疑似盗刷"),
