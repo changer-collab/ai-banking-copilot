@@ -2156,21 +2156,28 @@ body { background: var(--pg-bg); line-height: 1.52; }
   .topbar {
     flex-wrap: nowrap;
     gap: var(--s-2);
-    padding: 10px var(--s-4);
+    padding: 10px 12px;
   }
-  .top__t { font-size: 17px; }
+  /* 标题不参与收缩：宁可导航横滑，也不让「AI 银行副驾」折成两行 */
+  .top__brand { flex: none; min-width: 0; }
+  .top__t { font-size: 15px; white-space: nowrap; }
   .top__s { display: none; }
   .topbar__nav {
+    flex: 0 1 auto;
+    min-width: 0;
     width: auto;
     margin-left: auto;
     flex-wrap: nowrap;
-    justify-content: flex-end;
-    gap: var(--s-2);
-    overflow: visible;
+    justify-content: flex-start;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     padding: 0;
   }
-  .topbar__nav .btn { flex: none; padding: 5px 10px; font-size: 12.5px; }
-  .topbar__nav .switch { flex: none; font-size: 12.5px; }
+  .topbar__nav::-webkit-scrollbar { display: none; }
+  .topbar__nav .btn { flex: none; padding: 4px 5px; font-size: 12px; }
+  .topbar__nav .switch { flex: none; gap: 4px; font-size: 12px; }
   #btn-profile { display: none; }
 
   #app > .main > .view { padding: var(--s-4) var(--s-4) 76px; }
@@ -2281,7 +2288,17 @@ body { background: var(--pg-bg); line-height: 1.52; }
   .voucher { padding: var(--s-4); }
   .voucher::before,
   .voucher::after { display: none; }
-  .voucher__head { gap: var(--s-3); padding-right: 0; }
+  /* 浮章 68px 压在右上角：右侧让出 88px，长编号改折行，不再钻到章底下 */
+  .voucher__head { gap: var(--s-3); padding-right: 88px; }
+  .doc-no { min-width: 0; }
+  /* 只读快照的「计划编号」是长串 card_id：允许折行，并关掉打字机动画
+     （换行后右侧光标会错位、逐字动画也会把已折的行重播一遍） */
+  .voucher--snapshot .doc-no__value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    animation: none;
+    border-right: 0;
+  }
   .voucher__body { grid-template-columns: minmax(0, 1fr); gap: var(--s-3); }
   .seal--float { top: var(--s-3); right: var(--s-3); width: 68px; height: 68px; }
   .seal--float .seal__level { font-size: 17px; }
@@ -2295,7 +2312,10 @@ body { background: var(--pg-bg); line-height: 1.52; }
   #profile-panel { width: min(560px, 94vw); max-height: 86vh; }
   .profile-modal__head { padding: var(--s-3) var(--s-4); }
   #profile-body { padding: var(--s-3) var(--s-4) var(--s-4); }
-  #view-records .tabs { flex-wrap: nowrap; overflow-x: auto; }
+  /* 记录页 6 个分类签：窄屏换行成两行，文字完整不截断
+     （横滑会把「扣款记录」藏到屏外，用户以为只有 5 个分类） */
+  #view-records .tabs { flex-wrap: wrap; row-gap: 6px; }
+  #view-records .tab { flex: none; white-space: nowrap; }
   #records-body table,
   .mini-table { display: block; overflow-x: auto; }
 }
